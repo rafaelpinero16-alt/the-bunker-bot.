@@ -1,0 +1,93 @@
+:root {
+    --bg-deep: #030407; /* Fondo ultra oscuro y elegante */
+}
+
+html, body {
+    background-color: var(--bg-deep);
+    color: #fff;
+    font-family: 'Rajdhani', sans-serif;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+}
+
+body {
+    max-width: 480px;
+    margin: 0 auto;
+    min-height: 100vh;
+    position: relative;
+    box-shadow: 0 0 50px rgba(0, 243, 255, 0.05);
+}
+
+.gpu-accelerated {
+    transform: translate3d(0, 0, 0);
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+}
+
+/* Efecto Glassmorphism 3D Refinado y Sobrio */
+.glass-panel {
+    background: rgba(10, 12, 18, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 24px;
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+}
+
+/* Títulos 3D Limpios sin saturación para los 3 Planes */
+.text-3d-neutral {
+    font-family: 'Orbitron', sans-serif;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 15px rgba(163, 163, 163, 0.2);
+}
+
+.text-3d-cyan {
+    font-family: 'Orbitron', sans-serif;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(0, 243, 255, 0.4);
+}
+
+.text-3d-magenta {
+    font-family: 'Orbitron', sans-serif;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(255, 0, 255, 0.4);
+}
+
+/* Rejilla 3D con Perspectiva Infinita */
+.tron-grid {
+    position: fixed;
+    top: 0; left: 0; right: 0; margin: 0 auto;
+    width: 100%; max-width: 480px; height: 100vh;
+    background-image: 
+        linear-gradient(rgba(0, 243, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0, 243, 255, 0.03) 1px, transparent 1px);
+    background-size: 35px 35px;
+    transform: perspective(600px) rotateX(60deg) translateY(-100px) translateZ(-250px);
+    animation: gridMove 25s linear infinite;
+    z-index: -2;
+}
+
+@keyframes gridMove {
+    0% { background-position: 0 0; }
+    100% { background-position: 0 350px; }
+}
+
+.grid-fade {
+    position: fixed;
+    top: 0; left: 0; right: 0; margin: 0 auto;
+    width: 100%; max-width: 480px; height: 100vh;
+    background: radial-gradient(circle at center 40%, transparent 0%, var(--bg-deep) 70%);
+    z-index: -1;
+}
+
+/* Levitación Flotante para el Botón de Idioma */
+.levitate {
+    animation: levitate 3s ease-in-out infinite;
+}
+
+@keyframes levitate {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+}
+
+/* Scrollbar Minimalista */
+::-webkit-scrollbar { width: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 4px; }
