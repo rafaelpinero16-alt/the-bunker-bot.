@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import os
 from datetime import datetime
 from pyrogram import Client
 from pyrogram.enums import ChatMembersFilter, ChatType
@@ -28,8 +29,19 @@ logger = logging.getLogger("assistant_radar")
 DEFAULT_API_ID = 37074591
 DEFAULT_API_HASH = "66c86c8b4f08a0c142749b204f673d81"
 
-# Centinela global por defecto
-assistant_app = Client("assistant_session", api_id=DEFAULT_API_ID, api_hash=DEFAULT_API_HASH)
+MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
+
+# Centinela global: si existe MASTER_SESSION corre en memoria; si no, usa archivo local
+if MASTER_SESSION:
+    assistant_app = Client(
+        "assistant_session",
+        session_string=MASTER_SESSION,
+        api_id=DEFAULT_API_ID,
+        api_hash=DEFAULT_API_HASH,
+        in_memory=True
+    )
+else:
+    assistant_app = Client("assistant_session", api_id=DEFAULT_API_ID, api_hash=DEFAULT_API_HASH)
 
 _global_bot = None
 _default_my_id = None
