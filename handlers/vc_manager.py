@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from aiogram import Router, F, Bot
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
@@ -10,18 +11,23 @@ from database.database import (
 )
 from assistant import set_participant_mic
 
+logger = logging.getLogger("vc_manager_gateway")
 router = Router()
 
 vc_states = {}
 
+
 def get_lang(lang_code: str) -> str:
+    """Detecta el idioma del operador para renderizar la respuesta correspondiente."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
+
 
 # ==========================================
 # 🌐 DICCIONARIO BILINGÜE DE GESTIÓN DE VOZ
 # ==========================================
 TEXTS = {
     "en": {
+        "owner_only": "⛔ <b>Access Denied:</b> This protocol is strictly reserved for the Community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, please start a private chat with me first to view this control console: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
         "unauthorized_start": "⚠️ @{name}, this command is strictly reserved for community administrators.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 Voice chat monitoring and AutoLower sentinel are now <b>activated</b> for your group.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -34,10 +40,10 @@ TEXTS = {
             "• <b>Assigned Sentinel:</b> {sentinel_name}\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "kickcam_success": "⚡ User <b>{target}</b> has been disconnected from the voice room.\n\n🛡️ <i>Cloud Media Management</i>",
+        "kickcam_success": "⚡ User {target} has been disconnected from the voice room.\n\n🛡️ <i>Cloud Media Management</i>",
         "kickcam_needed": "⚠️ Reply to the message of the user you want to disconnect.\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_added": "✅ User <b>{target}</b> registered to Whitelist with full voice immunity.\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_removed": "❌ User <b>{target}</b> removed from Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_added": "✅ User {target} registered to Whitelist with full voice immunity.\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_removed": "❌ User {target} removed from Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_needed": "⚠️ Reply to the message of the user you wish to authorize.\n\n🛡️ <i>Cloud Media Management</i>",
         "status_text": (
             "🎙️ <b>Voice Room & Radar Telemetry</b>\n\n"
@@ -50,6 +56,8 @@ TEXTS = {
         ),
         "btn_cams": "📹 Camera Quality Audit",
         "btn_reset": "🔄 Sync Voice Room",
+        "btn_back_vc": "🔙 Back to Telemetry",
+        "btn_close_vc": "🗑️ Close Panel",
         "getid_text": (
             "✅ <b>Connectivity Telemetry:</b>\n"
             "• Chat Type: <code>{type}</code>\n"
@@ -70,6 +78,7 @@ TEXTS = {
         "btn_pay_stars": "⭐ Get VIP Voice Pass ({price} Stars)"
     },
     "es": {
+        "owner_only": "⛔ <b>Acceso Denegado:</b> Este protocolo está reservado exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, para ver esta información debes iniciar un chat privado conmigo primero: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
         "unauthorized_start": "⚠️ @{name}, este comando está reservado exclusivamente para los administradores del grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 El sistema de control acústico y radar centinela ha sido <b>activado</b> para tu grupo.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -82,10 +91,10 @@ TEXTS = {
             "• <b>Centinela Asignado:</b> {sentinel_name}\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "kickcam_success": "⚡ El usuario <b>{target}</b> ha sido desconectado de la sala de voz.\n\n🛡️ <i>Cloud Media Management</i>",
+        "kickcam_success": "⚡ El usuario {target} ha sido desconectado de la sala de voz.\n\n🛡️ <i>Cloud Media Management</i>",
         "kickcam_needed": "⚠️ Debes responder al mensaje del usuario que deseas desconectar.\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_added": "✅ Usuario <b>{target}</b> registrado en Whitelist con inmunidad de voz total.\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_removed": "❌ Usuario <b>{target}</b> retirado de la Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_added": "✅ Usuario {target} registrado en Whitelist con inmunidad de voz total.\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_removed": "❌ Usuario {target} retirado de la Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_needed": "⚠️ Responde al mensaje del usuario que deseas autorizar.\n\n🛡️ <i>Cloud Media Management</i>",
         "status_text": (
             "🎙️ <b>Telemetría de la Sala de Voz y Radar</b>\n\n"
@@ -98,6 +107,8 @@ TEXTS = {
         ),
         "btn_cams": "📹 Calidad de Cámaras",
         "btn_reset": "🔄 Sincronizar Sala",
+        "btn_back_vc": "🔙 Volver a Telemetría",
+        "btn_close_vc": "🗑️ Cerrar Panel",
         "getid_text": (
             "✅ <b>Telemetría de Conectividad:</b>\n"
             "• Tipo de Chat: <code>{type}</code>\n"
@@ -119,6 +130,7 @@ TEXTS = {
     }
 }
 
+
 async def get_active_sentinel_label(group_id: int) -> str:
     """Devuelve la etiqueta del centinela activo para el grupo (Dedicado o Maestro)."""
     session_data = await get_session_by_group(group_id)
@@ -126,8 +138,9 @@ async def get_active_sentinel_label(group_id: int) -> str:
         return "Centinela Dedicado Propio 💎"
     return "Centinela Maestro (@Alphacentinel) 🤖"
 
+
 async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
-    """Valida la aprobación del grupo y permisos de admin. Borra el comando del grupo si se ejecuta allí."""
+    """Valida la aprobación del grupo y rango exclusivo de Dueño (Creator)."""
     if message.chat.type != "private":
         try:
             await message.delete()
@@ -143,12 +156,25 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
 
     try:
         member = await bot.get_chat_member(chat_id, message.from_user.id)
-        return member.status in ["creator", "administrator"]
+        if member.status == "creator":
+            return True
+        else:
+            lang = get_lang(message.from_user.language_code)
+            warn = await message.answer(TEXTS[lang]["owner_only"], parse_mode="HTML")
+            async def auto_del_warn(msg):
+                await asyncio.sleep(8)
+                try: 
+                    await msg.delete()
+                except Exception: 
+                    pass
+            asyncio.create_task(auto_del_warn(warn))
+            return False
     except Exception:
         return False
 
+
 async def send_private_response(message: Message, text: str, reply_markup=None):
-    """Fuerza que las respuestas a comandos de admin lleguen al chat privado."""
+    """Fuerza que las respuestas a comandos de administración lleguen al chat privado."""
     user_id = message.from_user.id
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
@@ -171,7 +197,17 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
             asyncio.create_task(auto_del_warn(temp_msg))
         except Exception:
             pass
-        # ==========================================
+
+
+def get_user_mention_html(user) -> str:
+    """Genera una mención válida en formato HTML."""
+    if getattr(user, "username", None):
+        return f"@{user.username}"
+    name = getattr(user, "full_name", getattr(user, "first_name", "Usuario"))
+    return f'<a href="tg://user?id={user.id}">{name}</a>'
+
+
+# ==========================================
 # CAZADOR DE COMANDOS PÚBLICOS NO AUTORIZADOS
 # ==========================================
 @router.message(Command("start"), F.chat.type.in_({"group", "supergroup"}))
@@ -200,8 +236,9 @@ async def cmd_start_group(message: Message, bot: Bot):
     except Exception:
         pass
 
+
 # ==========================================
-# COMANDOS DE ADMINISTRADOR BLINDADOS
+# COMANDOS DE ADMINISTRADOR BLINDADOS (DUEÑO)
 # ==========================================
 @router.message(Command("enablevc"))
 async def cmd_enable_vc(message: Message, bot: Bot):
@@ -212,6 +249,7 @@ async def cmd_enable_vc(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     await send_private_response(message, TEXTS[lang]["vc_enabled"])
 
+
 @router.message(Command("disablevc"))
 async def cmd_disable_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
@@ -220,6 +258,7 @@ async def cmd_disable_vc(message: Message, bot: Bot):
     vc_states[chat_id] = False
     lang = get_lang(message.from_user.language_code)
     await send_private_response(message, TEXTS[lang]["vc_disabled"])
+
 
 @router.message(Command("cams"))
 async def cmd_cams(message: Message, bot: Bot):
@@ -230,6 +269,7 @@ async def cmd_cams(message: Message, bot: Bot):
     sentinel_label = await get_active_sentinel_label(chat_id)
     await send_private_response(message, TEXTS[lang]["cams_report"].format(sentinel_name=sentinel_label))
 
+
 @router.message(Command("kickoffcam"))
 async def cmd_kickoff_cam(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
@@ -237,15 +277,16 @@ async def cmd_kickoff_cam(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     if message.reply_to_message and message.reply_to_message.from_user:
-        target = message.reply_to_message.from_user.full_name
-        target_uid = message.reply_to_message.from_user.id
+        target_user = message.reply_to_message.from_user
+        target_mention = get_user_mention_html(target_user)
         try:
-            await set_participant_mic(chat_id=message.chat.id, user_id=target_uid, muted=True, volume=0)
+            await set_participant_mic(chat_id=message.chat.id, user_id=target_user.id, muted=True, volume=0)
         except Exception:
             pass
-        await send_private_response(message, t["kickcam_success"].format(target=target))
+        await send_private_response(message, t["kickcam_success"].format(target=target_mention))
     else:
         await send_private_response(message, t["kickcam_needed"])
+
 
 @router.message(Command("whitelist"))
 async def cmd_whitelist(message: Message, bot: Bot):
@@ -256,10 +297,11 @@ async def cmd_whitelist(message: Message, bot: Bot):
     if message.reply_to_message and message.reply_to_message.from_user:
         uid = message.reply_to_message.from_user.id
         await add_to_whitelist(uid)
-        target = message.reply_to_message.from_user.full_name
-        await send_private_response(message, t["wl_added"].format(target=target))
+        target_mention = get_user_mention_html(message.reply_to_message.from_user)
+        await send_private_response(message, t["wl_added"].format(target=target_mention))
     else:
         await send_private_response(message, t["wl_needed"])
+
 
 @router.message(Command("unwhitelist"))
 async def cmd_unwhitelist(message: Message, bot: Bot):
@@ -270,10 +312,11 @@ async def cmd_unwhitelist(message: Message, bot: Bot):
     if message.reply_to_message and message.reply_to_message.from_user:
         uid = message.reply_to_message.from_user.id
         await remove_from_whitelist(uid)
-        target = message.reply_to_message.from_user.full_name
-        await send_private_response(message, t["wl_removed"].format(target=target))
+        target_mention = get_user_mention_html(message.reply_to_message.from_user)
+        await send_private_response(message, t["wl_removed"].format(target=target_mention))
     else:
         await send_private_response(message, t["wl_needed"])
+
 
 @router.message(Command("statusvc"))
 async def cmd_status_vc(message: Message, bot: Bot):
@@ -295,6 +338,9 @@ async def cmd_status_vc(message: Message, bot: Bot):
         [
             InlineKeyboardButton(text=t["btn_cams"], callback_data=f"vc_cams_{chat_id}"),
             InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
+        ],
+        [
+            InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
         ]
     ])
     
@@ -309,6 +355,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
         reply_markup=keyboard
     )
 
+
 @router.callback_query(F.data.startswith("vc_"))
 async def process_vc_callback(callback: CallbackQuery):
     await callback.answer()
@@ -316,35 +363,79 @@ async def process_vc_callback(callback: CallbackQuery):
     action = f"{data[0]}_{data[1]}"
     chat_id = int(data[2]) if len(data) > 2 else callback.message.chat.id
     lang = get_lang(callback.from_user.language_code)
+    t = TEXTS[lang]
     
     try:
-        if action == "vc_cams":
+        if action == "vc_close":
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            return
+
+        elif action == "vc_status":
+            is_active = vc_states.get(chat_id, True)
+            autolower_val = await get_autolower_status(chat_id)
+            al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
+            status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
+            sentinel_label = await get_active_sentinel_label(chat_id)
+            mic_price = await get_mic_vip_price(chat_id)
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=t["btn_cams"], callback_data=f"vc_cams_{chat_id}"),
+                    InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
+                ],
+                [
+                    InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
+                ]
+            ])
+            await callback.message.edit_text(
+                t["status_text"].format(
+                    status=status_text, 
+                    autolower=al_display, 
+                    sentinel_name=sentinel_label,
+                    mic_price=mic_price
+                ),
+                reply_markup=keyboard,
+                parse_mode="HTML"
+            )
+
+        elif action == "vc_cams":
             sentinel_label = await get_active_sentinel_label(chat_id)
             report = (
-                "📹 <b>Auditoría de Transmisiones:</b> Calidad normal y fluida.\n"
+                "📹 <b>Auditoría de Transmisiones:</b> Calidad normal y fluida.\n\n"
                 "• Calidad de Video: Alta Fidelidad y sin cortes\n"
                 f"• Centinela en Sala: {sentinel_label} 🟢\n"
                 "• Optimización Automática: Activa en segundo plano\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
-                "📹 <b>Stream Quality Audit:</b> Normal and fluid operation.\n"
+                "📹 <b>Stream Quality Audit:</b> Normal and fluid operation.\n\n"
                 "• Video Quality: High Fidelity, zero interruptions\n"
                 f"• Active Room Sentinel: {sentinel_label} 🟢\n"
                 "• Background Stream Refresh: Enabled\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             )
-            await callback.message.edit_text(report, parse_mode="HTML")
+            back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]
+            ])
+            await callback.message.edit_text(report, reply_markup=back_kb, parse_mode="HTML")
+
         elif action == "vc_reset":
             synced = (
-                "🔄 Sincronización y refresco completados con éxito.\n\n"
+                "🔄 <b>Sincronización Completada:</b> Refresco de sala de voz ejecutado con éxito.\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
-                "🔄 Synchronization and room refresh completed successfully.\n\n"
+                "🔄 <b>Synchronization Completed:</b> Voice room refreshed successfully.\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             )
-            await callback.message.edit_text(synced, parse_mode="HTML")
+            back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]
+            ])
+            await callback.message.edit_text(synced, reply_markup=back_kb, parse_mode="HTML")
     except TelegramBadRequest:
         pass
+
 
 @router.message(Command("getid"))
 async def cmd_get_id(message: Message, bot: Bot):
@@ -361,6 +452,7 @@ async def cmd_get_id(message: Message, bot: Bot):
         )
     )
 
+
 @router.message(Command("autolower"))
 async def cmd_auto_lower(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
@@ -374,6 +466,7 @@ async def cmd_auto_lower(message: Message, bot: Bot):
     t = TEXTS[lang]
     res_text = t["autolower_on"] if new_st == 1 else t["autolower_off"]
     await send_private_response(message, res_text)
+
 
 # ==========================================
 # PASE VIP DE MICRÓFONO (COMANDO PÚBLICO)

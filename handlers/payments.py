@@ -30,8 +30,30 @@ ASSISTANT_INVITE_URL = "https://t.me/Alphacentinel?startgroup=true"
 
 
 def get_lang(lang_code: str) -> str:
-    """Detecta el idioma del operador o miembro para renderizar la pasarela adecuada."""
+    """Detecta el idioma del operador para renderizar la pasarela adecuada."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
+
+
+async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Verifica si el usuario ostenta el rango máximo de Dueño / Creador del grupo."""
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status == "creator"
+    except Exception:
+        return False
+
+
+async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 15):
+    """Auto-destrucción dual para mantener el chat grupal libre de clutter visual."""
+    await asyncio.sleep(delay)
+    try: 
+        await msg1.delete()
+    except Exception: 
+        pass
+    try: 
+        await msg2.delete()
+    except Exception: 
+        pass
 
 
 # ==========================================
@@ -39,6 +61,7 @@ def get_lang(lang_code: str) -> str:
 # ==========================================
 TEXTS = {
     "en": {
+        "owner_only": "⛔ <b>Access Denied:</b> Subscription and billing protocols are exclusive to the Community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "active": (
             "✨ <b>Command Center: Subscriptions & Licensing</b>\n\n"
             "• <b>Community ID:</b> <code>{chat_id}</code>\n"
@@ -60,6 +83,7 @@ TEXTS = {
         "btn_binance": "🟡 Binance Pay (Instant)",
         "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_back": "🔙 Back to Main Menu",
+        "btn_back_group": "🔙 Back to Group Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
         
         "inv_pro_t": "PRO Plan Subscription ($5)",
@@ -97,6 +121,7 @@ TEXTS = {
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
     },
     "es": {
+        "owner_only": "⛔ <b>Acceso Denegado:</b> Las opciones de suscripción y facturación son exclusivas para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "active": (
             "✨ <b>Centro de Mando: Suscripciones y Licencias</b>\n\n"
             "• <b>Comunidad ID:</b> <code>{chat_id}</code>\n"
@@ -118,6 +143,7 @@ TEXTS = {
         "btn_binance": "🟡 Binance Pay (Instantáneo)",
         "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_back": "🔙 Volver al Menú Principal",
+        "btn_back_group": "🔙 Volver al Panel del Grupo",
         "btn_pay_stars": "⭐ Pagar con Stars",
         
         "inv_pro_t": "Suscripción Plan PRO ($5)",
@@ -158,15 +184,14 @@ TEXTS = {
 
 
 # ==========================================
-# 🚀 COMANDOS DE ACCESO A PLANES EN GRUPOS
+# 🚀 COMANDOS DE ACCESO A PLANES EN GRUPOS (EXCLUSIVO DUEÑO)
 # ==========================================
 @router.message(Command("pro", "ultra"))
 async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
-    """Permite a los administradores de un grupo auditar su plan o solicitar pasarelas al privado."""
+    """Permite al dueño auditar su plan o solicitar pasarelas al privado."""
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    # Los comandos de facturación de grupo se despachan desde el chat del grupo
     if message.chat.type == "private":
         await message.answer(
             f"⚠️ Por favor ejecuta /{command.command} dentro de tu grupo para vincular la facturación a esa comunidad.",
@@ -177,19 +202,14 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
     chat_id = message.chat.id
     user_id = message.from_user.id
 
-    # Validación de rango de administrador
-    try:
-        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        if member.status not in ["creator", "administrator"]:
-            try: 
-                await message.delete()
-            except Exception: 
-                pass
-            return
-    except Exception:
+    if not await is_user_creator(bot, chat_id, user_id):
+        try:
+            warn = await message.reply(t["owner_only"], parse_mode="HTML")
+            asyncio.create_task(auto_delete_pair(message, warn, delay=8))
+        except Exception:
+            pass
         return
 
-    # Limpieza inmediata del comando para mantener el chat limpio
     try: 
         await message.delete()
     except Exception: 
@@ -201,7 +221,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
         tier_display = "PRO ⭐" if current_tier == "pro" else "ULTRA PRO 💎"
         private_text = t["active"].format(chat_id=chat_id, tier=tier_display)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
         ])
     else:
         private_text = t["free"].format(chat_id=chat_id)
@@ -217,20 +237,15 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
             [
                 InlineKeyboardButton(text=t["btn_ton"], url=TON_MINI_APP_LINK)
             ],
-            [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
         ])
 
-    # Envío de la terminal de facturación al chat privado del administrador
     try:
         await bot.send_message(chat_id=user_id, text=private_text, reply_markup=keyboard, parse_mode="HTML")
     except Exception:
         bot_info = await bot.get_me()
         temp_msg = await message.answer(t["private_only"].format(bot_username=bot_info.username), parse_mode="HTML")
-        await asyncio.sleep(12)
-        try: 
-            await temp_msg.delete()
-        except Exception: 
-            pass
+        asyncio.create_task(auto_delete_pair(message, temp_msg, delay=12))
 
 
 # ==========================================
@@ -268,9 +283,15 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
             return
 
         prices = [LabeledPrice(label=title, amount=price)]
+        back_btn = (
+            InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id_target}_{lang}")
+            if chat_id_target != 0 else
+            InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")
+        )
+        
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
-            [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            [back_btn]
         ])
         
         await bot.send_invoice(
@@ -278,7 +299,7 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
             title=title,
             description=desc,
             payload=payload,
-            provider_token="",  # Telegram Stars no requiere token de pasarela bancaria
+            provider_token="",  # Telegram Stars
             currency="XTR",
             prices=prices,
             reply_markup=markup
@@ -286,7 +307,9 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
     except Exception as e:
         logger.error(f"Error generando factura de suscripción en start: {e}")
         await message.answer(t["err_inv"], parse_mode="HTML")
-        # ==========================================
+
+
+# ==========================================
 # 🎙️ FACTURACIÓN DINÁMICA DE PASE VIP DE MICRÓFONO
 # ==========================================
 @router.message(Command("start"), F.text.contains("vipmic_"))
@@ -306,7 +329,6 @@ async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
             desc = t["inv_vip_d"]
             payload = f"vip_mic_{chat_id}"
             
-            # 🎯 Consulta de tarifa en Stars establecida por los administradores de la comunidad
             dynamic_price = await get_mic_vip_price(chat_id)
             final_price = dynamic_price if dynamic_price and dynamic_price > 0 else DEFAULT_PRICE_VIP_MIC
             
@@ -360,7 +382,7 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
         prices = [LabeledPrice(label=title, amount=price)]
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
-            [InlineKeyboardButton(text=t["btn_back"], callback_data=f"gpanel_{chat_id}_{lang}")]
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
         ])
         
         try:
@@ -407,14 +429,12 @@ async def process_successful_payment(message: Message, bot: Bot):
             
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
             
-            # Activación de la licencia en SQLite con 30 días de vigencia
             await approve_group(group_id=chat_id, tier=tier_db, duration_days=30)
             
-            # Despliegue condicional según el nivel de suscripción
             if plan_type == "pro":
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=t["btn_add_master"], url=ASSISTANT_INVITE_URL)],
-                    [InlineKeyboardButton(text=t["btn_back"], callback_data=f"gpanel_{chat_id}_{lang}")]
+                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
                 ])
                 await message.answer(
                     t["pmt_ok_pro"].format(chat_id=chat_id),
@@ -424,7 +444,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             else:
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=f"gset_clone_{chat_id}_{lang}")],
-                    [InlineKeyboardButton(text=t["btn_back"], callback_data=f"gpanel_{chat_id}_{lang}")]
+                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
                 ])
                 await message.answer(
                     t["pmt_ok_ultra"].format(chat_id=chat_id),
@@ -441,10 +461,8 @@ async def process_successful_payment(message: Message, bot: Bot):
             chat_id = int(payload.split("_")[2])
             user_id = message.from_user.id
             
-            # Registro en Base de Datos: 24h automáticas de inmunidad de voz
             await grant_vip_mic(user_id=user_id, group_id=chat_id)
             
-            # Desmutear y colocar volumen al 100% en tiempo real mediante el Centinela
             try:
                 await set_participant_mic(
                     chat_id=chat_id, 
@@ -455,7 +473,6 @@ async def process_successful_payment(message: Message, bot: Bot):
             except Exception as radar_err:
                 logger.warning(f"Aviso Centinela al restaurar volumen de pase VIP: {radar_err}")
             
-            # Asignación de título visual en la comunidad si los permisos del bot lo permiten
             try:
                 await bot.promote_chat_member(
                     chat_id=chat_id, user_id=user_id,

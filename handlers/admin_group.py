@@ -55,11 +55,12 @@ async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 15):
         pass
 
 
-# ==========================================
-# 🌐 DICCIONARIO BILINGÜE PARA ADMINISTRACIÓN DE GRUPOS
-# ==========================================
+# ==========================================================
+# 🌐 DICCIONARIO BILINGÜE (MENSAJES DE SERVICIO Y ALERTAS)
+# ==========================================================
 TEXTS = {
     "en": {
+        "owner_only": "⛔ <b>Access Denied:</b> This command is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>Database synchronized.</b>\n"
             "This community is now indexed and ready in your Private Command Center.\n\n"
@@ -82,22 +83,23 @@ TEXTS = {
         "status_active": "🟢 ACTIVE (Mics dialed down to 2% for unverified users)",
         "status_inactive": "🔴 DEACTIVATED (Open Mics at 100%)",
         "success_updated": "Console updated",
-        "vip_revoked": "✅ VIP Pass revoked for user ID <code>{target_id}</code>. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_vip": "⚠️ Target required. Reply to a user or pass their numeric ID to revoke VIP pass.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_ban": "⚠️ Target required. Reply to a user or pass their numeric ID to ban them.\n\n🛡️ <i>Cloud Media Management</i>",
-        "ban_success": "🚫 User <code>{target_id}</code> permanently removed from the community.\n\n🛡️ <i>Cloud Media Management</i>",
+        "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_ban": "⚠️ Target required. Reply to a message or use: <code>/ban [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "ban_success": "🚫 <b>Sanction Executed:</b> {target_tag} has been permanently banned from the community for violating perimeter rules.\n\n🛡️ <i>Cloud Media Management</i>",
         "ban_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_kick": "⚠️ Target required. Reply to a user or pass their numeric ID to kick them.\n\n🛡️ <i>Cloud Media Management</i>",
-        "kick_success": "👢 User <code>{target_id}</code> kicked from the chat.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_kick": "⚠️ Target required. Reply to a message or use: <code>/kick [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "kick_success": "👢 <b>Perimeter Warning:</b> {target_tag} has been kicked from the community due to rule infractions.\n\n🛡️ <i>Cloud Media Management</i>",
         "kick_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_mute": "⚠️ Target required. Reply to a user or pass their numeric ID to silence them.\n\n🛡️ <i>Cloud Media Management</i>",
-        "mute_success": "🔇 User <code>{target_id}</code> silenced in text and live videochat.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_mute": "⚠️ Target required. Reply to a message or use: <code>/mute [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "mute_success": "🔇 <b>Notice:</b> {target_tag} has been muted in chat and live videochat for non-compliant conduct.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_unmute": "⚠️ Target required. Reply to a user or pass their numeric ID to restore privileges.\n\n🛡️ <i>Cloud Media Management</i>",
-        "unmute_success": "🔊 Voice and chat permissions restored to 100% for user <code>{target_id}</code>.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_unmute": "⚠️ Target required. Reply to a message or use: <code>/unmute [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "unmute_success": "🔊 <b>Restoration:</b> Chat and live voice privileges restored for {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>",
         "unmute_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>"
     },
     "es": {
+        "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>Base de datos sincronizada.</b>\n"
             "El grupo ahora está visible e indexado en tu panel de Configuración Privada.\n\n"
@@ -120,30 +122,74 @@ TEXTS = {
         "status_active": "🟢 ACTIVO (Reduciendo a 2% a no autorizados)",
         "status_inactive": "🔴 DESACTIVADO (Micrófonos Libres al 100%)",
         "success_updated": "Consola actualizada con éxito",
-        "vip_revoked": "✅ Pase VIP revocado con éxito para el usuario ID <code>{target_id}</code>. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_vip": "⚠️ Responde a un usuario o proporciona su ID numérica para revocar el pase VIP.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_ban": "⚠️ Responde a un usuario o proporciona su ID numérica para banearlo.\n\n🛡️ <i>Cloud Media Management</i>",
-        "ban_success": "🚫 Usuario <code>{target_id}</code> erradicado permanentemente de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_vip": "⚠️ Objetivo requerido. Responde a un usuario, menciónalo con @ o pasa su ID.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_ban": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/ban [@usuario o ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "ban_success": "🚫 <b>Sanción Ejecutada:</b> {target_tag} ha sido expulsado y bloqueado permanentemente del grupo por infringir las reglas de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "ban_error": "❌ No se pudo ejecutar el baneo: {error}\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_kick": "⚠️ Responde a un usuario o proporciona su ID numérica para expulsarlo.\n\n🛡️ <i>Cloud Media Management</i>",
-        "kick_success": "👢 Usuario <code>{target_id}</code> expulsado temporalmente.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_kick": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/kick [@usuario o ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "kick_success": "👢 <b>Aviso de Seguridad:</b> {target_tag} ha sido expulsado del grupo por infringir las normas de convivencia.\n\n🛡️ <i>Cloud Media Management</i>",
         "kick_error": "❌ No se pudo expulsar al usuario: {error}\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_mute": "⚠️ Responde a un usuario o proporciona su ID numérica para silenciarlo.\n\n🛡️ <i>Cloud Media Management</i>",
-        "mute_success": "🔇 Usuario <code>{target_id}</code> silenciado en chat y llamada de voz.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_mute": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/mute [@usuario o ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "mute_success": "🔇 <b>Aviso de Moderación:</b> {target_tag} ha sido silenciado en el chat y sala de voz por conducta no permitida.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_error": "❌ No se pudo silenciar al usuario: {error}\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_unmute": "⚠️ Responde a un usuario o proporciona su ID numérica para desmutearlo.\n\n🛡️ <i>Cloud Media Management</i>",
-        "unmute_success": "🔊 Permisos de voz y chat restaurados al 100% para el usuario <code>{target_id}</code>.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_unmute": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/unmute [@usuario o ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "unmute_success": "🔊 <b>Restauración:</b> Privilegios de voz y chat restaurados al 100% para {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>",
         "unmute_error": "❌ No se pudo desmutear al usuario: {error}\n\n🛡️ <i>Cloud Media Management</i>"
     }
 }
 
 
-# ==========================================
+# ==========================================================
+# 🎯 RESOLUCIÓN TÁCTICA DE USUARIO Y ETIQUETA (@ O ENLACE)
+# ==========================================================
+async def resolve_target(message: Message, command: CommandObject, bot: Bot):
+    """
+    Identifica al objetivo por respuesta directa, mención @ o ID numérica,
+    generando la etiqueta de mención directa para el aviso público.
+    """
+    user_obj = None
+    target_id = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        user_obj = message.reply_to_message.from_user
+        target_id = user_obj.id
+    elif command.args:
+        arg = command.args.split()[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+            try:
+                member = await bot.get_chat_member(chat_id=message.chat.id, user_id=target_id)
+                user_obj = member.user
+            except Exception:
+                user_obj = None
+        elif arg.startswith("@"):
+            try:
+                chat_info = await bot.get_chat(arg)
+                target_id = chat_info.id
+                user_obj = chat_info
+            except Exception:
+                return None, arg
+
+    if user_obj:
+        if getattr(user_obj, "username", None):
+            tag = f"@{user_obj.username}"
+        else:
+            name = getattr(user_obj, "full_name", getattr(user_obj, "first_name", "Usuario"))
+            tag = f'<a href="tg://user?id={user_obj.id}">{name}</a>'
+        return target_id, tag
+    elif target_id:
+        return target_id, f'<a href="tg://user?id={target_id}">ID: {target_id}</a>'
+
+    return None, None
+
+
+# ==========================================================
 # 🔄 COMANDO DE RECARGA E INDEXACIÓN (/reload)
-# ==========================================
+# ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """Indexa la comunidad en la base de datos para que el administrador la vea en privado."""
+    """Indexa la comunidad en la base de datos para que el dueño la vea en privado."""
     if message.chat.type == "private": 
         return
     
@@ -162,12 +208,12 @@ async def cmd_reload_group(message: Message, bot: Bot):
     asyncio.create_task(auto_delete_pair(message, msg, 10))
 
 
-# ==========================================
+# ==========================================================
 # ⚙️ COMANDO DE ENLACE A CONFIGURACIÓN (/settings)
-# ==========================================
+# ==========================================================
 @router.message(Command("settings"))
 async def cmd_settings_group(message: Message, bot: Bot):
-    """Entrega un acceso directo por DM al panel de configuración perimetral de la comunidad."""
+    """Entrega un acceso directo por DM al panel de configuración del búnker."""
     if message.chat.type == "private": 
         return
     
@@ -191,9 +237,9 @@ async def cmd_settings_group(message: Message, bot: Bot):
     asyncio.create_task(auto_delete_pair(message, msg, 15))
 
 
-# ==========================================
-# 🎛️ CONTROL RÁPIDO DE AUTOLOWER EN GRUPO
-# ==========================================
+# ==========================================================
+# 🎛️ CONTROL RÁPIDO DE AUTOLOWER (EXCLUSIVO DUEÑO)
+# ==========================================================
 @router.message(Command("autolower"))
 async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bot):
     """Muestra el panel interactivo de atenuación acústica al creador del grupo."""
@@ -240,161 +286,134 @@ async def process_autolower_callback(callback: CallbackQuery):
         await callback.message.edit_text(t["autolower_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
     except Exception:
         pass
-    # ==========================================
-# 🛑 REVOCACIÓN DE PASE VIP DE MICRÓFONO
-# ==========================================
+
+
+# ==========================================================
+# 🛑 REVOCACIÓN DE PASE VIP (EXCLUSIVO DUEÑO)
+# ==========================================================
 @router.message(Command("delvip"))
 async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
-    """Revoca inmediatamente la inmunidad acústica de un miembro y baja su volumen al 2%."""
+    """Revoca la inmunidad acústica de un miembro y resetea su volumen al 2%."""
     if message.chat.type == "private": 
         return
         
-    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    if command.args and command.args.strip().isdigit():
-        target_id = int(command.args.strip())
-    elif message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    else:
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
         msg = await message.reply(t["target_needed_vip"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
         
-    # Revocar de la tabla de pases VIP activos
     await revoke_vip_mic(target_id, message.chat.id)
     
-    # 🎙️ Restablecer atenuación forzada al 2% en sala de voz mediante el Centinela
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=200)
     except Exception as e:
         logger.warning(f"Aviso Centinela al revocar VIP en grupo {message.chat.id}: {e}")
 
-    msg = await message.answer(t["vip_revoked"].format(target_id=target_id), parse_mode="HTML")
+    msg = await message.answer(t["vip_revoked"].format(target_tag=target_tag), parse_mode="HTML")
     asyncio.create_task(auto_delete_pair(message, msg, 12))
 
 
-# ==========================================
-# 🚫 BANEO DIRECTO EN GRUPO CON CENTINELA
-# ==========================================
+# ==========================================================
+# 🚫 BANEO DIRECTO EN GRUPO (EXCLUSIVO DUEÑO)
+# ==========================================================
 @router.message(Command("ban"))
 async def cmd_ban_user(message: Message, command: CommandObject, bot: Bot):
-    """Expulsa y bloquea permanentemente a un usuario, silenciándolo en la videollamada."""
+    """Expulsa y bloquea permanentemente a un infractor tagueándolo en el grupo."""
     if message.chat.type == "private": 
         return
         
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    elif command.args and command.args.strip().isdigit():
-        target_id = int(command.args.strip())
-    else:
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
         msg = await message.reply(t["target_needed_ban"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
 
     try:
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id)
-        # 🎙️ Silenciar y expulsar inmediatamente de la llamada activa
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
         except Exception:
             pass
-        msg = await message.reply(t["ban_success"].format(target_id=target_id), parse_mode="HTML")
+        msg = await message.reply(t["ban_success"].format(target_tag=target_tag), parse_mode="HTML")
     except Exception as e:
         msg = await message.reply(t["ban_error"].format(error=e), parse_mode="HTML")
         
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    asyncio.create_task(auto_delete_pair(message, msg, 15))
 
 
-# ==========================================
-# 👢 EXPULSIÓN TEMPORAL EN GRUPO (KICK)
-# ==========================================
+# ==========================================================
+# 👢 EXPULSIÓN TEMPORAL EN GRUPO (KICK - EXCLUSIVO DUEÑO)
+# ==========================================================
 @router.message(Command("kick"))
 async def cmd_kick_user(message: Message, command: CommandObject, bot: Bot):
-    """Expulsa a un miembro sin bloquearlo permanentemente del grupo."""
+    """Expulsa a un usuario tagueándolo y notificando la advertencia formal."""
     if message.chat.type == "private": 
         return
         
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    elif command.args and command.args.strip().isdigit():
-        target_id = int(command.args.strip())
-    else:
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
         msg = await message.reply(t["target_needed_kick"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
 
     try:
-        # Baneo de 35 segundos y desbaneo inmediato para expulsar sin ban permanente
         await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id, until_date=int(time.time() + 35))
         await bot.unban_chat_member(chat_id=message.chat.id, user_id=target_id)
-        # 🎙️ Desconectar de la videollamada
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
         except Exception:
             pass
-        msg = await message.reply(t["kick_success"].format(target_id=target_id), parse_mode="HTML")
+        msg = await message.reply(t["kick_success"].format(target_tag=target_tag), parse_mode="HTML")
     except Exception as e:
         msg = await message.reply(t["kick_error"].format(error=e), parse_mode="HTML")
         
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    asyncio.create_task(auto_delete_pair(message, msg, 15))
 
 
-# ==========================================
-# 🔇 SILENCIO DE MIEMBRO EN GRUPO (MUTE)
-# ==========================================
+# ==========================================================
+# 🔇 SILENCIO DE MIEMBRO EN GRUPO (MUTE - EXCLUSIVO DUEÑO)
+# ==========================================================
 @router.message(Command("mute"))
 async def cmd_mute_user(message: Message, command: CommandObject, bot: Bot):
-    """Restringe el envío de mensajes en el chat y silencia el micrófono en vivo."""
+    """Restringe chat y videollamada al usuario tagueado con aviso de moderación."""
     if message.chat.type == "private": 
         return
         
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    elif command.args and command.args.strip().isdigit():
-        target_id = int(command.args.strip())
-    else:
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
         msg = await message.reply(t["target_needed_mute"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
@@ -405,50 +424,41 @@ async def cmd_mute_user(message: Message, command: CommandObject, bot: Bot):
             user_id=target_id,
             permissions=ChatPermissions(can_send_messages=False)
         )
-        # 🎙️ Silenciar simultáneamente en la videollamada activa
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
         except Exception:
             pass
-        msg = await message.reply(t["mute_success"].format(target_id=target_id), parse_mode="HTML")
+        msg = await message.reply(t["mute_success"].format(target_tag=target_tag), parse_mode="HTML")
     except Exception as e:
         msg = await message.reply(t["mute_error"].format(error=e), parse_mode="HTML")
         
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    asyncio.create_task(auto_delete_pair(message, msg, 15))
 
 
-# ==========================================
-# 🔊 RESTAURACIÓN DE FACULTADES EN GRUPO (UNMUTE DUAL)
-# ==========================================
+# ==========================================================
+# 🔊 RESTAURACIÓN DE FACULTADES (UNMUTE DUAL - EXCLUSIVO DUEÑO)
+# ==========================================================
 @router.message(Command("unmute"))
 async def cmd_unmute_user(message: Message, command: CommandObject, bot: Bot):
-    """Restaura completamente los privilegios de chat y el micrófono al 100% en la llamada."""
+    """Restaura chat y micrófono al 100% tagueando al usuario beneficiario."""
     if message.chat.type == "private": 
         return
         
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_id = message.reply_to_message.from_user.id
-    elif command.args and command.args.strip().isdigit():
-        target_id = int(command.args.strip())
-    else:
-        # Corregido: apunte exacto a target_needed_unmute
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
         msg = await message.reply(t["target_needed_unmute"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
 
     try:
-        # 1. Restaurar permisos de texto y multimedia en el chat
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=target_id,
@@ -465,14 +475,13 @@ async def cmd_unmute_user(message: Message, command: CommandObject, bot: Bot):
                 can_add_web_page_previews=True
             )
         )
-        # 2. 🎙️ Restaurar voz al 100% en la llamada mediante el Centinela
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=10000)
         except Exception as mic_err:
             logger.warning(f"Aviso Centinela al desmutear en videochat: {mic_err}")
 
-        msg = await message.reply(t["unmute_success"].format(target_id=target_id), parse_mode="HTML")
+        msg = await message.reply(t["unmute_success"].format(target_tag=target_tag), parse_mode="HTML")
     except Exception as e:
         msg = await message.reply(t["unmute_error"].format(error=e), parse_mode="HTML")
         
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    asyncio.create_task(auto_delete_pair(message, msg, 15))

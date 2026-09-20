@@ -20,62 +20,79 @@ from handlers import (
     groups
 )
 from assistant import (
-    assistant_app, 
     start_voice_radar, 
     close_all_sentinels
 )
 
-# Cargar variables de entorno de forma segura
+# Cargar variables de entorno locales o de Railway
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8801126106:AAH2uxiHrU2g4zhtdMn3H_iGZ0pjkaXaSqQ")
-ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", "-1004347871259"))
+ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID", "-1004351489258")
+ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW) if ADMIN_GROUP_ID_RAW else None
+
 
 async def main():
-    # 1. Inicializar la base de datos relacional, tablas y matrices de seguridad
-    init_db()
-    print("🛡️ [Base de Datos]: Núcleo del Búnker, matrices y programador VC inicializados correctamente.")
+    # 1. Configuración de logging unificado y limpio
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
+        stream=sys.stdout
+    )
+    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
-    # 2. Configurar Bot y Dispatcher con parse_mode HTML por defecto
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    # 2. Inicializar la base de datos SQLite y matrices de seguridad
+    init_db()
+    print("🛡️ [Base de Datos]: Esquema relacional, matrices perimetrales y programador VC inicializados con éxito.")
+
+    # 3. Inicializar Bot con parse_mode HTML por defecto
+    bot = Bot(
+        token=BOT_TOKEN, 
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
     dp = Dispatcher()
 
-    # 3. Registrar Middleware Anti-Spam global e inmunidad táctica
+    # 4. Registrar Middleware Anti-Spam global
     dp.message.middleware(AntiSpamMiddleware())
 
-    # 4. ORDEN ESTRATÉGICO DE ENRUTAMIENTO (De lo específico a lo general):
+    # 5. ORDEN ESTRATÉGICO DE ENRUTAMIENTO (De lo prioritario y transaccional a lo general):
+    # - payments: Facturación, Stars y pre-checkouts sin interferencias
+    # - user_private: Navegación de menús y comandos /start en DM
+    # - admin_group: Comandos directos del Dueño con avisos tagueados
+    # - ecosystem: Radares, telemetría y consultas del estado del búnker
+    # - moderation: Consola remota y callbacks de sanción
+    # - vc_manager: Comandos de videollamada y control acústico
+    # - groups: Escáner perimetral de mensajes, cerraduras, anti-flood y captcha (al final)
     dp.include_router(payments.router)      
     dp.include_router(user_private.router)  
+    dp.include_router(admin_group.router)   
     dp.include_router(ecosystem.router)     
     dp.include_router(moderation.router)    
     dp.include_router(vc_manager.router)    
-    dp.include_router(admin_group.router)   
     dp.include_router(groups.router)        
 
-    # Configuración de Logging corporativo
-    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
-
-    # 5. Encender el motor Multi-Sentinela, Watchdog y Programador VC concurrente
-    print("📡 [Radar MTProto]: Desplegando clúster de Centinelas, Watchdog y Automatización VC...")
+    # 6. Desplegar clúster de Centinelas y Programador VC en segundo plano
+    print("📡 [Radar MTProto]: Desplegando clúster de Centinelas y Programador VC...")
     try:
         start_voice_radar(bot)
     except Exception as e:
         print(f"⚠️ [Radar MTProto Aviso]: No se pudo iniciar el gestor de centinelas: {e}")
 
-    print("¡El Búnker Bot está encendido y operando en modo Multi-Comunidad, Rafa! 🤖🚀")
-    
+    print("🚀 ¡El Búnker Bot está completamente operativo y listo para producción, Rafa!")
+
     try:
-        # Purgar actualizaciones acumuladas y suscribir todos los tipos de eventos requeridos
+        # Purgar actualizaciones viejas para evitar conflictos al arrancar
         await bot.delete_webhook(drop_pending_updates=True)
         
+        # Suscribir todos los eventos requeridos (incluyendo pagos en Stars y solicitudes de ingreso)
         allowed_updates = dp.resolve_used_update_types()
-        if "chat_join_request" not in allowed_updates:
-            allowed_updates.append("chat_join_request")
-        if "chat_member" not in allowed_updates:
-            allowed_updates.append("chat_member")
-        if "my_chat_member" not in allowed_updates:
-            allowed_updates.append("my_chat_member")
+        required_updates = [
+            "message", "callback_query", "pre_checkout_query", 
+            "chat_join_request", "chat_member", "my_chat_member"
+        ]
+        for update_type in required_updates:
+            if update_type not in allowed_updates:
+                allowed_updates.append(update_type)
 
         await dp.start_polling(bot, allowed_updates=allowed_updates)
     finally:
@@ -83,6 +100,7 @@ async def main():
         await close_all_sentinels()
         await bot.session.close()
         print("🛡️ [Sistema]: El Búnker se ha cerrado de forma ordenada bajo los estándares de Cloud Media Management.")
+
 
 if __name__ == "__main__":
     try:

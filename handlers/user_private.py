@@ -54,6 +54,7 @@ FILTER_MAP = {
 # ==========================================
 TEXTS = {
     "en": {
+        "owner_only_alert": "⛔ Access Denied: This command center is strictly restricted to the community Owner.",
         "welcome": (
             "🏴‍☠️ <b>Welcome to the Inner Circle, {name}.</b>\n\n"
             "I am <b>The Bunker Bot</b>, the architectural security core designed by <b>Master Tom</b>. Within this domain, you wield absolute authority to forge order out of chaos.\n\n"
@@ -148,6 +149,9 @@ TEXTS = {
         "btn_back": "🔙 Back to Main Menu",
         "btn_back_settings": "🔙 Back to Groups",
         "btn_back_group": "🔙 Group Panel",
+        "btn_back_captcha": "🔙 Back to Captcha",
+        "btn_back_antispam": "🔙 Back to Anti-Spam",
+        "btn_back_antiflood": "🔙 Back to Anti-Flood",
         "mod_main": (
             "🛡️ <b>Tactical Moderation Matrix</b>\n\n"
             "Direct remote command console for <b>{group_name}</b>:\n\n"
@@ -162,7 +166,7 @@ TEXTS = {
         "eco_main": (
             "📡 <b>Radar & Ecosystem Control</b>\n\n"
             "Real-time telemetry and Voice Sentinel supervision for <b>{group_name}</b>:\n\n"
-            "• 📡 <b>/status_bc:</b> Live ecosystem report and network latency.\n"
+            "• 📡 <b>Radar Ecosistema:</b> Live ecosystem report and network latency.\n"
             "• 🎥 <b>/cams:</b> Stream quality audit & continuous audiovisual optimization.\n"
             "• ⚙️ <b>/autolower:</b> Voice chat volume moderation (2% vs 100%).\n"
             "• 🗓️ <b>/vcsched:</b> Automated Voice Chat opening/closing cron.\n"
@@ -262,6 +266,7 @@ TEXTS = {
         "btn_back_eco": "🔙 Ecosystem"
     },
     "es": {
+        "owner_only_alert": "⛔ Acceso Denegado: Esta consola táctica está reservada única y exclusivamente para el Dueño de la comunidad.",
         "welcome": (
             "🏴‍☠️ <b>Bienvenido al Círculo Interno, {name}.</b>\n\n"
             "Soy <b>The Bunker Bot</b>, el núcleo arquitectónico de seguridad diseñado por <b>Master Tom</b>. Dentro de este dominio, posees autoridad absoluta para forjar el orden a partir del caos.\n\n"
@@ -322,7 +327,7 @@ TEXTS = {
             "• 🛡️ <b>Anti-Spam Granular Total:</b> Bloqueo selectivo de canales, bots, citas y enlaces.\n\n"
             "💎 <b>Plan ULTRA PRO ($8 / 800 Stars):</b>\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
-            "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega una réplica exclusiva con tu token de @BotFather.\n"
+            "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
             "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como operador 24/7 en videollamadas (entorno aislado antiban).\n"
             "• 🔇 <b>Radar AutoLower Inteligente:</b> Atenúa al 2% a participantes no autorizados en milisegundos.\n"
             "• 💰 <b>Monetización Directa Stars (/micvip):</b> Venta de pases VIP de 24h donde <b>el 100% de las Stars recaudadas van directo a tu bot clon</b>.\n"
@@ -356,6 +361,9 @@ TEXTS = {
         "btn_back": "🔙 Volver al Menú Principal",
         "btn_back_settings": "🔙 Volver a Grupos",
         "btn_back_group": "🔙 Panel del Grupo",
+        "btn_back_captcha": "🔙 Volver a Captcha",
+        "btn_back_antispam": "🔙 Volver a Anti-Spam",
+        "btn_back_antiflood": "🔙 Volver a Anti-Flood",
         "mod_main": (
             "🛡️ <b>Matriz de Moderación Táctica</b>\n\n"
             "Consola de control y contramedidas remotas para <b>{group_name}</b>:\n\n"
@@ -370,7 +378,7 @@ TEXTS = {
         "eco_main": (
             "📡 <b>Radar y Control del Ecosistema</b>\n\n"
             "Telemetría en tiempo real y supervisión del Centinela de Voz en <b>{group_name}</b>:\n\n"
-            "• 📡 <b>/status_bc:</b> Reporte en vivo del ecosistema y latencia de red.\n"
+            "• 📡 <b>Radar Ecosistema:</b> Reporte en vivo del ecosistema y latencia de red.\n"
             "• 🎥 <b>/cams:</b> Calidad de video y optimización preventiva de llamadas.\n"
             "• ⚙️ <b>/autolower:</b> Control de atenuación de micrófonos en llamadas.\n"
             "• 🗓️ <b>/vcsched:</b> Cronograma de apertura/cierre automático de videochats.\n"
@@ -472,9 +480,10 @@ TEXTS = {
 }
 
 # ==========================================
-# 🔍 FILTRO DINÁMICO DE GRUPOS ACTIVOS (Ultrarrápido)
+# 🔍 FILTRO DINÁMICO DE GRUPOS ACTIVOS (EXCLUSIVO CREADOR)
 # ==========================================
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
+    """Filtra y devuelve solo los grupos donde el usuario es el Creador (Dueño)."""
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
         return []
@@ -482,17 +491,48 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     bot_info = await bot.get_me()
     bot_id = bot_info.id
     
-    async def check_admin(g_id, g_name):
+    async def check_ownership(g_id, g_name):
         try:
-            member = await bot.get_chat_member(chat_id=g_id, user_id=bot_id)
-            if member.status in ["administrator", "creator"]:
-                return (g_id, g_name)
+            bot_member = await bot.get_chat_member(chat_id=g_id, user_id=bot_id)
+            if bot_member.status in ["administrator", "creator"]:
+                user_member = await bot.get_chat_member(chat_id=g_id, user_id=user_id)
+                if user_member.status == "creator":
+                    return (g_id, g_name)
         except Exception:
             return None
         return None
 
-    results = await asyncio.gather(*(check_admin(g_id, g_name) for g_id, g_name in raw_groups))
+    results = await asyncio.gather(*(check_ownership(g_id, g_name) for g_id, g_name in raw_groups))
     return [res for res in results if res is not None]
+
+# ==========================================
+# 🚀 VALIDADORES DE PERMISOS (ESTRICTAMENTE DUEÑO / CREADOR)
+# ==========================================
+async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
+    """Garantiza acceso exclusivo al Dueño absoluto del grupo."""
+    lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
+    t = TEXTS[lang]
+    try:
+        member = await bot.get_chat_member(chat_id=group_id, user_id=callback.from_user.id)
+        if member.status == "creator":
+            return True
+    except Exception:
+        pass
+    await callback.answer(t["owner_only_alert"], show_alert=True)
+    return False
+
+async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int) -> bool:
+    """Garantiza acceso exclusivo al Dueño absoluto del grupo vía mensaje."""
+    lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
+    t = TEXTS[lang]
+    try:
+        member = await bot.get_chat_member(chat_id=group_id, user_id=message.from_user.id)
+        if member.status == "creator":
+            return True
+    except Exception:
+        pass
+    await message.answer(t["owner_only_alert"])
+    return False
 
 # ==========================================
 # 🎛️ GENERADOR DE TECLADOS INLINE
@@ -574,7 +614,6 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
         ]
     ]
 
-    # Segmentación táctica de privilegios
     if tier_level == "pro":
         btn_text = "🤖 Añadir Centinela Maestro (@Alphacentinel)" if lang == "es" else "🤖 Add Master Sentinel (@Alphacentinel)"
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, url=assistant_invite_url)])
@@ -583,7 +622,6 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"gset_clone_{group_id}_{lang}")])
 
     keyboard_rows.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
-
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 async def get_captcha_keyboard(group_id: int, lang: str):
@@ -626,7 +664,7 @@ def get_captcha_time_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text="⏱️ 3m", callback_data=f"capval_time_180_{group_id}_{lang}"),
             InlineKeyboardButton(text="⏱️ 5m", callback_data=f"capval_time_300_{group_id}_{lang}")
         ],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_captcha_{group_id}_{lang}")]
+        [InlineKeyboardButton(text=t.get("btn_back_captcha", "🔙 Volver a Captcha"), callback_data=f"gset_captcha_{group_id}_{lang}")]
     ])
 
 async def get_captcha_action_keyboard(group_id: int, lang: str):
@@ -645,7 +683,7 @@ async def get_captcha_action_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text=kick_text, callback_data=f"capval_action_kick_{group_id}_{lang}"),
             InlineKeyboardButton(text=mute_text, callback_data=f"capval_action_mute_{group_id}_{lang}")
         ],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_captcha_{group_id}_{lang}")]
+        [InlineKeyboardButton(text=t.get("btn_back_captcha", "🔙 Volver a Captcha"), callback_data=f"gset_captcha_{group_id}_{lang}")]
     ])
 
 async def get_antispam_text(group_id: int, lang: str) -> str:
@@ -693,7 +731,7 @@ async def get_forwards_keyboard(group_id: int, lang: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{chan_lbl} {st_chan}", callback_data=f"astog_fwdchan_{group_id}_{lang}"), InlineKeyboardButton(text=f"{usr_lbl} {st_usr}", callback_data=f"astog_fwdusr_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"{grp_lbl} {st_grp}", callback_data=f"astog_fwdgrp_{group_id}_{lang}"), InlineKeyboardButton(text=f"{bot_lbl} {st_bot}", callback_data=f"astog_fwdbot_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"gset_antispam_{group_id}_{lang}")]
+        [InlineKeyboardButton(text=t.get("btn_back_antispam", "🔙 Volver a Anti-Spam"), callback_data=f"gset_antispam_{group_id}_{lang}")]
     ])
 
 async def get_locks_keyboard(group_id: int, lang: str):
@@ -806,7 +844,7 @@ def get_antiflood_number_keyboard(group_id: int, lang: str, mode: str):
         if len(row) == 4:
             kb.append(row); row = []
     if row: kb.append(row)
-    kb.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_antiflood_{group_id}_{lang}")])
+    kb.append([InlineKeyboardButton(text=t.get("btn_back_antiflood", "🔙 Volver a Anti-Flood"), callback_data=f"gset_antiflood_{group_id}_{lang}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_mod_keyboard(group_id: int, lang: str):
@@ -830,7 +868,7 @@ def get_time_selection_keyboard(action_name: str, group_id: int, lang: str):
 def get_eco_keyboard(group_id: int, lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📡 /status_bc", callback_data=f"cmd_status_{group_id}_{lang}"), InlineKeyboardButton(text="🎥 /cams", callback_data=f"cmd_cams_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="📡 Radar Ecosistema", callback_data=f"radar_eco_{group_id}"), InlineKeyboardButton(text="🎥 /cams", callback_data=f"cmd_cams_{group_id}_{lang}")],
         [InlineKeyboardButton(text="⚙️ /autolower", callback_data=f"cmd_autolower_{group_id}_{lang}"), InlineKeyboardButton(text="🗓️ Programador VC", callback_data=f"vcsched_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎙️ /mic_vip", callback_data=f"cmd_mic_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
@@ -863,30 +901,7 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
             [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Unlock with ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
         ])
-
-# ==========================================
-# 🚀 VALIDADORES DE PERMISOS (ALINEADOS A COLUMNA 1)
-# ==========================================
-async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=callback.from_user.id)
-        if member.status in ["creator", "administrator"]:
-            return True
-    except Exception:
-        pass
-    await callback.answer("⚠️ Acceso Denegado: Solo el CREADOR o administradores autorizados tienen autoridad sobre esta matriz.", show_alert=True)
-    return False
-
-async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=message.from_user.id)
-        if member.status in ["creator", "administrator"]:
-            return True
-    except Exception:
-        pass
-    await message.answer("⚠️ Acceso Denegado: Solo el CREADOR o administradores de la comunidad pueden interactuar con este panel.")
-    return False
-# ==========================================
+    # ==========================================
 # 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO
 # ==========================================
 @router.message(CommandStart(), F.chat.type == "private")
@@ -1210,6 +1225,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
 @router.callback_query(F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") | F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") | F.data.startswith("reg_") | F.data.startswith("vcsched_"))
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     await callback.answer()
+    
+    # Limpieza preventiva de estados si el usuario navega a otra sección
+    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES]:
+        state_dict.pop(callback.from_user.id, None)
+
     data = callback.data.split("_")
     action = data[0] 
     lang = data[-1] if len(data) > 1 and data[-1] in ["es", "en"] else "es"
@@ -1427,24 +1447,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text="➕ Registrar Término en BD", callback_data=f"reg_bl_{group_id}_{lang}")],
                 [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"menu_mod_{group_id}_{lang}")]
             ])
-        elif sub_cmd == "status":
-            tier = await get_group_tier(group_id)
-            autolower_st = "🟢 ACTIVO (2%)" if await get_autolower_status(group_id) == 1 else "🔴 INACTIVO"
-            session_info = await get_owner_session(callback.from_user.id, group_id)
-            sentinel_indicator = "🟢 DEDICADO" if session_info else "🟢 MAESTRO (@Alphacentinel)"
-            text = (
-                "📡 <b>Telemetría en Vivo del Ecosistema</b>\n\n"
-                f"• <b>Comunidad ID:</b> <code>{group_id}</code>\n"
-                f"• <b>Nivel de Licencia:</b> <code>{tier.upper()}</code>\n"
-                f"• <b>Asistente de Voz en Llamada:</b> {sentinel_indicator}\n"
-                f"• <b>Atenuación Acústica (AutoLower):</b> {autolower_st}\n"
-                f"• <b>Estabilidad de Conexión:</b> Excelente (Respuesta inmediata 🟢)\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            )
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Refrescar Telemetría", callback_data=f"cmd_status_{group_id}_{lang}")],
-                [InlineKeyboardButton(text="🔙 Volver a Ecosistema", callback_data=f"menu_eco_{group_id}_{lang}")]
-            ])
         elif sub_cmd == "cams":
             text = (
                 "📹 <b>Supervisión y Control de Cámaras & Videochats</b>\n\n"
@@ -1653,6 +1655,22 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     action = data[0]
     lang = data[-1] if data[-1] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
+
+    # Manejo de retorno directo desde enlaces tipo gset_{group_id}
+    if action == "gset" and len(data) == 2 and data[1].lstrip("-").isdigit():
+        group_id = int(data[1])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+        try:
+            g_name = (await bot.get_chat(group_id)).title
+        except Exception:
+            g_name = "Comunidad"
+        await callback.message.edit_text(
+            t["group_panel_title"].format(group_name=g_name), 
+            reply_markup=get_group_panel_keyboard(group_id, lang), 
+            parse_mode="HTML"
+        )
+        return
 
     try:
         group_id = int(data[-2])

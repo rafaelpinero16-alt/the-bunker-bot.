@@ -6,18 +6,24 @@ from datetime import datetime
 
 DB_PATH = "database/bot_data.db"
 
+
+def get_db_connection():
+    """Genera una conexión SQLite optimizada contra colisiones y bloqueos de concurrencia."""
+    conn = sqlite3.connect(DB_PATH, timeout=30.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    return conn
+
+
 def init_db():
-    # Asegurar que el directorio de la base de datos exista
+    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # 🚀 Optimización de Concurrencia SQLite para AsyncIO
-        cursor.execute("PRAGMA journal_mode=WAL;")
-        cursor.execute("PRAGMA synchronous=NORMAL;")
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -49,7 +55,7 @@ def init_db():
             )
         """)
         
-        # Migraciones dinámicas de columnas perimetrales
+        # Migraciones dinámicas de columnas perimetrales y Modo Free
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
             ("captcha_status", "INTEGER DEFAULT 0"),
@@ -77,7 +83,9 @@ def init_db():
             ("lock_stickers", "INTEGER DEFAULT 0"),
             ("lock_links", "INTEGER DEFAULT 0"),
             ("lock_commands", "INTEGER DEFAULT 0"),
-            ("mic_vip_price", "INTEGER DEFAULT 50")
+            ("mic_vip_price", "INTEGER DEFAULT 50"),
+            ("free_badge_status", "INTEGER DEFAULT 0"),
+            ("free_badge_title", "TEXT DEFAULT 'VIP Free 🎙️'")
         ]
 
         for col_name, col_def in settings_columns:
@@ -155,6 +163,7 @@ def init_db():
 
     init_default_blacklist()
 
+
 def init_default_blacklist():
     banned_words = [
         "extasis", "cp", "c.p", "c-p", "cepe", "cheese", "pizza", "cheese pizza", "cheesepizza",
@@ -164,14 +173,15 @@ def init_default_blacklist():
         "stab", "kill", "nigger", "n1gger", "slave", "hitler", "nazi", "pedofilia", "pedophilia",
         "pedophile", "pedo", "p.e.d.o", "p3do", "p3d0", "paedo"
     ]
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         for word in banned_words:
             cursor.execute("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", (word.lower().strip(),))
         conn.commit()
 
+
 def get_or_create_user(user_id: int, username: str, full_name: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT topic_id, warnings, is_banned FROM users WHERE user_id = ?", (user_id,))
         row = cursor.fetchone()
@@ -185,53 +195,61 @@ def get_or_create_user(user_id: int, username: str, full_name: str):
             conn.commit()
             return None, 0, 0
 
+
 def update_user_topic(user_id: int, topic_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET topic_id = ? WHERE user_id = ?", (topic_id, user_id))
         conn.commit()
 
+
 def get_user_by_topic(topic_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id FROM users WHERE topic_id = ?", (topic_id,))
         row = cursor.fetchone()
         return row[0] if row else None
 
+
 def add_warning(user_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET warnings = warnings + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         cursor.execute("SELECT warnings FROM users WHERE user_id = ?", (user_id,))
         return cursor.fetchone()[0]
 
+
 def ban_user(user_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
         conn.commit()
 
+
 def get_blacklist():
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT word FROM blacklist")
         return [row[0] for row in cursor.fetchall()]
 
+
 def add_to_blacklist(word: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", (word.lower().strip(),))
         conn.commit()
 
+
 def remove_from_blacklist(word: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM blacklist WHERE word = ?", (word.lower().strip(),))
         conn.commit()
 
+
 def register_user_group(user_id: int, group_id: int, group_name: str):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO user_groups (user_id, group_id, group_name) 
@@ -240,29 +258,34 @@ def register_user_group(user_id: int, group_id: int, group_name: str):
         """, (user_id, group_id, group_name))
         conn.commit()
 
+
 def get_user_groups(user_id: int) -> list:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, group_name FROM user_groups WHERE user_id = ?", (user_id,))
         return cursor.fetchall()
 
+
 def set_autolower_status(group_id: int, status: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO group_settings (group_id, autolower) VALUES (?, ?) 
             ON CONFLICT(group_id) DO UPDATE SET autolower = excluded.autolower
         """, (group_id, status))
         conn.commit()
+
+
 def get_autolower_status(group_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT autolower FROM group_settings WHERE group_id = ?", (group_id,))
         row = cursor.fetchone()
         return row[0] if row else 1
 
+
 def set_antispam_status(group_id: int, status: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO group_settings (group_id, antispam) VALUES (?, ?) 
@@ -270,8 +293,9 @@ def set_antispam_status(group_id: int, status: int):
         """, (group_id, status))
         conn.commit()
 
+
 def get_antispam_status(group_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT antispam FROM group_settings WHERE group_id = ?", (group_id,))
@@ -280,8 +304,9 @@ def get_antispam_status(group_id: int) -> int:
         except sqlite3.OperationalError:
             return 0
 
+
 def set_captcha_status(group_id: int, status: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO group_settings (group_id, captcha_status) VALUES (?, ?) 
@@ -289,8 +314,9 @@ def set_captcha_status(group_id: int, status: int):
         """, (group_id, status))
         conn.commit()
 
+
 def get_captcha_status(group_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT captcha_status FROM group_settings WHERE group_id = ?", (group_id,))
@@ -299,8 +325,9 @@ def get_captcha_status(group_id: int) -> int:
         except sqlite3.OperationalError:
             return 0
 
+
 def get_captcha_config(group_id: int) -> dict:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
@@ -321,10 +348,11 @@ def get_captcha_config(group_id: int) -> dict:
             pass
         return {"status": 0, "mode": 1, "time": 60, "action": "kick", "text": "", "service_del": 1}
 
+
 def set_captcha_config(group_id: int, field: str, value):
     valid_fields = ["captcha_mode", "captcha_time", "captcha_action", "captcha_text", "captcha_service_del"]
     if field not in valid_fields: return
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
@@ -332,8 +360,9 @@ def set_captcha_config(group_id: int, field: str, value):
         """, (group_id, value))
         conn.commit()
 
+
 def get_warns_config(group_id: int) -> dict:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT warns_limit, warns_action FROM group_settings WHERE group_id = ?", (group_id,))
@@ -347,9 +376,10 @@ def get_warns_config(group_id: int) -> dict:
             pass
         return {"limit": 3, "action": "mute"}
 
+
 def set_warns_config(group_id: int, field: str, value):
     if field not in ["warns_limit", "warns_action"]: return
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
@@ -357,10 +387,11 @@ def set_warns_config(group_id: int, field: str, value):
         """, (group_id, value))
         conn.commit()
 
+
 def get_lock_status(group_id: int, lock_name: str) -> int:
     valid_locks = ["lock_media", "lock_stickers", "lock_links", "lock_commands"]
     if lock_name not in valid_locks: return 0
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute(f"SELECT {lock_name} FROM group_settings WHERE group_id = ?", (group_id,))
@@ -369,10 +400,11 @@ def get_lock_status(group_id: int, lock_name: str) -> int:
         except sqlite3.OperationalError:
             return 0
 
+
 def set_lock_status(group_id: int, lock_name: str, status: int):
     valid_locks = ["lock_media", "lock_stickers", "lock_links", "lock_commands"]
     if lock_name not in valid_locks: return
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {lock_name}) VALUES (?, ?) 
@@ -380,8 +412,9 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
         """, (group_id, status))
         conn.commit()
 
+
 def get_mic_vip_price(group_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT mic_vip_price FROM group_settings WHERE group_id = ?", (group_id,))
@@ -390,8 +423,9 @@ def get_mic_vip_price(group_id: int) -> int:
         except sqlite3.OperationalError:
             return 50
 
+
 def set_mic_vip_price(group_id: int, price: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO group_settings (group_id, mic_vip_price) VALUES (?, ?) 
@@ -399,16 +433,49 @@ def set_mic_vip_price(group_id: int, price: int):
         """, (group_id, price))
         conn.commit()
 
+
+# ==========================================
+# 🏷️ CONFIGURACIÓN DE ETIQUETA Y MODO FREE
+# ==========================================
+def get_free_badge_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT free_badge_status, free_badge_title FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "status": row[0] if row[0] is not None else 0,
+                    "title": row[1] if row[1] else "VIP Free 🎙️"
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"status": 0, "title": "VIP Free 🎙️"}
+
+
+def set_free_badge_config(group_id: int, field: str, value):
+    if field not in ["free_badge_status", "free_badge_title"]: 
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
 VALID_FILTERS = {
     "tg_links", "forwards", "quotes", "web_links", 
     "fwd_channels", "fwd_users", "fwd_groups", "fwd_bots"
 }
 
+
 def get_antispam_filter(group_id: int, filter_name: str) -> int:
     if filter_name not in VALID_FILTERS:
         return 0
     col_name = f"filter_{filter_name}" if filter_name in {"tg_links", "forwards", "quotes", "web_links"} else filter_name
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute(f"SELECT {col_name} FROM group_settings WHERE group_id = ?", (group_id,))
@@ -417,11 +484,12 @@ def get_antispam_filter(group_id: int, filter_name: str) -> int:
         except sqlite3.OperationalError:
             return 0
 
+
 def set_antispam_filter(group_id: int, filter_name: str, status: int):
     if filter_name not in VALID_FILTERS:
         return
     col_name = f"filter_{filter_name}" if filter_name in {"tg_links", "forwards", "quotes", "web_links"} else filter_name
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {col_name}) VALUES (?, ?) 
@@ -429,8 +497,9 @@ def set_antispam_filter(group_id: int, filter_name: str, status: int):
         """, (group_id, status))
         conn.commit()
 
+
 def get_antispam_delete(group_id: int) -> int:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT antispam_delete FROM group_settings WHERE group_id = ?", (group_id,))
@@ -439,8 +508,9 @@ def get_antispam_delete(group_id: int) -> int:
         except sqlite3.OperationalError:
             return 0
 
+
 def set_antispam_delete(group_id: int, status: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO group_settings (group_id, antispam_delete) VALUES (?, ?) 
@@ -448,8 +518,9 @@ def set_antispam_delete(group_id: int, status: int):
         """, (group_id, status))
         conn.commit()
 
+
 def get_antiflood_config(group_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT antiflood_msgs, antiflood_time, antiflood_action, antiflood_delete FROM group_settings WHERE group_id = ?", (group_id,))
@@ -465,10 +536,11 @@ def get_antiflood_config(group_id: int):
             pass
         return {"msgs": 10, "time": 15, "action": "kick", "delete": 1}
 
+
 def set_antiflood_config(group_id: int, field: str, value):
     valid_fields = ["antiflood_msgs", "antiflood_time", "antiflood_action", "antiflood_delete"]
     if field not in valid_fields: return
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
@@ -476,26 +548,30 @@ def set_antiflood_config(group_id: int, field: str, value):
         """, (group_id, value))
         conn.commit()
 
+
 def add_to_whitelist(user_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)", (user_id,))
         conn.commit()
 
+
 def remove_from_whitelist(user_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM whitelist WHERE user_id = ?", (user_id,))
         conn.commit()
 
+
 def is_whitelisted(user_id: int) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,))
         return cursor.fetchone() is not None
 
+
 def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         if tier in ["pro", "ultra_pro"]:
             cursor.execute(f"""
@@ -515,14 +591,16 @@ def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
             """, (group_id,))
         conn.commit()
 
+
 def is_group_approved(group_id: int) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM approved_groups WHERE group_id = ?", (group_id,))
         return cursor.fetchone() is not None
 
+
 def get_group_tier(group_id: int) -> str:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT tier, expires_at FROM approved_groups WHERE group_id = ?", (group_id,))
         row = cursor.fetchone()
@@ -537,8 +615,9 @@ def get_group_tier(group_id: int) -> str:
                 tier = "free"
         return tier
 
+
 def get_user_global_tier(user_id: int) -> str:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT a.tier FROM approved_groups a
@@ -552,18 +631,16 @@ def get_user_global_tier(user_id: int) -> str:
         if "pro" in tiers: return "pro"
         return "free"
 
+
 def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
     tier = get_group_tier(group_id)
     if tier in ["pro", "ultra_pro"]: 
         return True
         
     today = datetime.now().strftime("%Y-%m-%d")
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # Mantenimiento preventivo: limpiar registros de más de 7 días
         cursor.execute("DELETE FROM command_usage WHERE usage_date < date('now', '-7 days')")
-        
         cursor.execute("SELECT count FROM command_usage WHERE group_id = ? AND command = ? AND usage_date = ?", (group_id, command, today))
         row = cursor.fetchone()
         current_count = row[0] if row else 0
@@ -576,8 +653,9 @@ def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
         conn.commit()
         return True
 
+
 def grant_vip_mic(user_id: int, group_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO vip_mic_passes (user_id, group_id, expires_at) 
@@ -586,20 +664,23 @@ def grant_vip_mic(user_id: int, group_id: int):
         """, (user_id, group_id))
         conn.commit()
 
+
 def is_vip_mic_active(user_id: int, group_id: int) -> bool:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM vip_mic_passes WHERE user_id = ? AND group_id = ? AND expires_at > datetime('now')", (user_id, group_id))
         return cursor.fetchone() is not None
 
+
 def revoke_vip_mic(user_id: int, group_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM vip_mic_passes WHERE user_id = ? AND group_id = ?", (user_id, group_id))
         conn.commit()
 
+
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO bot_clones (user_id, group_id, bot_token, bot_username, status)
@@ -611,20 +692,23 @@ def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username
         """, (user_id, group_id, bot_token, bot_username))
         conn.commit()
 
+
 def get_bot_clone(user_id: int, group_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT bot_token, bot_username, status FROM bot_clones WHERE user_id = ? AND group_id = ?", (user_id, group_id))
         return cursor.fetchone()
 
+
 def get_all_active_clones():
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, group_id, bot_token, bot_username FROM bot_clones WHERE status = 'active'")
         return cursor.fetchall()
 
+
 def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: str = None, api_id: int = None, api_hash: str = None):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO owner_sessions (user_id, group_id, session_string, phone_number, api_id, api_hash, status, updated_at)
@@ -639,8 +723,9 @@ def save_owner_session(user_id: int, group_id: int, session_string: str, phone_n
         """, (user_id, group_id, session_string, phone_number, api_id, api_hash))
         conn.commit()
 
+
 def get_owner_session(user_id: int, group_id: int = None):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         if group_id is not None:
             cursor.execute("SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND group_id = ? AND status = 'active'", (user_id, group_id))
@@ -648,20 +733,23 @@ def get_owner_session(user_id: int, group_id: int = None):
             cursor.execute("SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND status = 'active'", (user_id,))
         return cursor.fetchone()
 
+
 def get_session_by_group(group_id: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, session_string, api_id, api_hash FROM owner_sessions WHERE group_id = ? AND status = 'active'", (group_id,))
         return cursor.fetchone()
 
+
 def get_all_active_sessions():
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, group_id, session_string, api_id, api_hash FROM owner_sessions WHERE status = 'active'")
         return cursor.fetchall()
 
+
 def revoke_owner_session(user_id: int, group_id: int = None):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         if group_id is not None:
             cursor.execute("UPDATE owner_sessions SET status = 'revoked' WHERE user_id = ? AND group_id = ?", (user_id, group_id))
@@ -669,9 +757,9 @@ def revoke_owner_session(user_id: int, group_id: int = None):
             cursor.execute("UPDATE owner_sessions SET status = 'revoked' WHERE user_id = ?", (user_id,))
         conn.commit()
 
-# --- Funciones para Programación de Videochats (VC Schedules) ---
+
 def get_vc_schedule(group_id: int) -> dict:
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT days, start_time, end_time, status, call_active FROM vc_schedules WHERE group_id = ?", (group_id,))
         row = cursor.fetchone()
@@ -685,8 +773,9 @@ def get_vc_schedule(group_id: int) -> dict:
             }
         return {"days": "1,2,3,4,5,6,7", "start_time": "20:00", "end_time": "23:00", "status": 0, "call_active": 0}
 
+
 def set_vc_schedule(group_id: int, days: str, start_time: str, end_time: str, status: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO vc_schedules (group_id, days, start_time, end_time, status) VALUES (?, ?, ?, ?, ?)
@@ -698,23 +787,27 @@ def set_vc_schedule(group_id: int, days: str, start_time: str, end_time: str, st
         """, (group_id, days, start_time, end_time, status))
         conn.commit()
 
+
 def update_vc_call_status(group_id: int, call_active: int):
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE vc_schedules SET call_active = ? WHERE group_id = ?", (call_active, group_id))
         conn.commit()
 
+
 def get_all_active_vc_schedules():
-    with sqlite3.connect(DB_PATH) as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, days, start_time, end_time, status, call_active FROM vc_schedules WHERE status = 1")
         return cursor.fetchall()
+
 
 def _make_async(sync_fn):
     @functools.wraps(sync_fn)
     async def _async_wrapper(*args, **kwargs):
         return await asyncio.to_thread(sync_fn, *args, **kwargs)
     return _async_wrapper
+
 
 _ASYNC_WRAPPED_FUNCTIONS = [
     "get_or_create_user",
@@ -741,6 +834,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_lock_status",
     "get_mic_vip_price",
     "set_mic_vip_price",
+    "get_free_badge_config",
+    "set_free_badge_config",
     "get_antispam_filter",
     "set_antispam_filter",
     "get_antispam_delete",

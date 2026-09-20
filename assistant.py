@@ -1,4 +1,4 @@
-import asyncio
+vimport asyncio
 import logging
 import random
 from datetime import datetime
@@ -45,7 +45,7 @@ ADMIN_CACHE_TTL = 300
 RADAR_TEXTS = {
     "combined": (
         "🔇 <b>The Bunker Bot: Atenuación Acústica Activa (AutoLower)</b>\n\n"
-        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> al no contar con un pase de voz autorizado en la sala.\n\n"
+        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> por no contar con un pase de voz o Modo Free activo en la sala.\n\n"
         "💡 <b>¿Quieres hablar sin restricciones?</b>\n"
         "Para subir tu volumen al 100% y hablar libremente durante 24 horas continuas en la transmisión, adquiere tu <b>Pase VIP de Micrófono</b> usando el comando <code>/micvip</code> en este chat.\n\n"
         "🇺🇸 <b>AutoLower Acoustic Shield Active:</b>\n"
@@ -54,7 +54,7 @@ RADAR_TEXTS = {
     ),
     "es": (
         "🔇 <b>The Bunker Bot: Atenuación Acústica Activa (AutoLower)</b>\n\n"
-        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> al no contar con un pase de voz autorizado en la sala.\n\n"
+        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> por no contar con pase VIP ni autorización en la sala.\n\n"
         "💡 <b>¿Quieres hablar sin restricciones?</b>\n"
         "Para subir tu volumen al 100% y hablar libremente durante 24 horas continuas, adquiere tu <b>Pase VIP de Micrófono</b> usando el comando <code>/micvip</code>.\n\n"
         "🛡️ <i>Cloud Media Management</i>"
@@ -71,7 +71,7 @@ RADAR_TEXTS = {
 OPTIMIZATION_TEXT = (
     "🔄 <b>Protocolo de Optimización Audiovisual — The Bunker</b>\n\n"
     "Estamos realizando una optimización de rutina en segundo plano para refrescar cámaras, purgar la transmisión y garantizar máxima fluidez sin retrasos.\n\n"
-    "⚡ <i>La sala se reiniciará en 3 segundos y se abrirá limpia de inmediato. Los pases VIP se mantendrán activos al reconectarse.</i>\n\n"
+    "⚡ <i>La sala se reiniciará en 3 segundos y se abrirá limpia de inmediato. Los pases VIP y Modo Free se mantendrán activos al reconectarse.</i>\n\n"
     "🇺🇸 <i>Giving the live stream a quick background refresh to clear video lag and keep camera feeds smooth. Reopening fresh in 3 seconds! VIP passes stay active.</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
@@ -91,6 +91,7 @@ VC_SCHED_MESSAGES = {
     )
 }
 
+
 async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
     """Refresca la caché de administradores reconociendo 'owner', 'creator' y 'administrator'."""
     try:
@@ -108,11 +109,12 @@ async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int)
             new_admins.add(bot_client_id)
             
         admin_caches[chat_id] = {'admins': new_admins, 'ts': asyncio.get_event_loop().time()}
-    except Exception:
-        pass 
+    except Exception as e:
+        logger.debug(f"Aviso actualizando admin cache en chat {chat_id}: {e}")
+
 
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int):
-    """Bucle de radar aislado con optimización preventiva cada 3.5h y moderación acústica."""
+    """Bucle de radar aislado con optimización preventiva cada 3.5h y moderación acústica inteligente."""
     alerted_users = set()
     current_call = None
     last_channel_check = 0
@@ -157,10 +159,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
-            # 🛡️ MANTENIMIENTO PREVENTIVO INALTERABLE (3.5 horas / 12600 segundos)
+            # 🛡️ MANTENIMIENTO PREVENTIVO (3.5 horas / 12600 segundos)
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
-                    print(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
+                    logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
                     if _global_bot:
                         try:
                             notice = await _global_bot.send_message(
@@ -181,14 +183,14 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     try:
                         await client.invoke(DiscardGroupCall(call=current_call))
                     except Exception as disc_err:
-                        print(f"⚠️ [Optimización] Error al cerrar llamada previa: {disc_err}")
+                        logger.warning(f"Aviso al cerrar llamada previa: {disc_err}")
 
                     await asyncio.sleep(3.0)
 
                     try:
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
                     except Exception as create_err:
-                        print(f"⚠️ [Optimización] Error al reiniciar llamada: {create_err}")
+                        logger.warning(f"Aviso al reiniciar llamada: {create_err}")
 
                     current_call = None
                     is_joined_audio = False
@@ -234,6 +236,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     u_id = peer_user.user_id
                     active_users.add(u_id)
 
+                    # 🛡️ BYPASS ABSOLUTO: Creadores, Administradores, Whitelist y Pases VIP (Modo Free)
                     if u_id == bot_client_id or u_id in cache_info['admins']:
                         continue
                     if await is_whitelisted(u_id):
@@ -244,6 +247,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     vol = p.volume if getattr(p, "volume", None) is not None else 10000
                     is_muted = getattr(p, "muted", True)
 
+                    # Si el usuario no autorizado intenta hablar o sube su volumen, atenuar al 2%
                     if (not is_muted) or vol > 200:
                         user_obj = users_map.get(u_id)
                         try:
@@ -304,7 +308,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
 async def vc_scheduler_loop():
     """Bucle de fondo para apertura y cierre programado de videochats (Ultra Pro)."""
-    print("🗓️ [Programador VC] Sistema de programación semanal iniciado.")
+    logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado.")
     while True:
         try:
             now = datetime.now()
@@ -333,7 +337,7 @@ async def vc_scheduler_loop():
                     try:
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
                         await update_vc_call_status(group_id, 1)
-                        print(f"📡 [Programador VC] Videochat abierto automáticamente en grupo {group_id}")
+                        logger.info(f"📡 [Programador VC] Videochat abierto automáticamente en grupo {group_id}")
                         if _global_bot:
                             await _global_bot.send_message(
                                 chat_id=group_id,
@@ -341,7 +345,7 @@ async def vc_scheduler_loop():
                                 parse_mode="HTML"
                             )
                     except Exception as e:
-                        print(f"⚠️ Error abriendo videochat programado para grupo {group_id}: {e}")
+                        logger.error(f"Error abriendo videochat en grupo {group_id}: {e}")
 
                 elif current_time_str == end_time and call_active == 1:
                     try:
@@ -351,7 +355,7 @@ async def vc_scheduler_loop():
                             call_obj = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
                             await client.invoke(DiscardGroupCall(call=call_obj))
                         await update_vc_call_status(group_id, 0)
-                        print(f"📡 [Programador VC] Videochat cerrado automáticamente en grupo {group_id}")
+                        logger.info(f"📡 [Programador VC] Videochat cerrado automáticamente en grupo {group_id}")
                         if _global_bot:
                             await _global_bot.send_message(
                                 chat_id=group_id,
@@ -359,12 +363,13 @@ async def vc_scheduler_loop():
                                 parse_mode="HTML"
                             )
                     except Exception as e:
-                        print(f"⚠️ Error cerrando videochat programado para grupo {group_id}: {e}")
+                        logger.error(f"Error cerrando videochat en grupo {group_id}: {e}")
 
         except Exception as e:
-            print(f"⚠️ Error en bucle de programación VC: {e}")
+            logger.error(f"Error en bucle de programación VC: {e}")
 
         await asyncio.sleep(50)
+
 
 async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
     """Inicia un cliente de Pyrogram dedicado para una comunidad específica."""
@@ -390,19 +395,21 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             "task": task,
             "user_id": user_id
         }
-        print(f"💎 [Centinela Propio Conectado] Comunidad {group_id} protegida por @{me.username or me.id}")
+        logger.info(f"💎 [Centinela Propio Conectado] Comunidad {group_id} protegida por @{me.username or me.id}")
         return True
     except Unauthorized:
-        print(f"⚠️ [Error de Sesión] La sesión del usuario {user_id} para el grupo {group_id} fue revocada.")
+        logger.warning(f"⚠️ [Error de Sesión] La sesión del usuario {user_id} para el grupo {group_id} fue revocada.")
         return False
     except Exception as e:
-        print(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
+        logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
         return False
+
 
 async def register_or_update_sentinel(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
     """Permite conectar o sustituir un Centinela en tiempo real desde el bot privado."""
     await disconnect_sentinel(group_id)
     return await launch_sentinel_instance(user_id, group_id, session_string, api_id, api_hash)
+
 
 async def disconnect_sentinel(group_id: int):
     """Detiene y desconecta de forma limpia un Centinela asignado protegiendo al Maestro."""
@@ -414,12 +421,12 @@ async def disconnect_sentinel(group_id: int):
             pass
         try:
             client = sentinel_info["client"]
-            # 🛡️ Blindaje: solo detener si es un cliente dedicado, nunca el Maestro compartido
             if client != assistant_app and client.is_connected:
                 await client.stop()
         except Exception:
             pass
-        print(f"🛑 [Centinela Desconectado] Grupo {group_id} liberado.")
+        logger.info(f"🛑 [Centinela Desconectado] Grupo {group_id} liberado.")
+
 
 async def load_all_sentinels():
     """Lee de la base de datos todas las sesiones activas y arranca sus clientes."""
@@ -428,6 +435,7 @@ async def load_all_sentinels():
         u_id, g_id, s_str, a_id, a_hash = row[0], row[1], row[2], row[3], row[4]
         if g_id not in active_sentinels:
             await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
+
 
 async def radar_master_loop():
     """Supervisa el centinela por defecto en las comunidades que no tienen centinela propio."""
@@ -449,10 +457,11 @@ async def radar_master_loop():
                                 }
                             except Exception:
                                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Aviso en radar master loop: {e}")
             
         await asyncio.sleep(45)
+
 
 async def init_assistant_master():
     """Punto de arranque que levanta el centinela maestro, el programador y el pool multi-sesión."""
@@ -462,19 +471,21 @@ async def init_assistant_master():
             await assistant_app.start()
         me = await assistant_app.get_me()
         _default_my_id = me.id
-        print(f"🤖 [Centinela Maestro Activo] Online como: @{me.username or me.first_name}")
+        logger.info(f"🤖 [Centinela Maestro Activo] Online como: @{me.username or me.first_name}")
     except Exception as e:
-        print(f"⚠️ [Aviso Centinela Maestro]: {e}")
+        logger.warning(f"⚠️ [Aviso Centinela Maestro]: {e}")
 
     await load_all_sentinels()
     asyncio.create_task(radar_master_loop())
     asyncio.create_task(vc_scheduler_loop())
+
 
 def start_voice_radar(bot):
     """Punto de entrada llamado desde main.py."""
     global _global_bot
     _global_bot = bot
     asyncio.create_task(init_assistant_master())
+
 
 async def close_all_sentinels():
     """Detiene ordenadamente todos los clientes activos al apagar el servidor."""
@@ -485,6 +496,7 @@ async def close_all_sentinels():
             await assistant_app.stop()
         except Exception:
             pass
+
 
 async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: int = 10000) -> bool:
     """Restaura o silencia participantes usando el Centinela asignado a la comunidad."""
@@ -512,5 +524,5 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         )
         return True
     except Exception as e:
-        print(f"⚠️ Error en set_participant_mic para grupo {chat_id}: {e}")
+        logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
         return False
