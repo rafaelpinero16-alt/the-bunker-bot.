@@ -71,11 +71,11 @@ def matches_blacklisted_term(word: str, text: str) -> bool:
 
 class AntiSpamMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: Message, data: dict):
-        # Permitir flujo si no proviene de un usuario individual
-        if not event.from_user:
+        # 1. Permitir flujo inmediato si no hay usuario o si ocurre en chat privado (Clones / Maestro en DM)
+        if not event.from_user or (event.chat and event.chat.type == "private"):
             return await handler(event, data)
 
-        # 🛡️ Inmunidad Táctica para Administradores, Aliados y Centinelas
+        # 2. 🛡️ Inmunidad Táctica para Administradores, Aliados y Centinelas en Grupos
         if await is_immune(event):
             return await handler(event, data)
 
