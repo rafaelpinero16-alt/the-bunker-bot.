@@ -7,8 +7,14 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types.web_app_info import WebAppInfo
 
-from database.database import init_db, get_all_active_clone_tokens
+from database.database import (
+    init_db, 
+    get_all_active_clone_tokens, 
+    get_or_create_user
+)
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
     user_private, 
@@ -18,6 +24,11 @@ from handlers import (
     vc_manager, 
     admin_group, 
     groups
+)
+from handlers.user_private import (
+    get_main_keyboard, 
+    get_group_panel_keyboard, 
+    TEXTS
 )
 from assistant import (
     start_voice_radar, 
@@ -29,6 +40,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
+WEBAPP_URL = "https://thebunkerapp.netlify.app"
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN no está definido en las variables de entorno.")
@@ -43,8 +55,8 @@ dp = Dispatcher()
 
 async def _clone_worker(clone_bot: Bot, token: str):
     """
-    Worker de polling dedicado para clones que alimenta el Dispatcher central
-    enrutando todas las interacciones (mensajes y callbacks) hacia la matriz universal.
+    Worker de polling dedicado para clones con despacho instantáneo de la interfaz
+    completa de The Bunker (estilo Group Help) y reenvío de callbacks al Dispatcher.
     """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
@@ -71,18 +83,61 @@ async def _clone_worker(clone_bot: Bot, token: str):
             for update in updates:
                 offset = update.update_id + 1
                 try:
-                    if update.message:
-                        user_id = update.message.from_user.id if update.message.from_user else "N/A"
-                        text = update.message.text or "[Media/Otro]"
-                        logging.info(f"📩 [Clon @{bot_username}] Update #{update.update_id} | User: {user_id} | Texto: '{text}'")
-                    elif update.callback_query:
-                        user_id = update.callback_query.from_user.id if update.callback_query.from_user else "N/A"
-                        logging.info(f"🔘 [Clon @{bot_username}] Callback #{update.update_id} | User: {user_id} | Data: '{update.callback_query.data}'")
+                    # 👑 GESTIÓN DIRECTA DE COMANDOS PRIVADOS PARA CLONES (100% IDÉNTICO A GROUP HELP)
+                    if update.message and update.message.chat.type == "private":
+                        user = update.message.from_user
+                        text = (update.message.text or "").strip()
+                        user_id = user.id if user else 0
+                        logging.info(f"📩 [Clon @{bot_username}] Mensaje de {user_id}: '{text}'")
 
-                    # Inyección limpia al Dispatcher universal de aiogram 3
+                        if text.startswith("/start"):
+                            lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
+                            t = TEXTS.get(lang, TEXTS["es"])
+
+                            try:
+                                if user:
+                                    await get_or_create_user(user.id, user.username or "Sin username", user.full_name)
+                            except Exception as db_err:
+                                logging.error(f"Aviso BD Clon: {db_err}")
+
+                            # Deep-link de configuración directa de comunidad (/start gset_...)
+                            parts = text.split()
+                            if len(parts) > 1 and parts[1].startswith("gset_"):
+                                try:
+                                    g_id = int(parts[1].split("_")[1])
+                                    try:
+                                        g_chat = await clone_bot.get_chat(g_id)
+                                        g_name = g_chat.title
+                                    except Exception:
+                                        g_name = "Comunidad" if lang == "es" else "Community"
+
+                                    await clone_bot.send_message(
+                                        chat_id=update.message.chat.id,
+                                        text=t["group_panel_title"].format(group_name=g_name),
+                                        reply_markup=get_group_panel_keyboard(g_id, lang),
+                                        parse_mode="HTML"
+                                    )
+                                    continue
+                                except Exception as gset_err:
+                                    logging.error(f"Error gset en clon: {gset_err}")
+
+                            # Despliegue de la interfaz oficial completa de The Bunker con el username del clon
+                            welcome_text = t["welcome"].format(name=user.full_name if user else "Comandante")
+                            full_keyboard = get_main_keyboard(bot_username, lang)
+
+                            await clone_bot.send_message(
+                                chat_id=update.message.chat.id,
+                                text=welcome_text,
+                                reply_markup=full_keyboard,
+                                parse_mode="HTML"
+                            )
+                            logging.info(f"✅ [Clon @{bot_username}] Matriz completa desplegada con éxito.")
+                            continue
+
+                    # Callbacks y eventos de grupo se inyectan fluidamente al Dispatcher
                     await dp.feed_update(clone_bot, update)
                 except Exception as feed_err:
-                    logging.error(f"❌ [Error feed_update clon @{bot_username}]: {feed_err}", exc_info=True)
+                    logging.error(f"❌ [Error en clon @{bot_username}]: {feed_err}", exc_info=True)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -149,7 +204,7 @@ async def main():
 
     dp.message.middleware(AntiSpamMiddleware())
 
-    # Routers con prioridad a comandos privados universales
+    # Routers perimetrales
     dp.include_router(user_private.router)
     dp.include_router(payments.router)
     dp.include_router(admin_group.router)
