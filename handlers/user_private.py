@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import logging
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, 
@@ -298,7 +299,6 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         
-        # Diccionario dinámico bilingüe completo
         "captcha_saved": "✅ <b>Captcha custom message saved successfully!</b>\n\n<i>{text_input}</i>\n\n🛡️ <i>Cloud Media Management</i>",
         "token_verifying": "🔄 <b>Verifying bot token with Telegram servers...</b>",
         "token_success": "✅ <b>Token received and verified successfully!</b>\nReplica instance connected to The Bunker database.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -1106,26 +1106,59 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
 # ==========================================
 @router.message(CommandStart(), F.chat.type == "private")
 async def cmd_start(message: Message, bot: Bot, command: CommandObject):
-    lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
-    t = TEXTS.get(lang, TEXTS["es"])
-    
-    await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
-
-    if command.args and command.args.startswith("gset_"):
+    try:
+        bot_info = await bot.get_me()
+        bot_username = bot_info.username or "BunkerBot"
+        logging.info(f"🚀 [cmd_start INICIO] Bot ID: {bot_info.id} (@{bot_username}) | Usuario: {message.from_user.id}")
+        
+        lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
+        t = TEXTS.get(lang, TEXTS["es"])
+        
         try:
-            group_id = int(command.args.split("_")[1])
-            if not await verify_admin_privileges_msg(message, bot, group_id):
-                return
-            try:
-                g_name = (await bot.get_chat(group_id)).title
-            except Exception:
-                g_name = "Comunidad" if lang == "es" else "Community"
-            await message.answer(t["group_panel_title"].format(group_name=g_name), reply_markup=get_group_panel_keyboard(group_id, lang), parse_mode="HTML")
-            return
-        except Exception:
-            pass
+            await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
+        except Exception as db_ex:
+            logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
 
-    await message.answer(t["welcome"].format(name=message.from_user.full_name), reply_markup=get_main_keyboard((await bot.get_me()).username, lang), parse_mode="HTML")
+        if command.args and command.args.startswith("gset_"):
+            try:
+                group_id = int(command.args.split("_")[1])
+                if not await verify_admin_privileges_msg(message, bot, group_id):
+                    return
+                try:
+                    g_name = (await bot.get_chat(group_id)).title
+                except Exception:
+                    g_name = "Comunidad" if lang == "es" else "Community"
+                await message.answer(t["group_panel_title"].format(group_name=g_name), reply_markup=get_group_panel_keyboard(group_id, lang), parse_mode="HTML")
+                return
+            except Exception as g_ex:
+                logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
+
+        # Identificación aislada y segura para Bot Clon vs Bot Maestro
+        if bot_info.id != 8801126106:
+            clone_welcome = (
+                f"🏴‍☠️ <b>¡Instancia Operativa Activa!</b>\n\n"
+                f"Hola <b>{message.from_user.full_name}</b>. Soy tu réplica de seguridad personalizada (<code>@{bot_username}</code>).\n\n"
+                f"Protejo tu comunidad bajo los estándares de alta seguridad de <i>Cloud Media Management</i>.\n\n"
+                f"🛡️ <i>Perímetro en línea y operando de forma autónoma.</i>"
+            ) if lang == "es" else (
+                f"🏴‍☠️ <b>Operational Replica Active!</b>\n\n"
+                f"Hello <b>{message.from_user.full_name}</b>. I am your custom security replica (<code>@{bot_username}</code>).\n\n"
+                f"Protecting your community under <i>Cloud Media Management</i> standards.\n\n"
+                f"🛡️ <i>Perimeter online and operating autonomously.</i>"
+            )
+            clone_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⚡ Command Center", web_app=WebAppInfo(url=WEBAPP_URL))],
+                [InlineKeyboardButton(text="🆘 Soporte / Support", url="https://t.me/m/RGx4ohGTMTk5")]
+            ])
+            await message.answer(clone_welcome, reply_markup=clone_kb, parse_mode="HTML")
+            logging.info(f"✅ [cmd_start ÉXITO Clon] Respuesta enviada con éxito por @{bot_username}.")
+            return
+
+        # Respuesta estándar para el Bot Maestro
+        await message.answer(t["welcome"].format(name=message.from_user.full_name), reply_markup=get_main_keyboard(bot_username, lang), parse_mode="HTML")
+        logging.info(f"✅ [cmd_start ÉXITO Maestro] Bienvenida enviada.")
+    except Exception as e:
+        logging.error(f"❌ [cmd_start ERROR CRÍTICO]: {e}", exc_info=True)
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery):
