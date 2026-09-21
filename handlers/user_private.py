@@ -3,7 +3,7 @@ import sys
 import time
 import asyncio
 import logging
-from aiogram import Router, F, Bot
+from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, ChatPermissions
@@ -34,6 +34,32 @@ from assistant import (
 )
 
 router = Router()
+
+
+class CallbackAutoAnswerMiddleware(BaseMiddleware):
+    """
+    Telegram admite UNA sola respuesta por callback_query.
+
+    Antes, los handlers principales llamaban `callback.answer()` al inicio y, después, varias ramas
+    intentaban `callback.answer(texto, show_alert=True)`: esa segunda respuesta fallaba y las alertas
+    (owner_only_alert, clone_disc, mic_alert_set, planes PRO/ULTRA...) nunca se mostraban.
+
+    Ahora los handlers NO responden al inicio: si una rama necesita alerta, esa es su respuesta única;
+    y este middleware garantiza, al terminar (con o sin error), que el spinner del botón se libere.
+    Si la query ya fue respondida, el segundo intento se descarta en silencio.
+    Es agnóstico al bot: usa el CallbackQuery vinculado a la instancia que recibió el update.
+    """
+    async def __call__(self, handler, event: CallbackQuery, data: dict):
+        try:
+            return await handler(event, data)
+        finally:
+            try:
+                await event.answer()
+            except Exception:
+                pass
+
+
+router.callback_query.middleware(CallbackAutoAnswerMiddleware())
 
 ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = "https://thebunkerapp.netlify.app"
@@ -1206,7 +1232,8 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery):
-    await callback.answer()
+    # La respuesta la emite CallbackAutoAnswerMiddleware
+    return
 
 @router.message(F.chat.type == "private")
 async def handle_private_inputs(message: Message, bot: Bot):
@@ -1581,8 +1608,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") | F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") | F.data.startswith("reg_") | F.data.startswith("vcsched_"))
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
-    await callback.answer()
-    
     for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES]:
         state_dict.pop((bot.id, callback.from_user.id), None)
     await cancel_phone_auth(callback.from_user.id)
@@ -2002,7 +2027,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     F.data.startswith("delmsgs_")
 )
 async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
-    await callback.answer()
     data = callback.data.split("_")
     action = data[0]
     lang = data[-1] if data[-1] in ["es", "en"] else "es"
