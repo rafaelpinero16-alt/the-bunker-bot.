@@ -2,18 +2,37 @@ import asyncio
 import functools
 import sqlite3
 import os
+import contextlib
 from datetime import datetime
 
 DB_PATH = "database/bot_data.db"
 
 
+@contextlib.contextmanager
 def get_db_connection():
-    """Genera una conexión SQLite optimizada contra colisiones y bloqueos de concurrencia."""
+    """
+    Genera una conexión SQLite optimizada contra colisiones y bloqueos de concurrencia.
+
+    IMPORTANTE: antes esta función devolvía la conexión directamente y cada
+    llamador hacía `with get_db_connection() as conn:`. Eso es una trampa
+    clásica de sqlite3 en Python: `Connection.__exit__` SOLO hace commit o
+    rollback de la transacción, nunca cierra el socket/descriptor del
+    archivo. Con 59 funciones abriendo una conexión por llamada y ninguna
+    cerrándose jamás, bajo la carga concurrente de varios bots clon el
+    proceso terminaba agotando file descriptors y el event loop se
+    congelaba. Al convertir esta función en un @contextmanager real, el
+    `with get_db_connection() as conn:` que ya usan las 59 funciones sigue
+    funcionando exactamente igual, pero ahora la conexión SIEMPRE se cierra
+    al salir del bloque (incluso si hay una excepción).
+    """
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute("PRAGMA busy_timeout = 30000;")
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def init_db():

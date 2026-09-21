@@ -1172,8 +1172,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS.get(lang, TEXTS["es"])
 
-    if user_id in CAPTCHA_STATES:
-        group_id = CAPTCHA_STATES.pop(user_id)
+    if (bot.id, user_id) in CAPTCHA_STATES:
+        group_id = CAPTCHA_STATES.pop((bot.id, user_id))
         await set_captcha_config(group_id, "captcha_text", text_input)
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t.get("btn_back_captcha", "🔙 Volver"), callback_data=f"gset_captcha_{group_id}_{lang}")]
@@ -1186,8 +1186,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
         return
 
     # 🔑 CAPTURA DEL TOKEN DE BOTFATHER (CON VERIFICACIÓN API Y ACTIVACIÓN DINÁMICA)
-    if user_id in CLONE_STATES:
-        state_data = CLONE_STATES.pop(user_id)
+    if (bot.id, user_id) in CLONE_STATES:
+        state_data = CLONE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
         token = text_input
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1260,8 +1260,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
         return
 
     # 📱 PASO 1: CAPTURA DE NÚMERO DE TELÉFONO PARA CENTINELA
-    if user_id in SENTINEL_PHONE_STATES:
-        state_data = SENTINEL_PHONE_STATES.pop(user_id)
+    if (bot.id, user_id) in SENTINEL_PHONE_STATES:
+        state_data = SENTINEL_PHONE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
 
         status_msg = await message.answer(t["phone_requesting"], parse_mode="HTML")
@@ -1273,7 +1273,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             pass
 
         if res["status"] == "ok":
-            SENTINEL_CODE_STATES[user_id] = {"group_id": group_id, "lang": lang}
+            SENTINEL_CODE_STATES[(bot.id, user_id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
@@ -1296,8 +1296,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
         return
 
     # 📩 PASO 2: VERIFICACIÓN DEL CÓDIGO TELEGRÁFICO
-    if user_id in SENTINEL_CODE_STATES:
-        state_data = SENTINEL_CODE_STATES.pop(user_id)
+    if (bot.id, user_id) in SENTINEL_CODE_STATES:
+        state_data = SENTINEL_CODE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
 
         status_msg = await message.answer(t["code_verifying"], parse_mode="HTML")
@@ -1321,7 +1321,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
 
         elif res["status"] == "2fa_required":
-            SENTINEL_2FA_STATES[user_id] = {"group_id": group_id, "lang": lang}
+            SENTINEL_2FA_STATES[(bot.id, user_id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
@@ -1335,8 +1335,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
         return
 
     # 🔐 PASO 3: VERIFICACIÓN DE CONTRASEÑA 2FA
-    if user_id in SENTINEL_2FA_STATES:
-        state_data = SENTINEL_2FA_STATES.pop(user_id)
+    if (bot.id, user_id) in SENTINEL_2FA_STATES:
+        state_data = SENTINEL_2FA_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
 
         status_msg = await message.answer(t["twofa_verifying"], parse_mode="HTML")
@@ -1366,8 +1366,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await message.answer(t["twofa_invalid"], reply_markup=cancel_kb, parse_mode="HTML")
         return
 
-    if user_id in VC_SCHED_STATES:
-        sched_data = VC_SCHED_STATES.pop(user_id)
+    if (bot.id, user_id) in VC_SCHED_STATES:
+        sched_data = VC_SCHED_STATES.pop((bot.id, user_id))
         group_id = sched_data["group_id"]
         mode = sched_data["mode"]
         
@@ -1391,8 +1391,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 await message.answer(t["sched_err"], reply_markup=back_kb, parse_mode="HTML")
             return
 
-    if user_id in DB_REG_STATES:
-        data = DB_REG_STATES.pop(user_id)
+    if (bot.id, user_id) in DB_REG_STATES:
+        data = DB_REG_STATES.pop((bot.id, user_id))
         reg_type = data["type"]
         group_id = data["group_id"]
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1429,8 +1429,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             )
         return
 
-    if user_id in MOD_TARGET_STATES:
-        st = MOD_TARGET_STATES.pop(user_id)
+    if (bot.id, user_id) in MOD_TARGET_STATES:
+        st = MOD_TARGET_STATES.pop((bot.id, user_id))
         action = st["action"]
         group_id = st["group_id"]
         duration = st["duration"]
@@ -1504,8 +1504,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await message.answer(t["dir_err"].format(ex=ex), reply_markup=back_kb, parse_mode="HTML")
         return
 
-    if user_id in MIC_VIP_STATES:
-        data = MIC_VIP_STATES.pop(user_id)
+    if (bot.id, user_id) in MIC_VIP_STATES:
+        data = MIC_VIP_STATES.pop((bot.id, user_id))
         group_id = data["group_id"]
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
@@ -1522,8 +1522,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await message.answer(t["mic_err"], reply_markup=back_kb, parse_mode="HTML")
         return
 
-    if user_id in MIC_TAG_STATES:
-        data = MIC_TAG_STATES.pop(user_id)
+    if (bot.id, user_id) in MIC_TAG_STATES:
+        data = MIC_TAG_STATES.pop((bot.id, user_id))
         group_id = data["group_id"]
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
@@ -1545,7 +1545,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     
     for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES]:
-        state_dict.pop(callback.from_user.id, None)
+        state_dict.pop((bot.id, callback.from_user.id), None)
     await cancel_phone_auth(callback.from_user.id)
 
     data = callback.data.split("_")
@@ -1668,7 +1668,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
         elif sub == "timeprompt":
-            VC_SCHED_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang, "mode": "times"}
+            VC_SCHED_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang, "mode": "times"}
             await callback.message.answer(t["vcsched_prompt"], parse_mode="HTML")
             return
 
@@ -1679,7 +1679,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
         
         if sub == "token":
-            CLONE_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            CLONE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
@@ -1687,7 +1687,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
 
         elif sub == "phone":
-            SENTINEL_PHONE_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            SENTINEL_PHONE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
@@ -1696,7 +1696,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
         elif sub == "cancel":
             for d in [CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES]:
-                d.pop(callback.from_user.id, None)
+                d.pop((bot.id, callback.from_user.id), None)
             await cancel_phone_auth(callback.from_user.id)
             await callback.answer(t["op_canceled"], show_alert=False)
 
@@ -1837,7 +1837,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 await callback.answer(t["tag_pro_req"], show_alert=True)
                 return
             
-            MIC_TAG_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            MIC_TAG_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
             await callback.message.answer(t["tag_menu_prompt"].format(curr_tag=curr_tag), parse_mode="HTML")
             return
@@ -1845,7 +1845,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             text = t["mod_ask_time"].format(sub_cmd=sub_cmd)
             keyboard = get_time_selection_keyboard(sub_cmd, group_id, lang)
         elif sub_cmd in ["kick", "unmute"]:
-            MOD_TARGET_STATES[callback.from_user.id] = {
+            MOD_TARGET_STATES[(bot.id, callback.from_user.id)] = {
                 "action": sub_cmd, "group_id": group_id, "duration": 0, 
                 "dur_label": "Inmediato" if lang == "es" else "Immediate", "lang": lang
             }
@@ -1857,7 +1857,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
-        DB_REG_STATES[callback.from_user.id] = {"type": sub, "group_id": group_id, "lang": lang}
+        DB_REG_STATES[(bot.id, callback.from_user.id)] = {"type": sub, "group_id": group_id, "lang": lang}
         target_name = t["reg_ask_wl"] if sub == "wl" else t["reg_ask_bl"]
         await callback.message.answer(t["reg_ask"].format(target_name=target_name), parse_mode="HTML")
         return
@@ -1888,7 +1888,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if not await verify_admin_privileges(callback, bot, group_id):
             return
         if sub_val == "custom":
-            MIC_VIP_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            MIC_VIP_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             await callback.message.answer(t["mic_custom_prompt"], parse_mode="HTML")
             return
         else:
@@ -1928,7 +1928,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             "perm": (0, "Permanente" if lang == "es" else "Permanent")
         }
         sec, label = dur_map.get(dur_str, (0, "Permanente" if lang == "es" else "Permanent"))
-        MOD_TARGET_STATES[callback.from_user.id] = {
+        MOD_TARGET_STATES[(bot.id, callback.from_user.id)] = {
             "action": sub_cmd, "group_id": group_id, "duration": sec, 
             "dur_label": label, "lang": lang
         }
@@ -2247,7 +2247,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                     pass
                 return
 
-            CAPTCHA_STATES[callback.from_user.id] = group_id
+            CAPTCHA_STATES[(bot.id, callback.from_user.id)] = group_id
             prompt = "✍️ <b>Editor de Captcha — Mensaje Personalizado</b>\n\nEnvía en este chat privado el mensaje que se enviará al usuario al ingresar.\n\n🛡️ <i>Cloud Media Management</i>" if lang == "es" else "✍️ <b>Captcha Editor — Custom Message</b>\n\nSend in this private chat the message that will be sent to the user upon joining.\n\n🛡️ <i>Cloud Media Management</i>"
             await callback.message.answer(prompt, parse_mode="HTML")
         elif sub == "srvdel":

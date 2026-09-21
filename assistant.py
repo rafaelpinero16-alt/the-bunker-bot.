@@ -271,8 +271,13 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
     while True:
         if not client.is_connected:
-            await asyncio.sleep(5)
-            continue
+            try:
+                await client.start()
+                logger.info(f"🔄 [Centinela Reconectado] Sesión restablecida para el grupo {chat_id}.")
+            except Exception as reconnect_err:
+                logger.warning(f"⚠️ [Centinela Desconectado] Grupo {chat_id} sin conexión, reintentando en 5s: {reconnect_err}")
+                await asyncio.sleep(5)
+                continue
 
         try:
             current_time = asyncio.get_event_loop().time()
@@ -610,6 +615,30 @@ async def radar_master_loop():
         await asyncio.sleep(45)
 
 
+async def pending_auth_cleanup_loop():
+    """
+    Libera clientes temporales de autenticación telefónica abandonados.
+
+    Cada intento de vincular un Centinela crea un Client de Pyrogram real
+    y lo mantiene conectado en `pending_auth_sessions` mientras el usuario
+    escribe el código/2FA. Si el usuario abandona el flujo (cierra el chat,
+    nunca responde), ese cliente se quedaba conectado para siempre —una
+    fuga de conexiones MTProto que crece con cada intento abandonado.
+    Este bucle purga cualquier sesión pendiente con más de 10 minutos.
+    """
+    TTL_SECONDS = 600
+    while True:
+        try:
+            now = time.time()
+            expired = [uid for uid, data in pending_auth_sessions.items() if now - data.get("ts", now) > TTL_SECONDS]
+            for uid in expired:
+                logger.info(f"🧹 [Auth Expirada] Liberando sesión temporal abandonada del usuario {uid}.")
+                await cancel_phone_auth(uid)
+        except Exception as e:
+            logger.debug(f"Aviso en limpieza de sesiones pendientes: {e}")
+        await asyncio.sleep(120)
+
+
 async def init_assistant_master():
     """Punto de arranque que levanta el centinela maestro, el programador y el pool multi-sesión."""
     global _default_my_id
@@ -625,6 +654,7 @@ async def init_assistant_master():
     await load_all_sentinels()
     asyncio.create_task(radar_master_loop())
     asyncio.create_task(vc_scheduler_loop())
+    asyncio.create_task(pending_auth_cleanup_loop())
 
 
 def start_voice_radar(bot):

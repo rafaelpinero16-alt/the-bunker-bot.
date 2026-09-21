@@ -27,9 +27,15 @@ from assistant import (
 # Cargar variables de entorno locales o de Railway
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8801126106:AAH2uxiHrU2g4zhtdMn3H_iGZ0pjkaXaSqQ")
-ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID", "-1004351489258")
-ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW) if ADMIN_GROUP_ID_RAW else None
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
+
+if not BOT_TOKEN:
+    raise RuntimeError("❌ BOT_TOKEN no está definido. Configúralo en tu .env o en las variables de Railway.")
+if not ADMIN_GROUP_ID_RAW:
+    raise RuntimeError("❌ ADMIN_GROUP_ID no está definido. Configúralo en tu .env o en las variables de Railway.")
+
+ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
 
 # Diccionario global en memoria: {token: {"bot": Bot, "task": Task}}
 active_clone_tasks = {}
