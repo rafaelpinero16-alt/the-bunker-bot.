@@ -2,10 +2,15 @@ import asyncio
 import logging
 import random
 import os
+import time
 from datetime import datetime
 from pyrogram import Client
 from pyrogram.enums import ChatMembersFilter, ChatType
-from pyrogram.errors import FloodWait, RPCError, Unauthorized
+from pyrogram.errors import (
+    FloodWait, RPCError, Unauthorized,
+    SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
+    PhoneNumberInvalid, PasswordHashInvalid
+)
 from pyrogram.raw.types import PeerUser, InputPeerUser, InputGroupCall, DataJSON
 from pyrogram.raw.functions.channels import GetFullChannel
 from pyrogram.raw.functions.messages import GetFullChat
@@ -50,6 +55,9 @@ _default_my_id = None
 active_sentinels = {}
 admin_caches = {}  
 ADMIN_CACHE_TTL = 300
+
+# Buffer de autenticación en memoria: {user_id: {"client": Client, "phone": str, "phone_code_hash": str, "group_id": int, "ts": float}}
+pending_auth_sessions = {}
 
 # ==========================================
 # 🌐 DICCIONARIO BILINGÜE DEL VIDEOCHAT
@@ -103,6 +111,133 @@ VC_SCHED_MESSAGES = {
     )
 }
 
+
+# ==============================================================================
+# 🔐 MOTOR DE AUTENTICACIÓN NATIVA (PHONE LOGIN SIN STRINGSESSION MANUAL)
+# ==============================================================================
+
+async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
+    """
+    Paso 1: Inicia la conexión con Pyrogram en memoria y solicita el código oficial de Telegram.
+    """
+    await cancel_phone_auth(user_id)
+    
+    clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
+    if not clean_phone.startswith("+"):
+        clean_phone = f"+{clean_phone}"
+
+    client = Client(
+        f"auth_temp_{user_id}_{group_id}",
+        api_id=DEFAULT_API_ID,
+        api_hash=DEFAULT_API_HASH,
+        in_memory=True
+    )
+
+    try:
+        await client.connect()
+        sent_code = await client.send_code(clean_phone)
+        pending_auth_sessions[user_id] = {
+            "client": client,
+            "phone": clean_phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "group_id": group_id,
+            "ts": time.time()
+        }
+        return {"status": "ok", "phone": clean_phone}
+    except PhoneNumberInvalid:
+        if client.is_connected:
+            await client.disconnect()
+        return {"status": "error", "message": "invalid_phone"}
+    except FloodWait as fw:
+        if client.is_connected:
+            await client.disconnect()
+        return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except Exception as e:
+        if client.is_connected:
+            await client.disconnect()
+        logger.error(f"Error al enviar código a {clean_phone}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def verify_phone_code(user_id: int, code: str) -> dict:
+    """
+    Paso 2: Valida el código de 5 dígitos ingresado por el usuario.
+    Si la cuenta tiene contraseña en la nube, solicita el 2FA.
+    """
+    auth_data = pending_auth_sessions.get(user_id)
+    if not auth_data:
+        return {"status": "error", "message": "session_expired"}
+
+    client: Client = auth_data["client"]
+    clean_code = code.strip().replace(" ", "").replace("-", "")
+
+    try:
+        await client.sign_in(
+            phone_number=auth_data["phone"],
+            phone_code_hash=auth_data["phone_code_hash"],
+            phone_code=clean_code
+        )
+        session_str = await client.export_session_string()
+        group_id = auth_data["group_id"]
+        
+        await cancel_phone_auth(user_id)
+        return {"status": "success", "session_string": session_str, "group_id": group_id}
+
+    except SessionPasswordNeeded:
+        return {"status": "2fa_required"}
+    except (PhoneCodeInvalid, PhoneCodeExpired):
+        return {"status": "error", "message": "invalid_code"}
+    except FloodWait as fw:
+        return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except Exception as e:
+        logger.error(f"Error al verificar código para {user_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def verify_2fa_password(user_id: int, password: str) -> dict:
+    """
+    Paso 3: Valida la contraseña de Verificación en Dos Pasos (2FA) si está configurada.
+    """
+    auth_data = pending_auth_sessions.get(user_id)
+    if not auth_data:
+        return {"status": "error", "message": "session_expired"}
+
+    client: Client = auth_data["client"]
+
+    try:
+        await client.check_password(password=password.strip())
+        session_str = await client.export_session_string()
+        group_id = auth_data["group_id"]
+
+        await cancel_phone_auth(user_id)
+        return {"status": "success", "session_string": session_str, "group_id": group_id}
+
+    except PasswordHashInvalid:
+        return {"status": "error", "message": "invalid_password"}
+    except FloodWait as fw:
+        return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except Exception as e:
+        logger.error(f"Error al validar contraseña 2FA para {user_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+async def cancel_phone_auth(user_id: int):
+    """
+    Limpia de forma segura los clientes temporales de login y libera memoria.
+    """
+    if user_id in pending_auth_sessions:
+        auth_data = pending_auth_sessions.pop(user_id)
+        client: Client = auth_data.get("client")
+        if client and client.is_connected:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+
+
+# ==============================================================================
+# 📡 RADAR Y GESTIÓN DE LLAMADAS
+# ==============================================================================
 
 async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
     """Refresca la caché de administradores reconociendo 'owner', 'creator' y 'administrator'."""

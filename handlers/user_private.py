@@ -27,7 +27,8 @@ from database.database import (
     get_vc_schedule, set_vc_schedule
 )
 from assistant import (
-    register_or_update_sentinel, disconnect_sentinel
+    register_or_update_sentinel, disconnect_sentinel,
+    start_phone_auth, verify_phone_code, verify_2fa_password, cancel_phone_auth
 )
 
 router = Router()
@@ -38,11 +39,9 @@ WEBAPP_URL = "https://thebunkerapp.netlify.app"
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
 # ==========================================
-# Carga IDs desde variables de entorno o define los IDs de Rafa y Javi
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-# IDs de respaldo directo de los arquitectos
-SUPER_ADMIN_IDS.update([5876356778, 6291929381])
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 def is_super_admin(user_id: int) -> bool:
     """Verifica si el usuario es uno de los dueños supremos con inmunidad total."""
@@ -59,14 +58,16 @@ async def get_effective_group_tier(group_id: int, user_id: int) -> str:
 # ==========================================
 CAPTCHA_STATES = {}
 CLONE_STATES = {}
-SENTINEL_STATES = {}
+SENTINEL_PHONE_STATES = {}
+SENTINEL_CODE_STATES = {}
+SENTINEL_2FA_STATES = {}
 VC_SCHED_STATES = {}
 DB_REG_STATES = {}
 MOD_TARGET_STATES = {}
 MIC_VIP_STATES = {}
 MIC_TAG_STATES = {}
 GROUP_MIC_PRICE = {}
-GROUP_VIP_TAG = {}  # Etiqueta personalizada para el comando /mic_vip (por defecto VIP 24/7)
+GROUP_VIP_TAG = {}
 
 FILTER_MAP = {
     "tglinks": "tg_links", "fwdchan": "fwd_channels", "fwdusr": "fwd_users",
@@ -120,7 +121,7 @@ TEXTS = {
         "info_main": (
             "ℹ️ <b>System Core Architecture</b>\n\n"
             "<b>The Bunker Bot</b>\n"
-            "• <b>Version:</b> 5.2 (Elite Core - Ultra Pro Shield)\n"
+            "• <b>Version:</b> 5.5 (Multi-Sentinel & Native Phone Auth Core)\n"
             "• <b>Architect:</b> Master Tom\n"
             "• <b>Tactical Focus:</b> Multi-Sentinel Architecture, Native VIP Badging, and Absolute Security.\n\n"
             "🛡️ <i>Developed and supported by <b>Cloud Media Management</b>.</i>"
@@ -140,7 +141,7 @@ TEXTS = {
             "💎 <b>ULTRA PRO ($8 / 800 Stars):</b>\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
-            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account as an isolated 24/7 moderator (100% anti-ban protection).\n"
+            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account seamlessly via phone number (100% anti-ban protection).\n"
             "• 🏷️ <b>Native VIP Tag Editor:</b> Assign automated, immovable custom titles upon tipping Stars.\n"
             "• 🔇 <b>AutoLower Acoustic Shield:</b> Mutes unverified speakers down to 2% in milliseconds.\n"
             "• 💰 <b>Direct Stars Monetization (/mic_vip):</b> 100% of revenue flows straight to your balance.\n"
@@ -163,7 +164,7 @@ TEXTS = {
             "Total command, decentralized automation, and high-tier monetization for your community:\n\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
-            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account as a 24/7 voice mod (isolated node).\n"
+            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account as a 24/7 voice mod via phone.\n"
             "• 🏷️ <b>Native VIP Tag Assignment:</b> Immovable badges (VIP 24/7) on Stars tips.\n"
             "• 🔇 <b>Smart AutoLower Radar:</b> Unverified mics get dialed down to 2% in milliseconds.\n"
             "• 💰 <b>Telegram Stars Monetization (/mic_vip):</b> 100% of pass revenue flows directly into your balance.\n"
@@ -270,6 +271,29 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
 
+        "botfather_guide": (
+            "🔑 <b>How to Connect Your Bot Clone — Step by Step</b>\n\n"
+            "Follow these simple instructions to link your custom bot instance:\n\n"
+            "1️⃣ Open official Telegram bot: @BotFather.\n"
+            "2️⃣ Send the command <code>/newbot</code>.\n"
+            "3️⃣ Choose a display name for your bot (e.g. <i>Nexus Security</i>).\n"
+            "4️⃣ Choose a unique username ending in <code>bot</code> (e.g. <i>NexusSecurityBot</i>).\n"
+            "5️⃣ @BotFather will send you an <b>HTTP API Token</b> (a long string like <code>7123456789:AAFn_...</code>).\n"
+            "6️⃣ <b>Copy that token and paste it right here in this chat.</b>\n\n"
+            "⚠️ <i>Never share your token publicly. We store it securely in your private Bunker grid.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+
+        "sentinel_phone_guide": (
+            "🎙️ <b>Connect Dedicated Sentinel — Phone Login</b>\n\n"
+            "Link your secondary/burner account as a 24/7 voice moderator without needing any code or string sessions:\n\n"
+            "1️⃣ Send your <b>phone number with international country code</b> (e.g. <code>+12025550143</code> or <code>+573001234567</code>).\n"
+            "2️⃣ Telegram will send an official 5-digit login code directly to your Telegram app.\n"
+            "3️⃣ Send the code here to complete the connection.\n\n"
+            "💡 <i>Tip: We recommend using a secondary account as sentinel to keep your main personal profile clean.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+
         "af_msgs": "📄 Messages Threshold",
         "af_time": "⏱️ Time Window",
         "af_off": "❌ Disable",
@@ -333,7 +357,7 @@ TEXTS = {
         "info_main": (
             "ℹ️ <b>Núcleo del Sistema</b>\n\n"
             "<b>The Bunker Bot</b>\n"
-            "• <b>Versión:</b> 5.2 (Elite Core - Ultra Pro Shield)\n"
+            "• <b>Versión:</b> 5.5 (Multi-Centinela y Autenticación Telefónica Nativa)\n"
             "• <b>Arquitecto:</b> Master Tom\n"
             "• <b>Enfoque Táctico:</b> Arquitectura Multi-Centinela, Etiquetas Nativas VIP y Seguridad Absoluta.\n\n"
             "🛡️ <i>Desarrollado y respaldado por <b>Cloud Media Management</b>.</i>"
@@ -353,7 +377,7 @@ TEXTS = {
             "💎 <b>Plan ULTRA PRO ($8 / 800 Stars):</b>\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
-            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como asistente 24/7 en llamadas (nodo aislado antiban).\n"
+            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Conecta tu cuenta fácilmente mediante tu número telefónico (nodo aislado antiban).\n"
             "• 🏷️ <b>Editor Nativo de Etiquetas VIP:</b> Asignación de rangos inamovibles (VIP 24/7) automáticos por propinas.\n"
             "• 🔇 <b>Radar AutoLower Inteligente:</b> Micrófonos no autorizados al 2% en milisegundos.\n"
             "• 💰 <b>Monetización Stars (/mic_vip):</b> El 100% de las Stars recaudadas entran directo a tu balance.\n"
@@ -376,7 +400,7 @@ TEXTS = {
             "Poder absoluto, automatización descentralizada y monetización para tu comunidad:\n\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
-            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como asistente 24/7 en llamadas (nodo aislado antiban).\n"
+            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como asistente 24/7 en llamadas vía teléfono.\n"
             "• 🏷️ <b>Etiquetas Nativas VIP:</b> Asignación de rangos inamovibles al recibir propinas de Stars.\n"
             "• 🔇 <b>Radar AutoLower Inteligente:</b> Micrófonos no autorizados al 2% en milisegundos.\n"
             "• 💰 <b>Monetización Stars (/mic_vip):</b> El 100% de las Stars recaudadas entran directo a tu balance.\n"
@@ -483,6 +507,29 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
 
+        "botfather_guide": (
+            "🔑 <b>Guía Paso a Paso: Cómo Conectar tu Bot Clon</b>\n\n"
+            "Sigue estas sencillas instrucciones para desplegar tu propio bot:\n\n"
+            "1️⃣ Entra al bot oficial de Telegram: @BotFather.\n"
+            "2️⃣ Envía el comando <code>/newbot</code>.\n"
+            "3️⃣ Asigna un nombre a tu bot (ejemplo: <i>Comunidad Segura</i>).\n"
+            "4️⃣ Asigna un alias único terminado en <code>bot</code> (ejemplo: <i>ComunidadSeguraBot</i>).\n"
+            "5️⃣ @BotFather te responderá con tu <b>HTTP API Token</b> (un código largo como <code>7123456789:AAFn_...</code>).\n"
+            "6️⃣ <b>Copia ese token y pégalo directamente en este chat.</b>\n\n"
+            "⚠️ <i>Nunca compartas tu token con extraños. Se almacena cifrado en tu grid privado.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+
+        "sentinel_phone_guide": (
+            "🎙️ <b>Guía Paso a Paso: Conexión de Centinela Propio</b>\n\n"
+            "Vincula tu cuenta secundaria como asistente 24/7 en llamadas de manera totalmente automática:\n\n"
+            "1️⃣ Envía a este chat tu <b>número de teléfono con código de país</b> (ejemplo: <code>+573001234567</code> o <code>+34600123456</code>).\n"
+            "2️⃣ Telegram te enviará un código oficial de 5 dígitos en tu app de Telegram.\n"
+            "3️⃣ Ingresa el código en este chat para completar la sincronización.\n\n"
+            "💡 <i>Recomendación táctica: Usa una cuenta secundaria o número de respaldo para aislar tu cuenta personal de cualquier reporte.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+
         "af_msgs": "📄 Umbral Mensajes",
         "af_time": "⏱️ Ventana de Tiempo",
         "af_off": "❌ Desactivar",
@@ -509,7 +556,6 @@ TEXTS = {
 # 🔍 FILTRO DINÁMICO DE GRUPOS ACTIVOS (CON INMUNIDAD)
 # ==========================================
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
-    """Devuelve los grupos gestionados. Los SuperAdmins tienen bypass de propiedad."""
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
         return []
@@ -538,7 +584,6 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
 # 🚀 VALIDADORES DE PERMISOS (CON INMUNIDAD TOTAL)
 # ==========================================
 async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
-    """Garantiza acceso al Dueño o bypass total para los Arquitectos."""
     if is_super_admin(callback.from_user.id):
         return True
     lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
@@ -553,7 +598,6 @@ async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: i
     return False
 
 async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int) -> bool:
-    """Garantiza acceso vía mensaje con bypass total para los Arquitectos."""
     if is_super_admin(message.from_user.id):
         return True
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
@@ -634,7 +678,6 @@ def get_group_panel_keyboard(group_id: int, lang: str):
     ])
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
-    """Teclado de pago blindado: Centinela Maestro eliminado de vistas públicas."""
     t = TEXTS.get(lang, TEXTS["es"])
     stars_price = "500 XTR" if tier_level == "pro" else "800 XTR"
     stars_label = f"⭐ Pagar con Stars ({stars_price})" if lang == "es" else f"⭐ Pay with Stars ({stars_price})"
@@ -647,7 +690,6 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
         ]
     ]
 
-    # En ULTRA se ofrece la configuración de clon y centinela propio sin exponer la cuenta maestra
     if tier_level == "ultra":
         btn_text = "🧬 Configurar Clon & Centinela Propio" if lang == "es" else "🧬 Setup Own Clone & Sentinel"
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"gset_clone_{group_id}_{lang}")])
@@ -915,13 +957,13 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
         session_info = await get_owner_session(user_id, group_id)
         has_sentinel = session_info is not None
         
-        sentinel_btn_text = "🔄 Actualizar Centinela (Sesión)" if has_sentinel else "🎙️ Conectar Centinela Propio"
+        sentinel_btn_text = "🔄 Actualizar Centinela (Teléfono) 🟢" if has_sentinel else "🎙️ Conectar Centinela Propio (Teléfono) 🔴"
         if lang == "en":
-            sentinel_btn_text = "🔄 Update Sentinel (Session)" if has_sentinel else "🎙️ Connect Own Sentinel"
+            sentinel_btn_text = "🔄 Update Sentinel (Phone) 🟢" if has_sentinel else "🎙️ Connect Own Sentinel (Phone) 🔴"
 
         kb = [
             [InlineKeyboardButton(text="🔑 Conectar Token @BotFather" if lang == "es" else "🔑 Connect @BotFather Token", callback_data=f"clone_token_{group_id}_{lang}")],
-            [InlineKeyboardButton(text=sentinel_btn_text, callback_data=f"clone_sentinel_{group_id}_{lang}")]
+            [InlineKeyboardButton(text=sentinel_btn_text, callback_data=f"clone_phone_{group_id}_{lang}")]
         ]
 
         if has_sentinel:
@@ -984,11 +1026,14 @@ async def handle_private_inputs(message: Message, bot: Bot):
         )
         return
 
+    # 🔑 CAPTURA DEL TOKEN DE BOTFATHER (CON CANCELACIÓN)
     if user_id in CLONE_STATES:
-        group_id = CLONE_STATES.pop(user_id)
+        state_data = CLONE_STATES.pop(user_id)
+        group_id = state_data["group_id"]
+        lang = state_data.get("lang", "es")
         token = text_input
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Panel de Clonador", callback_data=f"gset_clone_{group_id}_es")]
+            [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
         ])
         if ":" in token and len(token) > 30:
             await register_bot_clone(user_id, group_id, token, "")
@@ -1005,23 +1050,76 @@ async def handle_private_inputs(message: Message, bot: Bot):
             )
         return
 
-    if user_id in SENTINEL_STATES:
-        group_id = SENTINEL_STATES.pop(user_id)
-        session_str = text_input
-        back_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_es")]
-        ])
+    # 📱 PASO 1: CAPTURA DE NÚMERO DE TELÉFONO PARA CENTINELA
+    if user_id in SENTINEL_PHONE_STATES:
+        state_data = SENTINEL_PHONE_STATES.pop(user_id)
+        group_id = state_data["group_id"]
+        lang = state_data.get("lang", "es")
 
-        if len(session_str) > 50:
-            status_msg = await message.answer("🔄 <b>Verificando credenciales y conectando Centinela...</b>", parse_mode="HTML")
+        status_msg = await message.answer(
+            "🔄 <b>Solicitando código oficial de Telegram...</b>\nPor favor espera unos segundos.",
+            parse_mode="HTML"
+        )
+
+        res = await start_phone_auth(user_id, group_id, text_input)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        if res["status"] == "ok":
+            SENTINEL_CODE_STATES[user_id] = {"group_id": group_id, "lang": lang}
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancelar y Volver", callback_data=f"clone_cancel_{group_id}_{lang}")]
+            ])
+            await message.answer(
+                f"📩 <b>¡Código Oficial Enviado!</b>\n\n"
+                f"Telegram ha enviado un código de acceso a tu app oficial asociada al número <code>{res['phone']}</code>.\n\n"
+                f"<b>Escribe el código numérico recibido a continuación:</b>\n"
+                f"<i>(Ejemplo: 49281)</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>",
+                reply_markup=cancel_kb,
+                parse_mode="HTML"
+            )
+        else:
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Intentar Nuevamente", callback_data=f"clone_phone_{group_id}_{lang}")],
+                [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+            ])
+            error_reason = "Número telefónico no válido o no registrado en Telegram." if res.get("message") == "invalid_phone" else f"Aviso de Telegram: {res.get('message')}"
+            await message.answer(
+                f"❌ <b>Error al enviar código:</b>\n\n{error_reason}\n\n"
+                f"Asegúrate de incluir el código de país (ejemplo: <code>+573001234567</code>).",
+                reply_markup=cancel_kb,
+                parse_mode="HTML"
+            )
+        return
+
+    # 📩 PASO 2: VERIFICACIÓN DEL CÓDIGO TELEGRÁFICO
+    if user_id in SENTINEL_CODE_STATES:
+        state_data = SENTINEL_CODE_STATES.pop(user_id)
+        group_id = state_data["group_id"]
+        lang = state_data.get("lang", "es")
+
+        status_msg = await message.answer(
+            "🔄 <b>Verificando código y autorizando Centinela...</b>",
+            parse_mode="HTML"
+        )
+
+        res = await verify_phone_code(user_id, text_input)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        if res["status"] == "success":
+            session_str = res["session_string"]
             connected = await register_or_update_sentinel(user_id, group_id, session_str)
-            
             if connected:
                 await save_owner_session(user_id, group_id, session_str)
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
+                back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+                ])
                 await message.answer(
                     "💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\n"
                     "• <b>Comunidad:</b> Blindada con tu propia cuenta\n"
@@ -1033,21 +1131,92 @@ async def handle_private_inputs(message: Message, bot: Bot):
                     parse_mode="HTML"
                 )
             else:
-                try:
-                    await status_msg.delete()
-                except Exception:
-                    pass
+                back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+                ])
                 await message.answer(
-                    "❌ <b>Error al inicializar la sesión:</b>\n\n"
-                    "La cadena de sesión ingresada no es válida o fue revocada. Genera una nueva String Session de Pyrogram e inténtalo nuevamente.\n\n"
+                    "❌ <b>Error al inicializar la sesión.</b> Inténtalo nuevamente desde el menú.",
+                    reply_markup=back_kb,
+                    parse_mode="HTML"
+                )
+
+        elif res["status"] == "2fa_required":
+            SENTINEL_2FA_STATES[user_id] = {"group_id": group_id, "lang": lang}
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancelar y Volver", callback_data=f"clone_cancel_{group_id}_{lang}")]
+            ])
+            await message.answer(
+                "🔐 <b>Verificación en Dos Pasos (2FA) Requerida</b>\n\n"
+                "Tu cuenta de Telegram tiene activada una contraseña en la nube.\n\n"
+                "<b>Ingresa tu contraseña de verificación en dos pasos:</b>\n\n"
+                "🛡️ <i>Cloud Media Management</i>",
+                reply_markup=cancel_kb,
+                parse_mode="HTML"
+            )
+        else:
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Reintentar", callback_data=f"clone_phone_{group_id}_{lang}")],
+                [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+            ])
+            await message.answer(
+                "❌ <b>Código inválido o expirado.</b>\nVerifica el código recibido en tu aplicación oficial de Telegram e inténtalo nuevamente.",
+                reply_markup=cancel_kb,
+                parse_mode="HTML"
+            )
+        return
+
+    # 🔐 PASO 3: VERIFICACIÓN DE CONTRASEÑA 2FA
+    if user_id in SENTINEL_2FA_STATES:
+        state_data = SENTINEL_2FA_STATES.pop(user_id)
+        group_id = state_data["group_id"]
+        lang = state_data.get("lang", "es")
+
+        status_msg = await message.answer(
+            "🔄 <b>Validando contraseña 2FA...</b>",
+            parse_mode="HTML"
+        )
+
+        res = await verify_2fa_password(user_id, text_input)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+
+        if res["status"] == "success":
+            session_str = res["session_string"]
+            connected = await register_or_update_sentinel(user_id, group_id, session_str)
+            if connected:
+                await save_owner_session(user_id, group_id, session_str)
+                back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+                ])
+                await message.answer(
+                    "💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\n"
+                    "• <b>Comunidad:</b> Blindada con tu propia cuenta\n"
+                    "• <b>Radar de Transmisiones:</b> Activo 24/7 en la nube\n"
+                    "• <b>Aislamiento Total:</b> Operando sin riesgo de baneo global\n\n"
+                    "<i>Asegúrate de haber añadido tu cuenta al grupo con permiso de Administrar Videollamadas.</i>\n\n"
                     "🛡️ <i>Cloud Media Management</i>",
                     reply_markup=back_kb,
                     parse_mode="HTML"
                 )
+            else:
+                back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+                ])
+                await message.answer(
+                    "❌ <b>Error al inicializar la sesión.</b> Inténtalo de nuevo.",
+                    reply_markup=back_kb,
+                    parse_mode="HTML"
+                )
         else:
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Reintentar", callback_data=f"clone_phone_{group_id}_{lang}")],
+                [InlineKeyboardButton(text="🔙 Volver al Panel", callback_data=f"gset_clone_{group_id}_{lang}")]
+            ])
             await message.answer(
-                "❌ <b>Formato no reconocido:</b> Envía una String Session de Pyrogram válida.\n\n🛡️ <i>Cloud Media Management</i>",
-                reply_markup=back_kb,
+                "❌ <b>Contraseña de 2FA incorrecta.</b>\nVerifica tu clave e inténtalo nuevamente.",
+                reply_markup=cancel_kb,
                 parse_mode="HTML"
             )
         return
@@ -1264,7 +1433,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
             [InlineKeyboardButton(text="🔙 Volver a Ecosistema", callback_data=f"menu_eco_{group_id}_{lang}")]
         ])
         
-        # Validación de longitud: Telegram permite hasta 16 caracteres para custom_title de admin
         if 1 <= len(text_input) <= 16:
             GROUP_VIP_TAG[group_id] = text_input
             await message.answer(
@@ -1289,9 +1457,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     
-    # Limpieza preventiva de estados si el usuario navega a otra sección
-    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES]:
+    # Limpieza preventiva de estados y buffers de login
+    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES]:
         state_dict.pop(callback.from_user.id, None)
+    await cancel_phone_auth(callback.from_user.id)
 
     data = callback.data.split("_")
     action = data[0] 
@@ -1451,24 +1620,47 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
         
         if sub == "token":
-            CLONE_STATES[callback.from_user.id] = group_id
+            CLONE_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancelar y Volver", callback_data=f"clone_cancel_{group_id}_{lang}")]
+            ])
             await callback.message.answer(
-                "🔑 <b>Conexión de Clon — Token de BotFather</b>\n\n"
-                "Envía a este chat privado el <b>HTTP API Token</b> de tu bot generado en @BotFather.\n\n"
-                "🛡️ <i>Cloud Media Management</i>",
+                t["botfather_guide"],
+                reply_markup=cancel_kb,
                 parse_mode="HTML"
             )
             return
-        elif sub == "sentinel":
-            SENTINEL_STATES[callback.from_user.id] = group_id
+
+        elif sub == "phone":
+            SENTINEL_PHONE_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Cancelar y Volver", callback_data=f"clone_cancel_{group_id}_{lang}")]
+            ])
             await callback.message.answer(
-                "🎙️ <b>Conexión de Centinela Propio (Videochats 24/7)</b>\n\n"
-                "Para vincular tu propia cuenta y blindar tus salas de voz sin intermediarios:\n\n"
-                "Envía a este chat privado tu <b>StringSession de Pyrogram</b> generada con tu cuenta.\n\n"
-                "🛡️ <i>Cloud Media Management</i>",
+                t["sentinel_phone_guide"],
+                reply_markup=cancel_kb,
                 parse_mode="HTML"
             )
             return
+
+        elif sub == "cancel":
+            for d in [CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES]:
+                d.pop(callback.from_user.id, None)
+            await cancel_phone_auth(callback.from_user.id)
+            await callback.answer("Operación cancelada y memoria liberada.", show_alert=False)
+
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            try:
+                g_name = (await bot.get_chat(group_id)).title
+            except Exception:
+                g_name = "Comunidad"
+            status = "Operativo 🟢" if tier == "ultra_pro" else "Bloqueado 🔴"
+            session_info = await get_owner_session(callback.from_user.id, group_id)
+            sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
+            
+            text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
+            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
+
         elif sub == "discsentinel":
             await disconnect_sentinel(group_id)
             await revoke_owner_session(callback.from_user.id, group_id)
@@ -1749,7 +1941,6 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     lang = data[-1] if data[-1] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
 
-    # Manejo de retorno directo desde enlaces tipo gset_{group_id}
     if action == "gset" and len(data) == 2 and data[1].lstrip("-").isdigit():
         group_id = int(data[1])
         if not await verify_admin_privileges(callback, bot, group_id):
