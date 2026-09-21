@@ -7,8 +7,14 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types.web_app_info import WebAppInfo
 
-from database.database import init_db, get_all_active_clone_tokens
+from database.database import (
+    init_db, 
+    get_all_active_clone_tokens, 
+    get_or_create_user
+)
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
     user_private, 
@@ -24,28 +30,28 @@ from assistant import (
     close_all_sentinels
 )
 
-# Cargar variables de entorno locales o de Railway
+# Cargar variables de entorno
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
+WEBAPP_URL = "https://thebunkerapp.netlify.app"
 
 if not BOT_TOKEN:
-    raise RuntimeError("❌ BOT_TOKEN no está definido. Configúralo en tu .env o en las variables de Railway.")
+    raise RuntimeError("❌ BOT_TOKEN no está definido en las variables de entorno.")
 if not ADMIN_GROUP_ID_RAW:
-    raise RuntimeError("❌ ADMIN_GROUP_ID no está definido. Configúralo en tu .env o en las variables de Railway.")
+    raise RuntimeError("❌ ADMIN_GROUP_ID no está definido en las variables de entorno.")
 
 ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
 
-# Diccionario global en memoria: {token: {"bot": Bot, "task": Task}}
 active_clone_tasks = {}
 dp = Dispatcher()
 
 
 async def _clone_worker(clone_bot: Bot, token: str):
     """
-    Worker de polling dedicado para clones que alimenta el Dispatcher central
-    con telemetría de entrada y salida para diagnóstico en tiempo real.
+    Worker de polling dedicado para clones con despacho directo de /start
+    y telemetría de alta velocidad.
     """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
@@ -72,22 +78,56 @@ async def _clone_worker(clone_bot: Bot, token: str):
             for update in updates:
                 offset = update.update_id + 1
                 try:
-                    # 1. Telemetría de entrada
-                    if update.message:
-                        user_id = update.message.from_user.id if update.message.from_user else "N/A"
-                        text = update.message.text or "[Contenido multimedia/otro]"
+                    # 🚀 INTERCEPCIÓN DIRECTA DE COMANDOS PRIVADOS PARA CLONES
+                    if update.message and update.message.chat.type == "private":
+                        user = update.message.from_user
+                        text = (update.message.text or "").strip()
+                        user_id = user.id if user else 0
                         logging.info(f"📩 [Clon @{bot_username}] Update #{update.update_id} | User: {user_id} | Texto: '{text}'")
+
+                        if text.startswith("/start"):
+                            lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
+                            
+                            try:
+                                if user:
+                                    await get_or_create_user(user.id, user.username or "Sin username", user.full_name)
+                            except Exception as db_err:
+                                logging.error(f"Aviso BD Clon: {db_err}")
+
+                            clone_welcome = (
+                                f"🏴‍☠️ <b>¡Instancia Operativa Activa!</b>\n\n"
+                                f"Hola <b>{user.full_name if user else 'Comandante'}</b>. Soy tu réplica de seguridad personalizada (<code>@{bot_username}</code>).\n\n"
+                                f"Protejo tu comunidad bajo los estándares de alta seguridad de <i>Cloud Media Management</i>.\n\n"
+                                f"🛡️ <i>Perímetro en línea y operando de forma autónoma.</i>"
+                            ) if lang == "es" else (
+                                f"🏴‍☠️ <b>Operational Replica Active!</b>\n\n"
+                                f"Hello <b>{user.full_name if user else 'Commander'}</b>. I am your custom security replica (<code>@{bot_username}</code>).\n\n"
+                                f"Protecting your community under <i>Cloud Media Management</i> standards.\n\n"
+                                f"🛡️ <i>Perimeter online and operating autonomously.</i>"
+                            )
+                            clone_kb = InlineKeyboardMarkup(inline_keyboard=[
+                                [InlineKeyboardButton(text="⚡ Command Center", web_app=WebAppInfo(url=WEBAPP_URL))],
+                                [InlineKeyboardButton(text="🆘 Soporte / Support", url="https://t.me/m/RGx4ohGTMTk5")]
+                            ])
+
+                            await clone_bot.send_message(
+                                chat_id=update.message.chat.id,
+                                text=clone_welcome,
+                                reply_markup=clone_kb,
+                                parse_mode="HTML"
+                            )
+                            logging.info(f"✅ [Clon @{bot_username}] ¡Bienvenida enviada exitosamente a {user_id}!")
+                            continue
+
                     elif update.callback_query:
                         user_id = update.callback_query.from_user.id if update.callback_query.from_user else "N/A"
                         logging.info(f"🔘 [Clon @{bot_username}] Callback #{update.update_id} | User: {user_id} | Data: '{update.callback_query.data}'")
 
-                    # 2. Inyección directa al Dispatcher central
+                    # Inyección protegida al Dispatcher para otros eventos de grupo
                     res = await dp.feed_update(clone_bot, update)
-                    
-                    # 3. Telemetría de salida exitosa
-                    logging.info(f"✅ [Clon @{bot_username}] Update #{update.update_id} procesado con éxito | Resultado: {res}")
+                    logging.info(f"📡 [Clon @{bot_username}] feed_update procesado: {res}")
                 except Exception as feed_err:
-                    logging.error(f"❌ [Error crítico en feed_update para clon @{bot_username}]: {feed_err}", exc_info=True)
+                    logging.error(f"❌ [Error feed_update clon @{bot_username}]: {feed_err}", exc_info=True)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -127,56 +167,49 @@ async def stop_clone_polling_task(token: str):
 
 
 def trigger_dynamic_clone(token: str):
-    """Disparador dinámico llamado desde user_private.py al registrar un nuevo token."""
+    """Disparador dinámico llamado al registrar un nuevo token."""
     asyncio.create_task(start_clone_polling_task(token))
 
 
 def trigger_disconnect_clone(token: str):
-    """Disparador dinámico para desconectar un clon a petición del usuario."""
+    """Disparador dinámico para desconectar un clon."""
     asyncio.create_task(stop_clone_polling_task(token))
 
 
 async def main():
-    # 1. Configuración de logging unificado y limpio
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
         stream=sys.stdout
     )
-    # Dejamos aiogram.event en INFO para ver los diagnósticos de enrutamiento
     logging.getLogger("aiogram.event").setLevel(logging.INFO)
 
-    # 2. Inicializar la base de datos SQLite y matrices de seguridad
     init_db()
-    print("🛡️ [Base de Datos]: Esquema relacional, matrices perimetrales y programador VC inicializados con éxito.")
+    print("🛡️ [Base de Datos]: Esquema relacional y matrices perimetrales inicializadas.")
 
-    # 3. Inicializar Bot Maestro
     master_bot = Bot(
         token=BOT_TOKEN, 
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
 
-    # 4. Registrar Middleware Anti-Spam global en el Dispatcher
     dp.message.middleware(AntiSpamMiddleware())
 
-    # 5. ORDEN ESTRATÉGICO DE ENRUTAMIENTO (Prioridad máxima a comandos privados /start)
-    dp.include_router(user_private.router)  # ⚡ Prioridad 1: Comandos de usuarios y clones en privado
-    dp.include_router(payments.router)      # Pagos y estrellas
-    dp.include_router(admin_group.router)   
-    dp.include_router(ecosystem.router)     
-    dp.include_router(moderation.router)    
-    dp.include_router(vc_manager.router)    
-    dp.include_router(groups.router)        # Seguridad perimetral en comunidades
+    # Routers con prioridad a comandos privados
+    dp.include_router(user_private.router)
+    dp.include_router(payments.router)
+    dp.include_router(admin_group.router)
+    dp.include_router(ecosystem.router)
+    dp.include_router(moderation.router)
+    dp.include_router(vc_manager.router)
+    dp.include_router(groups.router)
 
-    # 6. Desplegar clúster de Centinelas y Programador VC en segundo plano
-    print("📡 [Radar MTProto]: Desplegando clúster de Centinelas y Programador VC...")
+    print("📡 [Radar MTProto]: Desplegando clúster de Centinelas...")
     try:
         start_voice_radar(master_bot)
     except Exception as e:
         print(f"⚠️ [Radar MTProto Aviso]: No se pudo iniciar el gestor de centinelas: {e}")
 
-    # 7. CARGAR Y ARRANCAR TODOS LOS BOTS CLONES EXISTENTES EN LA BD
-    print("🧬 [Gestor de Clones]: Sincronizando bots clones registrados en la base de datos...")
+    print("🧬 [Gestor de Clones]: Sincronizando bots clones...")
     try:
         stored_clones = await get_all_active_clone_tokens()
         for clone_token in stored_clones:
@@ -186,7 +219,6 @@ async def main():
         print(f"⚠️ [Aviso Clones BD]: No se pudieron precargar los clones: {e}")
 
     try:
-        # Purgar actualizaciones viejas del bot maestro
         await master_bot.delete_webhook(drop_pending_updates=True)
         
         allowed_updates = dp.resolve_used_update_types()
@@ -198,15 +230,14 @@ async def main():
             if update_type not in allowed_updates:
                 allowed_updates.append(update_type)
 
-        # Iniciar polling del bot maestro
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
-        print("🛑 [Sistema]: Deteniendo clúster, clones y cerrando sesiones de forma segura...")
+        print("🛑 [Sistema]: Deteniendo clúster y cerrando sesiones...")
         for token in list(active_clone_tasks.keys()):
             await stop_clone_polling_task(token)
         await close_all_sentinels()
         await master_bot.session.close()
-        print("🛡️ [Sistema]: El Búnker se ha cerrado de forma ordenada bajo los estándares de Cloud Media Management.")
+        print("🛡️ [Sistema]: El Búnker se ha cerrado de forma ordenada.")
 
 
 if __name__ == "__main__":
