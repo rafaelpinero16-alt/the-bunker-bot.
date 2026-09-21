@@ -7,14 +7,8 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.types.web_app_info import WebAppInfo
 
-from database.database import (
-    init_db, 
-    get_all_active_clone_tokens, 
-    get_or_create_user
-)
+from database.database import init_db, get_all_active_clone_tokens
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
     user_private, 
@@ -35,7 +29,6 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
-WEBAPP_URL = "https://thebunkerapp.netlify.app"
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN no está definido en las variables de entorno.")
@@ -50,8 +43,8 @@ dp = Dispatcher()
 
 async def _clone_worker(clone_bot: Bot, token: str):
     """
-    Worker de polling dedicado para clones con despacho directo de /start
-    y telemetría de alta velocidad.
+    Worker de polling dedicado para clones que alimenta el Dispatcher central
+    enrutando todas las interacciones (mensajes y callbacks) hacia la matriz universal.
     """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
@@ -78,54 +71,16 @@ async def _clone_worker(clone_bot: Bot, token: str):
             for update in updates:
                 offset = update.update_id + 1
                 try:
-                    # 🚀 INTERCEPCIÓN DIRECTA DE COMANDOS PRIVADOS PARA CLONES
-                    if update.message and update.message.chat.type == "private":
-                        user = update.message.from_user
-                        text = (update.message.text or "").strip()
-                        user_id = user.id if user else 0
+                    if update.message:
+                        user_id = update.message.from_user.id if update.message.from_user else "N/A"
+                        text = update.message.text or "[Media/Otro]"
                         logging.info(f"📩 [Clon @{bot_username}] Update #{update.update_id} | User: {user_id} | Texto: '{text}'")
-
-                        if text.startswith("/start"):
-                            lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
-                            
-                            try:
-                                if user:
-                                    await get_or_create_user(user.id, user.username or "Sin username", user.full_name)
-                            except Exception as db_err:
-                                logging.error(f"Aviso BD Clon: {db_err}")
-
-                            clone_welcome = (
-                                f"🏴‍☠️ <b>¡Instancia Operativa Activa!</b>\n\n"
-                                f"Hola <b>{user.full_name if user else 'Comandante'}</b>. Soy tu réplica de seguridad personalizada (<code>@{bot_username}</code>).\n\n"
-                                f"Protejo tu comunidad bajo los estándares de alta seguridad de <i>Cloud Media Management</i>.\n\n"
-                                f"🛡️ <i>Perímetro en línea y operando de forma autónoma.</i>"
-                            ) if lang == "es" else (
-                                f"🏴‍☠️ <b>Operational Replica Active!</b>\n\n"
-                                f"Hello <b>{user.full_name if user else 'Commander'}</b>. I am your custom security replica (<code>@{bot_username}</code>).\n\n"
-                                f"Protecting your community under <i>Cloud Media Management</i> standards.\n\n"
-                                f"🛡️ <i>Perimeter online and operating autonomously.</i>"
-                            )
-                            clone_kb = InlineKeyboardMarkup(inline_keyboard=[
-                                [InlineKeyboardButton(text="⚡ Command Center", web_app=WebAppInfo(url=WEBAPP_URL))],
-                                [InlineKeyboardButton(text="🆘 Soporte / Support", url="https://t.me/m/RGx4ohGTMTk5")]
-                            ])
-
-                            await clone_bot.send_message(
-                                chat_id=update.message.chat.id,
-                                text=clone_welcome,
-                                reply_markup=clone_kb,
-                                parse_mode="HTML"
-                            )
-                            logging.info(f"✅ [Clon @{bot_username}] ¡Bienvenida enviada exitosamente a {user_id}!")
-                            continue
-
                     elif update.callback_query:
                         user_id = update.callback_query.from_user.id if update.callback_query.from_user else "N/A"
                         logging.info(f"🔘 [Clon @{bot_username}] Callback #{update.update_id} | User: {user_id} | Data: '{update.callback_query.data}'")
 
-                    # Inyección protegida al Dispatcher para otros eventos de grupo
-                    res = await dp.feed_update(clone_bot, update)
-                    logging.info(f"📡 [Clon @{bot_username}] feed_update procesado: {res}")
+                    # Inyección limpia al Dispatcher universal de aiogram 3
+                    await dp.feed_update(clone_bot, update)
                 except Exception as feed_err:
                     logging.error(f"❌ [Error feed_update clon @{bot_username}]: {feed_err}", exc_info=True)
         except asyncio.CancelledError:
@@ -194,7 +149,7 @@ async def main():
 
     dp.message.middleware(AntiSpamMiddleware())
 
-    # Routers con prioridad a comandos privados
+    # Routers con prioridad a comandos privados universales
     dp.include_router(user_private.router)
     dp.include_router(payments.router)
     dp.include_router(admin_group.router)

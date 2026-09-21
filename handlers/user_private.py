@@ -62,7 +62,7 @@ async def revoke_bot_clone_db(user_id: int, group_id: int):
     await asyncio.to_thread(_sync)
 
 # ==========================================
-# 🧠 ESTADOS DE EDICIÓN CONVERSACIONAL EN PRIVADO
+# 🧠 ESTADOS DE EDICIÓN CONVERSACIONAL AISLADOS POR BOT
 # ==========================================
 CAPTCHA_STATES = {}
 CLONE_STATES = {}
@@ -1094,7 +1094,8 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
             disc_text = "🛑 Desconectar Centinela" if lang == "es" else "🛑 Disconnect Sentinel"
             kb.append([InlineKeyboardButton(text=disc_text, callback_data=f"clone_discsentinel_{group_id}_{lang}")])
 
-        kb.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
+        kb.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
+        )
         return InlineKeyboardMarkup(inline_keyboard=kb)
     else:
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -1119,6 +1120,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         except Exception as db_ex:
             logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
 
+        # Deep link para configurar grupos directamente desde el botón en comunidad
         if command.args and command.args.startswith("gset_"):
             try:
                 group_id = int(command.args.split("_")[1])
@@ -1133,30 +1135,13 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             except Exception as g_ex:
                 logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
 
-        # Identificación aislada y segura para Bot Clon vs Bot Maestro
-        if bot_info.id != 8801126106:
-            clone_welcome = (
-                f"🏴‍☠️ <b>¡Instancia Operativa Activa!</b>\n\n"
-                f"Hola <b>{message.from_user.full_name}</b>. Soy tu réplica de seguridad personalizada (<code>@{bot_username}</code>).\n\n"
-                f"Protejo tu comunidad bajo los estándares de alta seguridad de <i>Cloud Media Management</i>.\n\n"
-                f"🛡️ <i>Perímetro en línea y operando de forma autónoma.</i>"
-            ) if lang == "es" else (
-                f"🏴‍☠️ <b>Operational Replica Active!</b>\n\n"
-                f"Hello <b>{message.from_user.full_name}</b>. I am your custom security replica (<code>@{bot_username}</code>).\n\n"
-                f"Protecting your community under <i>Cloud Media Management</i> standards.\n\n"
-                f"🛡️ <i>Perimeter online and operating autonomously.</i>"
-            )
-            clone_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⚡ Command Center", web_app=WebAppInfo(url=WEBAPP_URL))],
-                [InlineKeyboardButton(text="🆘 Soporte / Support", url="https://t.me/m/RGx4ohGTMTk5")]
-            ])
-            await message.answer(clone_welcome, reply_markup=clone_kb, parse_mode="HTML")
-            logging.info(f"✅ [cmd_start ÉXITO Clon] Respuesta enviada con éxito por @{bot_username}.")
-            return
-
-        # Respuesta estándar para el Bot Maestro
-        await message.answer(t["welcome"].format(name=message.from_user.full_name), reply_markup=get_main_keyboard(bot_username, lang), parse_mode="HTML")
-        logging.info(f"✅ [cmd_start ÉXITO Maestro] Bienvenida enviada.")
+        # 👑 RESPUESTA UNIVERSAL CLON/MAESTRO (Estilo Group Help con todos los botones operativos)
+        await message.answer(
+            t["welcome"].format(name=message.from_user.full_name),
+            reply_markup=get_main_keyboard(bot_username, lang),
+            parse_mode="HTML"
+        )
+        logging.info(f"✅ [cmd_start ÉXITO] Matriz completa desplegada en @{bot_username} para {message.from_user.id}.")
     except Exception as e:
         logging.error(f"❌ [cmd_start ERROR CRÍTICO]: {e}", exc_info=True)
 
@@ -1197,7 +1182,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if ":" in token and len(token) > 30:
             status_msg = await message.answer(t["token_verifying"], parse_mode="HTML")
             
-            # Verificación real del token contra Telegram
             test_bot = Bot(token=token)
             try:
                 bot_info = await test_bot.get_me()
@@ -1205,7 +1189,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
                 bot_username = bot_info.username or ""
 
-                # Si ya existía un clon con token anterior para este grupo, se detiene
                 old_clone = await get_bot_clone(user_id, group_id)
                 if old_clone and old_clone[0] and old_clone[0] != token:
                     try:
@@ -1216,7 +1199,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
                 await register_bot_clone(user_id, group_id, token, bot_username)
 
-                # Despertar el bot clon en segundo plano mediante feed_update
                 try:
                     from main import trigger_dynamic_clone
                     trigger_dynamic_clone(token)
@@ -1233,14 +1215,14 @@ async def handle_private_inputs(message: Message, bot: Bot):
                     f"• <b>Bot Clon:</b> @{bot_username}\n"
                     f"• <b>Estado:</b> Operativo 🟢\n"
                     f"• <b>Comunidad:</b> Blindada con tu propia réplica\n\n"
-                    f"<i>¡Listo! Ya puedes abrir @{bot_username} y presionar /start. Responderá al instante.</i>\n\n"
+                    f"<i>¡Listo! Ya puedes abrir @{bot_username} y presionar /start. Responderá con toda la interfaz de The Bunker.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ) if lang == "es" else (
                     f"✅ <b>Replica Instance Connected and Active!</b>\n\n"
                     f"• <b>Clone Bot:</b> @{bot_username}\n"
                     f"• <b>Status:</b> Operational 🟢\n"
                     f"• <b>Community:</b> Shielded with your own replica\n\n"
-                    f"<i>All set! You can now open @{bot_username} and press /start. It will respond immediately.</i>\n\n"
+                    f"<i>All set! You can now open @{bot_username} and press /start. It will respond with the full Bunker interface.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 )
 
@@ -2293,7 +2275,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         mode_text = "🟢" if cfg["mode"] == 1 else "🔴"
         try:
             await callback.message.edit_text(
-                t["captcha_main_title"].format(status_text=st_text, mode_text=mode_text, time_text=str(cfg["time"]), action_text=cfg["action"].upper()),
+                t["captcha_main_title"].format(status_text=st_text, mode_text=mode_text, time_text=str(cfg["time"]), action_text=cfg["action"].upper()), 
                 reply_markup=await get_captcha_keyboard(group_id, lang),
                 parse_mode="HTML"
             )
