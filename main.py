@@ -39,7 +39,7 @@ dp = Dispatcher()
 async def _clone_worker(clone_bot: Bot, token: str):
     """
     Worker de polling dedicado para clones que alimenta el Dispatcher central
-    con captura de errores detallada para diagnóstico en tiempo real.
+    con telemetría detallada para diagnóstico de comandos en tiempo real.
     """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
@@ -66,15 +66,25 @@ async def _clone_worker(clone_bot: Bot, token: str):
             for update in updates:
                 offset = update.update_id + 1
                 try:
-                    # Inyección protegida para capturar cualquier fallo de enrutamiento
-                    await dp.feed_update(bot=clone_bot, update=update)
+                    # Telemetría en vivo para rastrear interacciones con el clon
+                    if update.message:
+                        user_id = update.message.from_user.id if update.message.from_user else "N/A"
+                        text = update.message.text or "[Contenido multimedia/otro]"
+                        logging.info(f"📩 [Clon @{bot_username}] Update #{update.update_id} | User: {user_id} | Texto: '{text}'")
+                    elif update.callback_query:
+                        user_id = update.callback_query.from_user.id if update.callback_query.from_user else "N/A"
+                        logging.info(f"🔘 [Clon @{bot_username}] Callback #{update.update_id} | User: {user_id} | Data: '{update.callback_query.data}'")
+
+                    # Inyección protegida en el Dispatcher central
+                    await dp.feed_update(clone_bot, update)
                 except Exception as feed_err:
-                    logging.error(f"❌ [Error crítico en feed_update para clon @{bot_username}]: {feed_err}")
+                    logging.error(f"❌ [Error crítico en feed_update para clon @{bot_username}]: {feed_err}", exc_info=True)
         except asyncio.CancelledError:
             break
         except Exception as e:
             logging.warning(f"⚠️ [Loop Clon @{bot_username}]: {e}")
             await asyncio.sleep(2)
+
 
 async def start_clone_polling_task(token: str):
     """Instancia y levanta la tarea de escucha en segundo plano para un bot clon."""
