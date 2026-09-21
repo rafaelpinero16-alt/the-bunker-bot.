@@ -11,6 +11,7 @@ from database.database import (
     approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price
 )
 from assistant import set_participant_mic
+from handlers.user_private import is_clone_bot, get_master_bot_username
 
 logger = logging.getLogger("payments_gateway")
 router = Router()
@@ -18,8 +19,8 @@ router = Router()
 # ==========================================
 # 💰 TARIFAS Y CONFIGURACIÓN DE FACTURACIÓN
 # ==========================================
-PRICE_PRO_STARS = 500          # 500 Stars Telegram (~$5.00 USD)
-PRICE_ULTRAPRO_STARS = 800     # 800 Stars Telegram (~$8.00 USD)
+PRICE_PRO_STARS = 300          # 300 Stars Telegram (~$3.00 USD)
+PRICE_ULTRAPRO_STARS = 600     # 600 Stars Telegram (~$6.00 USD)
 DEFAULT_PRICE_VIP_MIC = 50     # Tarifa base en Stars para pase 24h
 
 # Pasarelas de Pago Oficiales - Cloud Media Management
@@ -56,6 +57,43 @@ async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 15):
         pass
 
 
+def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
+    """
+    Construye el aviso + botón que redirige el cobro de una suscripción PRO/ULTRA PRO
+    hacia el Bot Maestro cuando la orden se originó en un Bot Clon.
+
+    Las suscripciones (planes PRO/ULTRA PRO) son ingreso de la PLATAFORMA (Cloud Media
+    Management), no del dueño del Clon. Si se facturaran con bot.send_invoice() usando
+    la instancia del propio Clon, las Stars entrarían directo al balance del Clon en vez
+    de al Maestro. Por eso jamás se genera esa factura desde un Clon: siempre se
+    redirige al Maestro vía deep-link (/start sub_<plan>_<chat_id>), que sí sabe cobrar
+    con la instancia correcta. El pase VIP de micrófono (/micvip) es la excepción
+    deliberada: ese SÍ debe cobrarse con el bot actual para que fluya 100% al Clon.
+    """
+    master_username = get_master_bot_username()
+    if not master_username:
+        return None, None
+
+    text = (
+        "⭐ <b>Suscripción Oficial — Cloud Media Management</b>\n\n"
+        "Los planes PRO y ULTRA PRO son un servicio directo de la plataforma y se facturan siempre desde el <b>Bot Maestro</b>, para no descontar Stars del balance de tu Bot Clon.\n\n"
+        "Pulsa el botón para completar el pago de forma segura:\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ) if lang == "es" else (
+        "⭐ <b>Official Subscription — Cloud Media Management</b>\n\n"
+        "PRO and ULTRA PRO plans are a direct platform service and are always billed through the <b>Master Bot</b>, so they never draw Stars from your Bot Clone's balance.\n\n"
+        "Tap the button to complete payment securely:\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="⭐ Pagar en el Bot Maestro" if lang == "es" else "⭐ Pay via Master Bot",
+            url=f"https://t.me/{master_username}?start=sub_{plan}_{chat_id}"
+        )]
+    ])
+    return text, markup
+
+
 # ==========================================
 # 🌐 DICCIONARIO BILINGÜE DE FACTURACIÓN Y PASARELAS
 # ==========================================
@@ -77,18 +115,18 @@ TEXTS = {
             "<i>Select your payment gateway below to activate instantly:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "btn_pro_stars": "⭐ Upgrade to PRO (500 XTR)",
-        "btn_ultra_stars": "💎 Upgrade to ULTRA PRO (800 XTR)",
-        "btn_paypal": "💳 PayPal ($5 / $8 USD)",
+        "btn_pro_stars": "⭐ Upgrade to PRO (300 XTR)",
+        "btn_ultra_stars": "💎 Upgrade to ULTRA PRO (600 XTR)",
+        "btn_paypal": "💳 PayPal ($3 / $6 USD)",
         "btn_binance": "🟡 Binance Pay (Instant)",
         "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_back": "🔙 Back to Main Menu",
         "btn_back_group": "🔙 Back to Group Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
         
-        "inv_pro_t": "PRO Plan Subscription ($5)",
+        "inv_pro_t": "PRO Plan Subscription (300 Stars)",
         "inv_pro_d": "Unlimited bot commands, automated purge center, custom captcha pro, and master sentinel shielding.",
-        "inv_ultra_t": "ULTRA PRO Subscription ($8)",
+        "inv_ultra_t": "ULTRA PRO Subscription (600 Stars)",
         "inv_ultra_d": "All PRO features + Bot Clone architecture + Dedicated Voice Sentinel + Weekly VC Scheduler (100% Stars yours).",
         "inv_vip_t": "VIP Microphone Pass (24 Hours)",
         "inv_vip_d": "Unrestricted 100% voice transmission privileges for 24 hours in community voice chats.",
@@ -137,18 +175,18 @@ TEXTS = {
             "<i>Selecciona tu pasarela preferida para activar al instante:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "btn_pro_stars": "⭐ Mejorar a PRO (500 XTR)",
-        "btn_ultra_stars": "💎 Mejorar a ULTRA PRO (800 XTR)",
-        "btn_paypal": "💳 PayPal ($5 / $8 USD)",
+        "btn_pro_stars": "⭐ Mejorar a PRO (300 XTR)",
+        "btn_ultra_stars": "💎 Mejorar a ULTRA PRO (600 XTR)",
+        "btn_paypal": "💳 PayPal ($3 / $6 USD)",
         "btn_binance": "🟡 Binance Pay (Instantáneo)",
         "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_back": "🔙 Volver al Menú Principal",
         "btn_back_group": "🔙 Volver al Panel del Grupo",
         "btn_pay_stars": "⭐ Pagar con Stars",
         
-        "inv_pro_t": "Suscripción Plan PRO ($5)",
+        "inv_pro_t": "Suscripción Plan PRO (300 Stars)",
         "inv_pro_d": "Comandos ilimitados, purga de mensajes automatizada, captcha pro y centinela maestro.",
-        "inv_ultra_t": "Suscripción Plan ULTRA PRO ($8)",
+        "inv_ultra_t": "Suscripción Plan ULTRA PRO (600 Stars)",
         "inv_ultra_d": "Todo PRO + Arquitectura Bot Clone + Centinela Dedicado Propio + Programador VC Semanal (100% Stars para ti).",
         "inv_vip_t": "Pase VIP de Micrófono (24 Horas)",
         "inv_vip_d": "Privilegios de voz continua al 100% de volumen por 24 horas en salas de voz y videochats.",
@@ -261,6 +299,27 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
     t = TEXTS[lang]
     args = command.args or ""
 
+    # 🔒 Blindaje de ingreso de plataforma: si alguien dispara este deep-link
+    # directamente contra un Bot Clon (en vez del Maestro), se redirige en lugar
+    # de facturar, por la misma razón que en process_invoice_callback.
+    if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
+        redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
+        redirect_chat_id = 0
+        redirect_parts = args.split("_")
+        if len(redirect_parts) > 2:
+            try:
+                redirect_chat_id = int(redirect_parts[2])
+            except ValueError:
+                redirect_chat_id = 0
+        redirect_text, redirect_markup = _clone_subscription_redirect(lang, redirect_plan, redirect_chat_id)
+        if redirect_text:
+            try:
+                await message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
+            except Exception:
+                pass
+            return
+        logger.warning("⚠️ [Blindaje Suscripción] MASTER_BOT_USERNAME no resuelto aún; se factura por excepción desde el Clon.")
+
     try:
         chat_id_target = 0
         if args.startswith("sub_pro"):
@@ -367,6 +426,18 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
     if len(parts) >= 3:
         plan = parts[1] 
         chat_id = int(parts[2])
+
+        # 🔒 Blindaje de ingreso de plataforma: si la orden llegó por un Bot Clon,
+        # NUNCA se factura aquí mismo. Se redirige al Maestro (ver _clone_subscription_redirect).
+        if is_clone_bot(bot):
+            redirect_text, redirect_markup = _clone_subscription_redirect(lang, plan, chat_id)
+            if redirect_text:
+                try:
+                    await callback.message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
+                except Exception:
+                    pass
+                return
+            logger.warning("⚠️ [Blindaje Suscripción] MASTER_BOT_USERNAME no resuelto aún; se factura por excepción desde el Clon.")
 
         if plan == "pro":
             price = PRICE_PRO_STARS
