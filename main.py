@@ -11,8 +11,8 @@ from aiogram.enums import ParseMode
 from database.database import init_db, get_all_active_clone_tokens
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
-    payments, 
     user_private, 
+    payments, 
     ecosystem, 
     moderation, 
     vc_manager, 
@@ -45,7 +45,7 @@ dp = Dispatcher()
 async def _clone_worker(clone_bot: Bot, token: str):
     """
     Worker de polling dedicado para clones que alimenta el Dispatcher central
-    con telemetría detallada para diagnóstico de comandos en tiempo real.
+    con telemetría de entrada y salida para diagnóstico en tiempo real.
     """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
@@ -72,7 +72,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
             for update in updates:
                 offset = update.update_id + 1
                 try:
-                    # Telemetría en vivo para rastrear interacciones con el clon
+                    # 1. Telemetría de entrada
                     if update.message:
                         user_id = update.message.from_user.id if update.message.from_user else "N/A"
                         text = update.message.text or "[Contenido multimedia/otro]"
@@ -81,8 +81,11 @@ async def _clone_worker(clone_bot: Bot, token: str):
                         user_id = update.callback_query.from_user.id if update.callback_query.from_user else "N/A"
                         logging.info(f"🔘 [Clon @{bot_username}] Callback #{update.update_id} | User: {user_id} | Data: '{update.callback_query.data}'")
 
-                    # Inyección protegida en el Dispatcher central
-                    await dp.feed_update(clone_bot, update)
+                    # 2. Inyección directa al Dispatcher central
+                    res = await dp.feed_update(clone_bot, update)
+                    
+                    # 3. Telemetría de salida exitosa
+                    logging.info(f"✅ [Clon @{bot_username}] Update #{update.update_id} procesado con éxito | Resultado: {res}")
                 except Exception as feed_err:
                     logging.error(f"❌ [Error crítico en feed_update para clon @{bot_username}]: {feed_err}", exc_info=True)
         except asyncio.CancelledError:
@@ -140,7 +143,8 @@ async def main():
         format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
         stream=sys.stdout
     )
-    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+    # Dejamos aiogram.event en INFO para ver los diagnósticos de enrutamiento
+    logging.getLogger("aiogram.event").setLevel(logging.INFO)
 
     # 2. Inicializar la base de datos SQLite y matrices de seguridad
     init_db()
@@ -155,14 +159,14 @@ async def main():
     # 4. Registrar Middleware Anti-Spam global en el Dispatcher
     dp.message.middleware(AntiSpamMiddleware())
 
-    # 5. ORDEN ESTRATÉGICO DE ENRUTAMIENTO
-    dp.include_router(payments.router)      
-    dp.include_router(user_private.router)  
+    # 5. ORDEN ESTRATÉGICO DE ENRUTAMIENTO (Prioridad máxima a comandos privados /start)
+    dp.include_router(user_private.router)  # ⚡ Prioridad 1: Comandos de usuarios y clones en privado
+    dp.include_router(payments.router)      # Pagos y estrellas
     dp.include_router(admin_group.router)   
     dp.include_router(ecosystem.router)     
     dp.include_router(moderation.router)    
     dp.include_router(vc_manager.router)    
-    dp.include_router(groups.router)        
+    dp.include_router(groups.router)        # Seguridad perimetral en comunidades
 
     # 6. Desplegar clúster de Centinelas y Programador VC en segundo plano
     print("📡 [Radar MTProto]: Desplegando clúster de Centinelas y Programador VC...")
