@@ -4,11 +4,21 @@ import sys
 import os
 from dotenv import load_dotenv
 
-from aiogram import Bot, Dispatcher
+# Alias de módulo: con `python main.py` este archivo corre como `__main__`. Sin este alias,
+# cualquier `from main import ...` en otro módulo re-ejecutaría main.py como un módulo nuevo
+# (Dispatcher vacío + otro active_clone_tasks) y los clones creados en caliente quedarían sin handlers.
+if __name__ == "__main__":
+    sys.modules.setdefault("main", sys.modules[__name__])
+
+# Cargar variables de entorno ANTES de importar los módulos del proyecto
+# (user_private lee ADMIN_IDS / BOT_TOKEN a nivel de módulo).
+load_dotenv()
+
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.types.web_app_info import WebAppInfo
+from aiogram.types import CallbackQuery, ErrorEvent, Update
 
 from database.database import (
     init_db, 
@@ -26,17 +36,13 @@ from handlers import (
     groups
 )
 from handlers.user_private import (
-    get_main_keyboard, 
-    get_group_panel_keyboard, 
-    TEXTS
+    send_official_welcome,
+    set_master_bot_id
 )
 from assistant import (
     start_voice_radar, 
     close_all_sentinels
 )
-
-# Cargar variables de entorno
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
@@ -52,11 +58,83 @@ ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
 active_clone_tasks = {}
 dp = Dispatcher()
 
+# Router de respaldo: se incluye SIEMPRE el último para capturar únicamente los
+# callbacks que ningún otro router reclamó (evita botones congelados en Maestro y Clones).
+fallback_router = Router(name="callback_fallback")
+
+
+@fallback_router.callback_query()
+async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
+    logging.warning(
+        f"🧭 [Callback sin handler] bot_id={bot.id} usuario={callback.from_user.id} "
+        f"callback_data={callback.data!r}"
+    )
+    is_es = bool(callback.from_user.language_code and callback.from_user.language_code.startswith("es"))
+    text = (
+        "⚠️ Este botón ya no está activo. Envía /start para renovar el menú."
+        if is_es else
+        "⚠️ This button is no longer active. Send /start to refresh the menu."
+    )
+    try:
+        await callback.answer(text, show_alert=True)
+    except Exception:
+        pass
+
+
+@dp.errors()
+async def on_dispatcher_error(event: ErrorEvent) -> bool:
+    """Registra la excepción con traza completa y libera el spinner del botón pulsado."""
+    update = event.update
+    logging.error(
+        f"❌ [Error de despacho] update_id={update.update_id}: {event.exception!r}",
+        exc_info=event.exception
+    )
+    if update.callback_query:
+        try:
+            await update.callback_query.answer("⚠️ Error temporal / Temporary error", show_alert=False)
+        except Exception:
+            pass
+    return True
+
+
+async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Update):
+    """
+    Entrega UNA actualización del clon al Dispatcher central.
+    Message y CallbackQuery viajan por el mismo camino (dp.feed_update) que el Maestro,
+    por lo que /start pasa por user_private.cmd_start (fuente única de la bienvenida).
+    """
+    try:
+        is_private_start = False
+        if update.callback_query:
+            cq = update.callback_query
+            logging.info(f"🔘 [Clon @{bot_username}] Callback de {cq.from_user.id}: {cq.data!r}")
+        elif update.message and update.message.chat.type == "private":
+            text = (update.message.text or "").strip()
+            user_id = update.message.from_user.id if update.message.from_user else 0
+            is_private_start = text.startswith("/start")
+            logging.info(f"📩 [Clon @{bot_username}] Mensaje de {user_id}: '{text}'")
+
+        result = await dp.feed_update(clone_bot, update)
+
+        # Red de seguridad: si /start privado no fue reclamado por ningún router,
+        # se despliega la misma bienvenida oficial (idéntica al Maestro, sin Command Center).
+        if result is UNHANDLED and is_private_start:
+            user = update.message.from_user
+            logging.warning(f"⚠️ [Clon @{bot_username}] /start sin handler; aplicando bienvenida de respaldo.")
+            try:
+                if user:
+                    await get_or_create_user(user.id, user.username or "Sin username", user.full_name)
+            except Exception as db_err:
+                logging.error(f"Aviso BD Clon: {db_err}")
+            await send_official_welcome(clone_bot, update.message.chat.id, user, bot_username)
+    except Exception as feed_err:
+        logging.error(f"❌ [Error en clon @{bot_username}]: {feed_err}", exc_info=True)
+
 
 async def _clone_worker(clone_bot: Bot, token: str):
     """
-    Worker de polling dedicado para clones con despacho instantáneo de la interfaz
-    completa de The Bunker (estilo Group Help) y reenvío de callbacks al Dispatcher.
+    Worker de polling dedicado para clones. Reenvía TODAS las actualizaciones
+    (Message, CallbackQuery, eventos de grupo y pagos) al Dispatcher central.
     """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
@@ -82,62 +160,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
             )
             for update in updates:
                 offset = update.update_id + 1
-                try:
-                    # 👑 GESTIÓN DIRECTA DE COMANDOS PRIVADOS PARA CLONES (100% IDÉNTICO A GROUP HELP)
-                    if update.message and update.message.chat.type == "private":
-                        user = update.message.from_user
-                        text = (update.message.text or "").strip()
-                        user_id = user.id if user else 0
-                        logging.info(f"📩 [Clon @{bot_username}] Mensaje de {user_id}: '{text}'")
-
-                        if text.startswith("/start"):
-                            lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
-                            t = TEXTS.get(lang, TEXTS["es"])
-
-                            try:
-                                if user:
-                                    await get_or_create_user(user.id, user.username or "Sin username", user.full_name)
-                            except Exception as db_err:
-                                logging.error(f"Aviso BD Clon: {db_err}")
-
-                            # Deep-link de configuración directa de comunidad (/start gset_...)
-                            parts = text.split()
-                            if len(parts) > 1 and parts[1].startswith("gset_"):
-                                try:
-                                    g_id = int(parts[1].split("_")[1])
-                                    try:
-                                        g_chat = await clone_bot.get_chat(g_id)
-                                        g_name = g_chat.title
-                                    except Exception:
-                                        g_name = "Comunidad" if lang == "es" else "Community"
-
-                                    await clone_bot.send_message(
-                                        chat_id=update.message.chat.id,
-                                        text=t["group_panel_title"].format(group_name=g_name),
-                                        reply_markup=get_group_panel_keyboard(g_id, lang),
-                                        parse_mode="HTML"
-                                    )
-                                    continue
-                                except Exception as gset_err:
-                                    logging.error(f"Error gset en clon: {gset_err}")
-
-                            # Despliegue de la interfaz oficial completa de The Bunker con el username del clon
-                            welcome_text = t["welcome"].format(name=user.full_name if user else "Comandante")
-                            full_keyboard = get_main_keyboard(bot_username, lang)
-
-                            await clone_bot.send_message(
-                                chat_id=update.message.chat.id,
-                                text=welcome_text,
-                                reply_markup=full_keyboard,
-                                parse_mode="HTML"
-                            )
-                            logging.info(f"✅ [Clon @{bot_username}] Matriz completa desplegada con éxito.")
-                            continue
-
-                    # Callbacks y eventos de grupo se inyectan fluidamente al Dispatcher
-                    await dp.feed_update(clone_bot, update)
-                except Exception as feed_err:
-                    logging.error(f"❌ [Error en clon @{bot_username}]: {feed_err}", exc_info=True)
+                await _dispatch_clone_update(clone_bot, bot_username, update)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -201,7 +224,10 @@ async def main():
         token=BOT_TOKEN, 
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
+    # Identidad del Maestro: cmd_start / teclados comparan bot.id contra este valor
+    set_master_bot_id(master_bot.id)
 
+    # El anti-spam solo intercepta mensajes; los callbacks nunca pasan por él.
     dp.message.middleware(AntiSpamMiddleware())
 
     # Routers perimetrales
@@ -212,6 +238,7 @@ async def main():
     dp.include_router(moderation.router)
     dp.include_router(vc_manager.router)
     dp.include_router(groups.router)
+    dp.include_router(fallback_router)  # SIEMPRE el último
 
     print("📡 [Radar MTProto]: Desplegando clúster de Centinelas...")
     try:

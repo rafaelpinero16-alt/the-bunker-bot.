@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import asyncio
 import logging
@@ -46,6 +47,45 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+# ==========================================
+# 🧬 IDENTIDAD MAESTRO / CLON (por bot.id)
+# ==========================================
+MASTER_BOT_ID = 0
+
+def set_master_bot_id(bot_id: int) -> None:
+    """Fija el ID del Bot Maestro (lo invoca main.py al arrancar)."""
+    global MASTER_BOT_ID
+    MASTER_BOT_ID = int(bot_id)
+
+def _resolve_master_bot_id() -> int:
+    if MASTER_BOT_ID:
+        return MASTER_BOT_ID
+    # Respaldo: el ID del bot es el prefijo numérico del token de BotFather
+    head = os.getenv("BOT_TOKEN", "").split(":", 1)[0].strip()
+    return int(head) if head.isdigit() else 0
+
+def is_clone_bot(bot: Bot) -> bool:
+    """True si la instancia ejecutora NO es el Bot Maestro (comparación por bot.id)."""
+    master_id = _resolve_master_bot_id()
+    return bool(master_id) and bot.id != master_id
+
+def _call_clone_trigger(name: str, token: str) -> None:
+    """
+    Invoca trigger_dynamic_clone / trigger_disconnect_clone del proceso que YA está en ejecución.
+
+    ⚠️ No usar `from main import ...`: al lanzar `python main.py` el archivo corre como `__main__`;
+    `import main` lo re-ejecuta como un módulo distinto, con un Dispatcher NUEVO y VACÍO (sin routers)
+    y otro `active_clone_tasks`. Los clones creados desde el panel quedaban escuchando ese Dispatcher
+    vacío → `Update is not handled` en cada callback.
+    """
+    for mod_name in ("__main__", "main"):
+        mod = sys.modules.get(mod_name)
+        fn = getattr(mod, name, None) if mod else None
+        if callable(fn):
+            fn(token)
+            return
+    logging.error(f"❌ [Clones] No se encontró {name} en __main__/main; token no procesado.")
 
 async def get_effective_group_tier(group_id: int, user_id: int) -> str:
     if is_super_admin(user_id):
@@ -723,22 +763,44 @@ async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int)
     await message.answer(t["owner_only_alert"])
     return False
 
-def get_main_keyboard(bot_username: str, lang: str):
+def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
+    """
+    Teclado principal oficial.
+    - Maestro (is_clone=False): 7 botones, incluido ⚡ Command Center (WebApp).
+    - Clon (is_clone=True): oculta ÚNICAMENTE ⚡ Command Center.
+    """
     t = TEXTS.get(lang, TEXTS["es"])
     add_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
-    return InlineKeyboardMarkup(inline_keyboard=[
+
+    rows = [
         [InlineKeyboardButton(text=t["btn_add"], url=add_url)],
         [InlineKeyboardButton(text=t["btn_settings"], callback_data=f"menu_settings_{lang}")],
-        [InlineKeyboardButton(text=t["btn_saas"], web_app=WebAppInfo(url=WEBAPP_URL))],
-        [
-            InlineKeyboardButton(text=t["btn_id"], callback_data=f"menu_id_{lang}"),
-            InlineKeyboardButton(text="🇪🇸 ES / 🇬🇧 EN", callback_data=f"lang_{'es' if lang == 'en' else 'en'}")
-        ],
-        [
-            InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}"),
-            InlineKeyboardButton(text=t["btn_info"], callback_data=f"menu_info_{lang}")
-        ]
+    ]
+    if not is_clone:
+        rows.append([InlineKeyboardButton(text=t["btn_saas"], web_app=WebAppInfo(url=WEBAPP_URL))])
+    rows.append([
+        InlineKeyboardButton(text=t["btn_id"], callback_data=f"menu_id_{lang}"),
+        InlineKeyboardButton(text="🇪🇸 ES / 🇬🇧 EN", callback_data=f"lang_{'es' if lang == 'en' else 'en'}")
     ])
+    rows.append([
+        InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}"),
+        InlineKeyboardButton(text=t["btn_info"], callback_data=f"menu_info_{lang}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str = None) -> None:
+    """Bienvenida oficial única para Maestro y Clones (fuente de verdad compartida)."""
+    if not bot_username:
+        bot_username = (await bot.get_me()).username or "BunkerBot"
+    lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
+    t = TEXTS.get(lang, TEXTS["es"])
+    name = user.full_name if user else "Comandante"
+    await bot.send_message(
+        chat_id=chat_id,
+        text=t["welcome"].format(name=name),
+        reply_markup=get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot)),
+        parse_mode="HTML"
+    )
 
 def get_simple_back_keyboard(lang: str, target: str = "main"):
     t = TEXTS.get(lang, TEXTS["es"])
@@ -1110,7 +1172,8 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
     try:
         bot_info = await bot.get_me()
         bot_username = bot_info.username or "BunkerBot"
-        logging.info(f"🚀 [cmd_start INICIO] Bot ID: {bot_info.id} (@{bot_username}) | Usuario: {message.from_user.id}")
+        role = "CLON" if is_clone_bot(bot) else "MAESTRO"
+        logging.info(f"🚀 [cmd_start INICIO] {role} | Bot ID: {bot_info.id} (@{bot_username}) | Usuario: {message.from_user.id}")
         
         lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
         t = TEXTS.get(lang, TEXTS["es"])
@@ -1135,12 +1198,8 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             except Exception as g_ex:
                 logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
 
-        # 👑 RESPUESTA UNIVERSAL CLON/MAESTRO (Estilo Group Help con todos los botones operativos)
-        await message.answer(
-            t["welcome"].format(name=message.from_user.full_name),
-            reply_markup=get_main_keyboard(bot_username, lang),
-            parse_mode="HTML"
-        )
+        # 👑 RESPUESTA UNIVERSAL CLON/MAESTRO (misma bienvenida; el clon oculta solo ⚡ Command Center)
+        await send_official_welcome(bot, message.chat.id, message.from_user, bot_username)
         logging.info(f"✅ [cmd_start ÉXITO] Matriz completa desplegada en @{bot_username} para {message.from_user.id}.")
     except Exception as e:
         logging.error(f"❌ [cmd_start ERROR CRÍTICO]: {e}", exc_info=True)
@@ -1192,16 +1251,14 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 old_clone = await get_bot_clone(user_id, group_id)
                 if old_clone and old_clone[0] and old_clone[0] != token:
                     try:
-                        from main import trigger_disconnect_clone
-                        trigger_disconnect_clone(old_clone[0])
+                        _call_clone_trigger("trigger_disconnect_clone", old_clone[0])
                     except Exception:
                         pass
 
                 await register_bot_clone(user_id, group_id, token, bot_username)
 
                 try:
-                    from main import trigger_dynamic_clone
-                    trigger_dynamic_clone(token)
+                    _call_clone_trigger("trigger_dynamic_clone", token)
                 except Exception:
                     pass
 
@@ -1541,7 +1598,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     if action == "lang":
         lang = data[1]
         text = TEXTS.get(lang, TEXTS["es"])["welcome"].format(name=callback.from_user.full_name)
-        keyboard = get_main_keyboard((await bot.get_me()).username, lang)
+        keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
 
     elif action == "langpanel":
         group_id = int(data[1])
@@ -1560,7 +1617,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         target = data[1]
         if target == "main":
             text = t["welcome"].format(name=callback.from_user.full_name)
-            keyboard = get_main_keyboard((await bot.get_me()).username, lang)
+            keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
         elif target == "settings":
             active_groups = await get_active_user_groups(bot, callback.from_user.id)
             text, keyboard = t["settings_main"], get_groups_keyboard(active_groups, lang)
@@ -1712,8 +1769,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             if clone_info and clone_info[0]:
                 try:
-                    from main import trigger_disconnect_clone
-                    trigger_disconnect_clone(clone_info[0])
+                    _call_clone_trigger("trigger_disconnect_clone", clone_info[0])
                 except Exception:
                     pass
 
