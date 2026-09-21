@@ -432,9 +432,7 @@ def set_mic_vip_price(group_id: int, price: int):
             ON CONFLICT(group_id) DO UPDATE SET mic_vip_price = excluded.mic_vip_price
         """, (group_id, price))
         conn.commit()
-
-
-# ==========================================
+        # ==========================================
 # 🏷️ CONFIGURACIÓN DE ETIQUETA Y MODO FREE
 # ==========================================
 def get_free_badge_config(group_id: int) -> dict:
@@ -707,6 +705,14 @@ def get_all_active_clones():
         return cursor.fetchall()
 
 
+def get_all_active_clone_tokens() -> list:
+    """Devuelve una lista limpia de tokens activos para el arranque dinámico en main.py."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT bot_token FROM bot_clones WHERE status = 'active' AND bot_token IS NOT NULL AND bot_token != ''")
+        return [row[0] for row in cursor.fetchall() if row[0]]
+
+
 def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: str = None, api_id: int = None, api_hash: str = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -856,6 +862,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "register_bot_clone",
     "get_bot_clone",
     "get_all_active_clones",
+    "get_all_active_clone_tokens",
     "save_owner_session",
     "get_owner_session",
     "get_session_by_group",

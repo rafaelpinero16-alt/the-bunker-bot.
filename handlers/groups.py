@@ -9,7 +9,7 @@ from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, ChatMemberUpdated, ChatJoinRequest
 )
-from aiogram.filters import ChatMemberUpdatedFilter, ADMINISTRATOR, MEMBER
+from aiogram.filters import ChatMemberUpdatedFilter, ADMINISTRATOR
 from database.database import (
     get_antispam_filter, get_antispam_delete,
     get_antiflood_config, is_whitelisted, get_captcha_config,
@@ -21,6 +21,14 @@ from assistant import active_sentinels, set_participant_mic
 
 logger = logging.getLogger("groups_handler")
 router = Router()
+
+# Inmunidad total para los Arquitectos Supremos
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
 
 # Memoria temporal en RAM optimizada
 FLOOD_CACHE = {}
@@ -57,15 +65,15 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 # ==========================================
 # 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA (MY_CHAT_MEMBER)
 # ==========================================
-@router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=MEMBER >> ADMINISTRATOR))
+@router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=(~ADMINISTRATOR) >> ADMINISTRATOR))
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
-    """Detecta automáticamente cuando el bot es promovido a administrador en un grupo."""
+    """Detecta automáticamente cuando el bot maestro o cualquier clon es promovido a administrador."""
     chat = event.chat
     if chat.type not in {"group", "supergroup"}:
         return
     
     group_id = chat.id
-    group_name = chat.title
+    group_name = chat.title or "Comunidad"
     user = event.from_user
 
     await approve_group(group_id, tier="free")
@@ -91,11 +99,12 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
                 chat_id=admin_group_id,
                 text=(
                     f"📡 <b>NUEVA COMUNIDAD ENLAZADA AL BÚNKER</b>\n\n"
+                    f"• <b>Instancia Operativa:</b> @{bot_info.username}\n"
                     f"• <b>Comunidad:</b> {group_name}\n"
                     f"• <b>Chat ID:</b> <code>{group_id}</code>\n"
                     f"• <b>Enlace / Ref:</b> {invite_link}\n"
                     f"• <b>Autor de Alta:</b> {user.full_name if user else 'N/A'} (<code>{user.id if user else 'N/A'}</code>)\n\n"
-                    f"✅ El bot ha sido desplegado con éxito y está listo para auditar el perímetro.\n\n"
+                    f"✅ Instancia desplegada con éxito. Lista para auditar el perímetro.\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 reply_markup=kb,
@@ -152,10 +161,18 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
         cfg = await get_captcha_config(group_id)
         
         msg_id = session_data.get("msg_id")
+        chat_msg_id = session_data.get("group_msg_id")
+        
         if msg_id:
             try: 
                 await bot.delete_message(chat_id=user_id, message_id=msg_id)
             except Exception: 
+                pass
+
+        if chat_msg_id:
+            try:
+                await bot.delete_message(chat_id=group_id, message_id=chat_msg_id)
+            except Exception:
                 pass
 
         support_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -204,24 +221,21 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
 
 
 async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name: str, username: str, is_join_req: bool = False):
-    """Procesa y despacha el captcha perimetral a nuevos miembros."""
+    """Procesa y despacha el captcha perimetral a nuevos miembros con tolerancia a fallo de DM."""
     cfg = await get_captcha_config(group_id)
     if cfg["status"] != 1:
         return
 
-    # Inmunidad total para Centinelas y cuentas de Whitelist
-    if await is_sentinel_account(group_id, user_id, username):
+    # Inmunidad total para Arquitectos, Centinelas y Whitelist
+    if is_super_admin(user_id) or await is_sentinel_account(group_id, user_id, username) or await is_whitelisted(user_id):
         return
 
     try:
-        if await is_whitelisted(user_id):
-            return
         member_check = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
         if member_check.status in ["creator", "administrator"]:
             return
     except Exception:
-        if await is_whitelisted(user_id):
-            return
+        pass
 
     mention = f"<a href='tg://user?id={user_id}'>{full_name}</a>"
 
@@ -237,7 +251,6 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
 
     custom_intro = cfg["text"] if cfg["text"] else f"¡Hola, {mention}! Para proteger la comunidad, requerimos una breve verificación."
 
-    bot_user = await bot.get_me()
     if cfg["mode"] == 1:
         correct_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
         CAPTCHA_SESSIONS[(group_id, user_id)] = {"code": correct_code, "is_join_req": is_join_req}
@@ -248,7 +261,7 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
             f"Selecciona el botón que contiene exactamente este código:\n"
             f"👉 <code>{correct_code}</code>\n\n"
             f"⏱️ <b>Tiempo límite:</b> {cfg['time']}s\n\n"
-            f"🇺🇸 <i>Tap the button matching the code above to clear entry! Don't let the clock run out.</i>\n\n"
+            f"🇺🇸 <i>Tap the button matching the code above to clear entry!</i>\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
     else:
@@ -262,25 +275,28 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
             f"🛡️ <i>Cloud Media Management</i>"
         )
 
+    dm_sent = False
     try:
         sent_msg = await bot.send_message(chat_id=user_id, text=text, reply_markup=kb, parse_mode="HTML")
         CAPTCHA_SESSIONS[(group_id, user_id)]["msg_id"] = sent_msg.message_id
+        dm_sent = True
     except Exception:
-        fallback_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔓 Verificarme en Privado / Verify", url=f"https://t.me/{bot_user.username}?start=cap_{group_id}")]
-        ])
+        pass
+
+    # Si no tiene abierto el privado del bot, se despliega la aduana directamente en el grupo
+    if not dm_sent and not is_join_req:
         try:
-            fallback_msg = await bot.send_message(
+            group_msg = await bot.send_message(
                 chat_id=group_id,
                 text=(
-                    f"🛡️ {mention}, por favor inicia un chat privado conmigo para verificar tu identidad y desbloquear tu acceso.\n\n"
-                    f"🇺🇸 <i>Please click the button below to clear the security checkpoint!</i>"
+                    f"🛑 <b>ADUANA DE SEGURIDAD / CHECKPOINT</b>\n\n"
+                    f"{mention}, completa tu verificación en este botón para desbloquear tu acceso al chat:\n"
+                    f"⏱️ <i>Tiempo restante: {cfg['time']}s</i>"
                 ),
-                reply_markup=fallback_kb,
+                reply_markup=kb,
                 parse_mode="HTML"
             )
-            CAPTCHA_SESSIONS[(group_id, user_id)]["msg_id"] = fallback_msg.message_id
-            asyncio.create_task(auto_delete_msg(fallback_msg, cfg["time"] + 10))
+            CAPTCHA_SESSIONS[(group_id, user_id)]["group_msg_id"] = group_msg.message_id
         except Exception:
             pass
 
@@ -338,7 +354,7 @@ async def handle_new_members(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("cap_ver_") | F.data.startswith("cap_simple_"))
 async def process_captcha(callback: CallbackQuery, bot: Bot):
-    """Evalúa la respuesta de la aduana y desbloquea permisos al usuario."""
+    """Evalúa la respuesta de la aduana y desbloquea permisos al usuario en tiempo real."""
     data = callback.data.split("_")
     if len(data) < 4:
         await callback.answer()
@@ -359,7 +375,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
 
     clicker_id = callback.from_user.id
     if clicker_id != target_user_id:
-        await callback.answer("⚠️ Este desafío no pertenece a tu perfil.", show_alert=True)
+        await callback.answer("⚠️ Este desafío no pertenece a tu perfil / Not your checkpoint.", show_alert=True)
         return
         
     session_key = (group_id, target_user_id)
@@ -369,30 +385,25 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
 
     cfg = await get_captcha_config(group_id)
 
+    # Limpieza del mensaje de aduana
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+    group_msg_id = session_data.get("group_msg_id")
+    if group_msg_id:
+        try:
+            await bot.delete_message(chat_id=group_id, message_id=group_msg_id)
+        except Exception:
+            pass
+
     try:
         chat_info = await bot.get_chat(group_id)
         group_title = chat_info.title or "la comunidad"
     except Exception:
         chat_info = None
         group_title = "la comunidad"
-
-    group_invite = None
-    if chat_info:
-        if chat_info.username:
-            group_invite = f"https://t.me/{chat_info.username}"
-        elif chat_info.invite_link:
-            group_invite = chat_info.invite_link
-
-    if not group_invite:
-        try:
-            group_invite = await bot.export_chat_invite_link(group_id)
-        except Exception:
-            try:
-                new_link = await bot.create_chat_invite_link(group_id, name="Acceso Captcha")
-                group_invite = new_link.invite_link
-            except Exception:
-                bot_me = await bot.get_me()
-                group_invite = f"https://t.me/{bot_me.username}"
 
     if is_correct == 1:
         await callback.answer("✅ ¡Identidad verificada con éxito!", show_alert=False)
@@ -423,44 +434,21 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.warning(f"Aviso otorgando permisos en {group_id}: {e}")
             
-        try: 
-            await callback.message.delete()
-        except Exception: 
-            pass
-            
         user_full_name = callback.from_user.full_name
         user_mention = f"<a href='tg://user?id={target_user_id}'>{user_full_name}</a>"
-
-        success_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"👉 Entrar a {group_title} / Enter Chat", url=group_invite)]
-        ])
-        try:
-            await bot.send_message(
-                chat_id=target_user_id,
-                text=(
-                    f"🎉 <b>¡Verificación completada con éxito!</b>\n\n"
-                    f"Bienvenido a <b>{group_title}</b>. Tu acceso ha sido aprobado y liberado.\n\n"
-                    f"🇺🇸 <i>Checkpoint cleared! Welcome to the crew. Tap below to jump straight in!</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
-                reply_markup=success_kb,
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
 
         try:
             welcome_msg = await bot.send_message(
                 chat_id=group_id,
                 text=(
-                    f"🎉 <b>¡Acceso concedido! Bienvenido a {group_title}</b>\n\n"
+                    f"🎉 <b>¡Acceso Concedido!</b> Bienvenido a <b>{group_title}</b>\n\n"
                     f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
                     f"🔓 Tu acceso ha sido liberado para participar en la comunidad.\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 parse_mode="HTML"
             )
-            asyncio.create_task(auto_delete_msg(welcome_msg, 25))
+            asyncio.create_task(auto_delete_msg(welcome_msg, 20))
         except Exception:
             pass
 
@@ -478,9 +466,9 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                 f"🇺🇸 <i>Incorrect code selected. Access protocol denied.</i>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
-            
+
             try: 
-                await callback.message.edit_text(fail_text, reply_markup=support_kb, parse_mode="HTML")
+                await bot.send_message(chat_id=target_user_id, text=fail_text, reply_markup=support_kb, parse_mode="HTML")
             except Exception: 
                 pass
 
@@ -541,8 +529,8 @@ async def group_security_matrix(message: Message, bot: Bot):
     username = message.from_user.username or ""
     text_content = message.text or message.caption or ""
 
-    # Inmunidad para Centinelas
-    if await is_sentinel_account(group_id, user_id, username):
+    # Inmunidad para Arquitectos Supremos y Centinelas
+    if is_super_admin(user_id) or await is_sentinel_account(group_id, user_id, username):
         return
 
     is_creator = False
@@ -626,7 +614,7 @@ async def group_security_matrix(message: Message, bot: Bot):
             elif "Bot" in origin_type and await get_antispam_filter(group_id, "fwd_bots") == 1: 
                 is_threat_detected = True
 
-    # ⚠️ Procesamiento de Infracción (Borrado + Warns + Mensaje de Servicio Tagueado)
+    # ⚠️ Procesamiento de Infracción (Borrado + Warns + Sanción)
     if is_threat_detected:
         try: 
             await message.delete()
@@ -641,7 +629,6 @@ async def group_security_matrix(message: Message, bot: Bot):
 
         if warnings >= limit:
             try:
-                # Silenciar al infractor en la sala de audio/videochat en vivo
                 try:
                     await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
                 except Exception:
@@ -703,7 +690,6 @@ async def group_security_matrix(message: Message, bot: Bot):
     FLOOD_CACHE[cache_key] = [t for t in FLOOD_CACHE[cache_key] if now - t < time_window]
     FLOOD_CACHE[cache_key].append(now)
 
-    # Limpieza preventiva para optimizar la memoria RAM
     if len(FLOOD_CACHE) > 500:
         keys_to_delete = [k for k, v in FLOOD_CACHE.items() if not v or (now - v[-1] > 60)]
         for k in keys_to_delete:
@@ -716,7 +702,6 @@ async def group_security_matrix(message: Message, bot: Bot):
                 await message.delete()
             user_mention = message.from_user.mention_html()
             
-            # Silenciar en videollamada al instante
             try:
                 await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
             except Exception:
