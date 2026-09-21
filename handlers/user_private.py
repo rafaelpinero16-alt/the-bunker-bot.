@@ -1,3 +1,4 @@
+import os
 import time
 import asyncio
 from aiogram import Router, F, Bot
@@ -34,7 +35,28 @@ router = Router()
 ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = "https://thebunkerapp.netlify.app"
 
-# Estados de edición conversacional en privado
+# ==========================================
+# 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
+# ==========================================
+# Carga IDs desde variables de entorno o define los IDs de Rafa y Javi
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+# IDs de respaldo directo de los arquitectos
+SUPER_ADMIN_IDS.update([5876356778, 6291929381])
+
+def is_super_admin(user_id: int) -> bool:
+    """Verifica si el usuario es uno de los dueños supremos con inmunidad total."""
+    return user_id in SUPER_ADMIN_IDS
+
+async def get_effective_group_tier(group_id: int, user_id: int) -> str:
+    """Otorga ULTRA PRO automático e ilimitado a los Arquitectos."""
+    if is_super_admin(user_id):
+        return "ultra_pro"
+    return await get_group_tier(group_id)
+
+# ==========================================
+# 🧠 ESTADOS DE EDICIÓN CONVERSACIONAL EN PRIVADO
+# ==========================================
 CAPTCHA_STATES = {}
 CLONE_STATES = {}
 SENTINEL_STATES = {}
@@ -42,7 +64,9 @@ VC_SCHED_STATES = {}
 DB_REG_STATES = {}
 MOD_TARGET_STATES = {}
 MIC_VIP_STATES = {}
+MIC_TAG_STATES = {}
 GROUP_MIC_PRICE = {}
+GROUP_VIP_TAG = {}  # Etiqueta personalizada para el comando /mic_vip (por defecto VIP 24/7)
 
 FILTER_MAP = {
     "tglinks": "tg_links", "fwdchan": "fwd_channels", "fwdusr": "fwd_users",
@@ -74,8 +98,8 @@ TEXTS = {
             "Take total perimeter control over your community. From this console you can:\n\n"
             "• 🤖 Configure the <b>Alphanumeric Captcha</b> checkpoint.\n"
             "• 🔒 Manage granular <b>Content Locks</b> and Anti-Spam shields.\n"
-            "• 🎙️ Deploy the <b>Voice Sentinel</b> and acoustic moderations.\n"
-            "• 💰 Activate <b>Telegram Stars Monetization</b> for live voice chats.\n\n"
+            "• 🎙️ Deploy your <b>Dedicated Sentinel</b> and acoustic moderations.\n"
+            "• 💰 Activate <b>Telegram Stars Monetization</b> for live voice chats with custom VIP tags.\n\n"
             "<i>Select the community below you wish to audit and shield:</i>\n\n"
             "© <i>Cloud Media Management</i>"
         ),
@@ -96,9 +120,9 @@ TEXTS = {
         "info_main": (
             "ℹ️ <b>System Core Architecture</b>\n\n"
             "<b>The Bunker Bot</b>\n"
-            "• <b>Version:</b> 5.0 (Elite Core)\n"
+            "• <b>Version:</b> 5.2 (Elite Core - Ultra Pro Shield)\n"
             "• <b>Architect:</b> Master Tom\n"
-            "• <b>Tactical Focus:</b> Alphanumeric Customs, Elite Anti-spam, Anti-flood, and Absolute Security.\n\n"
+            "• <b>Tactical Focus:</b> Multi-Sentinel Architecture, Native VIP Badging, and Absolute Security.\n\n"
             "🛡️ <i>Developed and supported by <b>Cloud Media Management</b>.</i>"
         ),
         "info_how_main": (
@@ -116,10 +140,11 @@ TEXTS = {
             "💎 <b>ULTRA PRO ($8 / 800 Stars):</b>\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
-            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your burner or secondary account as an isolated 24/7 moderator (100% anti-ban protection).\n"
+            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account as an isolated 24/7 moderator (100% anti-ban protection).\n"
+            "• 🏷️ <b>Native VIP Tag Editor:</b> Assign automated, immovable custom titles upon tipping Stars.\n"
             "• 🔇 <b>AutoLower Acoustic Shield:</b> Mutes unverified speakers down to 2% in milliseconds.\n"
-            "• 💰 <b>Direct Stars Monetization (/micvip):</b> Sell 24h VIP mic passes with <b>100% of revenue going straight to your bot's balance</b>.\n"
-            "• 🗓️ <b>Weekly VC Scheduler:</b> Automated voice chat open/close schedules and background continuous stream refresh.\n\n"
+            "• 💰 <b>Direct Stars Monetization (/mic_vip):</b> 100% of revenue flows straight to your balance.\n"
+            "• 🗓️ <b>Weekly VC Scheduler:</b> Automated voice chat open/close schedules and stream refresh.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
@@ -138,11 +163,11 @@ TEXTS = {
             "Total command, decentralized automation, and high-tier monetization for your community:\n\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
-            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your burner or secondary account as a 24/7 voice mod (isolated anti-ban node).\n"
+            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account as a 24/7 voice mod (isolated node).\n"
+            "• 🏷️ <b>Native VIP Tag Assignment:</b> Immovable badges (VIP 24/7) on Stars tips.\n"
             "• 🔇 <b>Smart AutoLower Radar:</b> Unverified mics get dialed down to 2% in milliseconds.\n"
-            "• 💰 <b>Telegram Stars Monetization (/micvip):</b> 100% of pass revenue flows directly into your bot clone balance.\n"
-            "• 🗓️ <b>Weekly VC Scheduler:</b> Automated voice chat open and close cron.\n"
-            "• 🔄 <b>Continuous Stream Optimization:</b> Background stream refresh to kill video lag and black screens.\n\n"
+            "• 💰 <b>Telegram Stars Monetization (/mic_vip):</b> 100% of pass revenue flows directly into your balance.\n"
+            "• 🗓️ <b>Weekly VC Scheduler:</b> Automated voice chat open and close cron.\n\n"
             "<i>Select your payment gateway below:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -170,7 +195,7 @@ TEXTS = {
             "• 🎥 <b>/cams:</b> Stream quality audit & continuous audiovisual optimization.\n"
             "• ⚙️ <b>/autolower:</b> Voice chat volume moderation (2% vs 100%).\n"
             "• 🗓️ <b>/vcsched:</b> Automated Voice Chat opening/closing cron.\n"
-            "• 🎙️ <b>/mic_vip:</b> VIP Microphone 24h pass pricing in Stars.\n\n"
+            "• 🎙️ <b>/mic_vip:</b> VIP Microphone 24h pass pricing in Stars & Custom Tag.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         
@@ -286,8 +311,8 @@ TEXTS = {
             "Toma el control perimetral total de tu comunidad. Desde esta consola podrás:\n\n"
             "• 🤖 Configurar la <b>Aduana Captcha</b> alfanumérica.\n"
             "• 🔒 Establecer <b>Cerraduras</b> de contenido y filtros Anti-Spam.\n"
-            "• 🎙️ Desplegar el <b>Centinela de Voz</b> y atenuación acústica.\n"
-            "• 💰 Activar la <b>Monetización con Telegram Stars</b> en salas en vivo.\n\n"
+            "• 🎙️ Desplegar tu <b>Centinela Dedicado</b> y atenuación acústica.\n"
+            "• 💰 Activar la <b>Monetización con Telegram Stars</b> con etiquetas VIP personalizadas.\n\n"
             "<i>Selecciona abajo la comunidad que deseas auditar y blindar:</i>\n\n"
             "© <i>Cloud Media Management</i>"
         ),
@@ -308,9 +333,9 @@ TEXTS = {
         "info_main": (
             "ℹ️ <b>Núcleo del Sistema</b>\n\n"
             "<b>The Bunker Bot</b>\n"
-            "• <b>Versión:</b> 5.0 (Elite Core)\n"
+            "• <b>Versión:</b> 5.2 (Elite Core - Ultra Pro Shield)\n"
             "• <b>Arquitecto:</b> Master Tom\n"
-            "• <b>Enfoque Táctico:</b> Aduana Alfanumérica, Anti-spam de Élite, Anti-flood y Seguridad Absoluta.\n\n"
+            "• <b>Enfoque Táctico:</b> Arquitectura Multi-Centinela, Etiquetas Nativas VIP y Seguridad Absoluta.\n\n"
             "🛡️ <i>Desarrollado y respaldado por <b>Cloud Media Management</b>.</i>"
         ),
         "info_how_main": (
@@ -328,10 +353,11 @@ TEXTS = {
             "💎 <b>Plan ULTRA PRO ($8 / 800 Stars):</b>\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
-            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como operador 24/7 en videollamadas (entorno aislado antiban).\n"
-            "• 🔇 <b>Radar AutoLower Inteligente:</b> Atenúa al 2% a participantes no autorizados en milisegundos.\n"
-            "• 💰 <b>Monetización Directa Stars (/micvip):</b> Venta de pases VIP de 24h donde <b>el 100% de las Stars recaudadas van directo a tu bot clon</b>.\n"
-            "• 🗓️ <b>Programador Semanal VC:</b> Apertura y cierre autónomo de salas y refresco continuo de cámaras cada 3.5h.\n\n"
+            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como asistente 24/7 en llamadas (nodo aislado antiban).\n"
+            "• 🏷️ <b>Editor Nativo de Etiquetas VIP:</b> Asignación de rangos inamovibles (VIP 24/7) automáticos por propinas.\n"
+            "• 🔇 <b>Radar AutoLower Inteligente:</b> Micrófonos no autorizados al 2% en milisegundos.\n"
+            "• 💰 <b>Monetización Stars (/mic_vip):</b> El 100% de las Stars recaudadas entran directo a tu balance.\n"
+            "• 🗓️ <b>Programador VC Semanal:</b> Apertura y cierre autónomo de videochats según cronograma.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
@@ -351,10 +377,10 @@ TEXTS = {
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
             "• 🎙️ <b>Centinela de Voz Dedicado:</b> Tu cuenta secundaria como asistente 24/7 en llamadas (nodo aislado antiban).\n"
+            "• 🏷️ <b>Etiquetas Nativas VIP:</b> Asignación de rangos inamovibles al recibir propinas de Stars.\n"
             "• 🔇 <b>Radar AutoLower Inteligente:</b> Micrófonos no autorizados al 2% en milisegundos.\n"
-            "• 💰 <b>Monetización Stars (/micvip):</b> El 100% de las Stars recaudadas entran directo a tu bot clon.\n"
-            "• 🗓️ <b>Programador VC Semanal:</b> Apertura y cierre autónomo de videochats según cronograma.\n"
-            "• 🔄 <b>Optimización Continua:</b> Refresco en segundo plano para mantener cámaras y audio al 100% fluidos.\n\n"
+            "• 💰 <b>Monetización Stars (/mic_vip):</b> El 100% de las Stars recaudadas entran directo a tu balance.\n"
+            "• 🗓️ <b>Programador VC Semanal:</b> Apertura y cierre autónomo de videochats según cronograma.\n\n"
             "<i>Selecciona tu pasarela preferida para activar al instante:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -382,7 +408,7 @@ TEXTS = {
             "• 🎥 <b>/cams:</b> Calidad de video y optimización preventiva de llamadas.\n"
             "• ⚙️ <b>/autolower:</b> Control de atenuación de micrófonos en llamadas.\n"
             "• 🗓️ <b>/vcsched:</b> Cronograma de apertura/cierre automático de videochats.\n"
-            "• 🎙️ <b>/mic_vip:</b> Tarifa en Stars del pase de micrófono VIP de 24h.\n\n"
+            "• 🎙️ <b>/mic_vip:</b> Tarifa en Stars y Etiqueta VIP para pases de micrófono de 24h.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         
@@ -480,14 +506,17 @@ TEXTS = {
 }
 
 # ==========================================
-# 🔍 FILTRO DINÁMICO DE GRUPOS ACTIVOS (EXCLUSIVO CREADOR)
+# 🔍 FILTRO DINÁMICO DE GRUPOS ACTIVOS (CON INMUNIDAD)
 # ==========================================
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
-    """Filtra y devuelve solo los grupos donde el usuario es el Creador (Dueño)."""
+    """Devuelve los grupos gestionados. Los SuperAdmins tienen bypass de propiedad."""
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
         return []
         
+    if is_super_admin(user_id):
+        return raw_groups
+
     bot_info = await bot.get_me()
     bot_id = bot_info.id
     
@@ -506,10 +535,12 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     return [res for res in results if res is not None]
 
 # ==========================================
-# 🚀 VALIDADORES DE PERMISOS (ESTRICTAMENTE DUEÑO / CREADOR)
+# 🚀 VALIDADORES DE PERMISOS (CON INMUNIDAD TOTAL)
 # ==========================================
 async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
-    """Garantiza acceso exclusivo al Dueño absoluto del grupo."""
+    """Garantiza acceso al Dueño o bypass total para los Arquitectos."""
+    if is_super_admin(callback.from_user.id):
+        return True
     lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
     t = TEXTS[lang]
     try:
@@ -522,7 +553,9 @@ async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: i
     return False
 
 async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int) -> bool:
-    """Garantiza acceso exclusivo al Dueño absoluto del grupo vía mensaje."""
+    """Garantiza acceso vía mensaje con bypass total para los Arquitectos."""
+    if is_super_admin(message.from_user.id):
+        return True
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS[lang]
     try:
@@ -601,8 +634,8 @@ def get_group_panel_keyboard(group_id: int, lang: str):
     ])
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
+    """Teclado de pago blindado: Centinela Maestro eliminado de vistas públicas."""
     t = TEXTS.get(lang, TEXTS["es"])
-    assistant_invite_url = "https://t.me/Alphacentinel?startgroup=true"
     stars_price = "500 XTR" if tier_level == "pro" else "800 XTR"
     stars_label = f"⭐ Pagar con Stars ({stars_price})" if lang == "es" else f"⭐ Pay with Stars ({stars_price})"
     
@@ -614,10 +647,8 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
         ]
     ]
 
-    if tier_level == "pro":
-        btn_text = "🤖 Añadir Centinela Maestro (@Alphacentinel)" if lang == "es" else "🤖 Add Master Sentinel (@Alphacentinel)"
-        keyboard_rows.append([InlineKeyboardButton(text=btn_text, url=assistant_invite_url)])
-    else:
+    # En ULTRA se ofrece la configuración de clon y centinela propio sin exponer la cuenta maestra
+    if tier_level == "ultra":
         btn_text = "🧬 Configurar Clon & Centinela Propio" if lang == "es" else "🧬 Setup Own Clone & Sentinel"
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"gset_clone_{group_id}_{lang}")])
 
@@ -870,13 +901,16 @@ def get_eco_keyboard(group_id: int, lang: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📡 Radar Ecosistema", callback_data=f"radar_eco_{group_id}"), InlineKeyboardButton(text="🎥 /cams", callback_data=f"cmd_cams_{group_id}_{lang}")],
         [InlineKeyboardButton(text="⚙️ /autolower", callback_data=f"cmd_autolower_{group_id}_{lang}"), InlineKeyboardButton(text="🗓️ Programador VC", callback_data=f"vcsched_menu_{group_id}_{lang}")],
-        [InlineKeyboardButton(text="🎙️ /mic_vip", callback_data=f"cmd_mic_{group_id}_{lang}")],
+        [
+            InlineKeyboardButton(text="🎙️ /mic_vip", callback_data=f"cmd_mic_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🏷️ Etiqueta VIP", callback_data=f"cmd_mictag_{group_id}_{lang}")
+        ],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
 
 async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
-    tier = await get_group_tier(group_id)
+    tier = await get_effective_group_tier(group_id, user_id)
     if tier == "ultra_pro":
         session_info = await get_owner_session(user_id, group_id)
         has_sentinel = session_info is not None
@@ -1222,12 +1256,41 @@ async def handle_private_inputs(message: Message, bot: Bot):
             )
         return
 
+    if user_id in MIC_TAG_STATES:
+        data = MIC_TAG_STATES.pop(user_id)
+        group_id = data["group_id"]
+        lang = data["lang"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Volver a Ecosistema", callback_data=f"menu_eco_{group_id}_{lang}")]
+        ])
+        
+        # Validación de longitud: Telegram permite hasta 16 caracteres para custom_title de admin
+        if 1 <= len(text_input) <= 16:
+            GROUP_VIP_TAG[group_id] = text_input
+            await message.answer(
+                f"🏷️ <b>¡Etiqueta VIP Actualizada con Éxito!</b>\n\n"
+                f"• <b>Comunidad ID:</b> <code>{group_id}</code>\n"
+                f"• <b>Etiqueta Nativa Asignada:</b> <code>{text_input}</code> 🟢\n\n"
+                f"<i>Al recibir propina de Stars o ejecutar /mic_vip, el usuario recibirá este título inamovible de forma automática.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb,
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(
+                "⚠️ La etiqueta debe tener entre 1 y 16 caracteres (límite oficial de Telegram para títulos de administrador).\n\n"
+                "Ejemplo: <code>VIP 24/7</code> o <code>VIP Gold</code>.",
+                reply_markup=back_kb,
+                parse_mode="HTML"
+            )
+        return
+
 @router.callback_query(F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") | F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") | F.data.startswith("reg_") | F.data.startswith("vcsched_"))
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     await callback.answer()
     
     # Limpieza preventiva de estados si el usuario navega a otra sección
-    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES]:
+    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES]:
         state_dict.pop(callback.from_user.id, None)
 
     data = callback.data.split("_")
@@ -1274,7 +1337,10 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             ])
         elif target == "id":
             user, tier_db = callback.from_user, await get_user_global_tier(callback.from_user.id)
-            rank_str = "Comandante ULTRA 💎" if tier_db == "ultra_pro" else ("Comandante PRO ⭐" if tier_db == "pro" else "Comandante (Free)")
+            if is_super_admin(user.id):
+                rank_str = "Arquitecto Supremo (Inmunidad Total) ⚡"
+            else:
+                rank_str = "Comandante ULTRA 💎" if tier_db == "ultra_pro" else ("Comandante PRO ⭐" if tier_db == "pro" else "Comandante (Free)")
             text, keyboard = t["id_status"].format(id=user.id, username=user.username or "N/A", rank=rank_str), get_simple_back_keyboard(lang)
         elif target in ["mod", "eco"]:
             group_id = int(data[2])
@@ -1305,7 +1371,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if not await verify_admin_privileges(callback, bot, group_id):
             return
 
-        tier = await get_group_tier(group_id)
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
             sched_lock_text = (
                 "🗓️ <b>Programador Automático de Videochats (ULTRA PRO)</b>\n\n"
@@ -1408,7 +1474,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             await revoke_owner_session(callback.from_user.id, group_id)
             await callback.answer("🛑 Centinela propio desconectado con éxito.", show_alert=True)
             
-            tier = await get_group_tier(group_id)
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
             try:
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
@@ -1478,13 +1544,15 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             ])
         elif sub_cmd == "mic":
             curr_price = GROUP_MIC_PRICE.get(group_id, 50)
+            curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
             text = (
                 "🎙️ <b>Pase VIP de Micrófono (Monetización en Stars)</b>\n\n"
                 "Permite a los miembros desbloquear su voz al 100% continuo durante 24h pagando Telegram Stars (XTR).\n\n"
                 "💡 <i>Ventaja Clave:</i> Al desplegar tu propio <b>Bot Clone</b> y <b>Centinela Dedicado</b>, el 100% de las Stars recaudadas por pases VIP van <b>directas a la cuenta de tu bot</b>, monetizando tu comunidad de forma totalmente automatizada.\n\n"
                 f"• <b>Tarifa Actual:</b> <code>{curr_price} Stars (XTR)</code> 🟢\n"
+                f"• <b>Etiqueta Asignada:</b> <code>{curr_tag}</code> (Nativa e inamovible)\n"
                 "• <b>Duración del Pase:</b> 24 Horas automáticas\n\n"
-                "Selecciona la tarifa de cobro que deseas aplicar:\n\n"
+                "Selecciona la tarifa de cobro o personaliza la etiqueta:\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1496,8 +1564,28 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                     InlineKeyboardButton(text="⭐ 100 Stars", callback_data=f"micval_100_{group_id}_{lang}"),
                     InlineKeyboardButton(text="✍️ Tarifa Personalizada", callback_data=f"micval_custom_{group_id}_{lang}")
                 ],
+                [
+                    InlineKeyboardButton(text=f"🏷️ Etiqueta: {curr_tag}", callback_data=f"cmd_mictag_{group_id}_{lang}")
+                ],
                 [InlineKeyboardButton(text="🔙 Volver a Ecosistema", callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
+        elif sub_cmd == "mictag":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                await callback.answer("💎 La edición de etiqueta nativa requiere nivel ULTRA PRO.", show_alert=True)
+                return
+            
+            MIC_TAG_STATES[callback.from_user.id] = {"group_id": group_id, "lang": lang}
+            curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
+            await callback.message.answer(
+                "🏷️ <b>Editor de Etiqueta VIP Nativa (ULTRA PRO)</b>\n\n"
+                f"Etiqueta actual: <code>{curr_tag}</code>\n\n"
+                "Envía en este chat privado el texto que deseas asignar automáticamente como título de administrador (máximo 16 caracteres).\n\n"
+                "<i>Ejemplo: VIP 24/7, VIP Elite, Sponsor</i>\n\n"
+                "🛡️ <i>Cloud Media Management</i>",
+                parse_mode="HTML"
+            )
+            return
         elif sub_cmd in ["ban", "mute"]:
             text = f"⚡ <b>Directiva de Moderación: /{sub_cmd}</b>\n\nSelecciona la duración de la directiva sobre el usuario:"
             keyboard = get_time_selection_keyboard(sub_cmd, group_id, lang)
@@ -1572,13 +1660,15 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             price_int = int(sub_val)
             GROUP_MIC_PRICE[group_id] = price_int
             await callback.answer(f"Tarifa configurada a {price_int} Stars ⭐", show_alert=True)
+            curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
             text = (
                 "🎙️ <b>Pase VIP de Micrófono (Monetización en Stars)</b>\n\n"
                 "Permite a los miembros desbloquear su voz al 100% continuo durante 24h pagando Telegram Stars (XTR).\n\n"
                 "💡 <i>Ventaja Clave:</i> Al desplegar tu propio <b>Bot Clone</b> y <b>Centinela Dedicado</b>, el 100% de las Stars recaudadas por pases VIP van <b>directas a la cuenta de tu bot</b>, monetizando tu comunidad de forma totalmente automatizada.\n\n"
                 f"• <b>Tarifa Actual:</b> <code>{price_int} Stars (XTR)</code> 🟢\n"
+                f"• <b>Etiqueta Asignada:</b> <code>{curr_tag}</code> (Nativa e inamovible)\n"
                 "• <b>Duración del Pase:</b> 24 Horas automáticas\n\n"
-                "Selecciona la tarifa de cobro que deseas aplicar:\n\n"
+                "Selecciona la tarifa de cobro o personaliza la etiqueta:\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1589,6 +1679,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [
                     InlineKeyboardButton(text="⭐ 100 Stars", callback_data=f"micval_100_{group_id}_{lang}"),
                     InlineKeyboardButton(text="✍️ Tarifa Personalizada", callback_data=f"micval_custom_{group_id}_{lang}")
+                ],
+                [
+                    InlineKeyboardButton(text=f"🏷️ Etiqueta: {curr_tag}", callback_data=f"cmd_mictag_{group_id}_{lang}")
                 ],
                 [InlineKeyboardButton(text="🔙 Volver a Ecosistema", callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
@@ -1711,7 +1804,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 parse_mode="HTML"
             )
         elif module == "delmsgs":
-            tier = await get_group_tier(group_id)
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
             tier_display = tier.upper()
             quota_desc = "3 purgas de servicio diarias (Plan Básico)" if tier == "free" else "Purga automatizada ilimitada (PRO / ULTRA)"
             if lang == "en":
@@ -1737,7 +1830,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 parse_mode="HTML"
             )
         elif module == "clone":
-            tier = await get_group_tier(group_id)
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
             try:
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
@@ -1789,7 +1882,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 
     elif action == "delmsgs":
         sub = data[1]
-        tier = await get_group_tier(group_id)
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if sub == "tier":
             info = "ℹ️ Plan Básico: Límite de 3 purgas diarias." if tier == "free" else f"⭐ Plan {tier.upper()}: Cuota mensual automatizada."
             await callback.answer(info, show_alert=True)
@@ -1900,7 +1993,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 parse_mode="HTML"
             )
         elif sub == "text":
-            tier_check = await get_group_tier(group_id)
+            tier_check = await get_effective_group_tier(group_id, callback.from_user.id)
             if tier_check not in ["pro", "ultra_pro"]:
                 upsell_text = (
                     "⭐ <b>Aduana Captcha Pro — Mensaje Personalizado</b>\n\n"
@@ -1939,7 +2032,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             cfg_updated = await get_captcha_config(group_id)
             
             if callback.message.text and ("Service" in callback.message.text or "Purga" in callback.message.text or "Purge" in callback.message.text or "Centro" in callback.message.text):
-                tier = await get_group_tier(group_id)
+                tier = await get_effective_group_tier(group_id, callback.from_user.id)
                 quota_desc = "3 purgas de servicio diarias (Plan Básico)" if tier == "free" else "Purga automatizada ilimitada (PRO / ULTRA)"
                 try:
                     await callback.message.edit_text(
