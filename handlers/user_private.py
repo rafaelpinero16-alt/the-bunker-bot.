@@ -84,6 +84,22 @@ def set_master_bot_id(bot_id: int) -> None:
     global MASTER_BOT_ID
     MASTER_BOT_ID = int(bot_id)
 
+MASTER_BOT_USERNAME = ""
+
+def set_master_bot_username(username: str) -> None:
+    """
+    Fija el @username del Bot Maestro (lo invoca main.py al arrancar, tras get_me()).
+
+    Se usa para construir deep-links (t.me/<usuario>?start=sub_...) que garantizan
+    que la facturación de suscripciones PRO/ULTRA PRO SIEMPRE se cobre a través del
+    Maestro, incluso cuando el comando se ejecuta desde un Bot Clon. Ver payments.py.
+    """
+    global MASTER_BOT_USERNAME
+    MASTER_BOT_USERNAME = (username or "").lstrip("@")
+
+def get_master_bot_username() -> str:
+    return MASTER_BOT_USERNAME
+
 def _resolve_master_bot_id() -> int:
     if MASTER_BOT_ID:
         return MASTER_BOT_ID
@@ -207,12 +223,12 @@ TEXTS = {
             "• Essential group security and baseline anti-spam.\n"
             "• Standard one-tap verification captcha.\n"
             "• 3 daily uses limit for remote moderation commands.\n\n"
-            "⭐ <b>PRO Plan ($5 / 500 Stars):</b>\n"
+            "⭐ <b>PRO Plan (300 Stars):</b>\n"
             "• ⚡ <b>Unlimited bot command usage:</b> Zero daily caps.\n"
             "• 🗑️ <b>Automated Purge Center:</b> Routine cleanup of service logs and chat clutter.\n"
             "• 🤖 <b>Advanced Captcha Pro:</b> Custom welcome copy and challenge timeouts.\n"
             "• 🛡️ <b>Granular Anti-Spam:</b> Strict filtering against forwarded posts, bots, and links.\n\n"
-            "💎 <b>ULTRA PRO ($8 / 800 Stars):</b>\n"
+            "💎 <b>ULTRA PRO (600 Stars):</b>\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
             "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account seamlessly via phone number (100% anti-ban protection).\n"
@@ -224,7 +240,7 @@ TEXTS = {
         ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
         "pay_pro_title": (
-            "⭐ <b>PRO Plan Subscription — {group_name} ($5 / 500 Stars)</b>\n\n"
+            "⭐ <b>PRO Plan Subscription — {group_name} (300 Stars)</b>\n\n"
             "Upgrade your community to elite operational status:\n\n"
             "• ⚡ <b>Unlimited Bot Commands:</b> Bypass the 3 daily uses limit.\n"
             "• 🗑️ <b>Automated Purge Center:</b> Unlimited service logs and chat clutter cleanup.\n"
@@ -234,7 +250,7 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pay_ultra_title": (
-            "💎 <b>ULTRA PRO Subscription — {group_name} ($8 / 800 Stars)</b>\n\n"
+            "💎 <b>ULTRA PRO Subscription — {group_name} (600 Stars)</b>\n\n"
             "Total command, decentralized automation, and high-tier monetization for your community:\n\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
@@ -500,12 +516,12 @@ TEXTS = {
             "• Seguridad esencial para grupos y escudo anti-spam básico.\n"
             "• Verificación de identidad con botón estándar de un solo toque.\n"
             "• Límite de 3 usos diarios en comandos de moderación remota.\n\n"
-            "⭐ <b>Plan PRO ($5 / 500 Stars):</b>\n"
+            "⭐ <b>Plan PRO (300 Stars):</b>\n"
             "• ⚡ <b>Comandos de bot ilimitados:</b> Sin topes diarios.\n"
             "• 🗑️ <b>Purga Automatizada:</b> Limpieza automática de mensajes de servicio y clutter.\n"
             "• 🤖 <b>Aduana Captcha Pro:</b> Mensaje de bienvenida y tiempos 100% personalizados.\n"
             "• 🛡️ <b>Anti-Spam Granular Total:</b> Bloqueo selectivo de canales, bots, citas y enlaces.\n\n"
-            "💎 <b>Plan ULTRA PRO ($8 / 800 Stars):</b>\n"
+            "💎 <b>Plan ULTRA PRO (600 Stars):</b>\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
             "• 🎙️ <b>Centinela de Voz Dedicado:</b> Conecta tu cuenta fácilmente mediante tu número telefónico (nodo aislado antiban).\n"
@@ -517,7 +533,7 @@ TEXTS = {
         ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
         "pay_pro_title": (
-            "⭐ <b>Suscripción Plan PRO — {group_name} ($5 / 500 Stars)</b>\n\n"
+            "⭐ <b>Suscripción Plan PRO — {group_name} (300 Stars)</b>\n\n"
             "Eleva tu comunidad a un estándar profesional de alta seguridad:\n\n"
             "• ⚡ <b>Comandos de Bot Ilimitados:</b> Sin tope diario de 3 usos.\n"
             "• 🗑️ <b>Purga Automatizada:</b> Limpieza ilimitada de mensajes de servicio y chat.\n"
@@ -527,7 +543,7 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pay_ultra_title": (
-            "💎 <b>Suscripción ULTRA PRO — {group_name} ($8 / 800 Stars)</b>\n\n"
+            "💎 <b>Suscripción ULTRA PRO — {group_name} (600 Stars)</b>\n\n"
             "Poder absoluto, automatización descentralizada y monetización para tu comunidad:\n\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
@@ -876,7 +892,7 @@ def get_group_panel_keyboard(group_id: int, lang: str):
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
     t = TEXTS.get(lang, TEXTS["es"])
-    stars_price = "500 XTR" if tier_level == "pro" else "800 XTR"
+    stars_price = "300 XTR" if tier_level == "pro" else "600 XTR"
     stars_label = f"⭐ Pagar con Stars ({stars_price})" if lang == "es" else f"⭐ Pay with Stars ({stars_price})"
     
     keyboard_rows = [
@@ -1741,7 +1757,34 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
-        
+
+        # 🔒 Blindaje por licencia: Clonación de Bot y Centinela Dedicado son
+        # exclusivos ULTRA PRO. El teclado ya oculta estos botones para Free/PRO,
+        # pero se revalida aquí para no depender únicamente de la UI.
+        if sub in ("token", "phone"):
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                clone_lock_text = (
+                    "🧬 <b>Clonación de Bot & Centinela Dedicado (ULTRA PRO)</b>\n\n"
+                    "Desplegar tu propio Bot Clon bajo token de @BotFather y vincular un Centinela Dedicado vía número de teléfono son capacidades exclusivas del nivel ULTRA PRO.\n\n"
+                    "🔒 <i>Actualiza tu licencia para desbloquear infraestructura aislada, blindaje antiban y monetización directa en Stars.</i>\n\n"
+                    "🛡️ <i>Cloud Media Management</i>"
+                ) if lang == "es" else (
+                    "🧬 <b>Bot Cloning & Dedicated Sentinel (ULTRA PRO)</b>\n\n"
+                    "Deploying your own Bot Clone under a @BotFather token and linking a Dedicated Sentinel via phone number are exclusive ULTRA PRO capabilities.\n\n"
+                    "🔒 <i>Upgrade your license to unlock isolated infrastructure, anti-ban protection, and direct Stars monetization.</i>\n\n"
+                    "🛡️ <i>Cloud Media Management</i>"
+                )
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Upgrade to ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
+                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                ])
+                try:
+                    await callback.message.edit_text(clone_lock_text, reply_markup=keyboard, parse_mode="HTML")
+                except TelegramBadRequest:
+                    pass
+                return
+
         if sub == "token":
             CLONE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1864,6 +1907,29 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
         elif sub_cmd == "autolower":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                al_lock_text = (
+                    "🔇 <b>Radar de Transmisiones / AutoLower (ULTRA PRO)</b>\n\n"
+                    "La atenuación acústica automática de micrófonos no autorizados durante las transmisiones en vivo es una capacidad avanzada del Centinela.\n\n"
+                    "🔒 <i>Este módulo de radar está disponible exclusivamente en el nivel ULTRA PRO.</i>\n\n"
+                    "🛡️ <i>Cloud Media Management</i>"
+                ) if lang == "es" else (
+                    "🔇 <b>Stream Radar / AutoLower (ULTRA PRO)</b>\n\n"
+                    "Automatic acoustic dimming of unauthorized microphones during live voice chats is an advanced Sentinel capability.\n\n"
+                    "🔒 <i>This radar module is available exclusively at the ULTRA PRO tier.</i>\n\n"
+                    "🛡️ <i>Cloud Media Management</i>"
+                )
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Upgrade to ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
+                    [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
+                ])
+                try:
+                    await callback.message.edit_text(al_lock_text, reply_markup=keyboard, parse_mode="HTML")
+                except TelegramBadRequest:
+                    pass
+                return
+
             curr_al = await get_autolower_status(group_id)
             status_str = "🟢 ACTIVADO (2% para no autorizados)" if curr_al == 1 else "🔴 DESACTIVADO (Micrófonos Libres)"
             if lang == "en":
@@ -1929,6 +1995,13 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         new_st = int(data[1])
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
+            return
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            await callback.answer(
+                "🔒 El Radar AutoLower requiere licencia ULTRA PRO." if lang == "es" else "🔒 AutoLower Radar requires the ULTRA PRO license.",
+                show_alert=True
+            )
             return
         await set_autolower_status(group_id, new_st)
         await callback.answer(t["al_updated_1"] if new_st == 1 else t["al_updated_0"])
