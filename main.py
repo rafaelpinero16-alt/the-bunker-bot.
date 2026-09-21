@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-from database.database import init_db, get_db_connection
+from database.database import init_db, get_all_active_clone_tokens
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
     payments, 
@@ -31,56 +31,91 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8801126106:AAH2uxiHrU2g4zhtdMn3H_iGZ0pjkaXaS
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID", "-1004351489258")
 ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW) if ADMIN_GROUP_ID_RAW else None
 
-# Diccionario global para almacenar las tareas de los bots clones activos: {token: task}
+# Diccionario global en memoria: {token: {"bot": Bot, "task": Task}}
 active_clone_tasks = {}
 dp = Dispatcher()
-_global_dp_initialized = False
 
-def get_all_active_clones() -> list:
-    """Consulta en la base de datos todos los tokens de bots clones registrados."""
+
+async def _clone_worker(clone_bot: Bot, token: str):
+    """
+    Worker de polling dedicado para clones que alimenta el Dispatcher central
+    mediante feed_update, garantizando aislamiento y respuesta instantánea.
+    """
+    allowed_updates = [
+        "message", "callback_query", "pre_checkout_query", 
+        "chat_join_request", "chat_member", "my_chat_member"
+    ]
+    
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT bot_token FROM bot_clones WHERE bot_token != ''")
-        rows = cursor.fetchall()
-        conn.close()
-        return [row[0] for row in rows if row[0]]
+        await clone_bot.delete_webhook(drop_pending_updates=True)
+        bot_info = await clone_bot.get_me()
+        bot_username = bot_info.username or "BotClon"
+        logging.info(f"🧬 [Bot Clon Activo]: Poller iniciado para @{bot_username} (ID: {bot_info.id}).")
     except Exception as e:
-        logging.error(f"⚠️ [Clones DB Error]: No se pudieron leer los clones activos: {e}")
-        return []
+        logging.error(f"❌ [Error Handshake Clon {token[:10]}]: {e}")
+        return
+
+    offset = None
+    while token in active_clone_tasks:
+        try:
+            updates = await clone_bot.get_updates(
+                offset=offset, 
+                timeout=15, 
+                allowed_updates=allowed_updates
+            )
+            for update in updates:
+                offset = update.update_id + 1
+                # Inyección no bloqueante en el Dispatcher con la identidad del clon
+                asyncio.create_task(dp.feed_update(bot=clone_bot, update=update))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logging.warning(f"⚠️ [Loop Clon @{bot_username}]: {e}")
+            await asyncio.sleep(2)
+
 
 async def start_clone_polling_task(token: str):
-    """Inicia un ciclo de polling independiente para un bot clon específico."""
-    if token in active_clone_tasks:
-        return  # Ya está corriendo
+    """Instancia y levanta la tarea de escucha en segundo plano para un bot clon."""
+    if not token or token in active_clone_tasks:
+        return
 
     try:
         clone_bot = Bot(
             token=token, 
             default=DefaultBotProperties(parse_mode=ParseMode.HTML)
         )
-        
-        # Omitir actualizaciones viejas para este clon
-        await clone_bot.delete_webhook(drop_pending_updates=True)
-        
-        logging.info(f"🧬 [Bot Clon Activo]: Desplegando instancia para el token {token[:10]}...")
-        
-        # Ejecutar polling en segundo plano usando el dispatcher general
-        task = asyncio.create_task(dp.start_polling(clone_bot, handled_exceptions=True))
+        task = asyncio.create_task(_clone_worker(clone_bot, token))
         active_clone_tasks[token] = {
             "bot": clone_bot,
             "task": task
         }
     except Exception as e:
-        logging.error(f"⚠️ [Error al arrancar Bot Clon {token[:10]}]: {e}")
+        logging.error(f"⚠️ [Error Inicializando Bot Clon {token[:10]}]: {e}")
+
+
+async def stop_clone_polling_task(token: str):
+    """Detiene la tarea del clon y cierra su sesión de forma limpia."""
+    task_data = active_clone_tasks.pop(token, None)
+    if task_data:
+        task_data["task"].cancel()
+        try:
+            await task_data["bot"].session.close()
+        except Exception:
+            pass
+        logging.info(f"🛑 [Bot Clon Desconectado]: Instancia {token[:10]} liberada de RAM.")
+
 
 def trigger_dynamic_clone(token: str):
-    """Función llamada desde user_private.py al registrar con éxito un nuevo token."""
+    """Disparador dinámico llamado desde user_private.py al registrar un nuevo token."""
     asyncio.create_task(start_clone_polling_task(token))
 
 
+def trigger_disconnect_clone(token: str):
+    """Disparador dinámico para desconectar un clon a petición del usuario."""
+    asyncio.create_task(stop_clone_polling_task(token))
+
+
 async def main():
-    global _global_dp_initialized
     # 1. Configuración de logging unificado y limpio
     logging.basicConfig(
         level=logging.INFO,
@@ -120,11 +155,13 @@ async def main():
 
     # 7. CARGAR Y ARRANCAR TODOS LOS BOTS CLONES EXISTENTES EN LA BD
     print("🧬 [Gestor de Clones]: Sincronizando bots clones registrados en la base de datos...")
-    stored_clones = get_all_active_clones()
-    for clone_token in stored_clones:
-        await start_clone_polling_task(clone_token)
-
-    print(f"🚀 ¡El Búnker Bot Maestro y {len(stored_clones)} Clones están completamente operativos, Rafa!")
+    try:
+        stored_clones = await get_all_active_clone_tokens()
+        for clone_token in stored_clones:
+            await start_clone_polling_task(clone_token)
+        print(f"🚀 ¡El Búnker Bot Maestro y {len(stored_clones)} Clones están completamente operativos, Rafa!")
+    except Exception as e:
+        print(f"⚠️ [Aviso Clones BD]: No se pudieron precargar los clones: {e}")
 
     try:
         # Purgar actualizaciones viejas del bot maestro
@@ -143,12 +180,8 @@ async def main():
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
         print("🛑 [Sistema]: Deteniendo clúster, clones y cerrando sesiones de forma segura...")
-        for data in active_clone_tasks.values():
-            try:
-                data["task"].cancel()
-                await data["bot"].session.close()
-            except Exception:
-                pass
+        for token in list(active_clone_tasks.keys()):
+            await stop_clone_polling_task(token)
         await close_all_sentinels()
         await master_bot.session.close()
         print("🛡️ [Sistema]: El Búnker se ha cerrado de forma ordenada bajo los estándares de Cloud Media Management.")

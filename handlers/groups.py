@@ -67,7 +67,6 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 @router.my_chat_member()
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     """Detecta automáticamente cuando el bot maestro o cualquier clon es promovido a administrador."""
-    # Filtrar únicamente transiciones donde el nuevo estado sea administrador/creador y antes no lo fuera
     if event.new_chat_member.status not in ["administrator", "creator"]:
         return
     if event.old_chat_member.status in ["administrator", "creator"]:
@@ -85,13 +84,41 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     if user:
         await register_user_group(user.id, group_id, group_name)
 
+    bot_info = await bot.get_me()
+
+    # Mensaje de bienvenida público enviado directamente al grupo con enlaces al bot activo
+    group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🚀 Iniciar Bot / Start Bot", url=f"https://t.me/{bot_info.username}?start=true"),
+            InlineKeyboardButton(text="⚙️ Configurar / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")
+        ]
+    ])
+
+    group_welcome_text = (
+        f"🛡️ <b>¡SISTEMA DE SEGURIDAD DESPLEGADO! / SECURITY BOT DEPLOYED!</b>\n\n"
+        f"Hola a todos. He sido activado como administrador para blindar el perímetro de <b>{group_name}</b> con aduana alfanumérica, anti-spam y protección de transmisiones.\n\n"
+        f"🇺🇸 <i>Greetings! I have been activated as an administrator to protect <b>{group_name}</b> with automated captcha customs, anti-spam shields, and stream monitoring.</i>\n\n"
+        f"👑 <b>Panel de Control / Management:</b>\n"
+        f"El Propietario del grupo puede pulsar los botones inferiores para configurar la matriz en privado.\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=group_id,
+            text=group_welcome_text,
+            reply_markup=group_welcome_kb,
+            parse_mode="HTML"
+        )
+    except Exception as ex:
+        logger.warning(f"Aviso al enviar bienvenida al grupo {group_id}: {ex}")
+
+    # Notificación de auditoría a la consola de administración
     admin_group_id_raw = os.getenv("ADMIN_GROUP_ID")
     if admin_group_id_raw:
         try:
             admin_group_id = int(admin_group_id_raw)
-            bot_info = await bot.get_me()
-            
-            kb = InlineKeyboardMarkup(inline_keyboard=[
+            kb_admin = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="⚙️ Configurar Matriz", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}"),
                     InlineKeyboardButton(text="⚡ Elevar a PRO/ULTRA", url=f"https://t.me/{bot_info.username}?start=sub_pro_{group_id}")
@@ -109,10 +136,10 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
                     f"• <b>Chat ID:</b> <code>{group_id}</code>\n"
                     f"• <b>Enlace / Ref:</b> {invite_link}\n"
                     f"• <b>Autor de Alta:</b> {user.full_name if user else 'N/A'} (<code>{user.id if user else 'N/A'}</code>)\n\n"
-                    f"✅ Instancia desplegada con éxito. Lista para auditar el perímetro.\n\n"
+                    f"✅ Instancia desplegada con éxito. Perímetro activo.\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
-                reply_markup=kb,
+                reply_markup=kb_admin,
                 parse_mode="HTML"
             )
         except Exception as e:
@@ -198,7 +225,7 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
             try:
                 fail_msg = await bot.send_message(
                     chat_id=group_id, 
-                    text=f"❌ <a href='tg://user?id={user_id}'>Usuario</a> no completó la verificación a tiempo.", 
+                    text=f"❌ <a href='tg://user?id={user_id}'>Usuario / User</a> no completó la verificación a tiempo.", 
                     reply_markup=support_kb, 
                     parse_mode="HTML"
                 )
@@ -288,7 +315,7 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
     except Exception:
         pass
 
-    # Si no tiene abierto el privado del bot, se despliega la aduana directamente en el grupo
+    # Si el usuario no tiene abierto el privado del bot, se despliega la aduana directamente en el grupo
     if not dm_sent and not is_join_req:
         try:
             group_msg = await bot.send_message(
@@ -446,9 +473,10 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
             welcome_msg = await bot.send_message(
                 chat_id=group_id,
                 text=(
-                    f"🎉 <b>¡Acceso Concedido!</b> Bienvenido a <b>{group_title}</b>\n\n"
+                    f"🎉 <b>¡Acceso Concedido! / Access Granted!</b>\n\n"
                     f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
-                    f"🔓 Tu acceso ha sido liberado para participar en la comunidad.\n\n"
+                    f"🔓 Tu acceso ha sido liberado para participar en <b>{group_title}</b>.\n\n"
+                    f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 parse_mode="HTML"
@@ -551,7 +579,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     if is_creator or await is_whitelisted(user_id):
         return
 
-    # 🛑 Cerradura de Comandos (Lock Commands): Exclusivo para el Dueño
+    # Cerradura de Comandos (Lock Commands): Exclusivo para el Dueño
     if text_content.startswith("/") and await get_lock_status(group_id, "lock_commands") == 1:
         try: 
             await message.delete()
@@ -575,7 +603,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     is_threat_detected = False
     lower_text = text_content.lower()
 
-    # 1. 🔒 Verificación de Cerraduras (Locks)
+    # 1. Verificación de Cerraduras (Locks)
     if await get_lock_status(group_id, "lock_media") == 1 and (
         message.photo or message.video or message.document or 
         message.audio or message.voice or message.video_note or message.animation
@@ -589,7 +617,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     ):
         is_threat_detected = True
 
-    # 2. ⚫ Verificación de Lista Negra (Blacklist)
+    # 2. Verificación de Lista Negra (Blacklist)
     if not is_threat_detected:
         blacklist = await get_blacklist()
         for b_word in blacklist:
@@ -597,7 +625,7 @@ async def group_security_matrix(message: Message, bot: Bot):
                 is_threat_detected = True
                 break
 
-    # 3. ✉️ Verificación Anti-Spam Granular
+    # 3. Verificación Anti-Spam Granular
     if not is_threat_detected:
         if await get_antispam_filter(group_id, "tg_links") == 1 and ("t.me/" in lower_text or "telegram.me/" in lower_text):
             is_threat_detected = True
@@ -619,7 +647,7 @@ async def group_security_matrix(message: Message, bot: Bot):
             elif "Bot" in origin_type and await get_antispam_filter(group_id, "fwd_bots") == 1: 
                 is_threat_detected = True
 
-    # ⚠️ Procesamiento de Infracción (Borrado + Warns + Sanción)
+    # Procesamiento de Infracción (Borrado + Warns + Sanción Bilingüe)
     if is_threat_detected:
         try: 
             await message.delete()
@@ -642,8 +670,9 @@ async def group_security_matrix(message: Message, bot: Bot):
                 if action == "mute":
                     await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
                     msg_sancion = await message.answer(
-                        f"🔇 <b>Sanción Automática: Límite de Advertencias ({warnings}/{limit})</b>\n\n"
-                        f"{user_mention} ha sido silenciado en el chat y salas de audio por reincidencia en faltas comunitarias.\n\n"
+                        f"🔇 <b>Sanción Automática / Auto-Sanction ({warnings}/{limit})</b>\n\n"
+                        f"{user_mention} ha sido silenciado por reincidencia en faltas comunitarias.\n"
+                        f"🇺🇸 <i>User has been muted due to reaching the strike threshold.</i>\n\n"
                         f"🛡️ <i>Cloud Media Management</i>",
                         parse_mode="HTML"
                     )
@@ -651,8 +680,9 @@ async def group_security_matrix(message: Message, bot: Bot):
                     await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
                     await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
                     msg_sancion = await message.answer(
-                        f"👢 <b>Sanción Automática: Límite de Advertencias ({warnings}/{limit})</b>\n\n"
-                        f"{user_mention} ha sido expulsado temporalmente por infringir las reglas de la comunidad.\n\n"
+                        f"👢 <b>Sanción Automática / Auto-Sanction ({warnings}/{limit})</b>\n\n"
+                        f"{user_mention} ha sido expulsado temporalmente por infringir las reglas.\n"
+                        f"🇺🇸 <i>User has been kicked due to reaching the strike threshold.</i>\n\n"
                         f"🛡️ <i>Cloud Media Management</i>",
                         parse_mode="HTML"
                     )
@@ -660,8 +690,9 @@ async def group_security_matrix(message: Message, bot: Bot):
                     await ban_user(user_id)
                     await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
                     msg_sancion = await message.answer(
-                        f"🚫 <b>Sanción Definitiva: Límite de Advertencias ({warnings}/{limit})</b>\n\n"
-                        f"{user_mention} ha sido expulsado y bloqueado permanentemente del grupo por faltas graves reiteradas.\n\n"
+                        f"🚫 <b>Sanción Definitiva / Final Sanction ({warnings}/{limit})</b>\n\n"
+                        f"{user_mention} ha sido bloqueado permanentemente del grupo por faltas graves.\n"
+                        f"🇺🇸 <i>User has been permanently banned from the community.</i>\n\n"
                         f"🛡️ <i>Cloud Media Management</i>",
                         parse_mode="HTML"
                     )
@@ -671,8 +702,8 @@ async def group_security_matrix(message: Message, bot: Bot):
         else:
             try:
                 warn_msg = await message.answer(
-                    f"⚠️ <b>Aviso de Seguridad ({warnings}/{limit})</b>\n\n"
-                    f"{user_mention}, tu mensaje ha sido retirado automáticamente por infringir las directivas del grupo (enlace, término o contenido no permitido).\n\n"
+                    f"⚠️ <b>Aviso de Seguridad / Security Notice ({warnings}/{limit})</b>\n\n"
+                    f"{user_mention}, tu mensaje ha sido retirado por infringir las directivas comunitarias.\n"
                     f"🇺🇸 <i>Notice: {user_mention}, your message was removed for violating community guidelines. Strike logged.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>",
                     parse_mode="HTML"
@@ -682,7 +713,7 @@ async def group_security_matrix(message: Message, bot: Bot):
                 pass
         return
 
-    # 4. 🗣️ Verificación Anti-Flood con Detección Dinámica
+    # 4. Verificación Anti-Flood con Detección Dinámica Bilingüe
     af_cfg = await get_antiflood_config(group_id)
     max_msgs, time_window, af_action = af_cfg["msgs"], af_cfg["time"], af_cfg["action"]
 
@@ -714,7 +745,10 @@ async def group_security_matrix(message: Message, bot: Bot):
 
             if af_action == "warn": 
                 f_msg = await message.answer(
-                    f"⚠️ <b>Alerta Anti-Flood:</b> {user_mention}, por favor modera la velocidad de tus mensajes en el chat.\n\n🛡️ <i>Cloud Media Management</i>",
+                    f"⚠️ <b>Alerta Anti-Flood / Anti-Flood Alert:</b>\n"
+                    f"{user_mention}, por favor modera la velocidad de tus mensajes en el chat.\n"
+                    f"🇺🇸 <i>Please slow down message frequency in the chat.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
                     parse_mode="HTML"
                 )
                 asyncio.create_task(auto_delete_msg(f_msg, 12))
@@ -722,14 +756,20 @@ async def group_security_matrix(message: Message, bot: Bot):
                 await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
                 await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
                 f_msg = await message.answer(
-                    f"👢 <b>Aviso de Expulsión:</b> {user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood).\n\n🛡️ <i>Cloud Media Management</i>",
+                    f"👢 <b>Aviso de Expulsión / Kick Notice:</b>\n"
+                    f"{user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood).\n"
+                    f"🇺🇸 <i>User kicked due to message flood.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
                     parse_mode="HTML"
                 )
                 asyncio.create_task(auto_delete_msg(f_msg, 20))
             elif af_action == "mute":
                 await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
                 f_msg = await message.answer(
-                    f"🔇 <b>Aviso de Silencio:</b> {user_mention} ha sido silenciado por saturación masiva de mensajes (Flood).\n\n🛡️ <i>Cloud Media Management</i>",
+                    f"🔇 <b>Aviso de Silencio / Mute Notice:</b>\n"
+                    f"{user_mention} ha sido silenciado por saturación masiva de mensajes (Flood).\n"
+                    f"🇺🇸 <i>User muted due to message flood.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
                     parse_mode="HTML"
                 )
                 asyncio.create_task(auto_delete_msg(f_msg, 20))
@@ -737,7 +777,10 @@ async def group_security_matrix(message: Message, bot: Bot):
                 await ban_user(user_id)
                 await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
                 f_msg = await message.answer(
-                    f"🚫 <b>Bloqueo Definitivo:</b> {user_mention} ha sido baneado permanentemente por flood reiterado.\n\n🛡️ <i>Cloud Media Management</i>",
+                    f"🚫 <b>Bloqueo Definitivo / Ban Notice:</b>\n"
+                    f"{user_mention} ha sido baneado permanentemente por flood reiterado.\n"
+                    f"🇺🇸 <i>User permanently banned due to continuous flood.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
                     parse_mode="HTML"
                 )
                 asyncio.create_task(auto_delete_msg(f_msg, 25))

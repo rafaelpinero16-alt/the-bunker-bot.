@@ -432,7 +432,9 @@ def set_mic_vip_price(group_id: int, price: int):
             ON CONFLICT(group_id) DO UPDATE SET mic_vip_price = excluded.mic_vip_price
         """, (group_id, price))
         conn.commit()
-        # ==========================================
+
+
+# ==========================================
 # 🏷️ CONFIGURACIÓN DE ETIQUETA Y MODO FREE
 # ==========================================
 def get_free_badge_config(group_id: int) -> dict:
@@ -678,8 +680,14 @@ def revoke_vip_mic(user_id: int, group_id: int):
 
 
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
+    """Registra o actualiza el bot clon asegurando no duplicar tokens activos."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Revocar registros huérfanos con ese mismo token para no romper el índice UNIQUE
+        cursor.execute(
+            "UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE bot_token = ? AND (user_id != ? OR group_id != ?)", 
+            (bot_token, user_id, group_id)
+        )
         cursor.execute("""
             INSERT INTO bot_clones (user_id, group_id, bot_token, bot_username, status)
             VALUES (?, ?, ?, ?, 'active')
@@ -696,6 +704,14 @@ def get_bot_clone(user_id: int, group_id: int):
         cursor = conn.cursor()
         cursor.execute("SELECT bot_token, bot_username, status FROM bot_clones WHERE user_id = ? AND group_id = ?", (user_id, group_id))
         return cursor.fetchone()
+
+
+def revoke_bot_clone(user_id: int, group_id: int):
+    """Revoca el bot clon desactivando su estado en la base de datos."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+        conn.commit()
 
 
 def get_all_active_clones():
@@ -861,6 +877,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "revoke_vip_mic",
     "register_bot_clone",
     "get_bot_clone",
+    "revoke_bot_clone",
     "get_all_active_clones",
     "get_all_active_clone_tokens",
     "save_owner_session",

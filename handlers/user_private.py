@@ -22,8 +22,8 @@ from database.database import (
     add_to_blacklist, get_blacklist,
     add_to_whitelist, is_whitelisted,
     get_autolower_status, set_autolower_status,
-    register_bot_clone, save_owner_session,
-    get_owner_session, revoke_owner_session,
+    register_bot_clone, get_bot_clone, get_db_connection,
+    save_owner_session, get_owner_session, revoke_owner_session,
     get_vc_schedule, set_vc_schedule
 )
 from assistant import (
@@ -50,6 +50,15 @@ async def get_effective_group_tier(group_id: int, user_id: int) -> str:
     if is_super_admin(user_id):
         return "ultra_pro"
     return await get_group_tier(group_id)
+
+async def revoke_bot_clone_db(user_id: int, group_id: int):
+    """Marca como revocado y desconectado el bot clon en la base de datos."""
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE bot_clones SET status = 'revoked', bot_token = '' WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+            conn.commit()
+    await asyncio.to_thread(_sync)
 
 # ==========================================
 # 🧠 ESTADOS DE EDICIÓN CONVERSACIONAL EN PRIVADO
@@ -323,6 +332,7 @@ TEXTS = {
         "btn_retry": "🔄 Retry",
         "op_canceled": "Operation canceled and memory cleared.",
         "sentinel_disc": "🛑 Own Sentinel disconnected successfully.",
+        "clone_disc": "🛑 Bot Clone disconnected successfully.",
         "tag_pro_req": "💎 Native tag editing requires ULTRA PRO tier.",
         "al_updated_1": "AutoLower updated 🟢",
         "al_updated_0": "AutoLower disabled 🔴",
@@ -592,6 +602,7 @@ TEXTS = {
         "code_verifying": "🔄 <b>Verificando código y autorizando Centinela...</b>",
         "sentinel_success": "💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\n• <b>Comunidad:</b> Blindada con tu propia cuenta\n• <b>Radar de Transmisiones:</b> Activo 24/7 en la nube\n• <b>Aislamiento Total:</b> Operando sin riesgo de baneo global\n\n<i>Asegúrate de haber añadido tu cuenta al grupo con permiso de Administrar Videollamadas.</i>\n\n🛡️ <i>Cloud Media Management</i>",
         "sentinel_error": "❌ <b>Error al inicializar la sesión.</b> Inténtalo nuevamente desde el menú.",
+        "clone_disc": "🛑 <b>Bot Clon desconectado con éxito.</b>\nLa instancia ha sido detenida y liberada del clúster.",
         "twofa_required": "🔐 <b>Verificación en Dos Pasos (2FA) Requerida</b>\n\nTu cuenta de Telegram tiene activada una contraseña en la nube.\n\n<b>Ingresa tu contraseña de verificación en dos pasos:</b>\n\n🛡️ <i>Cloud Media Management</i>",
         "code_invalid": "❌ <b>Código inválido o expirado.</b>\nVerifica el código recibido en tu aplicación oficial de Telegram e inténtalo nuevamente.",
         "twofa_verifying": "🔄 <b>Validando contraseña 2FA...</b>",
@@ -1056,17 +1067,28 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
     tier = await get_effective_group_tier(group_id, user_id)
     if tier == "ultra_pro":
+        clone_info = await get_bot_clone(user_id, group_id)
+        has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
+
         session_info = await get_owner_session(user_id, group_id)
         has_sentinel = session_info is not None
         
+        token_btn_text = "🔄 Actualizar Token @BotFather" if has_clone else "🔑 Conectar Token @BotFather"
+        if lang == "en":
+            token_btn_text = "🔄 Update @BotFather Token" if has_clone else "🔑 Connect @BotFather Token"
+
         sentinel_btn_text = "🔄 Actualizar Centinela (Teléfono) 🟢" if has_sentinel else "🎙️ Conectar Centinela Propio (Teléfono) 🔴"
         if lang == "en":
             sentinel_btn_text = "🔄 Update Sentinel (Phone) 🟢" if has_sentinel else "🎙️ Connect Own Sentinel (Phone) 🔴"
 
         kb = [
-            [InlineKeyboardButton(text="🔑 Conectar Token @BotFather" if lang == "es" else "🔑 Connect @BotFather Token", callback_data=f"clone_token_{group_id}_{lang}")],
+            [InlineKeyboardButton(text=token_btn_text, callback_data=f"clone_token_{group_id}_{lang}")],
             [InlineKeyboardButton(text=sentinel_btn_text, callback_data=f"clone_phone_{group_id}_{lang}")]
         ]
+
+        if has_clone:
+            disc_clone_text = "🛑 Desconectar Bot Clon" if lang == "es" else "🛑 Disconnect Bot Clone"
+            kb.append([InlineKeyboardButton(text=disc_clone_text, callback_data=f"clone_discbot_{group_id}_{lang}")])
 
         if has_sentinel:
             disc_text = "🛑 Desconectar Centinela" if lang == "es" else "🛑 Disconnect Sentinel"
@@ -1149,9 +1171,19 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 await test_bot.session.close()
 
                 bot_username = bot_info.username or ""
+
+                # Si ya existía un clon con token anterior para este grupo, se detiene
+                old_clone = await get_bot_clone(user_id, group_id)
+                if old_clone and old_clone[0] and old_clone[0] != token:
+                    try:
+                        from main import trigger_disconnect_clone
+                        trigger_disconnect_clone(old_clone[0])
+                    except Exception:
+                        pass
+
                 await register_bot_clone(user_id, group_id, token, bot_username)
 
-                # Despertar el bot clon en segundo plano sin reiniciar Railway
+                # Despertar el bot clon en segundo plano mediante feed_update
                 try:
                     from main import trigger_dynamic_clone
                     trigger_dynamic_clone(token)
@@ -1252,7 +1284,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             if connected:
                 await save_owner_session(user_id, group_id, session_str)
                 await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
-            else:await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
+            else:
+                await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
 
         elif res["status"] == "2fa_required":
             SENTINEL_2FA_STATES[user_id] = {"group_id": group_id, "lang": lang}
@@ -1639,13 +1672,51 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
                 g_name = "Comunidad" if lang == "es" else "Community"
-            status = "Operativo 🟢" if tier == "ultra_pro" else "Bloqueado 🔴"
+            
+            clone_info = await get_bot_clone(callback.from_user.id, group_id)
+            has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
+
+            if tier == "ultra_pro":
+                if has_clone:
+                    c_user = f"@{clone_info[1]}" if clone_info[1] else ""
+                    status = f"Operativo ({c_user}) 🟢" if lang == "es" else f"Operational ({c_user}) 🟢"
+                else:
+                    status = "No Configurado 🔴" if lang == "es" else "Not Configured 🔴"
+            else:
+                status = "Bloqueado 🔴" if lang == "es" else "Locked 🔴"
+            
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
             if lang == "en":
-                status = "Operational 🟢" if tier == "ultra_pro" else "Locked 🔴"
                 sentinel_status = "Connected 🟢" if session_info else "Not Configured 🔴"
             
+            text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
+            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
+
+        elif sub == "discbot":
+            clone_info = await get_bot_clone(callback.from_user.id, group_id)
+            if clone_info and clone_info[0]:
+                try:
+                    from main import trigger_disconnect_clone
+                    trigger_disconnect_clone(clone_info[0])
+                except Exception:
+                    pass
+
+            await revoke_bot_clone_db(callback.from_user.id, group_id)
+            await callback.answer(t["clone_disc"], show_alert=True)
+
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            try:
+                g_name = (await bot.get_chat(group_id)).title
+            except Exception:
+                g_name = "Comunidad" if lang == "es" else "Community"
+            status = "Desconectado 🔴" if lang == "es" else "Disconnected 🔴"
+
+            session_info = await get_owner_session(callback.from_user.id, group_id)
+            sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
+            if lang == "en":
+                sentinel_status = "Connected 🟢" if session_info else "Not Configured 🔴"
+
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
 
@@ -1659,11 +1730,16 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
                 g_name = "Comunidad" if lang == "es" else "Community"
-            status = "Operativo 🟢" if tier == "ultra_pro" else "Bloqueado 🔴"
-            sentinel_status = "Desconectado 🔴"
-            if lang == "en":
-                status = "Operational 🟢" if tier == "ultra_pro" else "Locked 🔴"
-                sentinel_status = "Disconnected 🔴"
+            
+            clone_info = await get_bot_clone(callback.from_user.id, group_id)
+            has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
+            if has_clone:
+                c_user = f"@{clone_info[1]}" if clone_info[1] else ""
+                status = f"Operativo ({c_user}) 🟢" if lang == "es" else f"Operational ({c_user}) 🟢"
+            else:
+                status = "No Configurado 🔴" if lang == "es" else "Not Configured 🔴"
+
+            sentinel_status = "Desconectado 🔴" if lang == "es" else "Disconnected 🔴"
             
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
@@ -1948,12 +2024,22 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
                 g_name = "Comunidad" if lang == "es" else "Community"
-            status = "Operativo 🟢" if tier == "ultra_pro" else "Bloqueado 🔴"
+
+            clone_info = await get_bot_clone(callback.from_user.id, group_id)
+            has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
+
+            if tier == "ultra_pro":
+                if has_clone:
+                    c_user = f"@{clone_info[1]}" if clone_info[1] else ""
+                    status = f"Operativo ({c_user}) 🟢" if lang == "es" else f"Operational ({c_user}) 🟢"
+                else:
+                    status = "No Configurado 🔴" if lang == "es" else "Not Configured 🔴"
+            else:
+                status = "Bloqueado 🔴" if lang == "es" else "Locked 🔴"
             
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
             if lang == "en":
-                status = "Operational 🟢" if tier == "ultra_pro" else "Locked 🔴"
                 sentinel_status = "Connected 🟢" if session_info else "Not Configured 🔴"
             
             await callback.message.edit_text(
