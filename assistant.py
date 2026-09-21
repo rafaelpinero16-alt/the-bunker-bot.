@@ -9,7 +9,7 @@ from pyrogram.enums import ChatMembersFilter, ChatType
 from pyrogram.errors import (
     FloodWait, RPCError, Unauthorized,
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
-    PhoneNumberInvalid, PasswordHashInvalid
+    PhoneNumberInvalid, PasswordHashInvalid, PeerIdInvalid
 )
 from pyrogram.raw.types import PeerUser, InputPeerUser, InputGroupCall, DataJSON
 from pyrogram.raw.functions.channels import GetFullChannel
@@ -117,9 +117,6 @@ VC_SCHED_MESSAGES = {
 # ==============================================================================
 
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
-    """
-    Paso 1: Inicia la conexión con Pyrogram en memoria y solicita el código oficial de Telegram.
-    """
     await cancel_phone_auth(user_id)
     
     clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
@@ -160,10 +157,6 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
 
 
 async def verify_phone_code(user_id: int, code: str) -> dict:
-    """
-    Paso 2: Valida el código de 5 dígitos ingresado por el usuario.
-    Si la cuenta tiene contraseña en la nube, solicita el 2FA.
-    """
     auth_data = pending_auth_sessions.get(user_id)
     if not auth_data:
         return {"status": "error", "message": "session_expired"}
@@ -195,9 +188,6 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
 
 
 async def verify_2fa_password(user_id: int, password: str) -> dict:
-    """
-    Paso 3: Valida la contraseña de Verificación en Dos Pasos (2FA) si está configurada.
-    """
     auth_data = pending_auth_sessions.get(user_id)
     if not auth_data:
         return {"status": "error", "message": "session_expired"}
@@ -222,9 +212,6 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
 
 
 async def cancel_phone_auth(user_id: int):
-    """
-    Limpia de forma segura los clientes temporales de login y libera memoria.
-    """
     if user_id in pending_auth_sessions:
         auth_data = pending_auth_sessions.pop(user_id)
         client: Client = auth_data.get("client")
@@ -240,7 +227,6 @@ async def cancel_phone_auth(user_id: int):
 # ==============================================================================
 
 async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
-    """Refresca la caché de administradores reconociendo 'owner', 'creator' y 'administrator'."""
     try:
         if not await is_group_approved(chat_id):
             admin_caches[chat_id] = {'admins': {bot_client_id} if bot_client_id else set(), 'ts': asyncio.get_event_loop().time()}
@@ -261,7 +247,7 @@ async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int)
 
 
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int):
-    """Bucle de radar aislado con optimización preventiva cada 3.5h y moderación acústica inteligente."""
+    """Bucle de radar aislado con tolerancia a PeerIdInvalid y mantenimiento preventivo."""
     alerted_users = set()
     current_call = None
     last_channel_check = 0
@@ -291,6 +277,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 try:
                     full_chat_res = await client.invoke(GetFullChannel(channel=peer))
                     raw_call = full_chat_res.full_chat.call
+                except PeerIdInvalid:
+                    logger.warning(f"⚠️ [Peer ID Inválido] El chat {chat_id} no está disponible en esta sesión. Pausando monitor.")
+                    await asyncio.sleep(300)
+                    continue
                 except Exception:
                     try:
                         full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
@@ -388,7 +378,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     u_id = peer_user.user_id
                     active_users.add(u_id)
 
-                    # 🛡️ BYPASS ABSOLUTO: Creadores, Administradores, Whitelist y Pases VIP (Modo Free)
                     if u_id == bot_client_id or u_id in cache_info['admins']:
                         continue
                     if await is_whitelisted(u_id):
@@ -399,7 +388,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     vol = p.volume if getattr(p, "volume", None) is not None else 10000
                     is_muted = getattr(p, "muted", True)
 
-                    # Si el usuario no autorizado intenta hablar o sube su volumen, atenuar al 2%
                     if (not is_muted) or vol > 200:
                         user_obj = users_map.get(u_id)
                         try:
@@ -448,6 +436,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
         except FloodWait as fw:
             await asyncio.sleep(fw.value + 2)
+        except PeerIdInvalid:
+            logger.warning(f"⚠️ [Peer ID Inválido] El chat {chat_id} generó error de peer. Silenciando aviso y esperando reconexión.")
+            await asyncio.sleep(60)
         except Exception as e:
             err_str = str(e).upper()
             if "GROUPCALL_INVALID" in err_str or "CALL_ALREADY_ENDED" in err_str:
@@ -459,7 +450,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
 
 async def vc_scheduler_loop():
-    """Bucle de fondo para apertura y cierre programado de videochats (Ultra Pro)."""
     logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado.")
     while True:
         try:
@@ -524,7 +514,6 @@ async def vc_scheduler_loop():
 
 
 async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
-    """Inicia un cliente de Pyrogram dedicado para una comunidad específica."""
     client_api_id = api_id if api_id else DEFAULT_API_ID
     client_api_hash = api_hash if api_hash else DEFAULT_API_HASH
     
@@ -552,19 +541,20 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
     except Unauthorized:
         logger.warning(f"⚠️ [Error de Sesión] La sesión del usuario {user_id} para el grupo {group_id} fue revocada.")
         return False
+    except PeerIdInvalid:
+        logger.warning(f"⚠️ [Peer ID Inválido al Iniciar] El grupo {group_id} no es accesible con esta sesión.")
+        return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
         return False
 
 
 async def register_or_update_sentinel(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
-    """Permite conectar o sustituir un Centinela en tiempo real desde el bot privado."""
     await disconnect_sentinel(group_id)
     return await launch_sentinel_instance(user_id, group_id, session_string, api_id, api_hash)
 
 
 async def disconnect_sentinel(group_id: int):
-    """Detiene y desconecta de forma limpia un Centinela asignado protegiendo al Maestro."""
     if group_id in active_sentinels:
         sentinel_info = active_sentinels.pop(group_id)
         try:
@@ -581,16 +571,19 @@ async def disconnect_sentinel(group_id: int):
 
 
 async def load_all_sentinels():
-    """Lee de la base de datos todas las sesiones activas y arranca sus clientes."""
     sessions = await get_all_active_sessions()
     for row in sessions:
         u_id, g_id, s_str, a_id, a_hash = row[0], row[1], row[2], row[3], row[4]
         if g_id not in active_sentinels:
-            await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
+            try:
+                await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
+            except PeerIdInvalid:
+                logger.debug(f"Saltando grupo inválido {g_id} al cargar sesiones.")
+            except Exception:
+                pass
 
 
 async def radar_master_loop():
-    """Supervisa el centinela por defecto en las comunidades que no tienen centinela propio."""
     while True:
         try:
             if assistant_app.is_connected:
@@ -607,6 +600,8 @@ async def radar_master_loop():
                                     "task": task,
                                     "user_id": 0
                                 }
+                            except PeerIdInvalid:
+                                continue
                             except Exception:
                                 pass
         except Exception as e:
@@ -616,16 +611,6 @@ async def radar_master_loop():
 
 
 async def pending_auth_cleanup_loop():
-    """
-    Libera clientes temporales de autenticación telefónica abandonados.
-
-    Cada intento de vincular un Centinela crea un Client de Pyrogram real
-    y lo mantiene conectado en `pending_auth_sessions` mientras el usuario
-    escribe el código/2FA. Si el usuario abandona el flujo (cierra el chat,
-    nunca responde), ese cliente se quedaba conectado para siempre —una
-    fuga de conexiones MTProto que crece con cada intento abandonado.
-    Este bucle purga cualquier sesión pendiente con más de 10 minutos.
-    """
     TTL_SECONDS = 600
     while True:
         try:
@@ -640,7 +625,6 @@ async def pending_auth_cleanup_loop():
 
 
 async def init_assistant_master():
-    """Punto de arranque que levanta el centinela maestro, el programador y el pool multi-sesión."""
     global _default_my_id
     try:
         if not assistant_app.is_connected:
@@ -658,14 +642,12 @@ async def init_assistant_master():
 
 
 def start_voice_radar(bot):
-    """Punto de entrada llamado desde main.py."""
     global _global_bot
     _global_bot = bot
     asyncio.create_task(init_assistant_master())
 
 
 async def close_all_sentinels():
-    """Detiene ordenadamente todos los clientes activos al apagar el servidor."""
     for group_id in list(active_sentinels.keys()):
         await disconnect_sentinel(group_id)
     if assistant_app.is_connected:
@@ -676,7 +658,6 @@ async def close_all_sentinels():
 
 
 async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: int = 10000) -> bool:
-    """Restaura o silencia participantes usando el Centinela asignado a la comunidad."""
     sentinel_data = active_sentinels.get(chat_id)
     client = sentinel_data["client"] if sentinel_data else assistant_app
 
