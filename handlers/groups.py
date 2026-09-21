@@ -9,7 +9,6 @@ from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, ChatMemberUpdated, ChatJoinRequest
 )
-from aiogram.filters import ChatMemberUpdatedFilter, ADMINISTRATOR
 from database.database import (
     get_antispam_filter, get_antispam_delete,
     get_antiflood_config, is_whitelisted, get_captcha_config,
@@ -65,9 +64,15 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 # ==========================================
 # 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA (MY_CHAT_MEMBER)
 # ==========================================
-@router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=(~ADMINISTRATOR) >> ADMINISTRATOR))
+@router.my_chat_member()
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     """Detecta automáticamente cuando el bot maestro o cualquier clon es promovido a administrador."""
+    # Filtrar únicamente transiciones donde el nuevo estado sea administrador/creador y antes no lo fuera
+    if event.new_chat_member.status not in ["administrator", "creator"]:
+        return
+    if event.old_chat_member.status in ["administrator", "creator"]:
+        return
+
     chat = event.chat
     if chat.type not in {"group", "supergroup"}:
         return
