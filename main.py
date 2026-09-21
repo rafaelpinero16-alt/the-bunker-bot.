@@ -37,7 +37,8 @@ from handlers import (
 )
 from handlers.user_private import (
     send_official_welcome,
-    set_master_bot_id
+    set_master_bot_id,
+    set_master_bot_username
 )
 from assistant import (
     start_voice_radar, 
@@ -226,6 +227,13 @@ async def main():
     )
     # Identidad del Maestro: cmd_start / teclados comparan bot.id contra este valor
     set_master_bot_id(master_bot.id)
+    # @username real del Maestro: payments.py lo usa para forzar que las suscripciones
+    # PRO/ULTRA PRO se cobren siempre a través del Maestro, nunca de un Bot Clon.
+    try:
+        master_info = await master_bot.get_me()
+        set_master_bot_username(master_info.username or "")
+    except Exception as e:
+        print(f"⚠️ [Aviso Identidad Maestro]: No se pudo resolver el @username del Maestro: {e}")
 
     # El anti-spam solo intercepta mensajes; los callbacks nunca pasan por él.
     dp.message.middleware(AntiSpamMiddleware())
