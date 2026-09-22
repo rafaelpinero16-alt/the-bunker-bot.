@@ -24,7 +24,7 @@ def get_db_connection():
 
 
 def init_db():
-    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas para The Bunker OS[cite: 4]."""
+    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas para The Bunker OS."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -590,8 +590,6 @@ def set_radar_config(group_id: int, field: str, value):
             ON CONFLICT(group_id) DO UPDATE SET {col_name} = excluded.{col_name}
         """, (group_id, value))
         conn.commit()
-
-
 def get_sentinel_payload_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1066,17 +1064,45 @@ def set_panic_status(group_id: int, status: int):
 
 
 def get_shield_status(group_id: int) -> int:
-    return get_screen_shield_status(group_id)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT screen_shield_status FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 1
+        except sqlite3.OperationalError:
+            return 1
+
 
 def set_shield_status(group_id: int, status: int):
-    set_screen_shield_status(group_id, status)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, screen_shield_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET screen_shield_status = excluded.screen_shield_status
+        """, (group_id, status))
+        conn.commit()
+
 
 def get_podcast_status(group_id: int) -> int:
-    cfg = get_podcast_config(group_id)
-    return cfg.get("status", 0)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT podcast_mode_status FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
 
 def set_podcast_status(group_id: int, status: int):
-    set_podcast_mode(group_id, status)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, podcast_mode_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET podcast_mode_status = excluded.podcast_mode_status
+        """, (group_id, status))
+        conn.commit()
 
 
 def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
@@ -1417,4 +1443,4 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
 
 dl = getattr(globals(), "dl", None)
 if "_fn_name" in globals():
-    del _fn_name
+    del _fn_name        
