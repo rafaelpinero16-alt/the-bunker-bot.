@@ -27,7 +27,8 @@ from database.database import (
     get_autolower_status, is_whitelisted,
     get_all_active_sessions, get_session_by_group,
     get_all_active_vc_schedules, update_vc_call_status,
-    get_radar_config, revoke_owner_session
+    get_radar_config, revoke_owner_session,
+    get_screen_shield_status, get_podcast_config
 )
 
 FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan)
@@ -67,6 +68,48 @@ _forbidden_strikes = {}
 _autolower_cooldowns = {}
 FORBIDDEN_STRIKE_LIMIT = 3
 FORBIDDEN_COOLDOWN_SECONDS = 900  
+
+# --- FASE "THE BUNKER OS": estado en memoria por grupo para las nuevas capas del Centinela ---
+# Escudo Antinota: quién ya recibió el corte de señal esta ronda (evita reintentos en bucle).
+_screen_shield_flagged = {}
+
+# Escudo Antirruido: historial de timestamps de "unmute" por (chat_id, user_id) para detectar
+# ráfagas de picos anómalos (una cuenta no autorizada abriendo/cerrando el micro repetidamente
+# para sabotear la transmisión con gritos o ruidos súbitos).
+_noise_unmute_history = {}
+NOISE_SPIKE_WINDOW_SECONDS = 12
+NOISE_SPIKE_STRIKE_LIMIT = 3
+
+# Último estado de mute conocido por (chat_id, user_id), usado para detectar transiciones
+# mute->unmute (necesarias tanto para el Escudo Antirruido como para no re-disparar avisos).
+_last_mute_state = {}
+
+DUCK_TEXT = (
+    "🎙️ <b>The Bunker Bot: Modo Podcast — Atenuación Dinámica</b>\n\n"
+    "El volumen de fondo de <b>{user_name}</b> fue atenuado automáticamente al <b>{pct}%</b> "
+    "mientras el orador principal tiene el micrófono activo, para priorizar su voz.\n\n"
+    "🇺🇸 <i><b>{user_name}</b>'s background volume was dialed down to <b>{pct}%</b> while the "
+    "main speaker is on mic, to keep their voice front and center.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
+SCREEN_SHIELD_ALERT_TEXT = (
+    "🎥 <b>The Bunker Bot: Escudo Antinota Activado</b>\n\n"
+    "Se detectó una transmisión de pantalla no autorizada por parte de <b>{user_name}</b>. "
+    "La señal fue cortada y la cuenta fue retirada de la sala de inmediato para proteger a la comunidad.\n\n"
+    "🇺🇸 <i>Unauthorized screen-share detected from <b>{user_name}</b>. Signal cut and the account "
+    "was removed from the room instantly to protect the community.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
+NOISE_SHIELD_ALERT_TEXT = (
+    "🔇 <b>The Bunker Bot: Escudo Antirruido Activado</b>\n\n"
+    "<b>{user_name}</b> fue silenciado automáticamente tras detectar picos de ruido anómalos y "
+    "repetidos en la transmisión.\n\n"
+    "🇺🇸 <i><b>{user_name}</b> was auto-muted after repeated anomalous noise spikes were detected "
+    "in the live stream.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
 
 RADAR_TEXTS = {
     "combined": (
@@ -290,6 +333,48 @@ def _register_forbidden_strike(chat_id: int, action: str):
         _forbidden_strikes[chat_id] = strikes
 
 
+async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id: int, p_peer) -> bool:
+    """
+    Escudo Antinota: intenta primero cortar la señal de video/pantalla compartida del
+    participante dentro de la propia llamada (no destructivo, instantáneo). Como la API
+    de videollamadas de Telegram no expone un método dedicado para expulsar sólo de la
+    sala sin tocar la membresía del grupo, se escala de inmediato a un kick temporal del
+    grupo (ban + unban) para garantizar la remoción real de la transmisión.
+    """
+    try:
+        await client.invoke(
+            EditGroupCallParticipant(
+                call=current_call, participant=p_peer,
+                video_stopped=True, presentation_paused=True, muted=True, volume=200
+            )
+        )
+    except Exception as e:
+        logger.debug(f"Aviso al intentar cortar video en {chat_id} para {u_id}: {e}")
+
+    if _global_bot:
+        try:
+            await _global_bot.ban_chat_member(chat_id=chat_id, user_id=u_id, until_date=int(time.time() + 35))
+            await _global_bot.unban_chat_member(chat_id=chat_id, user_id=u_id)
+            return True
+        except Exception as e:
+            logger.warning(f"Aviso: no se pudo expulsar a {u_id} de {chat_id} tras Escudo Antinota: {e}")
+    return False
+
+
+def _register_noise_strike(chat_id: int, u_id: int) -> bool:
+    """
+    Registra un evento de 'unmute' de una cuenta no autorizada y determina si constituye
+    una ráfaga anómala (posible sabotaje con gritos/ruido súbito). Devuelve True cuando se
+    supera el umbral de reincidencia dentro de la ventana de tiempo.
+    """
+    key = (chat_id, u_id)
+    now = asyncio.get_event_loop().time()
+    history = [t for t in _noise_unmute_history.get(key, []) if now - t < NOISE_SPIKE_WINDOW_SECONDS]
+    history.append(now)
+    _noise_unmute_history[key] = history
+    return len(history) >= NOISE_SPIKE_STRIKE_LIMIT
+
+
 async def _verify_active_membership(client: Client, chat_id: int) -> bool:
     try:
         member = await client.get_chat_member(chat_id, "me")
@@ -474,6 +559,24 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 users_map = {u.id: u for u in res.users} if getattr(res, 'users', None) else {}
                 active_users = set()
 
+                # --- 🎙️ Modo Podcast: primera pasada para saber si un orador autorizado
+                # (admin/dueño/Centinela) está hablando en vivo en esta ronda de polling.
+                podcast_cfg = await get_podcast_config(chat_id)
+                host_is_speaking = False
+                if podcast_cfg["status"] == 1:
+                    for p_scan in participants:
+                        if getattr(p_scan, "left", False):
+                            continue
+                        peer_scan = getattr(p_scan, "peer", None)
+                        if not isinstance(peer_scan, PeerUser):
+                            continue
+                        scan_id = peer_scan.user_id
+                        if (scan_id == bot_client_id or scan_id in cache_info['admins']) and not getattr(p_scan, "muted", True):
+                            host_is_speaking = True
+                            break
+
+                screen_shield_on = await get_screen_shield_status(chat_id)
+
                 for p in participants:
                     if getattr(p, "left", False):
                         continue
@@ -484,17 +587,70 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     u_id = peer_user.user_id
                     active_users.add(u_id)
 
-                    if u_id == bot_client_id or u_id in cache_info['admins']:
+                    is_authorized = (
+                        u_id == bot_client_id or u_id in cache_info['admins']
+                        or await is_whitelisted(u_id) or await is_vip_mic_active(u_id, chat_id)
+                    )
+
+                    # --- 🎥 Escudo Antinota (Screen-Sharing Shield) ---
+                    # `presentation` sólo viene poblado cuando la cuenta está compartiendo pantalla.
+                    if not is_authorized and screen_shield_on and getattr(p, "presentation", None):
+                        flag_key = (chat_id, u_id)
+                        if not _screen_shield_flagged.get(flag_key):
+                            _screen_shield_flagged[flag_key] = True
+                            user_obj = users_map.get(u_id)
+                            try:
+                                if user_obj and getattr(user_obj, "access_hash", None):
+                                    p_peer = InputPeerUser(user_id=u_id, access_hash=user_obj.access_hash)
+                                else:
+                                    p_peer = await client.resolve_peer(u_id)
+                                removed = await _cut_video_and_remove(client, current_call, chat_id, u_id, p_peer)
+                                if removed:
+                                    user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
+                                    try:
+                                        await _dispatch_radar_notice(
+                                            chat_id=chat_id,
+                                            text=SCREEN_SHIELD_ALERT_TEXT.format(user_name=user_name),
+                                            auto_delete_after=30
+                                        )
+                                    except Exception:
+                                        pass
+                            except Exception as e:
+                                logger.debug(f"Aviso en Escudo Antinota para {u_id} en {chat_id}: {e}")
                         continue
-                    if await is_whitelisted(u_id):
-                        continue
-                    if await is_vip_mic_active(u_id, chat_id):
+                    else:
+                        _screen_shield_flagged.pop((chat_id, u_id), None)
+
+                    if is_authorized:
                         continue
 
                     vol = p.volume if getattr(p, "volume", None) is not None else 10000
                     is_muted = getattr(p, "muted", True)
 
-                    if (not is_muted) or vol > 200:
+                    # --- 🔇 Escudo Antirruido: ráfagas de mute/unmute anómalas ---
+                    noise_spike = False
+                    was_muted_before = _last_mute_state.get((chat_id, u_id), True)
+                    if not is_muted and was_muted_before and podcast_cfg["noise_shield"] == 1:
+                        noise_spike = _register_noise_strike(chat_id, u_id)
+                    _last_mute_state[(chat_id, u_id)] = is_muted
+
+                    ducking_active = (podcast_cfg["status"] == 1 and host_is_speaking and not noise_spike)
+
+                    if noise_spike:
+                        desired_muted, desired_volume = True, 0
+                    elif ducking_active:
+                        # Atenuación real: permanecen desmutados pero a volumen mínimo (Director de Audio Automático).
+                        desired_muted, desired_volume = False, podcast_cfg["duck_volume"]
+                    else:
+                        desired_muted, desired_volume = True, 200
+
+                    action_needed = (
+                        noise_spike
+                        or (desired_muted and ((not is_muted) or vol > 200))
+                        or (not desired_muted and (is_muted or abs(vol - desired_volume) > 50))
+                    )
+
+                    if action_needed:
                         user_obj = users_map.get(u_id)
                         try:
                             if user_obj and getattr(user_obj, "access_hash", None):
@@ -503,7 +659,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 p_peer = await client.resolve_peer(u_id)
 
                             await client.invoke(
-                                EditGroupCallParticipant(call=current_call, participant=p_peer, muted=True, volume=200)
+                                EditGroupCallParticipant(call=current_call, participant=p_peer, muted=desired_muted, volume=desired_volume)
                             )
                             _forbidden_strikes[chat_id] = 0
                         except Exception as e:
@@ -525,15 +681,29 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
                             if _global_bot:
                                 try:
-                                    radar_cfg = await get_radar_config(chat_id)
-                                    autolower_text = _resolve_autolower_text(radar_cfg.get("autolower_text"), user_name)
-                                    await _dispatch_radar_notice(
-                                        chat_id=chat_id,
-                                        text=autolower_text,
-                                        media_id=radar_cfg.get("autolower_media_id"),
-                                        media_type=radar_cfg.get("autolower_media_type"),
-                                        auto_delete_after=40
-                                    )
+                                    if noise_spike:
+                                        await _dispatch_radar_notice(
+                                            chat_id=chat_id,
+                                            text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_name),
+                                            auto_delete_after=30
+                                        )
+                                    elif ducking_active:
+                                        pct = round(podcast_cfg["duck_volume"] / 100)
+                                        await _dispatch_radar_notice(
+                                            chat_id=chat_id,
+                                            text=DUCK_TEXT.format(user_name=user_name, pct=pct),
+                                            auto_delete_after=30
+                                        )
+                                    else:
+                                        radar_cfg = await get_radar_config(chat_id)
+                                        autolower_text = _resolve_autolower_text(radar_cfg.get("autolower_text"), user_name)
+                                        await _dispatch_radar_notice(
+                                            chat_id=chat_id,
+                                            text=autolower_text,
+                                            media_id=radar_cfg.get("autolower_media_id"),
+                                            media_type=radar_cfg.get("autolower_media_type"),
+                                            auto_delete_after=40
+                                        )
                                 except Exception:
                                     pass
 
@@ -693,6 +863,14 @@ async def disconnect_sentinel(group_id: int):
     _forbidden_strikes.pop(group_id, None)
     _autolower_cooldowns.pop(group_id, None)
 
+    # Limpieza de estado por-usuario de las capas "The Bunker OS" (Escudo Antinota / Antirruido)
+    for key in [k for k in _screen_shield_flagged if k[0] == group_id]:
+        _screen_shield_flagged.pop(key, None)
+    for key in [k for k in _noise_unmute_history if k[0] == group_id]:
+        _noise_unmute_history.pop(key, None)
+    for key in [k for k in _last_mute_state if k[0] == group_id]:
+        _last_mute_state.pop(key, None)
+
 
 async def load_all_sentinels():
     sessions = await get_all_active_sessions()
@@ -813,3 +991,18 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
     except Exception as e:
         logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
         return False
+    except Exception as e:
+            logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
+            return False
+
+async def engage_screen_shield(group_id: int):
+    logger.info(f"🎥 [Escudo Antinota] Activado para el grupo {group_id}")
+
+async def disengage_screen_shield(group_id: int):
+    logger.info(f"🎥 [Escudo Antinota] Desactivado para el grupo {group_id}")
+
+async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
+    logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% en el grupo {group_id}")
+
+async def disengage_podcast_ducking(group_id: int):
+    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")
