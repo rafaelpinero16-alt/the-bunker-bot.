@@ -1204,3 +1204,6 @@ async def group_security_matrix(message: Message, bot: Bot):
                 asyncio.create_task(auto_delete_msg(f_msg, 25))
         except Exception: 
             pass
+async def add_speaker_to_queue(group_id: int, user_id: int, full_name: str = "Speaker", username: str = "", stars_paid: int = 0):
+    """Wrapper de compatibilidad para user_private.py"""
+    return await add_to_speaker_queue(group_id, user_id, full_name, username, stars_paid)
