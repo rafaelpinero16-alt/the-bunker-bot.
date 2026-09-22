@@ -217,25 +217,26 @@ TEXTS = {
             "🛡️ <i>Developed and supported by <b>Cloud Media Management</b>.</i>"
         ),
         "info_how_main": (
-            "📖 <b>How The Bunker Bot Works — Plan Breakdown</b>\n\n"
-            "Discover the operational capabilities unlocked at each clearance level:\n\n"
-            "🆓 <b>BASIC Plan (Free Forever):</b>\n"
-            "• Essential group security and baseline anti-spam.\n"
-            "• Standard one-tap verification captcha.\n"
-            "• 3 daily uses limit for remote moderation commands.\n\n"
-            "⭐ <b>PRO Plan (300 Stars):</b>\n"
-            "• ⚡ <b>Unlimited bot command usage:</b> Zero daily caps.\n"
-            "• 🗑️ <b>Automated Purge Center:</b> Routine cleanup of service logs and chat clutter.\n"
-            "• 🤖 <b>Advanced Captcha Pro:</b> Custom welcome copy and challenge timeouts.\n"
-            "• 🛡️ <b>Granular Anti-Spam:</b> Strict filtering against forwarded posts, bots, and links.\n\n"
-            "💎 <b>ULTRA PRO (600 Stars):</b>\n"
-            "• 🌟 <b>All PRO Plan features included.</b>\n"
-            "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own @BotFather token.\n"
-            "• 🎙️ <b>Dedicated Voice Sentinel:</b> Link your account seamlessly via phone number (100% anti-ban protection).\n"
-            "• 🏷️ <b>Native VIP Tag Editor:</b> Assign automated, immovable custom titles upon tipping Stars.\n"
-            "• 🔇 <b>AutoLower Acoustic Shield:</b> Mutes unverified speakers down to 2% in milliseconds.\n"
-            "• 💰 <b>Direct Stars Monetization (/mic_vip):</b> 100% of revenue flows straight to your balance.\n"
-            "• 🗓️ <b>Weekly VC Scheduler:</b> Automated voice chat open/close schedules and stream refresh.\n\n"
+            "📖 <b>How The Bunker Bot Works — The Master Guide</b>\n\n"
+            "Follow this operational path to bring your Bunker online at full strength, "
+            "from the first install to full Telegram Stars monetization:\n\n"
+            "1️⃣ <b>Deployment: Add the Bot &amp; Grant Admin Rights</b>\n"
+            "• Add <b>@Alphacentinel</b> (or your own Bot Clone) to your group/supergroup using the 'Add to a Group' button.\n"
+            "• Promote it to <b>Administrator</b> with, at minimum: delete messages, restrict members, manage video chats, and pin messages. Without these, the Sentinel cannot run the Alphanumeric Captcha checkpoint or the AutoLower Radar.\n"
+            "• Once inside, run /pro or /ultra directly in the group to open the Command Center in this private chat.\n\n"
+            "2️⃣ <b>Your Own Bot Clone (ULTRA PRO 💎)</b>\n"
+            "• Message <b>@BotFather</b>, create a fresh bot with /newbot, and copy the token it hands you.\n"
+            "• From the ULTRA PRO panel, tap 'Setup Clone' and paste that token: your private replica gets linked exclusively to your community, running in parallel to the Master Bot without interfering with it.\n"
+            "• Every Star your Clone collects through VIP mic passes (/micvip) lands 100% in YOUR balance — the platform never takes a cut of those passes.\n\n"
+            "3️⃣ <b>Dedicated Sentinel: Phone Number &amp; 2FA Linking</b>\n"
+            "• In the same ULTRA PRO panel, choose 'Link Sentinel' and enter your phone number with the international code (e.g. +1...).\n"
+            "• Telegram sends a verification code: type it exactly as received in this private chat. If your account has Two-Factor Authentication (2FA), the bot will also ask for your password — both travel encrypted and are <b>never stored as plain text</b>; only the resulting StringSession is kept, and strictly in volatile memory.\n"
+            "• This spins up your isolated, anti-ban node: every Sentinel runs on its own session, sharing no IP or fingerprint with the rest of the network, shielding your main account from association bans.\n"
+            "• With the Sentinel active, the <b>AutoLower Radar</b> engages automatically: any mic that opens in the voice chat without an active VIP pass or explicit authorization gets dialed down to <b>2% volume in milliseconds</b> — no human moderator needs to be watching.\n\n"
+            "4️⃣ <b>Telegram Stars Monetization (/micvip)</b>\n"
+            "• Set your own Stars price for the 24-hour VIP Microphone Pass from the Economy panel.\n"
+            "• When a member pays, the Sentinel instantly restores their volume to 100% and auto-assigns an <b>immovable admin title</b> (e.g. \"VIP 24/7\"), fully customizable by you from the ULTRA PRO panel.\n"
+            "• Two clean, independent revenue streams: platform subscriptions (PRO/ULTRA PRO) are always billed through the Master Bot, while every VIP mic pass flows 100% into YOUR Clone.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
@@ -510,25 +511,26 @@ TEXTS = {
             "🛡️ <i>Desarrollado y respaldado por <b>Cloud Media Management</b>.</i>"
         ),
         "info_how_main": (
-            "📖 <b>¿Cómo Funciona The Bunker Bot? — Niveles de Acceso</b>\n\n"
-            "Conoce las herramientas y facultades de cada nivel operativo:\n\n"
-            "🆓 <b>Plan BÁSICO (Gratis de por vida):</b>\n"
-            "• Seguridad esencial para grupos y escudo anti-spam básico.\n"
-            "• Verificación de identidad con botón estándar de un solo toque.\n"
-            "• Límite de 3 usos diarios en comandos de moderación remota.\n\n"
-            "⭐ <b>Plan PRO (300 Stars):</b>\n"
-            "• ⚡ <b>Comandos de bot ilimitados:</b> Sin topes diarios.\n"
-            "• 🗑️ <b>Purga Automatizada:</b> Limpieza automática de mensajes de servicio y clutter.\n"
-            "• 🤖 <b>Aduana Captcha Pro:</b> Mensaje de bienvenida y tiempos 100% personalizados.\n"
-            "• 🛡️ <b>Anti-Spam Granular Total:</b> Bloqueo selectivo de canales, bots, citas y enlaces.\n\n"
-            "💎 <b>Plan ULTRA PRO (600 Stars):</b>\n"
-            "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
-            "• 🧬 <b>Arquitectura Bot Clone:</b> Despliega tu réplica con tu propio token de @BotFather.\n"
-            "• 🎙️ <b>Centinela de Voz Dedicado:</b> Conecta tu cuenta fácilmente mediante tu número telefónico (nodo aislado antiban).\n"
-            "• 🏷️ <b>Editor Nativo de Etiquetas VIP:</b> Asignación de rangos inamovibles (VIP 24/7) automáticos por propinas.\n"
-            "• 🔇 <b>Radar AutoLower Inteligente:</b> Micrófonos no autorizados al 2% en milisegundos.\n"
-            "• 💰 <b>Monetización Stars (/mic_vip):</b> El 100% de las Stars recaudadas entran directo a tu balance.\n"
-            "• 🗓️ <b>Programador VC Semanal:</b> Apertura y cierre autónomo de videochats según cronograma.\n\n"
+            "📖 <b>¿Cómo Funciona The Bunker Bot? — Guía Maestra</b>\n\n"
+            "Sigue esta ruta operativa para desplegar tu Búnker a máxima capacidad, "
+            "desde la instalación inicial hasta la monetización total con Telegram Stars:\n\n"
+            "1️⃣ <b>Despliegue: Añade el Bot y Otorga Administración</b>\n"
+            "• Agrega a <b>@Alphacentinel</b> (o tu propio Bot Clon) a tu grupo/supergrupo con el botón 'Añadir a un Grupo'.\n"
+            "• Promuévelo a <b>Administrador</b> con, como mínimo: eliminar mensajes, restringir miembros, gestionar videollamadas y fijar mensajes. Sin estos permisos, el Centinela no podrá operar la Aduana Captcha alfanumérica ni el Radar AutoLower.\n"
+            "• Una vez dentro, ejecuta /pro o /ultra directamente en el grupo para abrir el Centro de Mando en este chat privado.\n\n"
+            "2️⃣ <b>Tu Propio Bot Clon (ULTRA PRO 💎)</b>\n"
+            "• Escribe a <b>@BotFather</b>, crea un bot nuevo con /newbot y copia el token que te entrega.\n"
+            "• Desde el panel ULTRA PRO, pulsa 'Configurar Clon' y pega ese token: tu réplica privada queda enlazada en exclusiva a tu comunidad, corriendo en paralelo al Bot Maestro sin interferir con él.\n"
+            "• Cada Star que tu Clon recauda por pases VIP de micrófono (/micvip) entra al <b>100%</b> a TU balance — la plataforma nunca retiene comisión sobre esos pases.\n\n"
+            "3️⃣ <b>Centinela Dedicado: Vinculación por Teléfono y 2FA</b>\n"
+            "• En el mismo panel ULTRA PRO, elige 'Vincular Centinela' e ingresa tu número telefónico con el indicativo internacional (ej. +57...).\n"
+            "• Telegram te enviará un código de verificación: escríbelo tal cual en este chat privado. Si tu cuenta tiene Verificación en Dos Pasos (2FA), el bot también te pedirá tu contraseña — ambos datos viajan cifrados y <b>nunca se guardan en texto plano</b>; solo se conserva la StringSession resultante, y siempre en memoria volátil.\n"
+            "• Esto activa tu nodo aislado antiban: cada Centinela corre con su propia sesión, sin compartir IP ni huella con el resto de la red, blindando tu cuenta principal contra baneos por asociación.\n"
+            "• Con el Centinela activo se habilita automáticamente el <b>Radar AutoLower</b>: cualquier micrófono que se abra en el videochat sin un pase VIP activo o autorización explícita es atenuado al <b>2% de volumen en milisegundos</b>, sin que un moderador humano tenga que estar presente.\n\n"
+            "4️⃣ <b>Monetización con Telegram Stars (/micvip)</b>\n"
+            "• Define tu propio precio en Stars para el Pase VIP de Micrófono de 24 horas desde el panel de Economía.\n"
+            "• Cuando un miembro paga, el Centinela le restaura el volumen al 100% de inmediato y le asigna automáticamente una <b>etiqueta de administrador inamovible</b> (por ejemplo, \"VIP 24/7\"), totalmente personalizable por ti desde el panel ULTRA PRO.\n"
+            "• Dos flujos de ingreso limpios e independientes: las suscripciones de plataforma (PRO/ULTRA PRO) se facturan siempre a través del Bot Maestro, mientras que cada pase VIP de micrófono fluye 100% hacia TU Clon.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
@@ -2102,6 +2104,19 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
     action = data[0]
+
+    # 🩹 FIX: los prefijos de un solo token (gset, astog, togcap, capval, afset...)
+    # quedan correctamente aislados en data[0]. Pero "cap_set_*" es un prefijo
+    # COMPUESTO por dos tokens ("cap" + "set"): con action = data[0], quedaba
+    # reducido a "cap" y el `elif action == "cap_set":` de más abajo nunca
+    # coincidía, dejando mudos los sub-botones de tiempo límite, castigo,
+    # mensaje personalizado y borrado de servicio del Captcha. Se normaliza
+    # aquí, antes de cualquier despacho, para que el resto de los índices
+    # (data[1]=="set", data[2]==sub, data[-2]==group_id, data[-1]==lang) seguidos
+    # más abajo permanezcan exactamente iguales a como ya estaban escritos.
+    if callback.data.startswith("cap_set_"):
+        action = "cap_set"
+
     lang = data[-1] if data[-1] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
 
