@@ -30,32 +30,15 @@ from database.database import (
     get_radar_config, revoke_owner_session
 )
 
-# Excepciones que indican que una StringSession ya no es válida en Telegram
-# (revocada desde otro dispositivo, cuenta desactivada/baneada, etc.). Se agrupan
-# aquí porque en TODOS los puntos donde se detectan se aplica la misma receta:
-# purgar la sesión en BD (revoke_owner_session) y dejar de reintentar en bucle.
 FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan)
 
 logger = logging.getLogger("assistant_radar")
 
-# Credenciales maestras de respaldo
 DEFAULT_API_ID = 37074591
 DEFAULT_API_HASH = "66c86c8b4f08a0c142749b204f673d81"
 
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
-# ==============================================================================
-# 🔐 CENTINELA MAESTRO: EXCLUSIVAMENTE StringSession EN MEMORIA (SIN ARCHIVOS)
-# ==============================================================================
-# Railway (y cualquier plataforma de contenedores efímeros) NO garantiza disco
-# persistente entre despliegues/réplicas. Depender de un archivo `.session`
-# local (SQLite) es la causa raíz típica de "conflictos de sesión": dos
-# procesos abriendo el mismo archivo, o un archivo huérfano de un despliegue
-# anterior que ya no coincide con las claves vigentes en Telegram. Por eso el
-# Centinela Maestro NUNCA cae a un Client con sesión en disco: si no hay
-# MASTER_SESSION configurado, simplemente permanece inactivo (in_memory=True
-# siempre, `session_string=None` no crea nada en disco). Los Centinelas
-# propios por comunidad (owner_sessions en BD) no se ven afectados por esto.
 if MASTER_SESSION:
     assistant_app = Client(
         "assistant_session",
@@ -67,33 +50,24 @@ if MASTER_SESSION:
 else:
     assistant_app = None
     logger.warning(
-        "⚠️ [MASTER_SESSION no configurado] El Centinela Maestro global quedará inactivo "
-        "(no se usará ningún archivo .session local como respaldo). Los Centinelas propios "
-        "por comunidad (sesiones guardadas en BD) siguen funcionando con normalidad."
+        "⚠️ [MASTER_SESSION no configurado] El Centinela Maestro global quedará inactivo. "
+        "Los Centinelas propios por comunidad siguen funcionando con normalidad."
     )
 
 _global_bot = None
 _default_my_id = None
 
-# Pool de Centinelas activos: {group_id: {"client": Client, "task": Task, "user_id": int}}
 active_sentinels = {}
 admin_caches = {}  
 ADMIN_CACHE_TTL = 300
 
-# Buffer de autenticación en memoria: {user_id: {"client": Client, "phone": str, "phone_code_hash": str, "group_id": int, "ts": float}}
 pending_auth_sessions = {}
 
-# --- Circuit breaker de GROUPCALL_FORBIDDEN (Fallo #1) ---
-# {group_id: int} conteo de fallos consecutivos al unirse/editar el videochat
 _forbidden_strikes = {}
-# {group_id: float} timestamp (loop time) hasta el cual se pausan los intentos en ese grupo
 _autolower_cooldowns = {}
 FORBIDDEN_STRIKE_LIMIT = 3
-FORBIDDEN_COOLDOWN_SECONDS = 900  # 15 minutos de enfriamiento tras 3 fallos consecutivos
+FORBIDDEN_COOLDOWN_SECONDS = 900  
 
-# ==========================================
-# 🌐 DICCIONARIO BILINGÜE DEL VIDEOCHAT
-# ==========================================
 RADAR_TEXTS = {
     "combined": (
         "🔇 <b>The Bunker Bot: Atenuación Acústica Activa (AutoLower)</b>\n\n"
@@ -128,17 +102,8 @@ OPTIMIZATION_TEXT = (
     "🛡️ <i>Cloud Media Management</i>"
 )
 
-# ==========================================
-# 🎛️ DESPACHO DINÁMICO DE AVISOS PERSONALIZABLES (Req. #2 — Matriz del Centinela)
-# ==========================================
 async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
                                   media_type: str = None, auto_delete_after: int = None):
-    """
-    Envía un aviso del Centinela (AutoLower o pre-reinicio de 3.5h) respetando
-    la personalización guardada en BD para ese group_id. Si la comunidad
-    configuró multimedia propia (foto/video/gif), se envía como caption;
-    si no, se envía como texto plano — siempre con fallback seguro si algo falla.
-    """
     if not _global_bot:
         return None
 
@@ -171,7 +136,6 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
 
 
 def _resolve_autolower_text(custom_text: str, user_name: str) -> str:
-    """Usa el texto personalizado de la comunidad si existe; si no, el default bilingüe de fábrica."""
     template = custom_text if custom_text else RADAR_TEXTS["combined"]
     try:
         return template.format(user_name=user_name)
@@ -180,7 +144,6 @@ def _resolve_autolower_text(custom_text: str, user_name: str) -> str:
 
 
 def _resolve_reset_text(custom_text: str) -> str:
-    """Usa el aviso previo al reinicio de 3.5h personalizado si existe; si no, el default de fábrica."""
     return custom_text if custom_text else OPTIMIZATION_TEXT
 
 
@@ -199,11 +162,6 @@ VC_SCHED_MESSAGES = {
     )
 }
 
-
-# ==============================================================================
-# 🔐 MOTOR DE AUTENTICACIÓN NATIVA (PHONE LOGIN CON RECONEXIÓN BLINDADA)
-# ==============================================================================
-
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
     await cancel_phone_auth(user_id)
     
@@ -211,7 +169,6 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
     if not clean_phone.startswith("+"):
         clean_phone = f"+{clean_phone}"
 
-    # Nombre de sesión único en memoria para evitar colisiones de base de datos volátil
     client = Client(
         f"auth_temp_{user_id}_{group_id}_{int(time.time())}",
         api_id=DEFAULT_API_ID,
@@ -319,19 +276,7 @@ async def cancel_phone_auth(user_id: int):
                 pass
 
 
-# ==============================================================================
-# 📡 RADAR Y GESTIÓN DE LLAMADAS
-# ==============================================================================
-
 def _register_forbidden_strike(chat_id: int, action: str):
-    """
-    Lleva la cuenta de fallos consecutivos [400 GROUPCALL_FORBIDDEN] por grupo. Al
-    superar FORBIDDEN_STRIKE_LIMIT, activa un cooldown que detiene por completo los
-    intentos de unirse/silenciar en ESE grupo durante FORBIDDEN_COOLDOWN_SECONDS, en
-    vez de seguir invocando la RPC cada pocos segundos (causa raíz del flood de logs).
-    Esto casi siempre significa que la cuenta del Centinela NO es administradora con
-    el permiso "Gestionar videollamadas" habilitado en ese grupo/canal.
-    """
     strikes = _forbidden_strikes.get(chat_id, 0) + 1
     if strikes >= FORBIDDEN_STRIKE_LIMIT:
         _autolower_cooldowns[chat_id] = asyncio.get_event_loop().time() + FORBIDDEN_COOLDOWN_SECONDS
@@ -346,23 +291,20 @@ def _register_forbidden_strike(chat_id: int, action: str):
 
 
 async def _verify_active_membership(client: Client, chat_id: int) -> bool:
-    """Confirma que la cuenta del Centinela sigue siendo miembro activo del grupo (no LEFT/KICKED/BANNED)."""
+    """
+    Confirma membresía. En in_memory, atrapamos las excepciones silenciosamente
+    y asumimos True para no bloquear el login si los diálogos no han sincronizado.
+    """
     try:
         member = await client.get_chat_member(chat_id, "me")
         status_val = str(getattr(member.status, "value", member.status)).lower()
         return status_val not in ("left", "banned", "kicked")
     except Exception as e:
-        logger.debug(f"No se pudo verificar membresía activa en {chat_id}: {e}")
-        return False
+        logger.debug(f"Membresía no confirmada inmediatamente en {chat_id} (posible desincronización): {e}")
+        return True
 
 
 async def _ensure_connected(client: Client, retries: int = 3, delay: float = 1.5) -> bool:
-    """
-    Garantiza una conexión TCP viva antes de operaciones sensibles (sign_in,
-    check_password). En Railway los sockets pueden caerse en cualquier momento
-    del flujo de verificación; reintentar unas pocas veces con backoff corto
-    evita perder el progreso de un 2FA/código por una caída transitoria.
-    """
     for attempt in range(retries):
         if client.is_connected:
             return True
@@ -396,7 +338,6 @@ async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int)
 
 
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
-    """Bucle de radar aislado con tolerancia a PeerIdInvalid y mantenimiento preventivo."""
     alerted_users = set()
     current_call = None
     last_channel_check = 0
@@ -410,9 +351,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 await client.start()
                 logger.info(f"🔄 [Centinela Reconectado] Sesión restablecida para el grupo {chat_id}.")
             except FATAL_SESSION_ERRORS as auth_err:
-                # La sesión ya no es válida ante Telegram (revocada, cuenta desactivada/baneada, etc.).
-                # Reintentar aquí sólo produciría el mismo error en bucle para siempre: se purga en BD
-                # y se termina esta tarea de forma limpia en vez de seguir spameando logs.
                 logger.error(f"🔒 [Sesión Inválida] Centinela del grupo {chat_id} desautorizado: {auth_err}")
                 if user_id:
                     try:
@@ -434,9 +372,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 await _refresh_admin_cache(client, chat_id, bot_client_id)
                 cache_info = admin_caches.get(chat_id, {'admins': set(), 'ts': current_time})
 
-                # 🛡️ Membresía obligatoria: si la cuenta ya no pertenece al grupo (expulsada,
-                # salió manualmente, etc.), seguir monitoreando sólo produciría PeerIdInvalid
-                # y GROUPCALL_FORBIDDEN en bucle. Se corta la tarea de forma limpia.
                 if not await _verify_active_membership(client, chat_id):
                     logger.warning(f"🚪 [Membresía Perdida] El Centinela ya no pertenece al grupo {chat_id}. Deteniendo monitor.")
                     active_sentinels.pop(chat_id, None)
@@ -470,7 +405,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
-            # 🛡️ MANTENIMIENTO PREVENTIVO — INAMOVIBLE: 3.5 horas / 12600 segundos.
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
@@ -511,9 +445,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     await asyncio.sleep(10)
                     continue
 
-                # 🛑 Circuit breaker: si este grupo viene fallando por falta de permisos,
-                # no se reintenta unirse/silenciar hasta que expire el cooldown. Esto es lo
-                # que corta el bucle de [400 GROUPCALL_FORBIDDEN] repetido en los logs.
                 cooldown_until = _autolower_cooldowns.get(chat_id, 0)
                 if current_time < cooldown_until:
                     await asyncio.sleep(15)
@@ -584,7 +515,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             if "GROUPCALL_FORBIDDEN" in err_msg:
                                 if not permission_warned:
                                     permission_warned = True
-                                _register_forbidden_strike(chat_id, "silenciar un participante (EditGroupCallParticipant)")
+                                _register_forbidden_strike(chat_id, "silenciar un participante")
                                 await asyncio.sleep(25)
                                 break
                             elif "GROUPCALL_INVALID" in err_msg or "CALL_ALREADY_ENDED" in err_msg:
@@ -610,10 +541,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 except Exception:
                                     pass
 
-                # 🔁 Validación de unión activa: si nos creíamos unidos pero Telegram ya no nos
-                # lista como participantes (call recreado, expulsión silenciosa del canal de voz,
-                # etc.), forzamos un rejoin limpio en el próximo ciclo en vez de seguir invocando
-                # EditGroupCallParticipant "a ciegas" sobre una llamada de la que ya no formamos parte.
                 if is_joined_audio and bot_client_id not in active_users:
                     logger.info(f"🔁 [Rejoin Requerido] Centinela ausente de la llamada en {chat_id}; se reincorporará.")
                     is_joined_audio = False
@@ -665,13 +592,8 @@ async def vc_scheduler_loop():
                     try:
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
                         await update_vc_call_status(group_id, 1)
-                        logger.info(f"📡 [Programador VC] Videochat abierto automáticamente en grupo {group_id}")
                         if _global_bot:
-                            await _global_bot.send_message(
-                                chat_id=group_id,
-                                text=VC_SCHED_MESSAGES["start"],
-                                parse_mode="HTML"
-                            )
+                            await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["start"], parse_mode="HTML")
                     except Exception as e:
                         logger.error(f"Error abriendo videochat en grupo {group_id}: {e}")
 
@@ -683,13 +605,8 @@ async def vc_scheduler_loop():
                             call_obj = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
                             await client.invoke(DiscardGroupCall(call=call_obj))
                         await update_vc_call_status(group_id, 0)
-                        logger.info(f"📡 [Programador VC] Videochat cerrado automáticamente en grupo {group_id}")
                         if _global_bot:
-                            await _global_bot.send_message(
-                                chat_id=group_id,
-                                text=VC_SCHED_MESSAGES["end"],
-                                parse_mode="HTML"
-                            )
+                            await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["end"], parse_mode="HTML")
                     except Exception as e:
                         logger.error(f"Error cerrando videochat en grupo {group_id}: {e}")
 
@@ -715,9 +632,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
 
-        # 📥 Precarga obligatoria del chat: puebla la caché de peers de Pyrogram y es la
-        # forma más confiable de detectar PeerIdInvalid de forma temprana y controlada,
-        # antes de que aparezca de golpe en medio del bucle de monitoreo.
         try:
             await session_client.get_chat(group_id)
         except PeerIdInvalid:
@@ -727,13 +641,10 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         except Exception as chat_err:
             logger.debug(f"Aviso precargando chat {group_id}: {chat_err}")
 
-        # 👤 Membresía obligatoria: get_chat() puede tener éxito con datos cacheados por
-        # Telegram incluso si la cuenta ya no pertenece al grupo. Se verifica explícitamente
-        # antes de lanzar el bucle de monitoreo para no arrancar un Centinela "fantasma".
-        if not await _verify_active_membership(session_client, group_id):
-            logger.warning(f"⚠️ [Membresía Inválida] La cuenta ya no pertenece al grupo {group_id}. Abortando lanzamiento del Centinela.")
-            await session_client.stop()
-            return False
+        # 👤 Relax: No abortamos el lanzamiento si la validación falla por desincronización
+        is_member = await _verify_active_membership(session_client, group_id)
+        if not is_member:
+            logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar de todos modos...")
 
         peer = await session_client.resolve_peer(group_id)
 
@@ -746,9 +657,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         logger.info(f"💎 [Centinela Propio Conectado] Comunidad {group_id} protegida por @{me.username or me.id}")
         return True
     except FATAL_SESSION_ERRORS as auth_err:
-        # Sesión muerta ante Telegram: se purga en BD para que load_all_sentinels() no
-        # vuelva a intentarla en cada reinicio del proceso (evita el "conflicto de sesiones").
-        logger.warning(f"⚠️ [Sesión Inválida] La sesión del usuario {user_id} para el grupo {group_id} fue revocada: {auth_err}")
+        logger.warning(f"⚠️ [Sesión Inválida] La sesión de {user_id} para {group_id} fue revocada: {auth_err}")
         try:
             await revoke_owner_session(user_id, group_id, reason=str(auth_err))
         except Exception:
@@ -782,8 +691,6 @@ async def disconnect_sentinel(group_id: int):
             pass
         logger.info(f"🛑 [Centinela Desconectado] Grupo {group_id} liberado.")
 
-    # Limpieza del estado en memoria asociado a ese grupo, para no acumular
-    # entradas huérfanas indefinidamente a medida que rotan sesiones/clones.
     admin_caches.pop(group_id, None)
     _forbidden_strikes.pop(group_id, None)
     _autolower_cooldowns.pop(group_id, None)
@@ -797,7 +704,7 @@ async def load_all_sentinels():
             try:
                 await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
             except PeerIdInvalid:
-                logger.debug(f"Saltando grupo inválido {g_id} al cargar sesiones.")
+                pass
             except Exception:
                 pass
 
@@ -812,8 +719,6 @@ async def radar_master_loop():
                         chat_id = chat.id
                         if chat_id not in active_sentinels:
                             try:
-                                # Precarga defensiva: evita que un PeerIdInvalid aparezca recién
-                                # dentro de monitor_single_group en vez de aquí, donde es más barato.
                                 try:
                                     await assistant_app.get_chat(chat_id)
                                 except Exception:
@@ -898,7 +803,6 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         try:
             await client.get_chat(chat_id)
         except PeerIdInvalid:
-            logger.warning(f"⚠️ [Peer ID Inválido] set_participant_mic no puede resolver {chat_id}.")
             return False
         except Exception:
             pass
