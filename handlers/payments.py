@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, LabeledPrice, PreCheckoutQuery, 
@@ -9,7 +10,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
     approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
-    get_vip_badge_title
+    get_vip_badge_title, get_channel_plans, record_channel_subscription
 )
 from assistant import set_participant_mic
 from handlers.user_private import is_clone_bot, get_master_bot_username
@@ -117,7 +118,6 @@ TEXTS = {
         "btn_back_group": "🔙 Back to Group Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
         
-        # 🛡️ Límite API Telegram: Máximo 32 caracteres estrictos para títulos de factura
         "inv_pro_t": "PRO Subscription (300 XTR)",
         "inv_pro_d": "Unlimited bot commands, automated purge center, custom captcha pro, and master sentinel shielding.",
         "inv_ultra_t": "ULTRA PRO License (600 XTR)",
@@ -178,7 +178,6 @@ TEXTS = {
         "btn_back_group": "🔙 Volver al Panel del Grupo",
         "btn_pay_stars": "⭐ Pagar con Stars",
         
-        # 🛡️ Límite API Telegram: Máximo 32 caracteres estrictos para títulos de factura
         "inv_pro_t": "Suscripción PRO (300 XTR)",
         "inv_pro_d": "Comandos ilimitados, purga de mensajes automatizada, captcha pro y centinela maestro.",
         "inv_ultra_t": "Licencia ULTRA PRO (600 XTR)",
@@ -221,7 +220,6 @@ TEXTS = {
 # ==========================================
 @router.message(Command("pro", "ultra"))
 async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
-    """Permite al dueño auditar su plan o solicitar pasarelas al privado."""
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
@@ -286,7 +284,6 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
 # ==========================================
 @router.message(Command("start"), F.text.contains("sub_"))
 async def cmd_start_subscription(message: Message, command: CommandObject, bot: Bot):
-    """Recibe parámetros profundos de suscripción para despachar facturas en Stars al instante."""
     if message.chat.type != "private":
         return
 
@@ -333,7 +330,6 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
         else:
             return
 
-        # 🔒 Blindaje estricto: rechaza cobros si el ID de grupo no es un supergrupo válido negativo
         if chat_id_target >= 0:
             await message.answer(t["err_link"], parse_mode="HTML")
             return
@@ -351,7 +347,7 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
             title=title,
             description=desc,
             payload=payload,
-            provider_token="",  # Telegram Stars
+            provider_token="",
             currency="XTR",
             prices=prices,
             reply_markup=markup
@@ -362,11 +358,67 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
 
 
 # ==========================================
+# 📢 FASE 6: FACTURACIÓN DE MEMBRESÍAS EN CANALES (chanplan_)
+# ==========================================
+@router.message(Command("start"), F.text.contains("chanplan_"))
+async def cmd_start_chan_plan(message: Message, command: CommandObject, bot: Bot):
+    if message.chat.type != "private":
+        return
+
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+    args = command.args or ""
+
+    try:
+        parts = args.split("_")
+        # Formato esperado: chanplan_<plan_id>_<channel_id>
+        if len(parts) < 3:
+            await message.answer(t["err_link"], parse_mode="HTML")
+            return
+
+        plan_id = int(parts[1])
+        channel_id = int(parts[2])
+
+        plans = await get_channel_plans(channel_id, only_active=True)
+        target_plan = next((p for p in plans if p[0] == plan_id), None)
+        if not target_plan:
+            await message.answer(t["err_link"], parse_mode="HTML")
+            return
+
+        plan_name = target_plan[1]
+        duration_days = target_plan[2]
+        stars_price = target_plan[3]
+
+        title = f"Membresía: {plan_name}"[:32]
+        desc = f"Acceso exclusivo al canal por {duration_days} días."[:255]
+        payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
+
+        prices = [LabeledPrice(label=title, amount=stars_price)]
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)],
+            [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+        ])
+
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title=title,
+            description=desc,
+            payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=prices,
+            reply_markup=markup
+        )
+    except Exception as e:
+        logger.error(f"Error generando factura de membresía de canal: {e}")
+        await message.answer(t["err_inv"], parse_mode="HTML")
+
+
+# ==========================================
 # 🎙️ FACTURACIÓN DINÁMICA DE PASE VIP DE MICRÓFONO
 # ==========================================
 @router.message(Command("start"), F.text.contains("vipmic_"))
 async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
-    """Despacha la factura en Stars para desbloquear el micrófono por 24h consultando la tarifa del grupo."""
     if message.chat.type != "private":
         return
 
@@ -378,7 +430,6 @@ async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
         try:
             chat_id = int(args.split("_")[1])
             
-            # 🔒 Seguro antibug: El pase de micrófono es solo para supergrupos reales
             if chat_id >= 0:
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
@@ -401,7 +452,7 @@ async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
                 title=title,
                 description=desc,
                 payload=payload,
-                provider_token="",  # Telegram Stars
+                provider_token="",
                 currency="XTR",
                 prices=prices,
                 reply_markup=markup
@@ -409,14 +460,11 @@ async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
         except Exception as e:
             logger.error(f"Error generando factura de Micrófono VIP: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
-
-
-# ==========================================
+    # ==========================================
 # ⚡ DESPACHO DE FACTURAS DESDE BOTONES INLINE (inv_)
 # ==========================================
 @router.callback_query(F.data.startswith("inv_"))
 async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
-    """Genera y muestra la factura de Telegram Stars cuando el usuario pulsa en el panel inline."""
     await callback.answer()
     lang = get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
@@ -478,7 +526,6 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
 # ==========================================
 @router.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
-    """Responde positivamente a la pasarela de Telegram Stars para validar la orden."""
     await pre_checkout_query.answer(ok=True)
 
 
@@ -487,7 +534,6 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 # ==========================================
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, bot: Bot):
-    """Recibe la confirmación criptográfica de Telegram y eleva la comunidad en tiempo real."""
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     payload = message.successful_payment.invoice_payload
@@ -527,7 +573,53 @@ async def process_successful_payment(message: Message, bot: Bot):
             logger.error(f"Error procesando la entrega de suscripción adquirida: {e}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 2: PASES VIP DE MICRÓFONO (24 HORAS)
+    # CASO 2: FASE 6 — MEMBRESÍAS DE CANAL Y ENLACES CRIPTOGRÁFICOS DE UN SOLO USO
+    elif payload.startswith("chan_sub_"):
+        try:
+            parts = payload.split("_")
+            channel_id = int(parts[2])
+            plan_id = int(parts[3])
+            duration_days = int(parts[4])
+            user_id = message.from_user.id
+            stars_paid = message.successful_payment.total_amount
+
+            # Genera un enlace de invitación de un solo uso criptográficamente seguro
+            invite = await bot.create_chat_invite_link(
+                chat_id=channel_id,
+                member_limit=1,
+                expire_date=int(time.time()) + 86400 * 3 # Válido por 3 días o 1 un solo uso
+            )
+            invite_link = invite.invite_link
+
+            # Registra la suscripción activa en la base de datos
+            await record_channel_subscription(
+                channel_id=channel_id,
+                user_id=user_id,
+                plan_id=plan_id,
+                stars_paid=stars_paid,
+                duration_days=duration_days,
+                invite_link=invite_link
+            )
+
+            success_text = (
+                f"💎 <b>¡Membresía de Canal Activada con Éxito!</b>\n\n"
+                f"• Pago procesado: <b>{stars_paid} Stars (XTR)</b>\n"
+                f"• Tu <b>enlace criptográfico de un solo uso</b> está listo (se quemará automáticamente al unirte):\n\n"
+                f"🔗 <a href='{invite_link}'>Entrar al Canal Seguro</a>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"💎 <b>Channel Membership Activated Successfully!</b>\n\n"
+                f"• Payment processed: <b>{stars_paid} Stars (XTR)</b>\n"
+                f"• Your <b>single-use cryptographic invite link</b> is ready (burns automatically upon joining):\n\n"
+                f"🔗 <a href='{invite_link}'>Join Secure Channel</a>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            await message.answer(success_text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Error procesando el pago de membresía para canal: {e}")
+            await message.answer(t["err_inv"], parse_mode="HTML")
+
+    # CASO 3: PASES VIP DE MICRÓFONO (24 HORAS)
     elif payload.startswith("vip_mic_"):
         try:
             chat_id = int(payload.split("_")[2])
@@ -548,7 +640,6 @@ async def process_successful_payment(message: Message, bot: Bot):
             try:
                 badge_title = await get_vip_badge_title(chat_id)
 
-                # 💡 Corregido: se requiere can_manage_chat=True para que Telegram permita asignar un custom_title
                 await bot.promote_chat_member(
                     chat_id=chat_id, user_id=user_id,
                     can_manage_chat=True, can_change_info=False, can_delete_messages=False,
@@ -569,4 +660,4 @@ async def process_successful_payment(message: Message, bot: Bot):
             await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             logger.error(f"Error procesando la entrega del pase VIP de micrófono: {e}")
-            await message.answer(t["err_inv"], parse_mode="HTML")
+            await message.answer(t["err_inv"], parse_mode="HTML")        

@@ -29,7 +29,11 @@ from database.database import (
     get_all_active_vc_schedules, update_vc_call_status,
     get_radar_config, revoke_owner_session,
     get_screen_shield_status, get_podcast_config,
-    get_night_mode_config
+    get_night_mode_config,
+    get_expiring_channel_subscriptions,
+    get_expired_channel_subscriptions,
+    mark_subscription_warned,
+    update_subscription_status
 )
 
 # --- Payload Multimedia del Centinela (Ultra Pro) ---
@@ -842,6 +846,58 @@ async def vc_scheduler_loop():
         await asyncio.sleep(50)
 
 
+# ==========================================
+# 📢 FASE 6: BUCLE DE AUDITORÍA Y EXPULSIÓN DE CANALES
+# ==========================================
+async def channel_subscription_audit_loop():
+    logger.info("📡 [Auditor de Canales] Bucle de membresías y renovación automática iniciado.")
+    while True:
+        try:
+            # 1. Alertas de expiración cercana (48h antes)
+            expiring = await get_expiring_channel_subscriptions(hours_ahead=48)
+            for row in expiring:
+                channel_id, user_id, expires_at, stars_paid, grace_days = row
+                if _global_bot:
+                    try:
+                        warning_text = (
+                            f"⏳ <b>Aviso de Renovación — The Bunker OS</b>\n\n"
+                            f"Tu membresía en el canal expira el <code>{expires_at}</code>.\n"
+                            f"Renueva a tiempo para mantener tus privilegios de acceso exclusivo.\n\n"
+                            f"🛡️ <i>Cloud Media Management</i>"
+                        )
+                        await _global_bot.send_message(chat_id=user_id, text=warning_text, parse_mode="HTML")
+                        await mark_subscription_warned(channel_id, user_id)
+                    except Exception as e:
+                        logger.debug(f"Aviso al notificar expiración a {user_id} para canal {channel_id}: {e}")
+
+            # 2. Expirados y expulsión automática (auto-kick tras período de gracia)
+            expired = await get_expired_channel_subscriptions()
+            for row in expired:
+                channel_id, user_id, expires_at, grace_days, auto_kick = row
+                if auto_kick == 1 and _global_bot:
+                    try:
+                        await _global_bot.ban_chat_member(chat_id=channel_id, user_id=user_id, until_date=int(time.time() + 35))
+                        await _global_bot.unban_chat_member(chat_id=channel_id, user_id=user_id)
+                        expired_text = (
+                            f"⚠️ <b>Membresía Expirada — The Bunker OS</b>\n\n"
+                            f"Tu acceso al canal ha concluido tras agotar el período de gracia. Has sido retirado automáticamente.\n\n"
+                            f"🛡️ <i>Cloud Media Management</i>"
+                        )
+                        await _global_bot.send_message(chat_id=user_id, text=expired_text, parse_mode="HTML")
+                        await update_subscription_status(channel_id, user_id, "kicked")
+                        logger.info(f"👢 [Auto-Kick Canal] Usuario {user_id} expulsado del canal {channel_id} por falta de renovación.")
+                    except Exception as e:
+                        logger.warning(f"Aviso al expulsar al moroso {user_id} del canal {channel_id}: {e}")
+                        await update_subscription_status(channel_id, user_id, "expired")
+                else:
+                    await update_subscription_status(channel_id, user_id, "expired")
+
+        except Exception as e:
+            logger.error(f"Error en bucle de auditoría de canales: {e}")
+
+        await asyncio.sleep(1800)
+
+
 async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
     client_api_id = api_id if api_id else DEFAULT_API_ID
     client_api_hash = api_hash if api_hash else DEFAULT_API_HASH
@@ -1016,6 +1072,7 @@ async def init_assistant_master():
     asyncio.create_task(radar_master_loop())
     asyncio.create_task(vc_scheduler_loop())
     asyncio.create_task(pending_auth_cleanup_loop())
+    asyncio.create_task(channel_subscription_audit_loop())
 
 
 def start_voice_radar(bot):
@@ -1072,4 +1129,4 @@ async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
     logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% en el grupo {group_id}")
 
 async def disengage_podcast_ducking(group_id: int):
-    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")    
+    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")

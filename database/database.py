@@ -399,6 +399,8 @@ def get_user_channels(user_id: int) -> list:
             WHERE user_id = ? AND chat_type = 'channel'
         """, (user_id,))
         return cursor.fetchall()
+
+
 def set_autolower_status(group_id: int, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -544,8 +546,6 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
             ON CONFLICT(group_id) DO UPDATE SET {lock_name} = excluded.{lock_name}
         """, (group_id, status))
         conn.commit()
-
-
 def get_mic_vip_price(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()

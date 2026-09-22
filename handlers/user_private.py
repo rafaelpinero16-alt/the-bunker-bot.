@@ -37,6 +37,7 @@ from database.database import (
     # 💎 Módulos de Canales & Membresías
     get_channel_settings, set_channel_settings,
     get_channel_plans, get_active_subscribers_count,
+    create_channel_plan, delete_channel_plan,  # <--- Añadir aquí
     get_night_mode_config,
     set_night_mode_config
 )
@@ -173,6 +174,9 @@ TIPS_TARGET_STATES = {}
 SENTINEL_PAYLOAD_TEXT_STATES = {}
 SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
+SENTINEL_PAYLOAD_MEDIA_STATES = {}
+SENTINEL_PAYLOAD_AUTODEL_STATES = {}
+CHAN_PLAN_STATES = {}
 
 FILTER_MAP = {
     "tglinks": "tg_links", "fwdchan": "fwd_channels", "fwdusr": "fwd_users",
@@ -1023,11 +1027,14 @@ def get_channel_panel_keyboard(channel_id: int, lang: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 ULTRA PRO", callback_data=f"pay_ultra_{channel_id}_{lang}")],
         [
-            InlineKeyboardButton(text="🎙️ " + ("Moderación de Live" if lang == "es" else "Live Moderation"), callback_data=f"menu_ultra_{channel_id}_{lang}"),
-            InlineKeyboardButton(text="⭐ " + ("Propinas Stars" if lang == "es" else "Stars Tips"), callback_data=f"tips_menu_{channel_id}_{lang}")
+            InlineKeyboardButton(text="💎 " + ("Planes de Membresía" if lang == "es" else "Membership Plans"), callback_data=f"chplans_menu_{channel_id}_{lang}"),
+            InlineKeyboardButton(text="🎙️ " + ("Moderación de Live" if lang == "es" else "Live Moderation"), callback_data=f"menu_ultra_{channel_id}_{lang}")
         ],
         [
-            InlineKeyboardButton(text="💎 " + ("Payload Multimedia" if lang == "es" else "Media Payload"), callback_data=f"payload_menu_{channel_id}_{lang}"),
+            InlineKeyboardButton(text="⭐ " + ("Propinas Stars" if lang == "es" else "Stars Tips"), callback_data=f"tips_menu_{channel_id}_{lang}"),
+            InlineKeyboardButton(text="💎 " + ("Payload Multimedia" if lang == "es" else "Media Payload"), callback_data=f"payload_menu_{channel_id}_{lang}")
+        ],
+        [
             InlineKeyboardButton(text="🧬 " + ("Clon & Centinela" if lang == "es" else "Clone & Sentinel"), callback_data=f"gset_clone_{channel_id}_{lang}")
         ],
         [
@@ -1996,6 +2003,68 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
+    # 13. CREACIÓN DE PLANES DE MEMBRESÍA DE CANAL (FASE 6)
+    if (bot.id, user_id) in CHAN_PLAN_STATES:
+        st_data = CHAN_PLAN_STATES[(bot.id, user_id)]
+        channel_id = st_data["channel_id"]
+        step = st_data["step"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")]
+        ])
+
+        if step == "name":
+            plan_name = text_input[:30].strip()
+            CHAN_PLAN_STATES[(bot.id, user_id)]["name"] = plan_name
+            CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "days"
+            prompt_days = "⏳ <b>Duración del plan en días:</b>\n\nEnvía un número entero (ejemplo: <code>30</code> para un mes):" if lang == "es" else "⏳ <b>Plan duration in days:</b>\n\nSend an integer (e.g. <code>30</code>):"
+            resp = await message.answer(prompt_days, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "days":
+            if not text_input.isdigit() or int(text_input) <= 0:
+                resp = await message.answer("⚠️ Ingresa un número entero de días válido.", reply_markup=back_kb)
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+            CHAN_PLAN_STATES[(bot.id, user_id)]["days"] = int(text_input)
+            CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "price"
+            prompt_price = "⭐ <b>Precio en Telegram Stars (XTR):</b>\n\nEnvía la tarifa en Stars que costará la membresía (ejemplo: <code>150</code>):" if lang == "es" else "⭐ <b>Price in Telegram Stars (XTR):</b>\n\nSend the price in Stars (e.g. <code>150</code>):"
+            resp = await message.answer(prompt_price, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "price":
+            if not text_input.isdigit() or int(text_input) <= 0:
+                resp = await message.answer("⚠️ Ingresa un precio entero válido en Stars.", reply_markup=back_kb)
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
+            price_stars = int(text_input)
+            plan_name = st_data["name"]
+            duration_days = st_data["days"]
+            CHAN_PLAN_STATES.pop((bot.id, user_id), None)
+
+            plan_id = await create_channel_plan(channel_id, plan_name, duration_days, price_stars)
+            bot_info = await bot.get_me()
+            deep_link = f"https://t.me/{bot_info.username}?start=chanplan_{plan_id}_{channel_id}"
+
+            done_text = (
+                f"✅ <b>¡Plan de Membresía Creado con Éxito!</b>\n\n"
+                f"• <b>Plan:</b> {plan_name}\n"
+                f"• <b>Duración:</b> {duration_days} días\n"
+                f"• <b>Precio:</b> {price_stars} Stars (XTR)\n\n"
+                f"🔗 <b>Enlace de Pago para tus suscriptores:</b>\n<code>{deep_link}</code>\n\n"
+                f"<i>Al pagar, el bot generará automáticamente un enlace criptográfico de un solo uso que se quemará al unirse.</i>"
+            ) if lang == "es" else (
+                f"✅ <b>Membership Plan Created Successfully!</b>\n\n"
+                f"• <b>Plan:</b> {plan_name}\n"
+                f"• <b>Duration:</b> {duration_days} days\n"
+                f"• <b>Price:</b> {price_stars} Stars (XTR)\n\n"
+                f"🔗 <b>Payment Link for subscribers:</b>\n<code>{deep_link}</code>"
+            )
+            resp = await message.answer(done_text, reply_markup=back_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
 
 @router.callback_query(
     F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | 
@@ -3121,3 +3190,123 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             except Exception:
                 pass
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+            
+# ==========================================
+# 📢 FASE 6: DISPATCHER DE PLANES DE CANAL
+# ==========================================
+@router.callback_query(F.data.startswith("chplans_"))
+async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
+    await callback.answer()
+    data = callback.data.split("_")
+    sub = data[1]
+    
+    # 💡 Resolución blindada del channel_id:
+    if sub == "del":
+        plan_id = int(data[2])
+        channel_id = int(data[3])
+    else:
+        channel_id = int(data[2])
+
+    lang = data[-1] if data[-1] in ["es", "en"] else "es"
+    t = TEXTS.get(lang, TEXTS["es"])
+
+    if not await verify_admin_privileges(callback, bot, channel_id):
+        return
+
+    if sub == "menu":
+        plans = await get_channel_plans(channel_id, only_active=True)
+        sub_count = await get_active_subscribers_count(channel_id)
+        bot_info = await bot.get_me()
+
+        try:
+            c_name = (await bot.get_chat(channel_id)).title
+        except Exception:
+            c_name = "Canal"
+
+        plans_list_text = ""
+        kb_rows = []
+        if plans:
+            for p in plans:
+                p_id, p_name, p_days, p_stars = p[0], p[1], p[2], p[3]
+                link = f"https://t.me/{bot_info.username}?start=chanplan_{p_id}_{channel_id}"
+                plans_list_text += f"\n• <b>{p_name}:</b> {p_days}d — {p_stars} ⭐\n  └ <code>{link}</code>\n"
+                del_label = f"🗑️ Borrar {p_name[:12]}" if lang == "es" else f"🗑️ Delete {p_name[:12]}"
+                kb_rows.append([InlineKeyboardButton(text=del_label, callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}")])
+        else:
+            plans_list_text = "\n<i>(No hay planes activos configurados aún)</i>" if lang == "es" else "\n<i>(No active plans configured yet)</i>"
+
+        text = (
+            f"💎 <b>Gestión de Membresías — {c_name}</b>\n\n"
+            f"• <b>Suscriptores Activos:</b> <code>{sub_count}</code>\n"
+            f"• <b>Planes de Suscripción:</b>\n{plans_list_text}\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            f"💎 <b>Membership Management — {c_name}</b>\n\n"
+            f"• <b>Active Subscribers:</b> <code>{sub_count}</code>\n"
+            f"• <b>Subscription Plans:</b>\n{plans_list_text}\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+
+        add_btn_text = "➕ Crear Nuevo Plan" if lang == "es" else "➕ Create New Plan"
+        kb_rows.append([InlineKeyboardButton(text=add_btn_text, callback_data=f"chplans_add_{channel_id}_{lang}")])
+        kb_rows.append([InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")])
+
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode="HTML")
+        except TelegramBadRequest:
+            pass
+
+    elif sub == "add":
+        CHAN_PLAN_STATES[(bot.id, callback.from_user.id)] = {"channel_id": channel_id, "step": "name", "lang": lang}
+        prompt_name = (
+            "✍️ <b>Nombre del nuevo plan:</b>\n\n"
+            "Envía en este chat el nombre comercial de la suscripción (ejemplo: <code>Pase Mensual VIP</code>):"
+        ) if lang == "es" else (
+            "✍️ <b>New plan name:</b>\n\nSend the plan title (e.g. <code>Monthly VIP Pass</code>):"
+        )
+        prompt = await callback.message.answer(prompt_name, parse_mode="HTML")
+        fire_and_forget_auto_delete([prompt], delay=60)
+
+    elif sub == "del":
+        await delete_channel_plan(plan_id)
+        plans = await get_channel_plans(channel_id, only_active=True)
+        sub_count = await get_active_subscribers_count(channel_id)
+        bot_info = await bot.get_me()
+
+        try:
+            c_name = (await bot.get_chat(channel_id)).title
+        except Exception:
+            c_name = "Canal"
+
+        plans_list_text = ""
+        kb_rows = []
+        if plans:
+            for p in plans:
+                p_id, p_name, p_days, p_stars = p[0], p[1], p[2], p[3]
+                link = f"https://t.me/{bot_info.username}?start=chanplan_{p_id}_{channel_id}"
+                plans_list_text += f"\n• <b>{p_name}:</b> {p_days}d — {p_stars} ⭐\n  └ <code>{link}</code>\n"
+                del_label = f"🗑️ Borrar {p_name[:12]}" if lang == "es" else f"🗑️ Delete {p_name[:12]}"
+                kb_rows.append([InlineKeyboardButton(text=del_label, callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}")])
+        else:
+            plans_list_text = "\n<i>(No hay planes activos configurados aún)</i>" if lang == "es" else "\n<i>(No active plans configured yet)</i>"
+
+        text = (
+            f"💎 <b>Gestión de Membresías — {c_name}</b>\n\n"
+            f"• <b>Suscriptores Activos:</b> <code>{sub_count}</code>\n"
+            f"• <b>Planes de Suscripción:</b>\n{plans_list_text}\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            f"💎 <b>Membership Management — {c_name}</b>\n\n"
+            f"• <b>Active Subscribers:</b> <code>{sub_count}</code>\n"
+            f"• <b>Subscription Plans:</b>\n{plans_list_text}\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+
+        add_btn_text = "➕ Crear Nuevo Plan" if lang == "es" else "➕ Create New Plan"
+        kb_rows.append([InlineKeyboardButton(text=add_btn_text, callback_data=f"chplans_add_{channel_id}_{lang}")])
+        kb_rows.append([InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")])
+
+        try:
+            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows), parse_mode="HTML")
+        except TelegramBadRequest:
+            pass
