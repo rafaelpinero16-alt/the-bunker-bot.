@@ -7,7 +7,8 @@ from aiogram.exceptions import TelegramBadRequest
 from database.database import (
     add_to_whitelist, remove_from_whitelist, is_group_approved, 
     is_vip_mic_active, get_autolower_status, set_autolower_status,
-    get_mic_vip_price, get_session_by_group
+    get_mic_vip_price, get_session_by_group,
+    get_night_mode_config, get_podcast_status, get_screen_shield_status
 )
 from assistant import set_participant_mic
 
@@ -48,9 +49,12 @@ TEXTS = {
         "status_text": (
             "🎙️ <b>Voice Room & Radar Telemetry</b>\n\n"
             "• <b>System Status:</b> {status}\n"
-            "• <b>AutoLower Protocol (2%):</b> {autolower}\n"
             "• <b>Active Sentinel:</b> {sentinel_name} 🟢\n"
-            "• <b>VIP Mic Pass Fee:</b> {mic_price} Stars (XTR)\n\n"
+            "• <b>VIP Mic Pass Fee:</b> {mic_price} Stars (XTR)\n"
+            "• <b>AutoLower Protocol (2%):</b> {autolower}\n"
+            "• <b>Podcast Mode:</b> {podcast}\n"
+            "• <b>Screen Shield:</b> {shield}\n"
+            "• <b>Night Mode:</b> {night}\n\n"
             "<i>Select an action below:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -99,9 +103,12 @@ TEXTS = {
         "status_text": (
             "🎙️ <b>Telemetría de la Sala de Voz y Radar</b>\n\n"
             "• <b>Estado del Sistema:</b> {status}\n"
-            "• <b>Protocolo AutoLower (2%):</b> {autolower}\n"
             "• <b>Centinela Asignado:</b> {sentinel_name} 🟢\n"
-            "• <b>Tarifa Pase VIP:</b> {mic_price} Stars (XTR)\n\n"
+            "• <b>Tarifa Pase VIP:</b> {mic_price} Stars (XTR)\n"
+            "• <b>Protocolo AutoLower (2%):</b> {autolower}\n"
+            "• <b>Modo Podcast:</b> {podcast}\n"
+            "• <b>Escudo Antinota:</b> {shield}\n"
+            "• <b>Modo Nocturno:</b> {night}\n\n"
             "<i>Selecciona una acción:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -328,9 +335,23 @@ async def cmd_status_vc(message: Message, bot: Bot):
     t = TEXTS[lang]
     
     autolower_val = await get_autolower_status(chat_id)
-    al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
+    pod_val = await get_podcast_status(chat_id)
+    shield_val = await get_screen_shield_status(chat_id)
+    night_cfg = await get_night_mode_config(chat_id)
+
     status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
-    
+    al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
+    pod_display = "🟢 ACTIVO" if pod_val == 1 else "🔴 DESACTIVADO"
+    shield_display = "🟢 ACTIVO" if shield_val == 1 else "🔴 DESACTIVADO"
+    night_display = "🟢 ACTIVADO" if night_cfg and night_cfg.get("status") == 1 else "🔴 DESACTIVADO"
+
+    if lang == "en":
+        status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
+        al_display = "🟢 ACTIVE (2%)" if autolower_val == 1 else "🔴 DEACTIVATED (100%)"
+        pod_display = "🟢 ACTIVE" if pod_val == 1 else "🔴 DEACTIVATED"
+        shield_display = "🟢 ACTIVE" if shield_val == 1 else "🔴 DEACTIVATED"
+        night_display = "🟢 ACTIVE" if night_cfg and night_cfg.get("status") == 1 else "🔴 DEACTIVATED"
+
     sentinel_label = await get_active_sentinel_label(chat_id)
     mic_price = await get_mic_vip_price(chat_id)
     
@@ -349,6 +370,9 @@ async def cmd_status_vc(message: Message, bot: Bot):
         t["status_text"].format(
             status=status_text, 
             autolower=al_display, 
+            podcast=pod_display,
+            shield=shield_display,
+            night=night_display,
             sentinel_name=sentinel_label,
             mic_price=mic_price
         ), 
@@ -376,8 +400,23 @@ async def process_vc_callback(callback: CallbackQuery):
         elif action == "vc_status":
             is_active = vc_states.get(chat_id, True)
             autolower_val = await get_autolower_status(chat_id)
-            al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
+            pod_val = await get_podcast_status(chat_id)
+            shield_val = await get_screen_shield_status(chat_id)
+            night_cfg = await get_night_mode_config(chat_id)
+
             status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
+            al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
+            pod_display = "🟢 ACTIVO" if pod_val == 1 else "🔴 DESACTIVADO"
+            shield_display = "🟢 ACTIVO" if shield_val == 1 else "🔴 DESACTIVADO"
+            night_display = "🟢 ACTIVADO" if night_cfg and night_cfg.get("status") == 1 else "🔴 DESACTIVADO"
+
+            if lang == "en":
+                status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
+                al_display = "🟢 ACTIVE (2%)" if autolower_val == 1 else "🔴 DEACTIVATED (100%)"
+                pod_display = "🟢 ACTIVE" if pod_val == 1 else "🔴 DEACTIVATED"
+                shield_display = "🟢 ACTIVE" if shield_val == 1 else "🔴 DEACTIVATED"
+                night_display = "🟢 ACTIVE" if night_cfg and night_cfg.get("status") == 1 else "🔴 DEACTIVATED"
+
             sentinel_label = await get_active_sentinel_label(chat_id)
             mic_price = await get_mic_vip_price(chat_id)
 
@@ -394,6 +433,9 @@ async def process_vc_callback(callback: CallbackQuery):
                 t["status_text"].format(
                     status=status_text, 
                     autolower=al_display, 
+                    podcast=pod_display,
+                    shield=shield_display,
+                    night=night_display,
                     sentinel_name=sentinel_label,
                     mic_price=mic_price
                 ),

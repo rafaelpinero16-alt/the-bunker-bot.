@@ -11,9 +11,15 @@ from database.database import (
     set_autolower_status, 
     get_autolower_status, 
     revoke_vip_mic, 
-    register_user_group
+    register_user_group,
+    get_podcast_status, set_podcast_status,
+    get_screen_shield_status, set_screen_shield_status
 )
-from assistant import set_participant_mic
+from assistant import (
+    set_participant_mic,
+    engage_podcast_ducking, disengage_podcast_ducking,
+    engage_screen_shield, disengage_screen_shield
+)
 
 logger = logging.getLogger("admin_group_handler")
 router = Router()
@@ -82,6 +88,26 @@ TEXTS = {
         "autolower_off_btn": "❌ Disable AutoLower (Free)",
         "status_active": "🟢 ACTIVE (Mics dialed down to 2% for unverified users)",
         "status_inactive": "🔴 DEACTIVATED (Open Mics at 100%)",
+        "podcast_panel": (
+            "🎙️ <b>Radar Console: Podcast Mode (Ducking)</b>\n\n"
+            "• <b>Active State:</b> {status}\n\n"
+            "Select an action to change dynamic audio ducking:\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "podcast_on_btn": "✅ Enable Podcast",
+        "podcast_off_btn": "❌ Disable Podcast",
+        "status_active_pod": "🟢 ACTIVE (Dynamic Ducking enabled)",
+        "status_inactive_pod": "🔴 DEACTIVATED",
+        "shield_panel": (
+            "🎥 <b>Radar Console: Screen Shield (Antinota)</b>\n\n"
+            "• <b>Active State:</b> {status}\n\n"
+            "Select an action to change screen-sharing restrictions:\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "shield_on_btn": "✅ Enable Shield",
+        "shield_off_btn": "❌ Disable Shield",
+        "status_active_shield": "🟢 ACTIVE (Screen sharing blocked)",
+        "status_inactive_shield": "🔴 DEACTIVATED",
         "success_updated": "Console updated",
         "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -121,6 +147,26 @@ TEXTS = {
         "autolower_off_btn": "❌ Desactivar AutoLower (Libre)",
         "status_active": "🟢 ACTIVO (Reduciendo a 2% a no autorizados)",
         "status_inactive": "🔴 DESACTIVADO (Micrófonos Libres al 100%)",
+        "podcast_panel": (
+            "🎙️ <b>Panel de Control: Modo Podcast (Ducking)</b>\n\n"
+            "• <b>Estado Actual:</b> {status}\n\n"
+            "Selecciona una directiva para alterar la atenuación dinámica:\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "podcast_on_btn": "✅ Activar Podcast",
+        "podcast_off_btn": "❌ Desactivar Podcast",
+        "status_active_pod": "🟢 ACTIVO (Atenuación dinámica en vivo)",
+        "status_inactive_pod": "🔴 DESACTIVADO",
+        "shield_panel": (
+            "🎥 <b>Panel de Control: Escudo Antinota</b>\n\n"
+            "• <b>Estado Actual:</b> {status}\n\n"
+            "Selecciona una directiva para el corte de transmisiones de pantalla:\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "shield_on_btn": "✅ Activar Escudo",
+        "shield_off_btn": "❌ Desactivar Escudo",
+        "status_active_shield": "🟢 ACTIVO (Corte de pantalla a no autorizados)",
+        "status_inactive_shield": "🔴 DESACTIVADO",
         "success_updated": "Consola actualizada con éxito",
         "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Objetivo requerido. Responde a un usuario, menciónalo con @ o pasa su ID.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -238,7 +284,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
 
 
 # ==========================================================
-# 🎛️ CONTROL RÁPIDO DE AUTOLOWER (EXCLUSIVO DUEÑO)
+# 🎛️ CONTROLES RÁPIDOS DE AUDIO Y TRANSMISIÓN (FASE 5)
 # ==========================================================
 @router.message(Command("autolower"))
 async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bot):
@@ -270,7 +316,6 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
 
 @router.callback_query(F.data.startswith("autolower_"))
 async def process_autolower_callback(callback: CallbackQuery):
-    """Procesa los interruptores inline para activar o suspender el AutoLower en caliente."""
     await callback.answer()
     data_parts = callback.data.split("_")
     action = data_parts[1]
@@ -284,6 +329,110 @@ async def process_autolower_callback(callback: CallbackQuery):
     status_text = t["status_active"] if new_status == 1 else t["status_inactive"]
     try:
         await callback.message.edit_text(t["autolower_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.message(Command("podcast"))
+async def cmd_podcast_config(message: Message, bot: Bot):
+    """Muestra el panel interactivo del Modo Podcast (Ducking) al creador del grupo."""
+    if message.chat.type != "private":
+        if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+            try: 
+                await message.delete()
+            except Exception: 
+                pass
+            return
+
+    chat_id = message.chat.id
+    current_status = await get_podcast_status(chat_id)
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=t["podcast_on_btn"], callback_data=f"podcast_on_{lang}"),
+            InlineKeyboardButton(text=t["podcast_off_btn"], callback_data=f"podcast_off_{lang}")
+        ]
+    ])
+    status_text = t["status_active_pod"] if current_status == 1 else t["status_inactive_pod"]
+    msg = await message.answer(t["podcast_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
+    if message.chat.type != "private":
+        asyncio.create_task(auto_delete_pair(message, msg, 25))
+
+
+@router.callback_query(F.data.startswith("podcast_"))
+async def process_podcast_callback(callback: CallbackQuery):
+    await callback.answer()
+    data_parts = callback.data.split("_")
+    action = data_parts[1]
+    lang = data_parts[2] if len(data_parts) > 2 else get_lang(callback.from_user.language_code)
+    t = TEXTS[lang]
+
+    group_id = callback.message.chat.id
+    new_status = 1 if action == "on" else 0
+    await set_podcast_status(group_id, new_status)
+    
+    if new_status == 1:
+        await engage_podcast_ducking(group_id)
+    else:
+        await disengage_podcast_ducking(group_id)
+
+    status_text = t["status_active_pod"] if new_status == 1 else t["status_inactive_pod"]
+    try:
+        await callback.message.edit_text(t["podcast_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.message(Command("shield"))
+async def cmd_shield_config(message: Message, bot: Bot):
+    """Muestra el panel interactivo del Escudo Antinota al creador del grupo."""
+    if message.chat.type != "private":
+        if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+            try: 
+                await message.delete()
+            except Exception: 
+                pass
+            return
+
+    chat_id = message.chat.id
+    current_status = await get_screen_shield_status(chat_id)
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=t["shield_on_btn"], callback_data=f"shield_on_{lang}"),
+            InlineKeyboardButton(text=t["shield_off_btn"], callback_data=f"shield_off_{lang}")
+        ]
+    ])
+    status_text = t["status_active_shield"] if current_status == 1 else t["status_inactive_shield"]
+    msg = await message.answer(t["shield_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
+    if message.chat.type != "private":
+        asyncio.create_task(auto_delete_pair(message, msg, 25))
+
+
+@router.callback_query(F.data.startswith("shield_"))
+async def process_shield_callback(callback: CallbackQuery):
+    await callback.answer()
+    data_parts = callback.data.split("_")
+    action = data_parts[1]
+    lang = data_parts[2] if len(data_parts) > 2 else get_lang(callback.from_user.language_code)
+    t = TEXTS[lang]
+
+    group_id = callback.message.chat.id
+    new_status = 1 if action == "on" else 0
+    await set_screen_shield_status(group_id, new_status)
+
+    if new_status == 1:
+        await engage_screen_shield(group_id)
+    else:
+        await disengage_screen_shield(group_id)
+    
+    status_text = t["status_active_shield"] if new_status == 1 else t["status_inactive_shield"]
+    try:
+        await callback.message.edit_text(t["shield_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
     except Exception:
         pass
 
