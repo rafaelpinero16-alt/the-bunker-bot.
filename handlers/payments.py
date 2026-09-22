@@ -62,14 +62,6 @@ def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
     """
     Construye el aviso + botón que redirige el cobro de una suscripción PRO/ULTRA PRO
     hacia el Bot Maestro cuando la orden se originó en un Bot Clon.
-
-    Las suscripciones (planes PRO/ULTRA PRO) son ingreso de la PLATAFORMA (Cloud Media
-    Management), no del dueño del Clon. Si se facturaran con bot.send_invoice() usando
-    la instancia del propio Clon, las Stars entrarían directo al balance del Clon en vez
-    de al Maestro. Por eso jamás se genera esa factura desde un Clon: siempre se
-    redirige al Maestro vía deep-link (/start sub_<plan>_<chat_id>), que sí sabe cobrar
-    con la instancia correcta. El pase VIP de micrófono (/micvip) es la excepción
-    deliberada: ese SÍ debe cobrarse con el bot actual para que fluya 100% al Clon.
     """
     master_username = get_master_bot_username()
     if not master_username:
@@ -125,11 +117,12 @@ TEXTS = {
         "btn_back_group": "🔙 Back to Group Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
         
-        "inv_pro_t": "PRO Plan Subscription (300 Stars)",
+        # 🛡️ Límite API Telegram: Máximo 32 caracteres estrictos para títulos de factura
+        "inv_pro_t": "PRO Subscription (300 XTR)",
         "inv_pro_d": "Unlimited bot commands, automated purge center, custom captcha pro, and master sentinel shielding.",
-        "inv_ultra_t": "ULTRA PRO Subscription (600 Stars)",
+        "inv_ultra_t": "ULTRA PRO License (600 XTR)",
         "inv_ultra_d": "All PRO features + Bot Clone architecture + Dedicated Voice Sentinel + Weekly VC Scheduler (100% Stars yours).",
-        "inv_vip_t": "VIP Microphone Pass (24 Hours)",
+        "inv_vip_t": "VIP Mic Pass (24h)",
         "inv_vip_d": "Unrestricted 100% voice transmission privileges for 24 hours in community voice chats.",
         
         "pmt_ok_pro": (
@@ -185,11 +178,12 @@ TEXTS = {
         "btn_back_group": "🔙 Volver al Panel del Grupo",
         "btn_pay_stars": "⭐ Pagar con Stars",
         
-        "inv_pro_t": "Suscripción Plan PRO (300 Stars)",
+        # 🛡️ Límite API Telegram: Máximo 32 caracteres estrictos para títulos de factura
+        "inv_pro_t": "Suscripción PRO (300 XTR)",
         "inv_pro_d": "Comandos ilimitados, purga de mensajes automatizada, captcha pro y centinela maestro.",
-        "inv_ultra_t": "Suscripción Plan ULTRA PRO (600 Stars)",
+        "inv_ultra_t": "Licencia ULTRA PRO (600 XTR)",
         "inv_ultra_d": "Todo PRO + Arquitectura Bot Clone + Centinela Dedicado Propio + Programador VC Semanal (100% Stars para ti).",
-        "inv_vip_t": "Pase VIP de Micrófono (24 Horas)",
+        "inv_vip_t": "Pase VIP Micrófono (24h)",
         "inv_vip_d": "Privilegios de voz continua al 100% de volumen por 24 horas en salas de voz y videochats.",
         
         "pmt_ok_pro": (
@@ -216,7 +210,7 @@ TEXTS = {
         "btn_add_master": "🤖 Añadir Centinela Maestro (@Alphacentinel)",
         "btn_setup_clone": "🧬 Configurar Clon & Centinela Propio",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
-        "err_link": "⚠️ Enlace de activación VIP no válido o expirado.",
+        "err_link": "⚠️ Enlace de facturación no válido, sin grupo asociado o expirado.",
         "private_only": "⚠️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
     }
 }
@@ -300,9 +294,6 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
     t = TEXTS[lang]
     args = command.args or ""
 
-    # 🔒 Blindaje de ingreso de plataforma: si alguien dispara este deep-link
-    # directamente contra un Bot Clon (en vez del Maestro), se redirige en lugar
-    # de facturar, por la misma razón que en process_invoice_callback.
     if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
         redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
         redirect_chat_id = 0
@@ -342,12 +333,13 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
         else:
             return
 
+        # 🔒 Blindaje estricto: rechaza cobros si el ID de grupo no es un supergrupo válido negativo
+        if chat_id_target >= 0:
+            await message.answer(t["err_link"], parse_mode="HTML")
+            return
+
         prices = [LabeledPrice(label=title, amount=price)]
-        back_btn = (
-            InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id_target}_{lang}")
-            if chat_id_target != 0 else
-            InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")
-        )
+        back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id_target}_{lang}")
         
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
@@ -385,6 +377,12 @@ async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
     if args.startswith("vipmic_"):
         try:
             chat_id = int(args.split("_")[1])
+            
+            # 🔒 Seguro antibug: El pase de micrófono es solo para supergrupos reales
+            if chat_id >= 0:
+                await message.answer(t["err_link"], parse_mode="HTML")
+                return
+
             title = t["inv_vip_t"]
             desc = t["inv_vip_d"]
             payload = f"vip_mic_{chat_id}"
@@ -428,8 +426,10 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
         plan = parts[1] 
         chat_id = int(parts[2])
 
-        # 🔒 Blindaje de ingreso de plataforma: si la orden llegó por un Bot Clon,
-        # NUNCA se factura aquí mismo. Se redirige al Maestro (ver _clone_subscription_redirect).
+        if chat_id >= 0:
+            await callback.message.answer(t["err_link"], parse_mode="HTML")
+            return
+
         if is_clone_bot(bot):
             redirect_text, redirect_markup = _clone_subscription_redirect(lang, plan, chat_id)
             if redirect_text:
@@ -497,7 +497,7 @@ async def process_successful_payment(message: Message, bot: Bot):
         try:
             parts = payload.split("_")
             plan_type = parts[1]
-            chat_id = int(parts[2]) if parts[2] != "0" else message.chat.id
+            chat_id = int(parts[2])
             
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
             
@@ -546,23 +546,22 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.warning(f"Aviso Centinela al restaurar volumen de pase VIP: {radar_err}")
             
             try:
-                # 🏷️ Etiqueta VIP dinámica: ya no se hardcodea el título. Se lee la
-                # personalización guardada en group_settings por group_id (columna
-                # vip_mic_badge_title); si la comunidad Ultra Pro nunca la configuró,
-                # cae al valor de fábrica "Pase VIP 24h 🎙️" definido en database.py.
                 badge_title = await get_vip_badge_title(chat_id)
 
+                # 💡 Corregido: se requiere can_manage_chat=True para que Telegram permita asignar un custom_title
                 await bot.promote_chat_member(
                     chat_id=chat_id, user_id=user_id,
-                    can_manage_chat=False, can_change_info=False, can_delete_messages=False,
+                    can_manage_chat=True, can_change_info=False, can_delete_messages=False,
                     can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
                     can_promote_members=False, can_manage_video_chats=False
                 )
                 await bot.set_chat_administrator_custom_title(
                     chat_id=chat_id, user_id=user_id, custom_title=badge_title
                 )
-            except Exception:
-                pass
+            except TelegramBadRequest as admin_err:
+                logger.warning(f"Aviso al asignar título VIP (verificar permisos de promoción del bot): {admin_err}")
+            except Exception as admin_err:
+                logger.warning(f"Error general al asignar título VIP de micrófono: {admin_err}")
             
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
