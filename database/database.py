@@ -617,7 +617,9 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
             ON CONFLICT(group_id) DO UPDATE SET {lock_name} = excluded.{lock_name}
         """, (group_id, status))
         conn.commit()
-        def get_mic_vip_price(group_id: int) -> int:
+
+
+def get_mic_vip_price(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -626,8 +628,6 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
             return row[0] if row and row[0] is not None else 50
         except sqlite3.OperationalError:
             return 50
-
-
 def set_mic_vip_price(group_id: int, price: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
