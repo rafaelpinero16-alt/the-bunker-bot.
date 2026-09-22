@@ -24,7 +24,7 @@ def get_db_connection():
 
 
 def init_db():
-    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas para The Bunker OS."""
+    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas para The Bunker OS[cite: 4]."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -62,7 +62,6 @@ def init_db():
             )
         """)
         
-        # Migraciones dinámicas de columnas perimetrales, Modo Free, Capas Ultra Pro y Payload Multimedia del Centinela
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
             ("captcha_status", "INTEGER DEFAULT 0"),
@@ -110,7 +109,6 @@ def init_db():
             ("tips_enabled", "INTEGER DEFAULT 0"),
             ("tips_amount", "INTEGER DEFAULT 10"),
             ("tips_target_channel", "TEXT"),
-            # --- PAYLOAD MULTIMEDIA CENTINELA (ULTRA PRO) ---
             ("sentinel_payload_enabled", "INTEGER DEFAULT 0"),
             ("sentinel_payload_text", "TEXT"),
             ("sentinel_payload_media_id", "TEXT"),
@@ -333,6 +331,9 @@ def get_user_groups(user_id: int) -> list:
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, group_name FROM user_groups WHERE user_id = ?", (user_id,))
         return cursor.fetchall()
+
+
+def set_autolower_status(group_id: int, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -591,7 +592,6 @@ def set_radar_config(group_id: int, field: str, value):
         conn.commit()
 
 
-# --- PAYLOAD MULTIMEDIA DEL CENTINELA (ULTRA PRO) ---
 def get_sentinel_payload_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1415,4 +1415,6 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
     if _fn_name in globals():
         globals()[_fn_name] = _make_async(globals()[_fn_name])
 
-del _fn_name   
+dl = getattr(globals(), "dl", None)
+if "_fn_name" in globals():
+    del _fn_name
