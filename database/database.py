@@ -12,18 +12,6 @@ DB_PATH = "database/bot_data.db"
 def get_db_connection():
     """
     Genera una conexión SQLite optimizada contra colisiones y bloqueos de concurrencia.
-
-    IMPORTANTE: antes esta función devolvía la conexión directamente y cada
-    llamador hacía `with get_db_connection() as conn:`. Eso es una trampa
-    clásica de sqlite3 en Python: `Connection.__exit__` SOLO hace commit o
-    rollback de la transacción, nunca cierra el socket/descriptor del
-    archivo. Con 59 funciones abriendo una conexión por llamada y ninguna
-    cerrándose jamás, bajo la carga concurrente de varios bots clon el
-    proceso terminaba agotando file descriptors y el event loop se
-    congelaba. Al convertir esta función en un @contextmanager real, el
-    `with get_db_connection() as conn:` que ya usan las 59 funciones sigue
-    funcionando exactamente igual, pero ahora la conexión SIEMPRE se cierra
-    al salir del bloque (incluso si hay una excepción).
     """
     conn = sqlite3.connect(DB_PATH, timeout=30.0)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -105,22 +93,19 @@ def init_db():
             ("mic_vip_price", "INTEGER DEFAULT 50"),
             ("free_badge_status", "INTEGER DEFAULT 0"),
             ("free_badge_title", "TEXT DEFAULT 'VIP Free 🎙️'"),
-
-            # --- Requerimiento #1: Etiqueta VIP personalizada persistente (Ultra Pro) ---
-            # Título de administrador que el Centinela asigna al comprador del Pase VIP
-            # de Micrófono (24h). Antes vivía sólo como string hardcodeado en payments.py.
             ("vip_mic_badge_title", "TEXT DEFAULT 'Pase VIP 24h 🎙️'"),
-
-            # --- Requerimiento #2: Matriz personalizable del Centinela (assistant.py) ---
-            # Textos y multimedia editables para el aviso de Atenuación Acústica (AutoLower)
-            # y para el aviso previo al reinicio preventivo de las 3.5h. El ciclo de 12,600s
-            # en sí permanece inamovible y nativo en el código (no se toca desde BD).
             ("autolower_custom_text", "TEXT"),
             ("autolower_custom_media_id", "TEXT"),
             ("autolower_custom_media_type", "TEXT"),
             ("reset_notice_custom_text", "TEXT"),
             ("reset_notice_custom_media_id", "TEXT"),
-            ("reset_notice_custom_media_type", "TEXT")
+            ("reset_notice_custom_media_type", "TEXT"),
+            ("panic_active", "INTEGER DEFAULT 0"),
+            ("screen_shield_status", "INTEGER DEFAULT 1"),
+            ("podcast_mode_status", "INTEGER DEFAULT 0"),
+            ("podcast_duck_volume", "INTEGER DEFAULT 500"),
+            ("noise_shield_status", "INTEGER DEFAULT 1"),
+            ("speaker_queue_price", "INTEGER DEFAULT 25")
         ]
 
         for col_name, col_def in settings_columns:
@@ -183,6 +168,11 @@ def init_db():
             )
         """)
 
+        try:
+            cursor.execute("ALTER TABLE owner_sessions ADD COLUMN last_error TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS vc_schedules (
                 group_id INTEGER PRIMARY KEY,
@@ -193,7 +183,41 @@ def init_db():
                 call_active INTEGER DEFAULT 0
             )
         """)
-        
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS panic_snapshots (
+                group_id INTEGER PRIMARY KEY,
+                lock_media INTEGER DEFAULT 0,
+                lock_links INTEGER DEFAULT 0,
+                lock_stickers INTEGER DEFAULT 0,
+                captcha_status INTEGER DEFAULT 0,
+                captcha_mode INTEGER DEFAULT 1,
+                captcha_time INTEGER DEFAULT 60,
+                antispam INTEGER DEFAULT 0,
+                antispam_delete INTEGER DEFAULT 0,
+                antiflood_msgs INTEGER DEFAULT 10,
+                antiflood_time INTEGER DEFAULT 15,
+                antiflood_action TEXT DEFAULT 'kick',
+                chat_permissions_json TEXT,
+                activated_by INTEGER,
+                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS speaker_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                user_id INTEGER,
+                full_name TEXT,
+                username TEXT,
+                stars_paid INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'waiting',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
+
         conn.commit()
 
     init_default_blacklist()
@@ -469,9 +493,6 @@ def set_mic_vip_price(group_id: int, price: int):
         conn.commit()
 
 
-# ==========================================
-# 🏷️ CONFIGURACIÓN DE ETIQUETA Y MODO FREE
-# ==========================================
 def get_free_badge_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -500,20 +521,7 @@ def set_free_badge_config(group_id: int, field: str, value):
         conn.commit()
 
 
-# ==========================================
-# 🏷️ ETIQUETA VIP PERSONALIZADA (PASE DE MICRÓFONO — ULTRA PRO)
-# ==========================================
 def get_vip_badge_title(group_id: int) -> str:
-    """
-    Devuelve el título de administrador que se asigna al usuario cuando
-    adquiere el Pase VIP de Micrófono (24h). Lee de forma dinámica desde la
-    BD para que cada comunidad Ultra Pro tenga su etiqueta personalizada;
-    si el grupo nunca la configuró, cae al valor por defecto de la fábrica.
-
-    NOTA: Telegram limita el custom_title de administrador a 16 caracteres.
-    Se trunca aquí como última barrera de seguridad, pero el panel de
-    configuración (handlers) debería validar esto también al guardar.
-    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -526,7 +534,6 @@ def get_vip_badge_title(group_id: int) -> str:
 
 
 def set_vip_badge_title(group_id: int, title: str):
-    """Persiste la etiqueta VIP personalizada por group_id. Trunca a 16 chars (límite de Telegram)."""
     clean_title = (title or "").strip()[:16]
     if not clean_title:
         clean_title = "Pase VIP 24h 🎙️"[:16]
@@ -539,9 +546,6 @@ def set_vip_badge_title(group_id: int, title: str):
         conn.commit()
 
 
-# ==========================================
-# 🛰️ MATRIZ PERSONALIZABLE DEL CENTINELA (AUTOLOWER Y AVISO DE RESETEO 3.5H)
-# ==========================================
 _RADAR_CONFIG_FIELDS = {
     "autolower_text": "autolower_custom_text",
     "autolower_media_id": "autolower_custom_media_id",
@@ -553,14 +557,6 @@ _RADAR_CONFIG_FIELDS = {
 
 
 def get_radar_config(group_id: int) -> dict:
-    """
-    Devuelve la configuración personalizada (texto + multimedia) del Centinela
-    para un group_id: aviso de AutoLower (2%) y aviso previo al reinicio
-    preventivo de 3.5h. Cualquier campo no configurado vuelve como None, y
-    assistant.py debe aplicar su propio fallback bilingüe por defecto.
-
-    El ciclo de 12,600s (3.5h) NO se lee de aquí: es nativo e inamovible.
-    """
     cols = list(_RADAR_CONFIG_FIELDS.values())
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -576,13 +572,6 @@ def get_radar_config(group_id: int) -> dict:
 
 
 def set_radar_config(group_id: int, field: str, value):
-    """
-    Actualiza un único campo de la matriz del Centinela (texto o multimedia)
-    para un group_id. `field` debe ser una de las claves lógicas de
-    _RADAR_CONFIG_FIELDS (autolower_text, autolower_media_id,
-    autolower_media_type, reset_text, reset_media_id, reset_media_type),
-    nunca el nombre de columna crudo, para evitar inyección vía f-string.
-    """
     col_name = _RADAR_CONFIG_FIELDS.get(field)
     if not col_name:
         return
@@ -810,10 +799,8 @@ def revoke_vip_mic(user_id: int, group_id: int):
 
 
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
-    """Registra o actualiza el bot clon asegurando no duplicar tokens activos."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Revocar registros huérfanos con ese mismo token para no romper el índice UNIQUE
         cursor.execute(
             "UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE bot_token = ? AND (user_id != ? OR group_id != ?)", 
             (bot_token, user_id, group_id)
@@ -837,7 +824,6 @@ def get_bot_clone(user_id: int, group_id: int):
 
 
 def revoke_bot_clone(user_id: int, group_id: int):
-    """Revoca el bot clon desactivando su estado en la base de datos."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE user_id = ? AND group_id = ?", (user_id, group_id))
@@ -852,7 +838,6 @@ def get_all_active_clones():
 
 
 def get_all_active_clone_tokens() -> list:
-    """Devuelve una lista limpia de tokens activos para el arranque dinámico en main.py."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT bot_token FROM bot_clones WHERE status = 'active' AND bot_token IS NOT NULL AND bot_token != ''")
@@ -900,13 +885,19 @@ def get_all_active_sessions():
         return cursor.fetchall()
 
 
-def revoke_owner_session(user_id: int, group_id: int = None):
+def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if group_id is not None:
-            cursor.execute("UPDATE owner_sessions SET status = 'revoked' WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+            cursor.execute(
+                "UPDATE owner_sessions SET status = 'revoked', last_error = ? WHERE user_id = ? AND group_id = ?",
+                (reason, user_id, group_id)
+            )
         else:
-            cursor.execute("UPDATE owner_sessions SET status = 'revoked' WHERE user_id = ?", (user_id,))
+            cursor.execute(
+                "UPDATE owner_sessions SET status = 'revoked', last_error = ? WHERE user_id = ?",
+                (reason, user_id)
+            )
         conn.commit()
 
 
@@ -952,6 +943,267 @@ def get_all_active_vc_schedules():
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, days, start_time, end_time, status, call_active FROM vc_schedules WHERE status = 1")
         return cursor.fetchall()
+
+
+# ==========================================
+# 🛡️ BOTÓN DE PÁNICO & HELPERS DE COMPATIBILIDAD
+# ==========================================
+def get_panic_status(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
+
+# 🔗 Aliases agregados para empalmar perfectamente con las importaciones de user_private.py
+def get_shield_status(group_id: int) -> int:
+    return get_screen_shield_status(group_id)
+
+def set_shield_status(group_id: int, status: int):
+    set_screen_shield_status(group_id, status)
+
+def get_podcast_status(group_id: int) -> int:
+    cfg = get_podcast_config(group_id)
+    return cfg.get("status", 0)
+
+def set_podcast_status(group_id: int, status: int):
+    set_podcast_mode(group_id, status)
+
+
+def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
+        row = cursor.fetchone()
+        if row and row[0] == 1:
+            return False
+
+        cursor.execute("""
+            SELECT lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+                   antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action
+            FROM group_settings WHERE group_id = ?
+        """, (group_id,))
+        prev = cursor.fetchone()
+        prev = prev or (0, 0, 0, 0, 1, 60, 0, 0, 10, 15, 'kick')
+
+        cursor.execute("""
+            INSERT INTO panic_snapshots (
+                group_id, lock_media, lock_links, lock_stickers, captcha_status, captcha_mode,
+                captcha_time, antispam, antispam_delete, antiflood_msgs, antiflood_time,
+                antiflood_action, chat_permissions_json, activated_by, activated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id) DO UPDATE SET
+                lock_media = excluded.lock_media, lock_links = excluded.lock_links,
+                lock_stickers = excluded.lock_stickers, captcha_status = excluded.captcha_status,
+                captcha_mode = excluded.captcha_mode, captcha_time = excluded.captcha_time,
+                antispam = excluded.antispam, antispam_delete = excluded.antispam_delete,
+                antiflood_msgs = excluded.antiflood_msgs, antiflood_time = excluded.antiflood_time,
+                antiflood_action = excluded.antiflood_action,
+                chat_permissions_json = excluded.chat_permissions_json,
+                activated_by = excluded.activated_by, activated_at = CURRENT_TIMESTAMP
+        """, (group_id, *prev, chat_permissions_json, activated_by))
+
+        cursor.execute("""
+            INSERT INTO group_settings (
+                group_id, panic_active, lock_media, lock_links, lock_stickers,
+                captcha_status, captcha_mode, captcha_time,
+                antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action
+            ) VALUES (?, 1, 1, 1, 1, 1, 1, 30, 1, 1, 3, 10, 'mute')
+            ON CONFLICT(group_id) DO UPDATE SET
+                panic_active = 1, lock_media = 1, lock_links = 1, lock_stickers = 1,
+                captcha_status = 1, captcha_mode = 1, captcha_time = 30,
+                antispam = 1, antispam_delete = 1, antiflood_msgs = 3, antiflood_time = 10,
+                antiflood_action = 'mute'
+        """, (group_id,))
+        conn.commit()
+        return True
+
+
+def deactivate_panic(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+                   antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action,
+                   chat_permissions_json
+            FROM panic_snapshots WHERE group_id = ?
+        """, (group_id,))
+        snap = cursor.fetchone()
+
+        if snap:
+            (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+             antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action,
+             chat_permissions_json) = snap
+        else:
+            (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+             antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action,
+             chat_permissions_json) = (0, 0, 0, 0, 1, 60, 0, 0, 10, 15, 'kick', None)
+
+        cursor.execute("""
+            UPDATE group_settings SET
+                panic_active = 0, lock_media = ?, lock_links = ?, lock_stickers = ?,
+                captcha_status = ?, captcha_mode = ?, captcha_time = ?,
+                antispam = ?, antispam_delete = ?, antiflood_msgs = ?, antiflood_time = ?,
+                antiflood_action = ?
+            WHERE group_id = ?
+        """, (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+              antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action, group_id))
+        cursor.execute("DELETE FROM panic_snapshots WHERE group_id = ?", (group_id,))
+        conn.commit()
+
+        return {"chat_permissions_json": chat_permissions_json}
+
+
+def get_screen_shield_status(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT screen_shield_status FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 1
+        except sqlite3.OperationalError:
+            return 1
+
+
+def set_screen_shield_status(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, screen_shield_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET screen_shield_status = excluded.screen_shield_status
+        """, (group_id, status))
+        conn.commit()
+
+
+def get_podcast_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT podcast_mode_status, podcast_duck_volume, noise_shield_status FROM group_settings WHERE group_id = ?",
+                (group_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "status": row[0] if row[0] is not None else 0,
+                    "duck_volume": row[1] if row[1] is not None else 500,
+                    "noise_shield": row[2] if row[2] is not None else 1
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"status": 0, "duck_volume": 500, "noise_shield": 1}
+
+
+def set_podcast_mode(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, podcast_mode_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET podcast_mode_status = excluded.podcast_mode_status
+        """, (group_id, status))
+        conn.commit()
+
+
+def set_podcast_duck_volume(group_id: int, volume: int):
+    volume = max(0, min(10000, volume))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, podcast_duck_volume) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET podcast_duck_volume = excluded.podcast_duck_volume
+        """, (group_id, volume))
+        conn.commit()
+
+
+def set_noise_shield_status(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, noise_shield_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET noise_shield_status = excluded.noise_shield_status
+        """, (group_id, status))
+        conn.commit()
+
+
+def get_speaker_price(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT speaker_queue_price FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 25
+        except sqlite3.OperationalError:
+            return 25
+
+
+def set_speaker_price(group_id: int, price: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, speaker_queue_price) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET speaker_queue_price = excluded.speaker_queue_price
+        """, (group_id, price))
+        conn.commit()
+
+
+def add_to_speaker_queue(group_id: int, user_id: int, full_name: str, username: str, stars_paid: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO speaker_queue (group_id, user_id, full_name, username, stars_paid, status)
+            VALUES (?, ?, ?, ?, ?, 'waiting')
+        """, (group_id, user_id, full_name, username, stars_paid))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_speaker_queue(group_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, user_id, full_name, username, stars_paid, created_at FROM speaker_queue
+            WHERE group_id = ? AND status = 'waiting'
+            ORDER BY stars_paid DESC, created_at ASC
+        """, (group_id,))
+        return cursor.fetchall()
+
+
+def pop_next_speaker(group_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, user_id, full_name, username, stars_paid FROM speaker_queue
+            WHERE group_id = ? AND status = 'waiting'
+            ORDER BY stars_paid DESC, created_at ASC LIMIT 1
+        """, (group_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("UPDATE speaker_queue SET status = 'done' WHERE id = ?", (row[0],))
+        conn.commit()
+        return row
+
+
+def remove_from_speaker_queue(group_id: int, user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM speaker_queue WHERE group_id = ? AND user_id = ? AND status = 'waiting'",
+            (group_id, user_id)
+        )
+        conn.commit()
+
+
+def clear_speaker_queue(group_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
+        conn.commit()
 
 
 def _make_async(sync_fn):
@@ -1023,6 +1275,28 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_vc_schedule",
     "update_vc_call_status",
     "get_all_active_vc_schedules",
+
+    # --- FASE "THE BUNKER OS" ---
+    "get_panic_status",
+    "get_shield_status",
+    "set_shield_status",
+    "get_podcast_status",
+    "set_podcast_status",
+    "activate_panic",
+    "deactivate_panic",
+    "get_screen_shield_status",
+    "set_screen_shield_status",
+    "get_podcast_config",
+    "set_podcast_mode",
+    "set_podcast_duck_volume",
+    "set_noise_shield_status",
+    "get_speaker_price",
+    "set_speaker_price",
+    "add_to_speaker_queue",
+    "get_speaker_queue",
+    "pop_next_speaker",
+    "remove_from_speaker_queue",
+    "clear_speaker_queue",
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
