@@ -24,7 +24,7 @@ def get_db_connection():
 
 
 def init_db():
-    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas."""
+    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas para The Bunker OS."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -62,7 +62,7 @@ def init_db():
             )
         """)
         
-        # Migraciones dinámicas de columnas perimetrales y Modo Free
+        # Migraciones dinámicas de columnas perimetrales, Modo Free y Capas Ultra Pro (Tips & Service Msgs)
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
             ("captcha_status", "INTEGER DEFAULT 0"),
@@ -105,7 +105,12 @@ def init_db():
             ("podcast_mode_status", "INTEGER DEFAULT 0"),
             ("podcast_duck_volume", "INTEGER DEFAULT 500"),
             ("noise_shield_status", "INTEGER DEFAULT 1"),
-            ("speaker_queue_price", "INTEGER DEFAULT 25")
+            ("speaker_queue_price", "INTEGER DEFAULT 25"),
+            # --- NUEVAS COLUMNAS ULTRA PRO & SERVICE MSGS ---
+            ("service_msgs_mode", "INTEGER DEFAULT 1"),
+            ("tips_enabled", "INTEGER DEFAULT 0"),
+            ("tips_amount", "INTEGER DEFAULT 10"),
+            ("tips_target_channel", "TEXT")
         ]
 
         for col_name, col_def in settings_columns:
@@ -668,6 +673,58 @@ def set_antiflood_config(group_id: int, field: str, value):
         conn.commit()
 
 
+# --- NUEVAS FUNCIONES PARA MENSAJES DE SERVICIO & TIPS ULTRA PRO ---
+def get_service_msgs_mode(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT service_msgs_mode FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 1
+        except sqlite3.OperationalError:
+            return 1
+
+
+def set_service_msgs_mode(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, service_msgs_mode) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET service_msgs_mode = excluded.service_msgs_mode
+        """, (group_id, status))
+        conn.commit()
+
+
+def get_tips_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT tips_enabled, tips_amount, tips_target_channel FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "enabled": row[0] if row[0] is not None else 0,
+                    "amount": row[1] if row[1] is not None else 10,
+                    "target_channel": row[2] if row[2] else ""
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"enabled": 0, "amount": 10, "target_channel": ""}
+
+
+def set_tips_config(group_id: int, field: str, value):
+    valid_fields = ["tips_enabled", "tips_amount", "tips_target_channel"]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
 def add_to_whitelist(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -969,7 +1026,6 @@ def set_panic_status(group_id: int, status: int):
         conn.commit()
 
 
-# 🔗 Aliases agregados para empalmar perfectamente con las importaciones de user_private.py
 def get_shield_status(group_id: int) -> int:
     return get_screen_shield_status(group_id)
 
@@ -1260,6 +1316,10 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_antispam_delete",
     "get_antiflood_config",
     "set_antiflood_config",
+    "get_service_msgs_mode",
+    "set_service_msgs_mode",
+    "get_tips_config",
+    "set_tips_config",
     "add_to_whitelist",
     "remove_from_whitelist",
     "is_whitelisted",
