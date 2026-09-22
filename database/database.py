@@ -959,6 +959,16 @@ def get_panic_status(group_id: int) -> int:
             return 0
 
 
+def set_panic_status(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, panic_active) VALUES (?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET panic_active = excluded.panic_active
+        """, (group_id, status))
+        conn.commit()
+
+
 # 🔗 Aliases agregados para empalmar perfectamente con las importaciones de user_private.py
 def get_shield_status(group_id: int) -> int:
     return get_screen_shield_status(group_id)
@@ -1278,6 +1288,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
 
     # --- FASE "THE BUNKER OS" ---
     "get_panic_status",
+    "set_panic_status",
     "get_shield_status",
     "set_shield_status",
     "get_podcast_status",
