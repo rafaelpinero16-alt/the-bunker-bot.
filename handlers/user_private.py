@@ -26,11 +26,26 @@ from database.database import (
     get_autolower_status, set_autolower_status,
     register_bot_clone, get_bot_clone, get_db_connection,
     save_owner_session, get_owner_session, revoke_owner_session,
-    get_vc_schedule, set_vc_schedule
+    get_vc_schedule, set_vc_schedule,
+    # 🚨 ULTRA PRO — Panel de Élite (Botón de Pánico / Escudo Antinota / Podcast)
+    # NOTA: si en tu database.py estos helpers ya existen con otro nombre,
+    # ajusta ÚNICAMENTE esta lista de imports; el resto del módulo no depende
+    # de la implementación interna (misma firma que get/set_autolower_status).
+    get_panic_status, set_panic_status,
+    get_shield_status, set_shield_status,
+    get_podcast_status, set_podcast_status,
 )
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
-    start_phone_auth, verify_phone_code, verify_2fa_password, cancel_phone_auth
+    start_phone_auth, verify_phone_code, verify_2fa_password, cancel_phone_auth,
+    # 🎥🎙️ Motor del Centinela (MTProto) para Escudo Antinota y Podcast/Ducking
+    engage_screen_shield, disengage_screen_shield,
+    engage_podcast_ducking, disengage_podcast_ducking
+)
+from groups import (
+    # 🚨 Bloqueo/levantamiento de emergencia y cola de Speakers pagados
+    execute_raid_lockdown, lift_raid_lockdown,
+    add_speaker_to_queue, pop_next_speaker, clear_speaker_queue, get_speaker_queue
 )
 
 router = Router()
@@ -158,6 +173,11 @@ MIC_VIP_STATES = {}
 MIC_TAG_STATES = {}
 GROUP_MIC_PRICE = {}
 GROUP_VIP_TAG = {}
+# 🌟 ULTRA PRO — Podcast/Ducking y Cola de Speakers pagados
+PODCAST_DUCK_STATES = {}
+SPEAKER_PRICE_STATES = {}
+GROUP_DUCK_LEVEL = {}
+GROUP_SPEAKER_PRICE = {}
 
 FILTER_MAP = {
     "tglinks": "tg_links", "fwdchan": "fwd_channels", "fwdusr": "fwd_users",
@@ -460,7 +480,88 @@ TEXTS = {
         "btn_add_word": "➕ Register in DB",
         "btn_contact_support": "💬 Contact Support",
         "btn_back_mod": "🔙 Moderation",
-        "btn_back_eco": "🔙 Ecosystem"
+        "btn_back_eco": "🔙 Ecosystem",
+
+        # ==========================================
+        # 💎 ULTRA PRO — ELITE TOOLS PANEL
+        # ==========================================
+        "ultra_tools_main": (
+            "💎 <b>ULTRA PRO Elite Tools — {group_name}</b>\n\n"
+            "Direct panel control over your highest-tier automation modules, no group text commands required:\n\n"
+            "🚨 <b>Panic Button:</b> Instant emergency raid lockdown.\n"
+            "🎥 <b>Screen-Share Shield:</b> Screen-sharing moderation.\n"
+            "🎙️ <b>Podcast Mode:</b> Dynamic volume & noise-gate ducking.\n"
+            "🌟 <b>Speakers Queue:</b> Paid priority mic queue (/speakers).\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_ultra_tools": "💎 ULTRA Elite Tools",
+        "ultra_lock_generic": (
+            "🔒 <i>This module is an advanced ULTRA PRO automation capability and is available exclusively at that tier.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        # --- Panic Button / Raid Lockdown ---
+        "panic_menu": (
+            "🚨 <b>Panic Button — Raid Lockdown</b>\n\n"
+            "Instantly locks the entire community in an emergency: default permissions are dropped to zero and invite links are revoked, freezing any raid or mass-spam attack in progress.\n\n"
+            "• <b>Current Status:</b> {status_str}\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "panic_confirm": (
+            "⚠️ <b>Confirm Emergency Lockdown</b>\n\n"
+            "This will immediately silence and restrict <b>all</b> members in the group until you manually lift the lockdown. Use this only during an active raid or attack.\n\n"
+            "Do you want to proceed?"
+        ),
+        "panic_activated": "🚨 <b>RAID LOCKDOWN ACTIVE</b>\n\nThe community has been locked down. Tap below to lift it once the threat has passed.\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_deactivated": "🟢 <b>Lockdown lifted.</b>\n\nNormal permissions have been restored to the community.\n\n🛡️ <i>Cloud Media Management</i>",
+        "btn_panic_activate": "🚨 Activate Lockdown",
+        "btn_panic_confirm": "✅ Confirm Lockdown",
+        "btn_panic_deactivate": "🟢 Lift Lockdown",
+        # --- Screen-Sharing Shield ---
+        "shield_menu": (
+            "🎥 <b>Screen-Share Shield</b>\n\n"
+            "The Sentinel monitors active screen shares in the voice chat and automatically moderates unauthorized or inappropriate broadcasts.\n\n"
+            "• <b>Current Status:</b> {status_str}\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "shield_updated_1": "🎥 Screen-Share Shield activated 🟢",
+        "shield_updated_0": "🎥 Screen-Share Shield disabled 🔴",
+        "btn_shield_1": "🟢 Activate Shield",
+        "btn_shield_0": "🔴 Disable Shield",
+        # --- Podcast Mode & Audio Ducking ---
+        "podcast_menu": (
+            "🎙️ <b>Podcast Mode & Audio Ducking</b>\n\n"
+            "When a designated speaker talks, background mics are automatically dimmed (\"ducked\") to keep the show clean, plus a noise-gate shield against background noise.\n\n"
+            "• <b>Current Status:</b> {status_str}\n"
+            "• <b>Ducking Level:</b> <code>{duck_level}%</code> (background volume while a speaker talks)\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "podcast_updated_1": "🎙️ Podcast Mode activated 🟢",
+        "podcast_updated_0": "🎙️ Podcast Mode disabled 🔴",
+        "btn_podcast_1": "🟢 Activate Podcast Mode",
+        "btn_podcast_0": "🔴 Disable",
+        "btn_duck_level": "🎚️ Ducking Level: {duck_level}%",
+        "duck_custom_prompt": "🎚️ <b>Custom Ducking Level</b>\n\nSend in this private chat a number from 1 to 90 for the background mic volume percentage while a speaker talks (example: 15).\n\n🛡️ <i>Cloud Media Management</i>",
+        "duck_updated": "🎚️ <b>Ducking level updated!</b>\n\n• <b>Community ID:</b> <code>{group_id}</code>\n• <b>New Level:</b> <code>{duck_level}%</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
+        "duck_err": "⚠️ Enter a whole number between 1 and 90.\n\n🛡️ <i>Cloud Media Management</i>",
+        # --- Paid Speakers Queue (/speakers) ---
+        "speakers_menu": (
+            "🌟 <b>Paid Speakers Queue (/speakers)</b>\n\n"
+            "Members can pay Stars to skip the line and get priority in the mic queue for the voice chat.\n\n"
+            "• <b>Current Status:</b> {status_str}\n"
+            "• <b>Priority Pass Rate:</b> <code>{price} Stars (XTR)</code>\n"
+            "• <b>Members in Queue:</b> <code>{queue_count}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "speakers_updated_1": "🌟 Speakers Queue activated 🟢",
+        "speakers_updated_0": "🌟 Speakers Queue disabled 🔴",
+        "btn_speakers_1": "🟢 Activate Queue",
+        "btn_speakers_0": "🔴 Disable Queue",
+        "btn_speakers_price": "⭐ Priority Rate: {price} Stars",
+        "btn_speakers_clear": "🧹 Clear Queue",
+        "speakers_price_prompt": "⭐ <b>Custom Priority Rate</b>\n\nSend in this private chat the number of Stars to skip the speaker line (example: 30).\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_price_updated": "⭐ <b>Priority Rate Updated!</b>\n\n• <b>Community ID:</b> <code>{group_id}</code>\n• <b>New Rate:</b> <code>{price} Stars (XTR)</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_price_err": "⚠️ Enter a positive integer for Stars (e.g. 30).\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_cleared": "🧹 Speakers queue cleared 🟢"
     },
     "es": {
         "owner_only_alert": "⛔ Acceso Denegado: Esta consola táctica está reservada única y exclusivamente para el Dueño de la comunidad.",
@@ -754,7 +855,88 @@ TEXTS = {
         "btn_add_word": "➕ Registrar Término / Usuario",
         "btn_contact_support": "💬 Contactar Soporte",
         "btn_back_mod": "🔙 Moderación",
-        "btn_back_eco": "🔙 Ecosistema"
+        "btn_back_eco": "🔙 Ecosistema",
+
+        # ==========================================
+        # 💎 ULTRA PRO — PANEL DE HERRAMIENTAS DE ÉLITE
+        # ==========================================
+        "ultra_tools_main": (
+            "💎 <b>Herramientas de Élite ULTRA PRO — {group_name}</b>\n\n"
+            "Control directo desde el panel sobre tus módulos de automatización de mayor nivel, sin depender de comandos de texto en el grupo:\n\n"
+            "🚨 <b>Botón de Pánico:</b> Bloqueo total de emergencia ante raids.\n"
+            "🎥 <b>Escudo Antinota:</b> Moderación de pantalla compartida.\n"
+            "🎙️ <b>Modo Podcast:</b> Volumen dinámico y escudo antirruido.\n"
+            "🌟 <b>Cola de Speakers:</b> Cola de micrófono con prioridad pagada (/speakers).\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_ultra_tools": "💎 Herramientas ULTRA",
+        "ultra_lock_generic": (
+            "🔒 <i>Este módulo es una capacidad avanzada de automatización y está disponible exclusivamente en el nivel ULTRA PRO.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        # --- Botón de Pánico / Raid Lockdown ---
+        "panic_menu": (
+            "🚨 <b>Botón de Pánico — Bloqueo de Emergencia</b>\n\n"
+            "Bloquea instantáneamente toda la comunidad ante una emergencia: los permisos por defecto se llevan a cero y los enlaces de invitación quedan revocados, congelando cualquier raid o ataque de spam masivo en curso.\n\n"
+            "• <b>Estado Actual:</b> {status_str}\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "panic_confirm": (
+            "⚠️ <b>Confirmar Bloqueo de Emergencia</b>\n\n"
+            "Esto silenciará y restringirá de inmediato a <b>todos</b> los miembros del grupo hasta que levantes el bloqueo manualmente. Úsalo únicamente durante un raid o ataque activo.\n\n"
+            "¿Deseas continuar?"
+        ),
+        "panic_activated": "🚨 <b>BLOQUEO DE EMERGENCIA ACTIVO</b>\n\nLa comunidad ha quedado bloqueada. Toca abajo para levantarlo una vez que la amenaza haya pasado.\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_deactivated": "🟢 <b>Bloqueo levantado.</b>\n\nSe restauraron los permisos normales de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "btn_panic_activate": "🚨 Activar Bloqueo",
+        "btn_panic_confirm": "✅ Confirmar Bloqueo",
+        "btn_panic_deactivate": "🟢 Levantar Bloqueo",
+        # --- Escudo Antinota / Screen-Sharing Shield ---
+        "shield_menu": (
+            "🎥 <b>Escudo Antinota (Pantalla Compartida)</b>\n\n"
+            "El Centinela supervisa las transmisiones de pantalla activas en el videochat y modera automáticamente difusiones no autorizadas o inapropiadas.\n\n"
+            "• <b>Estado Actual:</b> {status_str}\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "shield_updated_1": "🎥 Escudo Antinota activado 🟢",
+        "shield_updated_0": "🎥 Escudo Antinota desactivado 🔴",
+        "btn_shield_1": "🟢 Activar Escudo",
+        "btn_shield_0": "🔴 Desactivar Escudo",
+        # --- Modo Podcast & Audio Ducking ---
+        "podcast_menu": (
+            "🎙️ <b>Modo Podcast & Audio Ducking</b>\n\n"
+            "Cuando un orador designado habla, los micrófonos de fondo se atenúan automáticamente (\"ducking\") para mantener la transmisión limpia, además de un escudo antirruido de fondo.\n\n"
+            "• <b>Estado Actual:</b> {status_str}\n"
+            "• <b>Nivel de Ducking:</b> <code>{duck_level}%</code> (volumen de fondo mientras habla un orador)\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "podcast_updated_1": "🎙️ Modo Podcast activado 🟢",
+        "podcast_updated_0": "🎙️ Modo Podcast desactivado 🔴",
+        "btn_podcast_1": "🟢 Activar Modo Podcast",
+        "btn_podcast_0": "🔴 Desactivar",
+        "btn_duck_level": "🎚️ Nivel de Ducking: {duck_level}%",
+        "duck_custom_prompt": "🎚️ <b>Nivel de Ducking Personalizado</b>\n\nEnvía en este chat privado un número del 1 al 90 para el porcentaje de volumen de los micrófonos de fondo mientras habla un orador (ejemplo: 15).\n\n🛡️ <i>Cloud Media Management</i>",
+        "duck_updated": "🎚️ <b>¡Nivel de Ducking actualizado!</b>\n\n• <b>ID Comunidad:</b> <code>{group_id}</code>\n• <b>Nuevo Nivel:</b> <code>{duck_level}%</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
+        "duck_err": "⚠️ Ingresa un número entero entre 1 y 90.\n\n🛡️ <i>Cloud Media Management</i>",
+        # --- Cola de Speakers pagada (/speakers) ---
+        "speakers_menu": (
+            "🌟 <b>Cola de Speakers Pagada (/speakers)</b>\n\n"
+            "Los miembros pueden pagar con Stars para saltarse la fila y obtener prioridad en la cola del micrófono en el videochat.\n\n"
+            "• <b>Estado Actual:</b> {status_str}\n"
+            "• <b>Tarifa de Prioridad:</b> <code>{price} Stars (XTR)</code>\n"
+            "• <b>Miembros en Cola:</b> <code>{queue_count}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "speakers_updated_1": "🌟 Cola de Speakers activada 🟢",
+        "speakers_updated_0": "🌟 Cola de Speakers desactivada 🔴",
+        "btn_speakers_1": "🟢 Activar Cola",
+        "btn_speakers_0": "🔴 Desactivar Cola",
+        "btn_speakers_price": "⭐ Tarifa Prioridad: {price} Stars",
+        "btn_speakers_clear": "🧹 Vaciar Cola",
+        "speakers_price_prompt": "⭐ <b>Tarifa de Prioridad Personalizada</b>\n\nEnvía en este chat privado el número de Stars para saltar la fila de oradores (ejemplo: 30).\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_price_updated": "⭐ <b>¡Tarifa de Prioridad Actualizada!</b>\n\n• <b>ID Comunidad:</b> <code>{group_id}</code>\n• <b>Nueva Tarifa:</b> <code>{price} Stars (XTR)</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_price_err": "⚠️ Ingresa un entero positivo de Stars (ej. 30).\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_cleared": "🧹 Cola de speakers vaciada 🟢"
     }
 }
 
@@ -886,10 +1068,96 @@ def get_group_panel_keyboard(group_id: int, lang: str):
         [InlineKeyboardButton(text=t["btn_captcha"], callback_data=f"gset_captcha_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_locks"], callback_data=f"gset_locks_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_warns"], callback_data=f"gset_warns_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_delmsgs"], callback_data=f"gset_delmsgs_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_clone"], callback_data=f"gset_clone_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_ultra_tools"], callback_data=f"menu_ultra_{group_id}_{lang}")],
         [
             InlineKeyboardButton(text=f"🌐 {'English' if lang == 'es' else 'Español'}", callback_data=f"langpanel_{group_id}_{toggle_lang}"),
             InlineKeyboardButton(text=t["btn_back_settings"], callback_data=f"menu_settings_{lang}")
         ]
+    ])
+
+def get_ultra_tools_keyboard(group_id: int, lang: str):
+    t = TEXTS.get(lang, TEXTS["es"])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🚨 " + ("Botón de Pánico" if lang == "es" else "Panic Button"), callback_data=f"panic_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="🎥 " + ("Escudo Antinota" if lang == "es" else "Screen-Share Shield"), callback_data=f"shield_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="🌟 " + ("Gestión de Speakers" if lang == "es" else "Speakers Management"), callback_data=f"speakers_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
+    ])
+
+def build_ultra_lock_view(group_id: int, lang: str, feature_title: str):
+    """
+    Vista de muro de pago reutilizable para cualquier submódulo ULTRA PRO
+    de este panel (Pánico / Escudo / Podcast / Speakers). Sigue el mismo
+    patrón visual que ya usan autolower, vcsched y clone en este archivo.
+    """
+    t = TEXTS.get(lang, TEXTS["es"])
+    lock_text = f"{feature_title}\n\n{t['ultra_lock_generic']}"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Upgrade to ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+    return lock_text, keyboard
+
+def get_panic_keyboard(group_id: int, lang: str, status: int):
+    t = TEXTS.get(lang, TEXTS["es"])
+    action_btn = (
+        InlineKeyboardButton(text=t["btn_panic_deactivate"], callback_data=f"panic_deactivate_{group_id}_{lang}")
+        if status == 1 else
+        InlineKeyboardButton(text=t["btn_panic_activate"], callback_data=f"panic_confirm_{group_id}_{lang}")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [action_btn],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+
+def get_panic_confirm_keyboard(group_id: int, lang: str):
+    t = TEXTS.get(lang, TEXTS["es"])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_panic_confirm"], callback_data=f"panic_activate_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"panic_menu_{group_id}_{lang}")]
+    ])
+
+def get_shield_keyboard(group_id: int, lang: str, status: int):
+    t = TEXTS.get(lang, TEXTS["es"])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=t["btn_shield_1"], callback_data=f"shield_toggle_1_{group_id}_{lang}"),
+            InlineKeyboardButton(text=t["btn_shield_0"], callback_data=f"shield_toggle_0_{group_id}_{lang}")
+        ],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+
+def get_podcast_keyboard(group_id: int, lang: str, status: int, duck_level: int):
+    t = TEXTS.get(lang, TEXTS["es"])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=t["btn_podcast_1"], callback_data=f"podcast_toggle_1_{group_id}_{lang}"),
+            InlineKeyboardButton(text=t["btn_podcast_0"], callback_data=f"podcast_toggle_0_{group_id}_{lang}")
+        ],
+        [
+            InlineKeyboardButton(text="10%", callback_data=f"podcast_duckval_10_{group_id}_{lang}"),
+            InlineKeyboardButton(text="20%", callback_data=f"podcast_duckval_20_{group_id}_{lang}"),
+            InlineKeyboardButton(text="30%", callback_data=f"podcast_duckval_30_{group_id}_{lang}")
+        ],
+        [InlineKeyboardButton(text=t["btn_duck_level"].format(duck_level=duck_level), callback_data=f"podcast_duckset_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+
+def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int):
+    t = TEXTS.get(lang, TEXTS["es"])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=t["btn_speakers_1"], callback_data=f"speakers_toggle_1_{group_id}_{lang}"),
+            InlineKeyboardButton(text=t["btn_speakers_0"], callback_data=f"speakers_toggle_0_{group_id}_{lang}")
+        ],
+        [
+            InlineKeyboardButton(text="⭐ 20", callback_data=f"speakers_priceval_20_{group_id}_{lang}"),
+            InlineKeyboardButton(text="⭐ 30", callback_data=f"speakers_priceval_30_{group_id}_{lang}"),
+            InlineKeyboardButton(text=t["btn_speakers_price"].format(price=price), callback_data=f"speakers_priceset_{group_id}_{lang}")
+        ],
+        [InlineKeyboardButton(text=t["btn_speakers_clear"], callback_data=f"speakers_clear_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
     ])
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
@@ -1624,9 +1892,47 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await message.answer(t["tag_err"], reply_markup=back_kb, parse_mode="HTML")
         return
 
+    if (bot.id, user_id) in PODCAST_DUCK_STATES:
+        data = PODCAST_DUCK_STATES.pop((bot.id, user_id))
+        group_id = data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"podcast_menu_{group_id}_{lang}")]
+        ])
+        if text_input.isdigit() and 1 <= int(text_input) <= 90:
+            duck_level = int(text_input)
+            GROUP_DUCK_LEVEL[group_id] = duck_level
+            await disengage_podcast_ducking(group_id)
+            await engage_podcast_ducking(group_id, duck_level)
+            await message.answer(
+                t["duck_updated"].format(group_id=group_id, duck_level=duck_level),
+                reply_markup=back_kb,
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(t["duck_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
+    if (bot.id, user_id) in SPEAKER_PRICE_STATES:
+        data = SPEAKER_PRICE_STATES.pop((bot.id, user_id))
+        group_id = data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"speakers_menu_{group_id}_{lang}")]
+        ])
+        if text_input.isdigit() and int(text_input) > 0:
+            price_val = int(text_input)
+            GROUP_SPEAKER_PRICE[group_id] = price_val
+            await message.answer(
+                t["speakers_price_updated"].format(group_id=group_id, price=price_val),
+                reply_markup=back_kb,
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer(t["speakers_price_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
 @router.callback_query(F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") | F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") | F.data.startswith("reg_") | F.data.startswith("vcsched_"))
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
-    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES]:
+    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES, PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES]:
         state_dict.pop((bot.id, callback.from_user.id), None)
     await cancel_phone_auth(callback.from_user.id)
 
@@ -1689,6 +1995,16 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 g_name = "Comunidad" if lang == "es" else "Community"
             text = t[f"{target}_main"].format(group_name=g_name)
             keyboard = get_mod_keyboard(group_id, lang) if target == "mod" else get_eco_keyboard(group_id, lang)
+        elif target == "ultra":
+            group_id = int(data[2])
+            if not await verify_admin_privileges(callback, bot, group_id):
+                return
+            try:
+                g_name = (await bot.get_chat(group_id)).title
+            except Exception:
+                g_name = "Comunidad" if lang == "es" else "Community"
+            text = t["ultra_tools_main"].format(group_name=g_name)
+            keyboard = get_ultra_tools_keyboard(group_id, lang)
             
     elif action == "pay":
         tier_level = data[1]
@@ -2484,3 +2800,227 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             reply_markup=get_antiflood_keyboard(group_id, lang, cfg), 
             parse_mode="HTML"
         )
+
+# ==========================================
+# 💎 ULTRA PRO — HERRAMIENTAS DE ÉLITE
+# (Botón de Pánico, Escudo Antinota, Modo Podcast/Ducking, Cola de Speakers)
+#
+# Dispatcher independiente, igual en espíritu al de "gset_/astog_/..." más
+# arriba: aislado del árbol principal de process_menu_navigation para no
+# tocar su regex ni su lógica y así blindar los menús ya existentes
+# (Captcha, Cerraduras, Antispam, etc.) contra cualquier regresión.
+# ==========================================
+@router.callback_query(
+    F.data.startswith("panic_") | F.data.startswith("shield_") |
+    F.data.startswith("podcast_") | F.data.startswith("speakers_")
+)
+async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
+    for state_dict in [PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES]:
+        state_dict.pop((bot.id, callback.from_user.id), None)
+
+    data = callback.data.split("_")
+    module = data[0]           # panic | shield | podcast | speakers
+    sub = data[1]               # menu | toggle | confirm | activate | ...
+    lang = data[-1] if data[-1] in ["es", "en"] else "es"
+    t = TEXTS.get(lang, TEXTS["es"])
+
+    text = ""
+    keyboard = None
+
+    # ------------------------------------------------------------
+    # 🚨 BOTÓN DE PÁNICO / RAID LOCKDOWN
+    # ------------------------------------------------------------
+    if module == "panic":
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = "🚨 <b>Botón de Pánico</b>" if lang == "es" else "🚨 <b>Panic Button</b>"
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title)
+        elif sub == "menu":
+            status = await get_panic_status(group_id)
+            status_str = "🚨 BLOQUEADO" if status == 1 else "🟢 Normal"
+            if lang == "en":
+                status_str = "🚨 LOCKED DOWN" if status == 1 else "🟢 Normal"
+            text = t["panic_menu"].format(status_str=status_str)
+            keyboard = get_panic_keyboard(group_id, lang, status)
+        elif sub == "confirm":
+            text = t["panic_confirm"]
+            keyboard = get_panic_confirm_keyboard(group_id, lang)
+        elif sub == "activate":
+            await set_panic_status(group_id, 1)
+            try:
+                await execute_raid_lockdown(bot, group_id)
+            except Exception as ex:
+                logging.error(f"❌ [Panic] Fallo al ejecutar el lockdown en {group_id}: {ex}")
+            text = t["panic_activated"]
+            keyboard = get_panic_keyboard(group_id, lang, 1)
+        elif sub == "deactivate":
+            await set_panic_status(group_id, 0)
+            try:
+                await lift_raid_lockdown(bot, group_id)
+            except Exception as ex:
+                logging.error(f"❌ [Panic] Fallo al levantar el lockdown en {group_id}: {ex}")
+            text = t["panic_deactivated"]
+            keyboard = get_panic_keyboard(group_id, lang, 0)
+
+    # ------------------------------------------------------------
+    # 🎥 ESCUDO ANTINOTA / SCREEN-SHARING SHIELD
+    # ------------------------------------------------------------
+    elif module == "shield":
+        if sub == "toggle":
+            new_status = int(data[2])
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = "🎥 <b>Escudo Antinota</b>" if lang == "es" else "🎥 <b>Screen-Share Shield</b>"
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title)
+        elif sub == "menu":
+            status = await get_shield_status(group_id)
+            status_str = ("🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO") if lang == "es" else ("🟢 ACTIVE" if status == 1 else "🔴 DISABLED")
+            text = t["shield_menu"].format(status_str=status_str)
+            keyboard = get_shield_keyboard(group_id, lang, status)
+        elif sub == "toggle":
+            await set_shield_status(group_id, new_status)
+            try:
+                if new_status == 1:
+                    await engage_screen_shield(group_id)
+                else:
+                    await disengage_screen_shield(group_id)
+            except Exception as ex:
+                logging.error(f"❌ [Shield] Fallo al aplicar el escudo en {group_id}: {ex}")
+            await callback.answer(t["shield_updated_1"] if new_status == 1 else t["shield_updated_0"])
+            status = await get_shield_status(group_id)
+            status_str = ("🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO") if lang == "es" else ("🟢 ACTIVE" if status == 1 else "🔴 DISABLED")
+            text = t["shield_menu"].format(status_str=status_str)
+            keyboard = get_shield_keyboard(group_id, lang, status)
+
+    # ------------------------------------------------------------
+    # 🎙️ MODO PODCAST & AUDIO DUCKING
+    # ------------------------------------------------------------
+    elif module == "podcast":
+        if sub in ("toggle", "duckval"):
+            val = data[2]
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = "🎙️ <b>Modo Podcast & Audio Ducking</b>" if lang == "es" else "🎙️ <b>Podcast Mode & Audio Ducking</b>"
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title)
+        elif sub == "menu":
+            status = await get_podcast_status(group_id)
+            duck_level = GROUP_DUCK_LEVEL.get(group_id, 20)
+            status_str = ("🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO") if lang == "es" else ("🟢 ACTIVE" if status == 1 else "🔴 DISABLED")
+            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
+            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level)
+        elif sub == "toggle":
+            new_status = int(val)
+            await set_podcast_status(group_id, new_status)
+            duck_level = GROUP_DUCK_LEVEL.get(group_id, 20)
+            try:
+                if new_status == 1:
+                    await engage_podcast_ducking(group_id, duck_level)
+                else:
+                    await disengage_podcast_ducking(group_id)
+            except Exception as ex:
+                logging.error(f"❌ [Podcast] Fallo al aplicar el ducking en {group_id}: {ex}")
+            await callback.answer(t["podcast_updated_1"] if new_status == 1 else t["podcast_updated_0"])
+            status = await get_podcast_status(group_id)
+            status_str = ("🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO") if lang == "es" else ("🟢 ACTIVE" if status == 1 else "🔴 DISABLED")
+            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
+            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level)
+        elif sub == "duckval":
+            duck_level = int(val)
+            GROUP_DUCK_LEVEL[group_id] = duck_level
+            status = await get_podcast_status(group_id)
+            if status == 1:
+                try:
+                    await disengage_podcast_ducking(group_id)
+                    await engage_podcast_ducking(group_id, duck_level)
+                except Exception as ex:
+                    logging.error(f"❌ [Podcast] Fallo al actualizar el ducking en {group_id}: {ex}")
+            await callback.answer(t["duck_updated"].format(group_id=group_id, duck_level=duck_level), show_alert=True)
+            status_str = ("🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO") if lang == "es" else ("🟢 ACTIVE" if status == 1 else "🔴 DISABLED")
+            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
+            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level)
+        elif sub == "duckset":
+            PODCAST_DUCK_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["duck_custom_prompt"], parse_mode="HTML")
+            return
+
+    # ------------------------------------------------------------
+    # 🌟 COLA DE SPEAKERS PAGADA (/speakers)
+    # ------------------------------------------------------------
+    elif module == "speakers":
+        if sub in ("toggle", "priceval"):
+            val = data[2]
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = "🌟 <b>Cola de Speakers Pagada</b>" if lang == "es" else "🌟 <b>Paid Speakers Queue</b>"
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title)
+        elif sub == "menu":
+            price = GROUP_SPEAKER_PRICE.get(group_id, 20)
+            queue = await get_speaker_queue(group_id)
+            queue_count = len(queue) if queue else 0
+            status_str = "🟢 ACTIVA" if lang == "es" else "🟢 ACTIVE"
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
+            keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+        elif sub == "toggle":
+            new_status = int(val)
+            await callback.answer(t["speakers_updated_1"] if new_status == 1 else t["speakers_updated_0"])
+            price = GROUP_SPEAKER_PRICE.get(group_id, 20)
+            queue = await get_speaker_queue(group_id)
+            queue_count = len(queue) if queue else 0
+            status_str = ("🟢 ACTIVADA" if new_status == 1 else "🔴 DESACTIVADA") if lang == "es" else ("🟢 ACTIVE" if new_status == 1 else "🔴 DISABLED")
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
+            keyboard = get_speakers_keyboard(group_id, lang, new_status, price)
+        elif sub == "priceval":
+            price = int(val)
+            GROUP_SPEAKER_PRICE[group_id] = price
+            await callback.answer(t["speakers_price_updated"].format(group_id=group_id, price=price), show_alert=True)
+            queue = await get_speaker_queue(group_id)
+            queue_count = len(queue) if queue else 0
+            status_str = "🟢 ACTIVA" if lang == "es" else "🟢 ACTIVE"
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
+            keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+        elif sub == "priceset":
+            SPEAKER_PRICE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["speakers_price_prompt"], parse_mode="HTML")
+            return
+        elif sub == "clear":
+            try:
+                await clear_speaker_queue(group_id)
+            except Exception as ex:
+                logging.error(f"❌ [Speakers] Fallo al vaciar la cola en {group_id}: {ex}")
+            await callback.answer(t["speakers_cleared"])
+            price = GROUP_SPEAKER_PRICE.get(group_id, 20)
+            status_str = "🟢 ACTIVA" if lang == "es" else "🟢 ACTIVE"
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=0)
+            keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+
+    if text and keyboard:
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except TelegramBadRequest:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
