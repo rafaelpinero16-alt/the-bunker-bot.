@@ -113,7 +113,12 @@ def init_db():
             ("sentinel_payload_text", "TEXT"),
             ("sentinel_payload_media_id", "TEXT"),
             ("sentinel_payload_media_type", "TEXT"),
-            ("sentinel_payload_auto_delete", "INTEGER")
+            ("sentinel_payload_auto_delete", "INTEGER"),
+            # --- MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO ---
+            ("night_mode_status", "INTEGER DEFAULT 0"),
+            ("night_mode_start", "TEXT DEFAULT '22:00'"),
+            ("night_mode_end", "TEXT DEFAULT '06:00'"),
+            ("night_action", "TEXT DEFAULT 'lock_media'")
         ]
 
         for col_name, col_def in settings_columns:
@@ -682,6 +687,43 @@ def set_sentinel_payload_config(group_id: int, field: str, value):
         "sentinel_payload_media_id", "sentinel_payload_media_type", 
         "sentinel_payload_auto_delete"
     ]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
+# ==========================================
+# 🌙 MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO
+# ==========================================
+def get_night_mode_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT night_mode_status, night_mode_start, night_mode_end, night_action
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "status": row[0] if row[0] is not None else 0,
+                    "start": row[1] if row[1] else "22:00",
+                    "end": row[2] if row[2] else "06:00",
+                    "action": row[3] if row[3] else "lock_media"
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"status": 0, "start": "22:00", "end": "06:00", "action": "lock_media"}
+
+
+def set_night_mode_config(group_id: int, field: str, value):
+    valid_fields = ["night_mode_status", "night_mode_start", "night_mode_end", "night_action"]
     if field not in valid_fields:
         return
     with get_db_connection() as conn:
@@ -1376,6 +1418,8 @@ def clear_speaker_queue(group_id: int):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
         conn.commit()
+
+
 # ==========================================
 # 💎 MOTOR DE CANALES, PLANES Y MEMBRESÍAS ULTRA PRO
 # ==========================================
@@ -1506,7 +1550,6 @@ def get_channel_subscription(channel_id: int, user_id: int) -> dict:
 
 
 def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
-    """Obtiene suscripciones activas por vencer en las próximas horas que aún no han sido notificadas hoy."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
@@ -1522,7 +1565,6 @@ def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
 
 
 def get_expired_channel_subscriptions() -> list:
-    """Obtiene suscripciones cuyo periodo de vencimiento más los días de gracia ya caducó para auto-kick."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1613,6 +1655,9 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_radar_config",
     "get_sentinel_payload_config",
     "set_sentinel_payload_config",
+    # --- MÓDULO FASE 4: MODO NOCTURNO ---
+    "get_night_mode_config",
+    "set_night_mode_config",
     "get_antispam_filter",
     "set_antispam_filter",
     "get_antispam_delete",
@@ -1694,4 +1739,4 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
 
 dl = getattr(globals(), "dl", None)
 if "_fn_name" in globals():
-    del _fn_name            
+    del _fn_name

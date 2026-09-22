@@ -36,7 +36,9 @@ from database.database import (
     get_sentinel_payload_config, set_sentinel_payload_config,
     # 💎 Módulos de Canales & Membresías
     get_channel_settings, set_channel_settings,
-    get_channel_plans, get_active_subscribers_count
+    get_channel_plans, get_active_subscribers_count,
+    get_night_mode_config,
+    set_night_mode_config
 )
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
@@ -155,6 +157,7 @@ SENTINEL_PHONE_STATES = {}
 SENTINEL_CODE_STATES = {}
 SENTINEL_2FA_STATES = {}
 VC_SCHED_STATES = {}
+NIGHT_STATES = {}
 DB_REG_STATES = {}
 MOD_TARGET_STATES = {}
 MIC_VIP_STATES = {}
@@ -488,8 +491,24 @@ TEXTS = {
         "sentinel_payload_prompt_media": "🖼️ <b>Upload Media Asset (Photo, GIF, or Video):</b>",
         "sentinel_payload_prompt_del": "⏱️ <b>Auto-Delete Timeout in seconds (0 to keep):</b>",
         "sentinel_payload_saved": "✅ <b>Payload asset updated successfully!</b>",
-        "sentinel_payload_err": "⚠️ Invalid input for payload asset."
-    },
+        "sentinel_payload_err": "⚠️ Invalid input for payload asset.",
+        
+        "btn_night_mode": "🌙 Autonomous Night Mode",
+        "night_main": (
+            "🏴‍☠️ <b>Autonomous Night Mode (Phase 4)</b>\n\n"
+            "Automates perimeter shielding during low-supervision hours:\n\n"
+            "• <b>Status:</b> {st_badge}\n"
+            "• <b>Schedule:</b> <code>{start} - {end}</code>\n"
+            "• <b>Action:</b> <code>{action}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),  # <--- ¡Esta coma es la clave que faltaba!
+        "night_prompt": "⏰ <b>Night Mode Schedule</b>\n\nSend the start and end interval in 24h format (example: <code>22:00-06:00</code>):\n\n🛡️ <i>Cloud Media Management</i>",
+        "night_updated": "✅ <b>Night Mode schedule updated successfully!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+        "night_err": "⚠️ Invalid format. Use HH:MM-HH:MM (Example: <code>22:00-06:00</code>).\n\n🛡️ <i>Cloud Media Management</i>",
+        "btn_night_on": "🟢 Enable Night Mode",
+        "btn_night_off": "🔴 Disable Night Mode",
+        "btn_night_mod": "⏰ Modify Schedule (HH:MM-HH:MM)"
+    },  # <--- Aquí cierra el bloque "en"
     "es": {
         "owner_only_alert": "⛔ Acceso Denegado: Esta consola táctica está reservada única y exclusivamente para el Dueño de la comunidad o canal.",
         "welcome": (
@@ -787,7 +806,22 @@ TEXTS = {
         "sentinel_payload_prompt_media": "🖼️ <b>Carga de Multimedia del Payload (Foto, GIF o Video):</b>",
         "sentinel_payload_prompt_del": "⏱️ <b>Tiempo de Auto-Borrado en segundos (0 para mantener):</b>",
         "sentinel_payload_saved": "✅ <b>¡Activo de payload guardado correctamente!</b>",
-        "sentinel_payload_err": "⚠️ Entrada no válida para el activo multimedia del payload."
+       "sentinel_payload_err": "⚠️ Entrada no válida para el activo multimedia del payload.",
+        "btn_night_mode": "🌙 Modo Nocturno Autónomo",
+        "night_main": (
+            "🌙 <b>Modo Nocturno Autónomo (Fase 4)</b>\n\n"
+            "Automatiza el blindaje perimetral de tu comunidad durante las horas de menor supervisión:\n\n"
+            "• <b>Estado:</b> {st_badge}\n"
+            "• <b>Horario:</b> <code>{start} - {end}</code>\n"
+            "• <b>Acción:</b> <code>{action}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "night_prompt": "⏰ <b>Configuración de Horario Nocturno</b>\n\nEnvía en este chat el intervalo de inicio y cierre en formato 24h (ejemplo: <code>22:00-06:00</code>):\n\n🛡️ <i>Cloud Media Management</i>",
+        "night_updated": "✅ <b>¡Horario del Modo Nocturno actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+        "night_err": "⚠️ Formato incorrecto. Usa HH:MM-HH:MM (Ejemplo: <code>22:00-06:00</code>).\n\n🛡️ <i>Cloud Media Management</i>",
+        "btn_night_on": "🟢 Activar Modo Nocturno",
+        "btn_night_off": "🔴 Desactivar Modo Nocturno",
+        "btn_night_mod": "⏰ Modificar Horario (HH:MM-HH:MM)"
     }
 }
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
@@ -1053,6 +1087,18 @@ def get_panic_keyboard(group_id: int, lang: str, status: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [action_btn],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+def get_night_keyboard(group_id: int, lang: str, status: int):
+    t = TEXTS.get(lang, TEXTS["es"])
+    toggle_btn = (
+        InlineKeyboardButton(text=t["btn_night_off"], callback_data=f"night_toggle_0_{group_id}_{lang}")
+        if status == 1 else
+        InlineKeyboardButton(text=t["btn_night_on"], callback_data=f"night_toggle_1_{group_id}_{lang}")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [toggle_btn],
+        [InlineKeyboardButton(text=t["btn_night_mod"], callback_data=f"night_prompt_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
     ])
 
 
@@ -1437,7 +1483,10 @@ def get_eco_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text="🎙️ /mic_vip", callback_data=f"cmd_mic_{group_id}_{lang}"),
             InlineKeyboardButton(text="🏷️ Etiqueta VIP" if lang == "es" else "🏷️ VIP Tag", callback_data=f"cmd_mictag_{group_id}_{lang}")
         ],
-        [InlineKeyboardButton(text=t["btn_tips"], callback_data=f"tips_menu_{group_id}_{lang}")],
+        [
+            InlineKeyboardButton(text=t["btn_tips"], callback_data=f"tips_menu_{group_id}_{lang}"),
+            InlineKeyboardButton(text=t["btn_night_mode"], callback_data=f"night_menu_{group_id}_{lang}") # <--- ¡Añadido aquí!
+        ],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
 
@@ -1953,7 +2002,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
     F.data.startswith("langcpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cpanel_") | 
     F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") | 
     F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") | 
-    F.data.startswith("reg_") | F.data.startswith("vcsched_") | F.data.startswith("tips_")
+    F.data.startswith("reg_") | F.data.startswith("vcsched_") | F.data.startswith("tips_") |
+    F.data.startswith("night_")
 )
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     for state_dict in [
@@ -1961,7 +2011,8 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, 
         MIC_VIP_STATES, MIC_TAG_STATES, PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES,
         TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, SENTINEL_PAYLOAD_TEXT_STATES,
-        SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES
+        SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
+        NIGHT_STATES
     ]:
         state_dict.pop((bot.id, callback.from_user.id), None)
     await cancel_phone_auth(callback.from_user.id)
@@ -2425,6 +2476,34 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         prompt = await callback.message.answer(t["mod_ask_target"].format(sub_cmd_upper=f"{sub_cmd.upper()} ({label})"), parse_mode="HTML")
         fire_and_forget_auto_delete([prompt], delay=60)
         return
+
+    elif action == "night":
+        sub = data[1]
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        if sub == "menu" or sub == "toggle":
+            if sub == "toggle":
+                new_st = int(data[3])
+                await set_night_mode_config(group_id, "night_mode_status", new_st)
+            
+            cfg = await get_night_mode_config(group_id)
+            st_badge = "🟢 ACTIVADO" if cfg["status"] == 1 else "🔴 DESACTIVADO"
+            if lang == "en":
+                st_badge = "🟢 ACTIVE" if cfg["status"] == 1 else "🔴 DISABLED"
+
+            text = t["night_main"].format(st_badge=st_badge, start=cfg["start"], end=cfg["end"], action=cfg["action"])
+            keyboard = get_night_keyboard(group_id, lang, cfg["status"])
+            try:
+                await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
+        elif sub == "prompt":
+            NIGHT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt = await callback.message.answer(t["night_prompt"], parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
 
     if text and keyboard:
         try:
