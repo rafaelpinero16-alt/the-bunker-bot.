@@ -583,6 +583,13 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
     try:
         await session_client.start()
         me = await session_client.get_me()
+        
+        # 💡 Solución PeerIdInvalid en memoria: precargar el chat antes de resolver el peer
+        try:
+            await session_client.get_chat(group_id)
+        except Exception as chat_err:
+            logger.debug(f"Aviso precargando chat {group_id}: {chat_err}")
+
         peer = await session_client.resolve_peer(group_id)
         
         task = asyncio.create_task(monitor_single_group(group_id, peer, session_client, me.id))
