@@ -62,7 +62,7 @@ def init_db():
             )
         """)
         
-        # Migraciones dinámicas de columnas perimetrales, Modo Free y Capas Ultra Pro (Tips & Service Msgs)
+        # Migraciones dinámicas de columnas perimetrales, Modo Free, Capas Ultra Pro y Payload Multimedia del Centinela
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
             ("captcha_status", "INTEGER DEFAULT 0"),
@@ -106,11 +106,16 @@ def init_db():
             ("podcast_duck_volume", "INTEGER DEFAULT 500"),
             ("noise_shield_status", "INTEGER DEFAULT 1"),
             ("speaker_queue_price", "INTEGER DEFAULT 25"),
-            # --- NUEVAS COLUMNAS ULTRA PRO & SERVICE MSGS ---
             ("service_msgs_mode", "INTEGER DEFAULT 1"),
             ("tips_enabled", "INTEGER DEFAULT 0"),
             ("tips_amount", "INTEGER DEFAULT 10"),
-            ("tips_target_channel", "TEXT")
+            ("tips_target_channel", "TEXT"),
+            # --- PAYLOAD MULTIMEDIA CENTINELA (ULTRA PRO) ---
+            ("sentinel_payload_enabled", "INTEGER DEFAULT 0"),
+            ("sentinel_payload_text", "TEXT"),
+            ("sentinel_payload_media_id", "TEXT"),
+            ("sentinel_payload_media_type", "TEXT"),
+            ("sentinel_payload_auto_delete", "INTEGER")
         ]
 
         for col_name, col_def in settings_columns:
@@ -328,9 +333,6 @@ def get_user_groups(user_id: int) -> list:
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, group_name FROM user_groups WHERE user_id = ?", (user_id,))
         return cursor.fetchall()
-
-
-def set_autolower_status(group_id: int, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -589,6 +591,47 @@ def set_radar_config(group_id: int, field: str, value):
         conn.commit()
 
 
+# --- PAYLOAD MULTIMEDIA DEL CENTINELA (ULTRA PRO) ---
+def get_sentinel_payload_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT sentinel_payload_enabled, sentinel_payload_text, sentinel_payload_media_id,
+                       sentinel_payload_media_type, sentinel_payload_auto_delete
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "enabled": row[0] if row[0] is not None else 0,
+                    "text": row[1] if row[1] is not None else None,
+                    "media_id": row[2] if row[2] is not None else None,
+                    "media_type": row[3] if row[3] is not None else None,
+                    "auto_delete_after": row[4] if row[4] is not None else None
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
+
+
+def set_sentinel_payload_config(group_id: int, field: str, value):
+    valid_fields = [
+        "sentinel_payload_enabled", "sentinel_payload_text", 
+        "sentinel_payload_media_id", "sentinel_payload_media_type", 
+        "sentinel_payload_auto_delete"
+    ]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
 VALID_FILTERS = {
     "tg_links", "forwards", "quotes", "web_links", 
     "fwd_channels", "fwd_users", "fwd_groups", "fwd_bots"
@@ -673,7 +716,6 @@ def set_antiflood_config(group_id: int, field: str, value):
         conn.commit()
 
 
-# --- NUEVAS FUNCIONES PARA MENSAJES DE SERVICIO & TIPS ULTRA PRO ---
 def get_service_msgs_mode(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1002,9 +1044,6 @@ def get_all_active_vc_schedules():
         return cursor.fetchall()
 
 
-# ==========================================
-# 🛡️ BOTÓN DE PÁNICO & HELPERS DE COMPATIBILIDAD
-# ==========================================
 def get_panic_status(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1310,6 +1349,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_vip_badge_title",
     "get_radar_config",
     "set_radar_config",
+    "get_sentinel_payload_config",
+    "set_sentinel_payload_config",
     "get_antispam_filter",
     "set_antispam_filter",
     "get_antispam_delete",
@@ -1374,4 +1415,4 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
     if _fn_name in globals():
         globals()[_fn_name] = _make_async(globals()[_fn_name])
 
-del _fn_name
+del _fn_name   

@@ -47,6 +47,62 @@ async def _is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     except Exception:
         return False
 
+# ==========================================
+# 🎚️ MATRIZ DE RANGOS — AUTOLOWER SELECTIVO & INMUNIDAD DE ARQUITECTOS
+# ==========================================
+async def get_privilege_tier(bot: Bot, group_id: int, user_id: int, username: str = "") -> str:
+    """
+    Resuelve el rango de privilegio de una cuenta dentro de la comunidad, en orden
+    estricto de jerarquía. Este rango es la fuente única de verdad que usan tanto
+    el AutoLower (atenuación acústica) como el núcleo de sanciones para decidir
+    quién queda protegido.
+
+      - "architect"   -> Arquitecto Supremo (SUPER_ADMIN_IDS). Inmunidad absoluta:
+                          nunca aparece en registros de purgas ni alertas de castigo.
+      - "sentinel"     -> Centinela Maestro/Dedicado ligado a la sesión de voz activa.
+      - "owner"        -> Dueño/Creador de la comunidad.
+      - "admin"        -> Administrador designado por el Dueño.
+      - "whitelisted"  -> Aliado autorizado explícitamente en la Whitelist.
+      - "standard"     -> Miembro común, sujeto a todas las cerraduras y sanciones.
+    """
+    if is_super_admin(user_id):
+        return "architect"
+
+    if await is_sentinel_account(group_id, user_id, username):
+        return "sentinel"
+
+    try:
+        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
+        if member.status == "creator":
+            return "owner"
+        if member.status == "administrator":
+            return "admin"
+    except Exception:
+        pass
+
+    if await is_whitelisted(user_id):
+        return "whitelisted"
+
+    return "standard"
+
+
+def _tier_is_privileged(tier: str) -> bool:
+    """Cualquier rango distinto de 'standard' queda excluido de sanciones automáticas."""
+    return tier in ("architect", "sentinel", "owner", "admin", "whitelisted")
+
+
+async def _autolower_can_mute(bot: Bot, group_id: int, user_id: int, username: str = "") -> bool:
+    """
+    AutoLower Selectivo por Rangos: antes de aplicar cualquier atenuación acústica
+    (silenciamiento de micrófono), vuelve a verificar permisos y rango autorizado.
+    Los aliados con privilegios (Arquitectos, Centinelas, Dueño, Administradores y
+    Whitelist) quedan completamente protegidos del silenciamiento automático,
+    incluso si por alguna vía alterna llegaran a este punto del flujo.
+    """
+    tier = await get_privilege_tier(bot, group_id, user_id, username)
+    return not _tier_is_privileged(tier)
+
+
 # Memoria temporal en RAM optimizada
 FLOOD_CACHE = {}
 CAPTCHA_SESSIONS = {}
@@ -980,38 +1036,60 @@ async def group_security_matrix(message: Message, bot: Bot):
     username = message.from_user.username or ""
     text_content = message.text or message.caption or ""
 
-    # Inmunidad para Arquitectos Supremos y Centinelas
-    if is_super_admin(user_id) or await is_sentinel_account(group_id, user_id, username):
+    # 🎖️ Matriz de rangos — Inmunidad total para Arquitectos Supremos, Centinelas,
+    # Dueño y aliados en Whitelist. Ninguno de estos rangos deja rastro en los
+    # registros de purgas ni dispara alertas de castigo: la inspección termina aquí.
+    tier = await get_privilege_tier(bot, group_id, user_id, username)
+    if tier in ("architect", "sentinel", "owner", "whitelisted"):
         return
 
-    is_creator = False
-    is_admin = False
-    try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
-        is_creator = (member.status == "creator")
-        is_admin = (member.status in ["creator", "administrator"])
-    except Exception:
-        pass
+    is_admin = (tier == "admin")
 
-    # El Creador (Dueño) y usuarios en Whitelist tienen inmunidad total
-    if is_creator or await is_whitelisted(user_id):
-        return
-
-    # Cerradura de Comandos (Lock Commands): Exclusivo para el Dueño
+    # 🕵️ Interceptor Anti-Invocación — Cerradura de Comandos (Lock Commands):
+    # Exclusiva para el Dueño. Cualquier intruso (incluidos administradores, si la
+    # cerradura está activa) que invoque un comando protegido es interceptado en
+    # silencio: el mensaje se elimina sin aviso público y se le aplica un strike
+    # automático sobre la escalera de sanciones ya configurada (/warns), sin
+    # generar ruido visible en el chat ni alterar en absoluto la visibilidad o
+    # experiencia del Dueño de la comunidad.
     if text_content.startswith("/") and await get_lock_status(group_id, "lock_commands") == 1:
-        try: 
+        try:
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
 
-        user_mention = message.from_user.mention_html()
-        temp_warn = await message.answer(
-            f"⛔ {user_mention}, la ejecución de comandos en este grupo está reservada <b>exclusivamente para el Dueño de la comunidad</b>.\n\n"
-            f"🇺🇸 <i>Command execution is locked to the Community Owner.</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
-        asyncio.create_task(auto_delete_msg(temp_warn, 8))
+        try:
+            strikes = await add_warning(user_id)
+            warns_cfg = await get_warns_config(group_id)
+            limit = warns_cfg["limit"]
+            action = warns_cfg["action"]
+
+            if strikes >= limit:
+                if await _autolower_can_mute(bot, group_id, user_id, username):
+                    try:
+                        await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
+                    except Exception:
+                        pass
+
+                if action == "mute":
+                    await bot.restrict_chat_member(
+                        chat_id=group_id, user_id=user_id,
+                        permissions=ChatPermissions(can_send_messages=False)
+                    )
+                elif action == "kick":
+                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
+                    await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
+                elif action == "ban":
+                    await ban_user(user_id)
+                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+
+            logger.info(
+                f"[AntiInvocacion] Intruso {user_id} interceptado en silencio en el grupo {group_id} "
+                f"(strike {strikes}/{limit}, acción={action if strikes >= limit else 'sin_escalar'})."
+            )
+        except Exception as e:
+            logger.error(f"Error aplicando strike silencioso del Interceptor Anti-Invocación ({group_id}/{user_id}): {e}")
+
         return
 
     # Si es administrador autorizado no aplican los filtros de usuarios comunes
@@ -1080,10 +1158,13 @@ async def group_security_matrix(message: Message, bot: Bot):
 
         if warnings >= limit:
             try:
-                try:
-                    await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
-                except Exception:
-                    pass
+                if await _autolower_can_mute(bot, group_id, user_id, username):
+                    try:
+                        await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
+                    except Exception:
+                        pass
+                else:
+                    logger.info(f"[AutoLower] Atenuación omitida para aliado con privilegios {user_id} en {group_id}.")
 
                 if action == "mute":
                     await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
@@ -1155,11 +1236,14 @@ async def group_security_matrix(message: Message, bot: Bot):
             if af_cfg["delete"] == 1: 
                 await message.delete()
             user_mention = message.from_user.mention_html()
-            
-            try:
-                await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
-            except Exception:
-                pass
+
+            if await _autolower_can_mute(bot, group_id, user_id, username):
+                try:
+                    await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
+                except Exception:
+                    pass
+            else:
+                logger.info(f"[AutoLower] Atenuación omitida para aliado con privilegios {user_id} en {group_id}.")
 
             if af_action == "warn": 
                 f_msg = await message.answer(

@@ -31,6 +31,29 @@ from database.database import (
     get_screen_shield_status, get_podcast_config
 )
 
+# --- Payload Multimedia del Centinela (Ultra Pro) ---
+# Import resiliente: si `database.py` todavía no expone `get_sentinel_payload_config`,
+# usamos un stub que devuelve "deshabilitado" en vez de tumbar el arranque en Railway.
+# Firma esperada en database.py:
+#   async def get_sentinel_payload_config(chat_id: int) -> dict:
+#       return {
+#           "enabled": 0 | 1,          # sólo comunidades Ultra Pro deberían poder activarlo
+#           "text": str | None,        # texto personalizado (soporta HTML de Telegram)
+#           "media_id": str | None,    # file_id de Telegram (foto/animación) subido por el owner
+#           "media_type": "photo" | "animation" | None,
+#           "auto_delete_after": int | None,  # segundos antes de autoborrar (opcional)
+#       }
+try:
+    from database.database import get_sentinel_payload_config
+except ImportError:
+    logging.getLogger("assistant_radar").warning(
+        "⚠️ [Payload Ultra Pro no disponible] `get_sentinel_payload_config` no existe aún en "
+        "database.py; el despacho de multimedia personalizado del Centinela quedará inactivo "
+        "hasta que se implemente esa función."
+    )
+    async def get_sentinel_payload_config(chat_id: int) -> dict:
+        return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
+
 FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan)
 
 logger = logging.getLogger("assistant_radar")
@@ -83,6 +106,28 @@ NOISE_SPIKE_STRIKE_LIMIT = 3
 # Último estado de mute conocido por (chat_id, user_id), usado para detectar transiciones
 # mute->unmute (necesarias tanto para el Escudo Antirruido como para no re-disparar avisos).
 _last_mute_state = {}
+
+# Payload Multimedia Ultra Pro: evita reenviar el mismo payload personalizado si dos disparadores
+# (p. ej. optimización + programador VC) coinciden muy cerca en el tiempo para el mismo grupo.
+_sentinel_payload_last_sent = {}
+SENTINEL_PAYLOAD_MIN_GAP_SECONDS = 60
+
+# Estabilidad MTProto: un asyncio.Lock por grupo evita que dos operaciones concurrentes
+# (p. ej. un registro manual desde el panel + el propio ciclo de reconexión) intenten
+# arrancar/detener la sesión del mismo Centinela propio al mismo tiempo y corrompan
+# el estado in-memory de Pyrogram (llaves de auth, dialogs cacheados, etc.).
+_sentinel_launch_locks = {}
+# Límite de arranques simultáneos de sesiones MTProto propias (evita ráfagas de conexión
+# que Telegram puede interpretar como abuso al reiniciar el proceso con muchas comunidades).
+_sentinel_launch_semaphore = asyncio.Semaphore(4)
+
+
+def _get_launch_lock(group_id: int) -> asyncio.Lock:
+    lock = _sentinel_launch_locks.get(group_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _sentinel_launch_locks[group_id] = lock
+    return lock
 
 DUCK_TEXT = (
     "🎙️ <b>The Bunker Bot: Modo Podcast — Atenuación Dinámica</b>\n\n"
@@ -188,6 +233,54 @@ def _resolve_autolower_text(custom_text: str, user_name: str) -> str:
 
 def _resolve_reset_text(custom_text: str) -> str:
     return custom_text if custom_text else OPTIMIZATION_TEXT
+
+
+async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
+    """
+    Despacha el payload multimedia personalizado (texto + foto/animación) configurado por
+    un usuario Ultra Pro para su comunidad, leyendo la configuración desde la base de datos.
+
+    Se envía como un mensaje INDEPENDIENTE del aviso técnico de optimización/parpadeo (no se
+    mezcla con el texto de "mantenimiento"), para que quede claro para los miembros qué es
+    contenido curado por el owner de la comunidad y qué es un aviso operativo del sistema.
+
+    `origin` sólo se usa para logging/trazabilidad (qué ciclo disparó el envío).
+    """
+    if not _global_bot:
+        return None
+
+    try:
+        payload_cfg = await get_sentinel_payload_config(chat_id)
+    except Exception as e:
+        logger.debug(f"Aviso leyendo payload Ultra Pro para {chat_id}: {e}")
+        return None
+
+    if not payload_cfg or payload_cfg.get("enabled") != 1:
+        return None
+
+    text = payload_cfg.get("text")
+    if not text:
+        return None
+
+    now = asyncio.get_event_loop().time()
+    last_sent = _sentinel_payload_last_sent.get(chat_id, 0)
+    if now - last_sent < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
+        logger.debug(f"⏭️ [Payload Ultra Pro] Omitido en {chat_id} (gap mínimo, origen={origin}).")
+        return None
+
+    sent = await _dispatch_radar_notice(
+        chat_id=chat_id,
+        text=text,
+        media_id=payload_cfg.get("media_id"),
+        media_type=payload_cfg.get("media_type"),
+        auto_delete_after=payload_cfg.get("auto_delete_after")
+    )
+
+    if sent:
+        _sentinel_payload_last_sent[chat_id] = now
+        logger.info(f"💎 [Payload Ultra Pro Despachado] Grupo {chat_id} (origen={origin}).")
+
+    return sent
 
 
 VC_SCHED_MESSAGES = {
@@ -503,6 +596,14 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         except Exception:
                             pass
 
+                        # 💎 Payload Ultra Pro: se despacha aparte del aviso técnico de arriba,
+                        # nunca oculto dentro de él, para que el contenido curado por el owner
+                        # se distinga claramente de un mensaje operativo del sistema.
+                        try:
+                            await _dispatch_sentinel_payload(chat_id, origin="optimizacion_3.5h")
+                        except Exception as payload_err:
+                            logger.debug(f"Aviso despachando payload Ultra Pro en {chat_id}: {payload_err}")
+
                     try:
                         await client.invoke(DiscardGroupCall(call=current_call))
                     except Exception as disc_err:
@@ -760,6 +861,10 @@ async def vc_scheduler_loop():
                         await update_vc_call_status(group_id, 1)
                         if _global_bot:
                             await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["start"], parse_mode="HTML")
+                            try:
+                                await _dispatch_sentinel_payload(group_id, origin="apertura_programada")
+                            except Exception as payload_err:
+                                logger.debug(f"Aviso despachando payload Ultra Pro en apertura programada {group_id}: {payload_err}")
                     except Exception as e:
                         logger.error(f"Error abriendo videochat en grupo {group_id}: {e}")
 
@@ -840,11 +945,20 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
 
 
 async def register_or_update_sentinel(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
-    await disconnect_sentinel(group_id)
-    return await launch_sentinel_instance(user_id, group_id, session_string, api_id, api_hash)
+    lock = _get_launch_lock(group_id)
+    async with lock:
+        await _disconnect_sentinel_unlocked(group_id)
+        async with _sentinel_launch_semaphore:
+            return await launch_sentinel_instance(user_id, group_id, session_string, api_id, api_hash)
 
 
 async def disconnect_sentinel(group_id: int):
+    lock = _get_launch_lock(group_id)
+    async with lock:
+        await _disconnect_sentinel_unlocked(group_id)
+
+
+async def _disconnect_sentinel_unlocked(group_id: int):
     if group_id in active_sentinels:
         sentinel_info = active_sentinels.pop(group_id)
         try:
@@ -874,15 +988,26 @@ async def disconnect_sentinel(group_id: int):
 
 async def load_all_sentinels():
     sessions = await get_all_active_sessions()
-    for row in sessions:
-        u_id, g_id, s_str, a_id, a_hash = row[0], row[1], row[2], row[3], row[4]
-        if g_id not in active_sentinels:
-            try:
-                await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
-            except PeerIdInvalid:
-                pass
-            except Exception:
-                pass
+
+    async def _load_one(u_id, g_id, s_str, a_id, a_hash):
+        lock = _get_launch_lock(g_id)
+        async with lock:
+            if g_id in active_sentinels:
+                return
+            async with _sentinel_launch_semaphore:
+                try:
+                    await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
+                except PeerIdInvalid:
+                    pass
+                except Exception:
+                    pass
+
+    # Arranque en paralelo mas acotado por el semáforo (_sentinel_launch_semaphore):
+    # así no se abren decenas de sesiones MTProto propias al mismo instante contra
+    # Telegram cuando el proceso reinicia en Railway con muchas comunidades activas.
+    await asyncio.gather(*[
+        _load_one(row[0], row[1], row[2], row[3], row[4]) for row in sessions
+    ])
 
 
 async def radar_master_loop():
