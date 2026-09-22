@@ -291,10 +291,6 @@ def _register_forbidden_strike(chat_id: int, action: str):
 
 
 async def _verify_active_membership(client: Client, chat_id: int) -> bool:
-    """
-    Confirma membresía. En in_memory, atrapamos las excepciones silenciosamente
-    y asumimos True para no bloquear el login si los diálogos no han sincronizado.
-    """
     try:
         member = await client.get_chat_member(chat_id, "me")
         status_val = str(getattr(member.status, "value", member.status)).lower()
@@ -632,20 +628,22 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
 
+        # 🔥 SOLUCIÓN CRÍTICA AL PEER ID INVALID EN MEMORIA 🔥
+        # Como usamos in_memory=True, Pyrogram olvida las llaves de acceso (access_hash).
+        # Al descargar los diálogos directamente desde Telegram, forzamos a Pyrogram
+        # a cachear las credenciales del grupo para que `resolve_peer` no explote.
         try:
-            await session_client.get_chat(group_id)
-        except PeerIdInvalid:
-            logger.warning(f"⚠️ [Peer ID Inválido al Precargar] El grupo {group_id} no es accesible con esta sesión.")
-            await session_client.stop()
-            return False
-        except Exception as chat_err:
-            logger.debug(f"Aviso precargando chat {group_id}: {chat_err}")
+            async for dialog in session_client.get_dialogs(limit=250):
+                if dialog.chat.id == group_id:
+                    break
+        except Exception as dialog_err:
+            logger.debug(f"Aviso al poblar la libreta de contactos para {group_id}: {dialog_err}")
 
-        # 👤 Relax: No abortamos el lanzamiento si la validación falla por desincronización
         is_member = await _verify_active_membership(session_client, group_id)
         if not is_member:
-            logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar de todos modos...")
+            logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
 
+        # Pyrogram ya se sabe el access_hash de memoria, ahora sí conectará impecable:
         peer = await session_client.resolve_peer(group_id)
 
         task = asyncio.create_task(monitor_single_group(group_id, peer, session_client, me.id, user_id))
@@ -664,7 +662,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             pass
         return False
     except PeerIdInvalid:
-        logger.warning(f"⚠️ [Peer ID Inválido al Iniciar] El grupo {group_id} no es accesible con esta sesión.")
+        logger.error(f"⚠️ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
         return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
@@ -719,10 +717,6 @@ async def radar_master_loop():
                         chat_id = chat.id
                         if chat_id not in active_sentinels:
                             try:
-                                try:
-                                    await assistant_app.get_chat(chat_id)
-                                except Exception:
-                                    pass
                                 peer = await assistant_app.resolve_peer(chat_id)
                                 task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, _default_my_id))
                                 active_sentinels[chat_id] = {
@@ -800,13 +794,6 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         return False
 
     try:
-        try:
-            await client.get_chat(chat_id)
-        except PeerIdInvalid:
-            return False
-        except Exception:
-            pass
-
         peer = await client.resolve_peer(chat_id)
         try:
             full_chat_res = await client.invoke(GetFullChannel(channel=peer))
