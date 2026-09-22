@@ -42,7 +42,7 @@ from assistant import (
     engage_screen_shield, disengage_screen_shield,
     engage_podcast_ducking, disengage_podcast_ducking
 )
-from groups import (
+from .groups import (
     # 🚨 Bloqueo/levantamiento de emergencia y cola de Speakers pagados
     execute_raid_lockdown, lift_raid_lockdown,
     add_speaker_to_queue, pop_next_speaker, clear_speaker_queue, get_speaker_queue
