@@ -122,8 +122,6 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
             sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
     except Exception as e:
         logger.warning(f"Aviso al despachar notificación personalizada del Centinela en {chat_id}: {e}")
-        # Fallback defensivo: si el media_id personalizado ya no es válido (borrado, expirado),
-        # se reintenta en texto plano para que el aviso nunca se pierda del todo.
         try:
             sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         except Exception:
@@ -147,7 +145,6 @@ def _resolve_autolower_text(custom_text: str, user_name: str) -> str:
     try:
         return template.format(user_name=user_name)
     except (KeyError, IndexError):
-        # El operador personalizó el texto sin dejar el placeholder {user_name}: se envía tal cual.
         return template
 
 
@@ -173,7 +170,7 @@ VC_SCHED_MESSAGES = {
 
 
 # ==============================================================================
-# 🔐 MOTOR DE AUTENTICACIÓN NATIVA (PHONE LOGIN SIN STRINGSESSION MANUAL)
+# 🔐 MOTOR DE AUTENTICACIÓN NATIVA (PHONE LOGIN CON RECONEXIÓN BLINDADA)
 # ==============================================================================
 
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
@@ -225,6 +222,8 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
     clean_code = code.strip().replace(" ", "").replace("-", "")
 
     try:
+        if not client.is_connected:
+            await client.connect()
         await client.sign_in(
             phone_number=auth_data["phone"],
             phone_code_hash=auth_data["phone_code_hash"],
@@ -255,6 +254,8 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
     client: Client = auth_data["client"]
 
     try:
+        if not client.is_connected:
+            await client.connect()
         await client.check_password(password=password.strip())
         session_str = await client.export_session_string()
         group_id = auth_data["group_id"]
@@ -362,14 +363,11 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 last_channel_check = current_time
 
             # 🛡️ MANTENIMIENTO PREVENTIVO — INAMOVIBLE: 3.5 horas / 12600 segundos.
-            # Este umbral NUNCA se lee de la base de datos: permanece nativo y estricto
-            # en el código del userbot para evitar congelamientos de stream (Req. #2).
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
                     if _global_bot:
                         try:
-                            # EDITABLE: texto/multimedia del aviso previo al reinicio, personalizable por BD.
                             radar_cfg = await get_radar_config(chat_id)
                             reset_text = _resolve_reset_text(radar_cfg.get("reset_text"))
                             await _dispatch_radar_notice(
@@ -477,7 +475,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
                             if _global_bot:
                                 try:
-                                    # EDITABLE: texto/multimedia del aviso de AutoLower, personalizable por BD.
                                     radar_cfg = await get_radar_config(chat_id)
                                     autolower_text = _resolve_autolower_text(radar_cfg.get("autolower_text"), user_name)
                                     await _dispatch_radar_notice(
