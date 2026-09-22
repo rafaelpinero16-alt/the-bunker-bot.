@@ -153,7 +153,6 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     bot_info = await bot.get_me()
 
     if is_channel:
-        # En canales: confirmación privada al dueño para no interferir con las publicaciones públicas
         if user:
             ch_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📡 Consola del Canal / Studio Panel", url=f"https://t.me/{bot_info.username}?start=cset_{group_id}")]
@@ -172,7 +171,6 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             except Exception as ex:
                 logger.warning(f"Aviso al enviar bienvenida privada de canal al usuario {user.id}: {ex}")
     else:
-        # En supergrupos: despliegue del mensaje perimetral público
         group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
             [
                 InlineKeyboardButton(text="🚀 Iniciar Bot / Start Bot", url=f"https://t.me/{bot_info.username}?start=true"),
@@ -199,7 +197,6 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
         except Exception as ex:
             logger.warning(f"Aviso al enviar bienvenida al grupo {group_id}: {ex}")
 
-    # Notificación de auditoría a la consola central
     admin_group_id_raw = os.getenv("ADMIN_GROUP_ID")
     if admin_group_id_raw:
         try:
@@ -601,7 +598,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                 await bot.unban_chat_member(chat_id=group_id, user_id=target_user_id)
         except Exception as ex:
             logger.error(f"Error aplicando sanción por fallo de captcha: {ex}")
-        # ==========================================
+            # ==========================================
 # 🧹 PURGA DE MENSAJES DE SERVICIO
 # ==========================================
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.left_chat_member)
@@ -995,8 +992,83 @@ async def speakers_successful_payment(message: Message, bot: Bot):
 
 
 # ==========================================
-# 🛡️ MATRIZ DE SEGURIDAD (LOCKS, ANTISPAM & ANTIFLOOD)
+# 🛡️ FASE 3: MATRIZ DE ADVERTENCIAS CENTRALIZADA (WARNS MATRIX) & SEGURIDAD
 # ==========================================
+@router.message(Command("warn"), F.chat.type.in_({"group", "supergroup"}))
+async def manual_warn_command(message: Message, bot: Bot):
+    """Comando administrativo /warn para imponer un strike manual y ejecutar la escala de castigos."""
+    group_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+
+    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
+        return
+
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        warn_notice = await message.answer("⚠️ Responde al mensaje del usuario al que deseas aplicar un strike con <code>/warn</code>.", parse_mode="HTML")
+        asyncio.create_task(auto_delete_msg(warn_notice, 10))
+        return
+
+    target_user = message.reply_to_message.from_user
+    if target_user.is_bot:
+        return
+
+    target_id = target_user.id
+    target_tier = await get_privilege_tier(bot, group_id, target_id, target_user.username or "")
+    if _tier_is_privileged(target_tier):
+        await message.answer("🛡️ Este usuario posee rango protegido o inmunidad de Arquitecto/Admin.")
+        return
+
+    strikes = await add_warning(target_id)
+    warns_cfg = await get_warns_config(group_id)
+    limit = warns_cfg["limit"]
+    action = warns_cfg["action"]
+    target_mention = target_user.mention_html()
+
+    if strikes >= limit:
+        try:
+            if await _autolower_can_mute(bot, group_id, target_id, target_user.username or ""):
+                try:
+                    await set_participant_mic(chat_id=group_id, user_id=target_id, muted=True, volume=0)
+                except Exception:
+                    pass
+
+            if action == "mute":
+                await bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=ChatPermissions(can_send_messages=False))
+                msg_sancion = await message.answer(
+                    f"🔇 <b>Strike Manual — Sanción Automática ({strikes}/{limit})</b>\n\n"
+                    f"{target_mention} ha alcanzado el límite de advertencias y fue silenciado.\n\n🛡️ <i>Cloud Media Management</i>",
+                    parse_mode="HTML"
+                )
+            elif action == "kick":
+                await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
+                await bot.unban_chat_member(chat_id=group_id, user_id=target_id)
+                msg_sancion = await message.answer(
+                    f"👢 <b>Strike Manual — Sanción Automática ({strikes}/{limit})</b>\n\n"
+                    f"{target_mention} ha alcanzado el límite y fue expulsado.\n\n🛡️ <i>Cloud Media Management</i>",
+                    parse_mode="HTML"
+                )
+            elif action == "ban":
+                await ban_user(target_id)
+                await bot.ban_chat_member(chat_id=group_id, user_id=target_id)
+                msg_sancion = await message.answer(
+                    f"🚫 <b>Strike Manual — Sanción Definitiva ({strikes}/{limit})</b>\n\n"
+                    f"{target_mention} ha sido baneado permanentemente por acumulación de faltas.\n\n🛡️ <i>Cloud Media Management</i>",
+                    parse_mode="HTML"
+                )
+            asyncio.create_task(auto_delete_msg(msg_sancion, 25))
+        except Exception as e:
+            logger.error(f"Error aplicando sanción manual por warns: {e}")
+    else:
+        warn_msg = await message.answer(
+            f"⚠️ <b>Advertencia Registrada ({strikes}/{limit})</b>\n\n"
+            f"• <b>Infractor:</b> {target_mention}\n"
+            f"• <b>Estado:</b> Strike aplicado por orden de administración.\n\n🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+        asyncio.create_task(auto_delete_msg(warn_msg, 15))
+
+
 @router.message(F.chat.type.in_({"group", "supergroup"}))
 async def group_security_matrix(message: Message, bot: Bot):
     if not message.from_user or message.from_user.is_bot:
@@ -1246,4 +1318,4 @@ async def group_security_matrix(message: Message, bot: Bot):
 
 async def add_speaker_to_queue(group_id: int, user_id: int, full_name: str = "Speaker", username: str = "", stars_paid: int = 0):
     """Wrapper de compatibilidad para user_private.py"""
-    return await add_to_speaker_queue(group_id, user_id, full_name, username, stars_paid)    
+    return await add_to_speaker_queue(group_id, user_id, full_name, username, stars_paid)
