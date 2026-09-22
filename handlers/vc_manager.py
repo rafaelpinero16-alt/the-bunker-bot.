@@ -8,7 +8,8 @@ from database.database import (
     add_to_whitelist, remove_from_whitelist, is_group_approved, 
     is_vip_mic_active, get_autolower_status, set_autolower_status,
     get_mic_vip_price, get_session_by_group,
-    get_night_mode_config, get_podcast_status, get_screen_shield_status
+    get_night_mode_config, get_podcast_status, get_screen_shield_status,
+    get_community_live_telemetry, get_speaker_queue, get_panic_status
 )
 from assistant import set_participant_mic
 
@@ -37,8 +38,11 @@ TEXTS = {
             "📹 <b>Camera & Transmission Quality Audit:</b>\n\n"
             "• <b>Live Video & Streams:</b> Active High-Fidelity Feed 🟢\n"
             "• <b>Transmission Status:</b> Fluid & Lag-Free\n"
-            "• <b>Continuous Optimization:</b> Background stream refresh enabled\n"
-            "• <b>Assigned Sentinel:</b> {sentinel_name}\n\n"
+            "• <b>Assigned Sentinel:</b> {sentinel_name}\n"
+            "• <b>Screen-Share Shield:</b> {shield_status}\n"
+            "• <b>AutoLower Protocol (2%):</b> {autolower_status}\n"
+            "• <b>Active VIP Passes in Room:</b> <code>{vip_count}</code>\n"
+            "• <b>Background Optimization:</b> Cleans video lag & refreshes room every 3.5h automatically\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "kickcam_success": "⚡ User {target} has been disconnected from the voice room.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -47,13 +51,16 @@ TEXTS = {
         "wl_removed": "❌ User {target} removed from Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_needed": "⚠️ Reply to the message of the user you wish to authorize.\n\n🛡️ <i>Cloud Media Management</i>",
         "status_text": (
-            "🎙️ <b>Voice Room & Radar Telemetry</b>\n\n"
-            "• <b>System Status:</b> {status}\n"
+            "🎙️ <b>Voice Room & Radar Live Telemetry</b>\n\n"
+            "• <b>Supervision State:</b> {status}\n"
             "• <b>Active Sentinel:</b> {sentinel_name} 🟢\n"
-            "• <b>VIP Mic Pass Fee:</b> {mic_price} Stars (XTR)\n"
+            "• <b>VIP Mic Rate:</b> <code>{mic_price} Stars (XTR)</code>\n"
+            "• <b>Active VIP Passes in Room:</b> <code>{vip_count}</code>\n"
+            "• <b>Speakers Queue:</b> <code>{speakers_count} waiting</code>\n"
             "• <b>AutoLower Protocol (2%):</b> {autolower}\n"
             "• <b>Podcast Mode:</b> {podcast}\n"
             "• <b>Screen Shield:</b> {shield}\n"
+            "• <b>Emergency Lockdown:</b> {panic}\n"
             "• <b>Night Mode:</b> {night}\n\n"
             "<i>Select an action below:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -91,8 +98,11 @@ TEXTS = {
             "📹 <b>Auditoría de Calidad de Cámaras y Transmisión:</b>\n\n"
             "• <b>Video en Vivo y Streams:</b> Transmisión en Alta Fidelidad Activa 🟢\n"
             "• <b>Estado de Transmisión:</b> Fluida y sin congelamientos\n"
-            "• <b>Optimización Continua:</b> Refresco en segundo plano activado\n"
-            "• <b>Centinela Asignado:</b> {sentinel_name}\n\n"
+            "• <b>Centinela Asignado:</b> {sentinel_name}\n"
+            "• <b>Escudo Antinota:</b> {shield_status}\n"
+            "• <b>Protocolo AutoLower (2%):</b> {autolower_status}\n"
+            "• <b>Pases VIP Activos en Sala:</b> <code>{vip_count}</code>\n"
+            "• <b>Optimización en Segundo Plano:</b> Purgado de lag y refresco automático cada 3.5h activado\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "kickcam_success": "⚡ El usuario {target} ha sido desconectado de la sala de voz.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -101,13 +111,16 @@ TEXTS = {
         "wl_removed": "❌ Usuario {target} retirado de la Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_needed": "⚠️ Responde al mensaje del usuario que deseas autorizar.\n\n🛡️ <i>Cloud Media Management</i>",
         "status_text": (
-            "🎙️ <b>Telemetría de la Sala de Voz y Radar</b>\n\n"
-            "• <b>Estado del Sistema:</b> {status}\n"
+            "🎙️ <b>Telemetría en Vivo de la Sala de Voz y Radar</b>\n\n"
+            "• <b>Supervisión Acústica:</b> {status}\n"
             "• <b>Centinela Asignado:</b> {sentinel_name} 🟢\n"
-            "• <b>Tarifa Pase VIP:</b> {mic_price} Stars (XTR)\n"
+            "• <b>Tarifa Pase VIP:</b> <code>{mic_price} Stars (XTR)</code>\n"
+            "• <b>Pases VIP Activos en Sala:</b> <code>{vip_count}</code>\n"
+            "• <b>Cola de Speakers Pagada:</b> <code>{speakers_count} en espera</code>\n"
             "• <b>Protocolo AutoLower (2%):</b> {autolower}\n"
             "• <b>Modo Podcast:</b> {podcast}\n"
             "• <b>Escudo Antinota:</b> {shield}\n"
+            "• <b>Bloqueo de Emergencia:</b> {panic}\n"
             "• <b>Modo Nocturno:</b> {night}\n\n"
             "<i>Selecciona una acción:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -274,7 +287,23 @@ async def cmd_cams(message: Message, bot: Bot):
     chat_id = message.chat.id
     lang = get_lang(message.from_user.language_code)
     sentinel_label = await get_active_sentinel_label(chat_id)
-    await send_private_response(message, TEXTS[lang]["cams_report"].format(sentinel_name=sentinel_label))
+    telem = await get_community_live_telemetry(chat_id)
+    
+    shield_status = "🟢 Activo" if telem["shield_status"] == 1 else "🔴 Inactivo"
+    autolower_status = "🟢 Activo (2%)" if telem["autolower_status"] == 1 else "🔴 Inactivo (100%)"
+    if lang == "en":
+        shield_status = "🟢 Active" if telem["shield_status"] == 1 else "🔴 Inactive"
+        autolower_status = "🟢 Active (2%)" if telem["autolower_status"] == 1 else "🔴 Inactive (100%)"
+
+    await send_private_response(
+        message, 
+        TEXTS[lang]["cams_report"].format(
+            sentinel_name=sentinel_label,
+            shield_status=shield_status,
+            autolower_status=autolower_status,
+            vip_count=telem["vip_passes_active"]
+        )
+    )
 
 
 @router.message(Command("kickoffcam"))
@@ -334,22 +363,22 @@ async def cmd_status_vc(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     
-    autolower_val = await get_autolower_status(chat_id)
-    pod_val = await get_podcast_status(chat_id)
-    shield_val = await get_screen_shield_status(chat_id)
+    telem = await get_community_live_telemetry(chat_id)
     night_cfg = await get_night_mode_config(chat_id)
 
     status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
-    al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
-    pod_display = "🟢 ACTIVO" if pod_val == 1 else "🔴 DESACTIVADO"
-    shield_display = "🟢 ACTIVO" if shield_val == 1 else "🔴 DESACTIVADO"
+    al_display = "🟢 ACTIVO (2%)" if telem["autolower_status"] == 1 else "🔴 DESACTIVADO (100%)"
+    pod_display = "🟢 ACTIVO" if telem["podcast_status"] == 1 else "🔴 DESACTIVADO"
+    shield_display = "🟢 ACTIVO" if telem["shield_status"] == 1 else "🔴 DESACTIVADO"
+    panic_display = "🚨 BLOQUEO ACTIVO" if telem["panic_active"] == 1 else "🟢 Normal"
     night_display = "🟢 ACTIVADO" if night_cfg and night_cfg.get("status") == 1 else "🔴 DESACTIVADO"
 
     if lang == "en":
         status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
-        al_display = "🟢 ACTIVE (2%)" if autolower_val == 1 else "🔴 DEACTIVATED (100%)"
-        pod_display = "🟢 ACTIVE" if pod_val == 1 else "🔴 DEACTIVATED"
-        shield_display = "🟢 ACTIVE" if shield_val == 1 else "🔴 DEACTIVATED"
+        al_display = "🟢 ACTIVE (2%)" if telem["autolower_status"] == 1 else "🔴 DEACTIVATED (100%)"
+        pod_display = "🟢 ACTIVE" if telem["podcast_status"] == 1 else "🔴 DEACTIVATED"
+        shield_display = "🟢 ACTIVE" if telem["shield_status"] == 1 else "🔴 DEACTIVATED"
+        panic_display = "🚨 RAID ACTIVE" if telem["panic_active"] == 1 else "🟢 Normal"
         night_display = "🟢 ACTIVE" if night_cfg and night_cfg.get("status") == 1 else "🔴 DEACTIVATED"
 
     sentinel_label = await get_active_sentinel_label(chat_id)
@@ -372,9 +401,12 @@ async def cmd_status_vc(message: Message, bot: Bot):
             autolower=al_display, 
             podcast=pod_display,
             shield=shield_display,
+            panic=panic_display,
             night=night_display,
             sentinel_name=sentinel_label,
-            mic_price=mic_price
+            mic_price=mic_price,
+            vip_count=telem["vip_passes_active"],
+            speakers_count=telem["speakers_in_queue"]
         ), 
         reply_markup=keyboard
     )
@@ -399,22 +431,22 @@ async def process_vc_callback(callback: CallbackQuery):
 
         elif action == "vc_status":
             is_active = vc_states.get(chat_id, True)
-            autolower_val = await get_autolower_status(chat_id)
-            pod_val = await get_podcast_status(chat_id)
-            shield_val = await get_screen_shield_status(chat_id)
+            telem = await get_community_live_telemetry(chat_id)
             night_cfg = await get_night_mode_config(chat_id)
 
             status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
-            al_display = "🟢 ACTIVO (2%)" if autolower_val == 1 else "🔴 DESACTIVADO (100%)"
-            pod_display = "🟢 ACTIVO" if pod_val == 1 else "🔴 DESACTIVADO"
-            shield_display = "🟢 ACTIVO" if shield_val == 1 else "🔴 DESACTIVADO"
+            al_display = "🟢 ACTIVO (2%)" if telem["autolower_status"] == 1 else "🔴 DESACTIVADO (100%)"
+            pod_display = "🟢 ACTIVO" if telem["podcast_status"] == 1 else "🔴 DESACTIVADO"
+            shield_display = "🟢 ACTIVO" if telem["shield_status"] == 1 else "🔴 DESACTIVADO"
+            panic_display = "🚨 BLOQUEO ACTIVO" if telem["panic_active"] == 1 else "🟢 Normal"
             night_display = "🟢 ACTIVADO" if night_cfg and night_cfg.get("status") == 1 else "🔴 DESACTIVADO"
 
             if lang == "en":
                 status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
-                al_display = "🟢 ACTIVE (2%)" if autolower_val == 1 else "🔴 DEACTIVATED (100%)"
-                pod_display = "🟢 ACTIVE" if pod_val == 1 else "🔴 DEACTIVATED"
-                shield_display = "🟢 ACTIVE" if shield_val == 1 else "🔴 DEACTIVATED"
+                al_display = "🟢 ACTIVE (2%)" if telem["autolower_status"] == 1 else "🔴 DEACTIVATED (100%)"
+                pod_display = "🟢 ACTIVE" if telem["podcast_status"] == 1 else "🔴 DEACTIVATED"
+                shield_display = "🟢 ACTIVE" if telem["shield_status"] == 1 else "🔴 DEACTIVATED"
+                panic_display = "🚨 RAID ACTIVE" if telem["panic_active"] == 1 else "🟢 Normal"
                 night_display = "🟢 ACTIVE" if night_cfg and night_cfg.get("status") == 1 else "🔴 DEACTIVATED"
 
             sentinel_label = await get_active_sentinel_label(chat_id)
@@ -435,9 +467,12 @@ async def process_vc_callback(callback: CallbackQuery):
                     autolower=al_display, 
                     podcast=pod_display,
                     shield=shield_display,
+                    panic=panic_display,
                     night=night_display,
                     sentinel_name=sentinel_label,
-                    mic_price=mic_price
+                    mic_price=mic_price,
+                    vip_count=telem["vip_passes_active"],
+                    speakers_count=telem["speakers_in_queue"]
                 ),
                 reply_markup=keyboard,
                 parse_mode="HTML"
@@ -445,18 +480,18 @@ async def process_vc_callback(callback: CallbackQuery):
 
         elif action == "vc_cams":
             sentinel_label = await get_active_sentinel_label(chat_id)
-            report = (
-                "📹 <b>Auditoría de Transmisiones:</b> Calidad normal y fluida.\n\n"
-                "• Calidad de Video: Alta Fidelidad y sin cortes\n"
-                f"• Centinela en Sala: {sentinel_label} 🟢\n"
-                "• Optimización Automática: Activa en segundo plano\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                "📹 <b>Stream Quality Audit:</b> Normal and fluid operation.\n\n"
-                "• Video Quality: High Fidelity, zero interruptions\n"
-                f"• Active Room Sentinel: {sentinel_label} 🟢\n"
-                "• Background Stream Refresh: Enabled\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
+            telem = await get_community_live_telemetry(chat_id)
+            shield_status = "🟢 Activo" if telem["shield_status"] == 1 else "🔴 Inactivo"
+            autolower_status = "🟢 Activo (2%)" if telem["autolower_status"] == 1 else "🔴 Inactivo (100%)"
+            if lang == "en":
+                shield_status = "🟢 Active" if telem["shield_status"] == 1 else "🔴 Inactive"
+                autolower_status = "🟢 Active (2%)" if telem["autolower_status"] == 1 else "🔴 Inactive (100%)"
+
+            report = t["cams_report"].format(
+                sentinel_name=sentinel_label,
+                shield_status=shield_status,
+                autolower_status=autolower_status,
+                vip_count=telem["vip_passes_active"]
             )
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]
