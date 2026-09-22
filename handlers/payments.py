@@ -61,7 +61,7 @@ async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 15):
 
 def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
     """
-    Construye el aviso + botón que redirige el cobro de una suscripción PRO/ULTRA PRO
+    Construye el aviso y botón que redirige el cobro de una suscripción PRO/ULTRA PRO
     hacia el Bot Maestro cuando la orden se originó en un Bot Clon.
     """
     master_username = get_master_bot_username()
@@ -136,7 +136,7 @@ TEXTS = {
             "💎 <b>Payment Confirmed! ULTRA PRO License Active</b>\n\n"
             "• Community: <code>{chat_id}</code> upgraded to <b>ULTRA PRO 💎</b>\n"
             "• Autonomous Bot Clone deployment, isolated Voice Sentinel node, and Weekly VC Cron unlocked.\n"
-            "• <b>Direct Monetization:</b> 100% of all Telegram Stars collected via /micvip enter your bot clone balance!\n\n"
+            "• <b>Direct Monetization:</b> 100% of all Telegram Stars collected enter your bot clone balance!\n\n"
             "💡 <b>Deployment Step:</b> Link your @BotFather token and secondary session string to activate your private node:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -149,7 +149,7 @@ TEXTS = {
         "btn_add_master": "🤖 Add Master Sentinel (@Alphacentinel)",
         "btn_setup_clone": "🧬 Setup Clone & Dedicated Sentinel",
         "err_inv": "⚠️ An error occurred while generating the invoice. Please try again.",
-        "err_link": "⚠️ Invalid VIP activation link or expired parameters.",
+        "err_link": "⚠️ Invalid activation link or expired parameters.",
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
     },
     "es": {
@@ -196,7 +196,7 @@ TEXTS = {
             "💎 <b>¡Pago Confirmado! Nivel ULTRA PRO Activado</b>\n\n"
             "• Comunidad <code>{chat_id}</code> elevada a <b>ULTRA PRO 💎</b>.\n"
             "• Clonación autónoma con @BotFather, Centinela aislado antiban y cronograma semanal de videochats desbloqueados.\n"
-            "• <b>Monetización Directa:</b> El 100% de las Stars cobradas por /micvip van directamente a tu propio bot clon.\n\n"
+            "• <b>Monetización Directa:</b> El 100% de las Stars cobradas van directamente a tu propio bot clon.\n\n"
             "💡 <b>Paso Siguiente:</b> Conecta tu token de bot y tu sesión de Pyrogram en el panel privado:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -225,7 +225,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
 
     if message.chat.type == "private":
         await message.answer(
-            f"⚠️ Por favor ejecuta /{command.command} dentro de tu grupo para vincular la facturación a esa comunidad.",
+            f"⚠️ Por favor ejecuta /{command.command} dentro de tu comunidad para vincular la facturación a ese grupo.",
             parse_mode="HTML"
         )
         return
@@ -280,10 +280,10 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
 
 
 # ==========================================
-# 🔗 ENRUTAMIENTO DE ENLACES PROFUNDOS (/start sub_)
+# 🔗 ENRUTAMIENTO UNIFICADO DE DEEP LINKS (/start sub_, vipmic_, chanplan_)
 # ==========================================
-@router.message(Command("start"), F.text.contains("sub_"))
-async def cmd_start_subscription(message: Message, command: CommandObject, bot: Bot):
+@router.message(Command("start"), F.text.regexp(r"^/start\s+(sub_|vipmic_|chanplan_)"))
+async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type != "private":
         return
 
@@ -291,145 +291,123 @@ async def cmd_start_subscription(message: Message, command: CommandObject, bot: 
     t = TEXTS[lang]
     args = command.args or ""
 
-    if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
-        redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
-        redirect_chat_id = 0
-        redirect_parts = args.split("_")
-        if len(redirect_parts) > 2:
-            try:
-                redirect_chat_id = int(redirect_parts[2])
-            except ValueError:
-                redirect_chat_id = 0
-        redirect_text, redirect_markup = _clone_subscription_redirect(lang, redirect_plan, redirect_chat_id)
-        if redirect_text:
-            try:
-                await message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
-            except Exception:
-                pass
-            return
-        logger.warning("⚠️ [Blindaje Suscripción] MASTER_BOT_USERNAME no resuelto aún; se factura por excepción desde el Clon.")
+    # 1. FLUJO SUSCRIPCIONES DE GRUPO (sub_pro / sub_ultra)
+    if args.startswith("sub_"):
+        if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
+            redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
+            redirect_chat_id = 0
+            redirect_parts = args.split("_")
+            if len(redirect_parts) > 2:
+                try:
+                    redirect_chat_id = int(redirect_parts[2])
+                except ValueError:
+                    redirect_chat_id = 0
+            redirect_text, redirect_markup = _clone_subscription_redirect(lang, redirect_plan, redirect_chat_id)
+            if redirect_text:
+                try:
+                    await message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
+                except Exception:
+                    pass
+                return
 
-    try:
-        chat_id_target = 0
-        if args.startswith("sub_pro"):
+        try:
+            chat_id_target = 0
+            if args.startswith("sub_pro"):
+                parts = args.split("_")
+                if len(parts) > 2:
+                    chat_id_target = int(parts[2])
+                price = PRICE_PRO_STARS
+                title = t["inv_pro_t"]
+                desc = t["inv_pro_d"]
+                payload = f"sub_pro_{chat_id_target}"
+            elif args.startswith("sub_ultra"):
+                parts = args.split("_")
+                if len(parts) > 2:
+                    chat_id_target = int(parts[2])
+                price = PRICE_ULTRAPRO_STARS
+                title = t["inv_ultra_t"]
+                desc = t["inv_ultra_d"]
+                payload = f"sub_ultra_{chat_id_target}"
+            else:
+                return
+
+            if chat_id_target >= 0:
+                await message.answer(t["err_link"], parse_mode="HTML")
+                return
+
+            prices = [LabeledPrice(label=title, amount=price)]
+            back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id_target}_{lang}")
+            
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
+                [back_btn]
+            ])
+            
+            await bot.send_invoice(
+                chat_id=message.chat.id,
+                title=title,
+                description=desc,
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=prices,
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Error generando factura de suscripción en start: {e}")
+            await message.answer(t["err_inv"], parse_mode="HTML")
+        return
+
+    # 2. FLUJO MEMBRESÍAS DE CANAL (chanplan_<plan_id>_<channel_id>)
+    elif args.startswith("chanplan_"):
+        try:
             parts = args.split("_")
-            if len(parts) > 2:
-                chat_id_target = int(parts[2])
-            price = PRICE_PRO_STARS
-            title = t["inv_pro_t"]
-            desc = t["inv_pro_d"]
-            payload = f"sub_pro_{chat_id_target}"
-        elif args.startswith("sub_ultra"):
-            parts = args.split("_")
-            if len(parts) > 2:
-                chat_id_target = int(parts[2])
-            price = PRICE_ULTRAPRO_STARS
-            title = t["inv_ultra_t"]
-            desc = t["inv_ultra_d"]
-            payload = f"sub_ultra_{chat_id_target}"
-        else:
-            return
+            if len(parts) < 3:
+                await message.answer(t["err_link"], parse_mode="HTML")
+                return
 
-        if chat_id_target >= 0:
-            await message.answer(t["err_link"], parse_mode="HTML")
-            return
+            plan_id = int(parts[1])
+            channel_id = int(parts[2])
 
-        prices = [LabeledPrice(label=title, amount=price)]
-        back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id_target}_{lang}")
-        
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
-            [back_btn]
-        ])
-        
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title=title,
-            description=desc,
-            payload=payload,
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            reply_markup=markup
-        )
-    except Exception as e:
-        logger.error(f"Error generando factura de suscripción en start: {e}")
-        await message.answer(t["err_inv"], parse_mode="HTML")
+            plans = await get_channel_plans(channel_id, only_active=True)
+            target_plan = next((p for p in plans if p[0] == plan_id), None)
+            if not target_plan:
+                await message.answer(t["err_link"], parse_mode="HTML")
+                return
 
+            plan_name = target_plan[1]
+            duration_days = target_plan[2]
+            stars_price = target_plan[3]
 
-# ==========================================
-# 📢 FASE 6: FACTURACIÓN DE MEMBRESÍAS EN CANALES (chanplan_)
-# ==========================================
-@router.message(Command("start"), F.text.contains("chanplan_"))
-async def cmd_start_chan_plan(message: Message, command: CommandObject, bot: Bot):
-    if message.chat.type != "private":
+            title = f"Membresía: {plan_name}"[:32]
+            desc = f"Acceso exclusivo al canal por {duration_days} días."[:255]
+            payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
+
+            prices = [LabeledPrice(label=title, amount=stars_price)]
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)],
+                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            ])
+
+            await bot.send_invoice(
+                chat_id=message.chat.id,
+                title=title,
+                description=desc,
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=prices,
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Error generando factura de membresía de canal: {e}")
+            await message.answer(t["err_inv"], parse_mode="HTML")
         return
 
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
-    args = command.args or ""
-
-    try:
-        parts = args.split("_")
-        # Formato esperado: chanplan_<plan_id>_<channel_id>
-        if len(parts) < 3:
-            await message.answer(t["err_link"], parse_mode="HTML")
-            return
-
-        plan_id = int(parts[1])
-        channel_id = int(parts[2])
-
-        plans = await get_channel_plans(channel_id, only_active=True)
-        target_plan = next((p for p in plans if p[0] == plan_id), None)
-        if not target_plan:
-            await message.answer(t["err_link"], parse_mode="HTML")
-            return
-
-        plan_name = target_plan[1]
-        duration_days = target_plan[2]
-        stars_price = target_plan[3]
-
-        title = f"Membresía: {plan_name}"[:32]
-        desc = f"Acceso exclusivo al canal por {duration_days} días."[:255]
-        payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
-
-        prices = [LabeledPrice(label=title, amount=stars_price)]
-        markup = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)],
-            [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
-        ])
-
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title=title,
-            description=desc,
-            payload=payload,
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-            reply_markup=markup
-        )
-    except Exception as e:
-        logger.error(f"Error generando factura de membresía de canal: {e}")
-        await message.answer(t["err_inv"], parse_mode="HTML")
-
-
-# ==========================================
-# 🎙️ FACTURACIÓN DINÁMICA DE PASE VIP DE MICRÓFONO
-# ==========================================
-@router.message(Command("start"), F.text.contains("vipmic_"))
-async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
-    if message.chat.type != "private":
-        return
-
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
-    args = command.args or ""
-
-    if args.startswith("vipmic_"):
+    # 3. FLUJO PASE VIP DE MICRÓFONO (vipmic_<chat_id>)
+    elif args.startswith("vipmic_"):
         try:
             chat_id = int(args.split("_")[1])
-            
             if chat_id >= 0:
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
@@ -460,7 +438,10 @@ async def cmd_start_vipmic(message: Message, command: CommandObject, bot: Bot):
         except Exception as e:
             logger.error(f"Error generando factura de Micrófono VIP: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
-    # ==========================================
+        return
+
+
+# ==========================================
 # ⚡ DESPACHO DE FACTURAS DESDE BOTONES INLINE (inv_)
 # ==========================================
 @router.callback_query(F.data.startswith("inv_"))
@@ -486,7 +467,6 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
                 except Exception:
                     pass
                 return
-            logger.warning("⚠️ [Blindaje Suscripción] MASTER_BOT_USERNAME no resuelto aún; se factura por excepción desde el Clon.")
 
         if plan == "pro":
             price = PRICE_PRO_STARS
@@ -546,7 +526,6 @@ async def process_successful_payment(message: Message, bot: Bot):
             chat_id = int(parts[2])
             
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
-            
             await approve_group(group_id=chat_id, tier=tier_db, duration_days=30)
             
             if plan_type == "pro":
@@ -561,7 +540,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 )
             else:
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=f"gset_clone_{chat_id}_{lang}")],
+                    [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=f"gset_clone_g_{chat_id}_{lang}")],
                     [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
                 ])
                 await message.answer(
@@ -583,11 +562,11 @@ async def process_successful_payment(message: Message, bot: Bot):
             user_id = message.from_user.id
             stars_paid = message.successful_payment.total_amount
 
-            # Genera un enlace de invitación de un solo uso criptográficamente seguro
+            # Genera un enlace de invitación de un solo uso que se quema al entrar
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
                 member_limit=1,
-                expire_date=int(time.time()) + 86400 * 3 # Válido por 3 días o 1 un solo uso
+                expire_date=int(time.time()) + 86400 * 3
             )
             invite_link = invite.invite_link
 
@@ -660,4 +639,4 @@ async def process_successful_payment(message: Message, bot: Bot):
             await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             logger.error(f"Error procesando la entrega del pase VIP de micrófono: {e}")
-            await message.answer(t["err_inv"], parse_mode="HTML")        
+            await message.answer(t["err_inv"], parse_mode="HTML")
