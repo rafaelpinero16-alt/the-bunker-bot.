@@ -13,7 +13,9 @@ from database.database import (
     revoke_vip_mic, 
     register_user_group,
     get_podcast_status, set_podcast_status,
-    get_screen_shield_status, set_screen_shield_status
+    get_screen_shield_status, set_screen_shield_status,
+    add_user_strike, get_user_strikes, reset_user_strikes, get_warns_config,
+    get_night_mode_config, activate_universal_night_mode, deactivate_universal_night_mode
 )
 from assistant import (
     set_participant_mic,
@@ -108,7 +110,8 @@ TEXTS = {
         "shield_off_btn": "❌ Disable Shield",
         "status_active_shield": "🟢 ACTIVE (Screen sharing blocked)",
         "status_inactive_shield": "🔴 DEACTIVATED",
-        "success_updated": "Console updated",
+        "night_on_msg": "🌙 <b>Universal Night Mode:</b> 🟢 ACTIVATED. Perimeter restrictions applied.",
+        "night_off_msg": "☀️ <b>Universal Night Mode:</b> 🔴 DEACTIVATED. Standard permissions restored.",
         "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_ban": "⚠️ Target required. Reply to a message or use: <code>/ban [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
@@ -122,7 +125,11 @@ TEXTS = {
         "mute_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_unmute": "⚠️ Target required. Reply to a message or use: <code>/unmute [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "unmute_success": "🔊 <b>Restoration:</b> Chat and live voice privileges restored for {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>",
-        "unmute_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>"
+        "unmute_error": "❌ Execution failed: {error}\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_warn": "⚠️ Target required. Reply to a message or use: <code>/warn [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_issued": "⚠️ <b>Warning Issued:</b> {target_tag} has received a formal strike ({current}/{limit}).\n• <b>Reason:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_punished": "⚖️ <b>Threshold Reached:</b> {target_tag} reached {limit}/{limit} strikes.\n• <b>Automated Action:</b> {action_name} executed.\n\n🛡️ <i>Cloud Media Management</i>",
+        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>"
     },
     "es": {
         "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -167,7 +174,8 @@ TEXTS = {
         "shield_off_btn": "❌ Desactivar Escudo",
         "status_active_shield": "🟢 ACTIVO (Corte de pantalla a no autorizados)",
         "status_inactive_shield": "🔴 DESACTIVADO",
-        "success_updated": "Consola actualizada con éxito",
+        "night_on_msg": "🌙 <b>Modo Nocturno Universal:</b> 🟢 ACTIVADO. Restricciones perimetrales aplicadas.",
+        "night_off_msg": "☀️ <b>Modo Nocturno Universal:</b> 🔴 DESACTIVADO. Permisos previos restaurados.",
         "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Objetivo requerido. Responde a un usuario, menciónalo con @ o pasa su ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_ban": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/ban [@usuario o ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
@@ -181,7 +189,11 @@ TEXTS = {
         "mute_error": "❌ No se pudo silenciar al usuario: {error}\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_unmute": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/unmute [@usuario o ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "unmute_success": "🔊 <b>Restauración:</b> Privilegios de voz y chat restaurados al 100% para {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>",
-        "unmute_error": "❌ No se pudo desmutear al usuario: {error}\n\n🛡️ <i>Cloud Media Management</i>"
+        "unmute_error": "❌ No se pudo desmutear al usuario: {error}\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_warn": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/warn [@usuario o ID] [motivo]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_issued": "⚠️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_punished": "⚖️ <b>Límite de Faltas Alcanzado:</b> {target_tag} sumó {limit}/{limit} faltas.\n• <b>Castigo Automático:</b> Se aplicó {action_name} de inmediato.\n\n🛡️ <i>Cloud Media Management</i>",
+        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>"
     }
 }
 
@@ -200,7 +212,7 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
     if message.reply_to_message and message.reply_to_message.from_user:
         user_obj = message.reply_to_message.from_user
         target_id = user_obj.id
-    elif command.args:
+    elif command and command.args:
         arg = command.args.split()[0].strip()
         if arg.isdigit():
             target_id = int(arg)
@@ -246,7 +258,12 @@ async def cmd_reload_group(message: Message, bot: Bot):
             pass
         return
 
-    await register_user_group(message.from_user.id, message.chat.id, message.chat.title)
+    await register_user_group(
+        user_id=message.from_user.id, 
+        group_id=message.chat.id, 
+        group_name=message.chat.title or "Comunidad",
+        chat_type=message.chat.type
+    )
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     
@@ -270,7 +287,12 @@ async def cmd_settings_group(message: Message, bot: Bot):
             pass
         return
 
-    await register_user_group(message.from_user.id, message.chat.id, message.chat.title)
+    await register_user_group(
+        user_id=message.from_user.id, 
+        group_id=message.chat.id, 
+        group_name=message.chat.title or "Comunidad",
+        chat_type=message.chat.type
+    )
     bot_info = await bot.get_me()
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
@@ -284,7 +306,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
 
 
 # ==========================================================
-# 🎛️ CONTROLES RÁPIDOS DE AUDIO Y TRANSMISIÓN (FASE 5)
+# 🎛️ CONTROLES RÁPIDOS DE AUDIO Y TRANSMISIÓN
 # ==========================================================
 @router.message(Command("autolower"))
 async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bot):
@@ -435,6 +457,119 @@ async def process_shield_callback(callback: CallbackQuery):
         await callback.message.edit_text(t["shield_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
     except Exception:
         pass
+
+
+# ==========================================================
+# 🌙 BLINDAJE RÁPIDO: MODO NOCTURNO UNIVERSAL (/night)
+# ==========================================================
+@router.message(Command("night"))
+async def cmd_toggle_night(message: Message, bot: Bot):
+    """Activa o desactiva en un solo paso el Modo Nocturno Universal con snapshot."""
+    if message.chat.type == "private":
+        return
+        
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    chat_id = message.chat.id
+    cfg = await get_night_mode_config(chat_id)
+    if cfg["status"] == 0:
+        await activate_universal_night_mode(chat_id)
+        msg = await message.reply(t["night_on_msg"], parse_mode="HTML")
+    else:
+        await deactivate_universal_night_mode(chat_id)
+        msg = await message.reply(t["night_off_msg"], parse_mode="HTML")
+
+    asyncio.create_task(auto_delete_pair(message, msg, 15))
+
+
+# ==========================================================
+# ⚠️ MATRIZ DE ADVERTENCIAS CENTRALIZADA (/warn, /resetwarns)
+# ==========================================================
+@router.message(Command("warn"))
+async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
+    """Aplica una advertencia formal al usuario y ejecuta castigo automático si alcanza el límite."""
+    if message.chat.type == "private":
+        return
+
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+
+    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
+        msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 10))
+        return
+
+    reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
+    if command and command.args:
+        args_parts = command.args.split(maxsplit=1)
+        if len(args_parts) > 1 and not args_parts[0].isdigit() and not args_parts[0].startswith("@"):
+            reason = command.args.strip()
+        elif len(args_parts) > 1:
+            reason = args_parts[1].strip()
+
+    cfg = await get_warns_config(message.chat.id)
+    limit = cfg["limit"]
+    action = cfg["action"]
+    current_strikes = await add_user_strike(message.chat.id, target_id, reason)
+
+    if current_strikes >= limit:
+        await reset_user_strikes(message.chat.id, target_id)
+        try:
+            if action == "ban":
+                await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id)
+            elif action == "kick":
+                await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id, until_date=int(time.time() + 35))
+                await bot.unban_chat_member(chat_id=message.chat.id, user_id=target_id)
+            elif action == "mute":
+                await bot.restrict_chat_member(
+                    chat_id=message.chat.id, 
+                    user_id=target_id,
+                    permissions=ChatPermissions(can_send_messages=False)
+                )
+            try:
+                await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
+            except Exception:
+                pass
+            msg = await message.reply(t["warn_punished"].format(target_tag=target_tag, limit=limit, action_name=action.upper()), parse_mode="HTML")
+        except Exception as ex:
+            msg = await message.reply(f"❌ Error: {ex}", parse_mode="HTML")
+    else:
+        msg = await message.reply(t["warn_issued"].format(target_tag=target_tag, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
+
+    asyncio.create_task(auto_delete_pair(message, msg, 15))
+
+
+@router.message(Command("resetwarns"))
+async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
+    """Limpia a cero el historial de faltas de un miembro."""
+    if message.chat.type == "private":
+        return
+
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+
+    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
+        return
+
+    target_id, target_tag = await resolve_target(message, command, bot)
+    if not target_id:
+        msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 10))
+        return
+
+    await reset_user_strikes(message.chat.id, target_id)
+    msg = await message.reply(t["warns_reset_done"].format(target_tag=target_tag), parse_mode="HTML")
+    asyncio.create_task(auto_delete_pair(message, msg, 12))
 
 
 # ==========================================================
