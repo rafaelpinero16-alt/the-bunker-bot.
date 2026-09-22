@@ -180,8 +180,9 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
     if not clean_phone.startswith("+"):
         clean_phone = f"+{clean_phone}"
 
+    # Nombre de sesión único en memoria para evitar colisiones de base de datos volátil
     client = Client(
-        f"auth_temp_{user_id}_{group_id}",
+        f"auth_temp_{user_id}_{group_id}_{int(time.time())}",
         api_id=DEFAULT_API_ID,
         api_hash=DEFAULT_API_HASH,
         in_memory=True
@@ -208,8 +209,11 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
     except Exception as e:
         if client.is_connected:
-            await client.disconnect()
-        logger.error(f"Error al enviar código a {clean_phone}: {e}")
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        logger.exception(f"🔥 [CRITICAL Auth Error] Falló start_phone_auth para {clean_phone}: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -584,7 +588,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
         
-        # 💡 Solución PeerIdInvalid en memoria: precargar el chat antes de resolver el peer
         try:
             await session_client.get_chat(group_id)
         except Exception as chat_err:
