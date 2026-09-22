@@ -29,22 +29,16 @@ from database.database import (
     get_all_active_vc_schedules, update_vc_call_status,
     get_radar_config, revoke_owner_session,
     get_screen_shield_status, get_podcast_config,
-    get_night_mode_config,
+    get_night_mode_config, is_night_mode_time,
     get_expiring_channel_subscriptions,
     get_expired_channel_subscriptions,
     mark_subscription_warned,
     update_subscription_status
 )
 
-# --- Payload Multimedia del Centinela (Ultra Pro) ---
 try:
     from database.database import get_sentinel_payload_config
 except ImportError:
-    logging.getLogger("assistant_radar").warning(
-        "⚠️ [Payload Ultra Pro no disponible] `get_sentinel_payload_config` no existe aún en "
-        "database.py; el despacho de multimedia personalizado del Centinela quedará inactivo "
-        "hasta que se implemente esa función."
-    )
     async def get_sentinel_payload_config(chat_id: int) -> dict:
         return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
 
@@ -86,7 +80,7 @@ _autolower_cooldowns = {}
 FORBIDDEN_STRIKE_LIMIT = 3
 FORBIDDEN_COOLDOWN_SECONDS = 900  
 
-# --- FASE "THE BUNKER OS": estado en memoria por grupo para las nuevas capas del Centinela ---
+# --- ESTADO EN CALIENTE POR COMUNIDAD ---
 _screen_shield_flagged = {}
 _noise_unmute_history = {}
 NOISE_SPIKE_WINDOW_SECONDS = 12
@@ -135,7 +129,7 @@ NOISE_SHIELD_ALERT_TEXT = (
 RADAR_TEXTS = {
     "combined": (
         "🔇 <b>The Bunker Bot: Atenuación Acústica Activa (AutoLower)</b>\n\n"
-        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> por no contar con un pase de voz o Modo Free activo en la sala.\n\n"
+        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> por no contar con un pase de voz o autorización activa en la sala.\n\n"
         "💡 <b>¿Quieres hablar sin restricciones?</b>\n"
         "Para subir tu volumen al 100% y hablar libremente durante 24 horas continuas en la transmisión, adquiere tu <b>Pase VIP de Micrófono</b> usando el comando <code>/micvip</code> en este chat.\n\n"
         "🇺🇸 <b>AutoLower Acoustic Shield Active:</b>\n"
@@ -161,25 +155,38 @@ RADAR_TEXTS = {
 OPTIMIZATION_TEXT = (
     "🔄 <b>Protocolo de Optimización Audiovisual — The Bunker</b>\n\n"
     "Estamos realizando una optimización de rutina en segundo plano para refrescar cámaras, purgar la transmisión y garantizar máxima fluidez sin retrasos.\n\n"
-    "⚡ <i>La sala se reiniciará en 3 segundos y se abrirá limpia de inmediato. Los pases VIP y Modo Free se mantendrán activos al reconectarse.</i>\n\n"
+    "⚡ <i>La sala se reiniciará en 3 segundos y se abrirá limpia de inmediato. Los pases VIP se mantendrán activos al reconectarse.</i>\n\n"
     "🇺🇸 <i>Giving the live stream a quick background refresh to clear video lag and keep camera feeds smooth. Reopening fresh in 3 seconds! VIP passes stay active.</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
+
+VC_SCHED_MESSAGES = {
+    "start": (
+        "📡 <b>Apertura Programada — The Bunker</b>\n\n"
+        "El videochat de la comunidad ha sido abierto automáticamente según el cronograma ULTRA PRO.\n\n"
+        "🇺🇸 <i>The community voice chat has automatically kicked off according to the ULTRA PRO schedule!</i>\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+    "end": (
+        "📡 <b>Cierre Programado — The Bunker</b>\n\n"
+        "El ciclo programado de videochat ha concluido. La sala ha sido cerrada de forma ordenada.\n\n"
+        "🇺🇸 <i>The scheduled voice chat session has wrapped up. The room has been closed out smoothly.</i>\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    )
+}
+
 
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
     try:
         cfg = await get_night_mode_config(chat_id)
         if not cfg or cfg.get("status") != 1:
             return False, ""
-        now_time = datetime.now().strftime("%H:%M")
         start, end = cfg.get("start", "22:00"), cfg.get("end", "06:00")
-        if start <= end:
-            active = start <= now_time <= end
-        else:
-            active = now_time >= start or now_time <= end
-        return active, cfg.get("action", "lock_media")
+        active = is_night_mode_time(start, end)
+        return active, cfg.get("action", "lock_universal")
     except Exception:
         return False, ""
+
 
 async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
                                   media_type: str = None, auto_delete_after: int = None):
@@ -196,7 +203,7 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
         else:
             sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
     except Exception as e:
-        logger.warning(f"Aviso al despachar notificación personalizada del Centinela en {chat_id}: {e}")
+        logger.warning(f"Aviso al despachar notificación del Centinela en {chat_id}: {e}")
         try:
             sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         except Exception:
@@ -263,21 +270,6 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     return sent
 
 
-VC_SCHED_MESSAGES = {
-    "start": (
-        "📡 <b>Apertura Programada — The Bunker</b>\n\n"
-        "El videochat de la comunidad ha sido abierto automáticamente según el cronograma ULTRA PRO.\n\n"
-        "🇺🇸 <i>The community voice chat has automatically kicked off according to the ULTRA PRO schedule!</i>\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    ),
-    "end": (
-        "📡 <b>Cierre Programado — The Bunker</b>\n\n"
-        "El ciclo programado de videochat ha concluido. La sala ha sido cerrada de forma ordenada.\n\n"
-        "🇺🇸 <i>The scheduled voice chat session has wrapped up. The room has been closed out smoothly.</i>\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    )
-}
-
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
     await cancel_phone_auth(user_id)
     
@@ -320,6 +312,8 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
                 pass
         logger.exception(f"🔥 [CRITICAL Auth Error] Falló start_phone_auth para {clean_phone}: {e}")
         return {"status": "error", "message": str(e)}
+
+
 async def verify_phone_code(user_id: int, code: str) -> dict:
     auth_data = pending_auth_sessions.get(user_id)
     if not auth_data:
@@ -397,8 +391,7 @@ def _register_forbidden_strike(chat_id: int, action: str):
         _forbidden_strikes[chat_id] = 0
         logger.warning(
             f"🚫 [GROUPCALL_FORBIDDEN] Grupo {chat_id}: la cuenta del Centinela no tiene permisos "
-            f"suficientes para {action}. Verifica que sea ADMIN con 'Gestionar videollamadas' "
-            f"habilitado. AutoLower pausado {FORBIDDEN_COOLDOWN_SECONDS // 60} min en este grupo."
+            f"suficientes para {action}. AutoLower pausado {FORBIDDEN_COOLDOWN_SECONDS // 60} min."
         )
     else:
         _forbidden_strikes[chat_id] = strikes
@@ -475,8 +468,6 @@ async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int)
         admin_caches[chat_id] = {'admins': new_admins, 'ts': asyncio.get_event_loop().time()}
     except Exception as e:
         logger.debug(f"Aviso actualizando admin cache en chat {chat_id}: {e}")
-
-
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
     alerted_users = set()
     current_call = None
@@ -545,6 +536,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
+            # Protocolo de reinicio de rutina preventivo cada 3.5h
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
@@ -655,6 +647,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         or await is_whitelisted(u_id) or await is_vip_mic_active(u_id, chat_id)
                     )
 
+                    # 1. Escudo Antinota (Pantalla no autorizada)
                     if not is_authorized and screen_shield_on and getattr(p, "presentation", None):
                         flag_key = (chat_id, u_id)
                         if not _screen_shield_flagged.get(flag_key):
@@ -870,7 +863,7 @@ async def channel_subscription_audit_loop():
                     except Exception as e:
                         logger.debug(f"Aviso al notificar expiración a {user_id} para canal {channel_id}: {e}")
 
-            # 2. Expirados y expulsión automática (auto-kick tras período de gracia)
+            # 2. Expirados y expulsión automática resiliente
             expired = await get_expired_channel_subscriptions()
             for row in expired:
                 channel_id, user_id, expires_at, grace_days, auto_kick = row
@@ -878,16 +871,21 @@ async def channel_subscription_audit_loop():
                     try:
                         await _global_bot.ban_chat_member(chat_id=channel_id, user_id=user_id, until_date=int(time.time() + 35))
                         await _global_bot.unban_chat_member(chat_id=channel_id, user_id=user_id)
-                        expired_text = (
-                            f"⚠️ <b>Membresía Expirada — The Bunker OS</b>\n\n"
-                            f"Tu acceso al canal ha concluido tras agotar el período de gracia. Has sido retirado automáticamente.\n\n"
-                            f"🛡️ <i>Cloud Media Management</i>"
-                        )
-                        await _global_bot.send_message(chat_id=user_id, text=expired_text, parse_mode="HTML")
+                        
+                        try:
+                            expired_text = (
+                                f"⚠️ <b>Membresía Expirada — The Bunker OS</b>\n\n"
+                                f"Tu acceso al canal ha concluido tras agotar el período de gracia. Has sido retirado automáticamente.\n\n"
+                                f"🛡️ <i>Cloud Media Management</i>"
+                            )
+                            await _global_bot.send_message(chat_id=user_id, text=expired_text, parse_mode="HTML")
+                        except Exception:
+                            pass
+
                         await update_subscription_status(channel_id, user_id, "kicked")
                         logger.info(f"👢 [Auto-Kick Canal] Usuario {user_id} expulsado del canal {channel_id} por falta de renovación.")
                     except Exception as e:
-                        logger.warning(f"Aviso al expulsar al moroso {user_id} del canal {channel_id}: {e}")
+                        logger.warning(f"Aviso al expulsar al usuario {user_id} del canal {channel_id}: {e}")
                         await update_subscription_status(channel_id, user_id, "expired")
                 else:
                     await update_subscription_status(channel_id, user_id, "expired")
@@ -1055,7 +1053,7 @@ async def pending_auth_cleanup_loop():
 async def init_assistant_master():
     global _default_my_id
     if assistant_app is None:
-        logger.warning("⚠️ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando sólo con Centinelas propios por comunidad.")
+        logger.warning("⚠️ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
     else:
         try:
             if not assistant_app.is_connected:
@@ -1064,9 +1062,13 @@ async def init_assistant_master():
             _default_my_id = me.id
             logger.info(f"🤖 [Centinela Maestro Activo] Online como: @{me.username or me.first_name}")
         except FATAL_SESSION_ERRORS as auth_err:
-            logger.error(f"🔒 [MASTER_SESSION Inválida] {auth_err}. Genera y configura una StringSession nueva en Railway.")
+            logger.error(f"🔒 [MASTER_SESSION Inválida] {auth_err}. Opera con Centinelas propios por comunidad.")
         except Exception as e:
-            logger.warning(f"⚠️ [Aviso Centinela Maestro]: {e}")
+            err_msg = str(e)
+            if "AUTH_KEY_DUPLICATED" in err_msg or "406" in err_msg:
+                logger.warning("⚠️ [MASTER_SESSION Clave Duplicada] Telegram detectó uso simultáneo. El maestro continuará en reposo sin afectar a los centinelas dedicados.")
+            else:
+                logger.warning(f"⚠️ [Aviso Centinela Maestro]: {e}")
 
     await load_all_sentinels()
     asyncio.create_task(radar_master_loop())
@@ -1119,14 +1121,18 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
         return False
 
+
 async def engage_screen_shield(group_id: int):
     logger.info(f"🎥 [Escudo Antinota] Activado para el grupo {group_id}")
+
 
 async def disengage_screen_shield(group_id: int):
     logger.info(f"🎥 [Escudo Antinota] Desactivado para el grupo {group_id}")
 
+
 async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
     logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% en el grupo {group_id}")
 
+
 async def disengage_podcast_ducking(group_id: int):
-    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")
+    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")        
