@@ -3,7 +3,7 @@ import functools
 import sqlite3
 import os
 import contextlib
-from datetime import datetime
+from datetime import datetime, time
 
 DB_PATH = "database/bot_data.db"
 
@@ -24,7 +24,7 @@ def get_db_connection():
 
 
 def init_db():
-    """Inicializa el esquema relacional, canales y migraciones dinámicas para The Bunker OS."""
+    """Inicializa el esquema relacional, canales, telemetría y migraciones dinámicas para The Bunker OS."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -85,6 +85,9 @@ def init_db():
             ("antiflood_delete", "INTEGER DEFAULT 1"),
             ("warns_limit", "INTEGER DEFAULT 3"),
             ("warns_action", "TEXT DEFAULT 'mute'"),
+            ("warn_links", "INTEGER DEFAULT 1"),
+            ("warn_blacklist", "INTEGER DEFAULT 1"),
+            ("warn_flood", "INTEGER DEFAULT 1"),
             ("lock_media", "INTEGER DEFAULT 0"),
             ("lock_stickers", "INTEGER DEFAULT 0"),
             ("lock_links", "INTEGER DEFAULT 0"),
@@ -114,11 +117,11 @@ def init_db():
             ("sentinel_payload_media_id", "TEXT"),
             ("sentinel_payload_media_type", "TEXT"),
             ("sentinel_payload_auto_delete", "INTEGER"),
-            # --- MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO ---
+            # --- MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL ---
             ("night_mode_status", "INTEGER DEFAULT 0"),
             ("night_mode_start", "TEXT DEFAULT '22:00'"),
             ("night_mode_end", "TEXT DEFAULT '06:00'"),
-            ("night_action", "TEXT DEFAULT 'lock_media'")
+            ("night_action", "TEXT DEFAULT 'lock_universal'")
         ]
 
         for col_name, col_def in settings_columns:
@@ -221,6 +224,31 @@ def init_db():
                 activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # --- FASE 4: SNAPSHOTS DE MODO NOCTURNO UNIVERSAL ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS night_snapshots (
+                group_id INTEGER PRIMARY KEY,
+                lock_media INTEGER DEFAULT 0,
+                lock_links INTEGER DEFAULT 0,
+                lock_stickers INTEGER DEFAULT 0,
+                lock_commands INTEGER DEFAULT 0,
+                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # --- FASE 4: REGISTRO CENTRALIZADO DE STRIKES (WARNS MATRIX) ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS user_strikes (
+                group_id INTEGER,
+                user_id INTEGER,
+                strikes INTEGER DEFAULT 0,
+                last_strike_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_reason TEXT DEFAULT 'Regla violada',
+                PRIMARY KEY (group_id, user_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_strikes ON user_strikes (group_id, user_id)")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS speaker_queue (
@@ -496,30 +524,73 @@ def set_captcha_config(group_id: int, field: str, value):
         conn.commit()
 
 
+# ==========================================
+# ⚠️ MATRIZ DE ADVERTENCIAS CENTRALIZADA (WARNS MATRIX)
+# ==========================================
 def get_warns_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT warns_limit, warns_action FROM group_settings WHERE group_id = ?", (group_id,))
+            cursor.execute("""
+                SELECT warns_limit, warns_action, warn_links, warn_blacklist, warn_flood 
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
                     "limit": row[0] if row[0] is not None else 3,
-                    "action": row[1] if row[1] is not None else "mute"
+                    "action": row[1] if row[1] is not None else "mute",
+                    "warn_links": row[2] if row[2] is not None else 1,
+                    "warn_blacklist": row[3] if row[3] is not None else 1,
+                    "warn_flood": row[4] if row[4] is not None else 1
                 }
         except sqlite3.OperationalError:
             pass
-        return {"limit": 3, "action": "mute"}
+        return {"limit": 3, "action": "mute", "warn_links": 1, "warn_blacklist": 1, "warn_flood": 1}
 
 
 def set_warns_config(group_id: int, field: str, value):
-    if field not in ["warns_limit", "warns_action"]: return
+    valid_fields = ["warns_limit", "warns_action", "warn_links", "warn_blacklist", "warn_flood"]
+    if field not in valid_fields: return
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
+        conn.commit()
+
+
+def add_user_strike(group_id: int, user_id: int, reason: str = "Infracción de reglas") -> int:
+    """Registra una falta contra un miembro en la matriz y retorna el total acumulado."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_strikes (group_id, user_id, strikes, last_strike_at, last_reason)
+            VALUES (?, ?, 1, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                strikes = strikes + 1,
+                last_strike_at = CURRENT_TIMESTAMP,
+                last_reason = excluded.last_reason
+        """, (group_id, user_id, reason))
+        conn.commit()
+        cursor.execute("SELECT strikes FROM user_strikes WHERE group_id = ? AND user_id = ?", (group_id, user_id))
+        row = cursor.fetchone()
+        return row[0] if row else 1
+
+
+def get_user_strikes(group_id: int, user_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT strikes FROM user_strikes WHERE group_id = ? AND user_id = ?", (group_id, user_id))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
+def reset_user_strikes(group_id: int, user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM user_strikes WHERE group_id = ? AND user_id = ?", (group_id, user_id))
         conn.commit()
 
 
@@ -546,7 +617,7 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
             ON CONFLICT(group_id) DO UPDATE SET {lock_name} = excluded.{lock_name}
         """, (group_id, status))
         conn.commit()
-def get_mic_vip_price(group_id: int) -> int:
+        def get_mic_vip_price(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -699,7 +770,7 @@ def set_sentinel_payload_config(group_id: int, field: str, value):
 
 
 # ==========================================
-# 🌙 MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO
+# 🌙 MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL
 # ==========================================
 def get_night_mode_config(group_id: int) -> dict:
     with get_db_connection() as conn:
@@ -715,11 +786,11 @@ def get_night_mode_config(group_id: int) -> dict:
                     "status": row[0] if row[0] is not None else 0,
                     "start": row[1] if row[1] else "22:00",
                     "end": row[2] if row[2] else "06:00",
-                    "action": row[3] if row[3] else "lock_media"
+                    "action": row[3] if row[3] else "lock_universal"
                 }
         except sqlite3.OperationalError:
             pass
-        return {"status": 0, "start": "22:00", "end": "06:00", "action": "lock_media"}
+        return {"status": 0, "start": "22:00", "end": "06:00", "action": "lock_universal"}
 
 
 def set_night_mode_config(group_id: int, field: str, value):
@@ -733,6 +804,79 @@ def set_night_mode_config(group_id: int, field: str, value):
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
+
+
+def activate_universal_night_mode(group_id: int) -> bool:
+    """Aplica el bloqueo universal del perímetro nocturno y captura snapshot de cerraduras."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT lock_media, lock_links, lock_stickers, lock_commands 
+            FROM group_settings WHERE group_id = ?
+        """, (group_id,))
+        prev = cursor.fetchone() or (0, 0, 0, 0)
+
+        cursor.execute("""
+            INSERT INTO night_snapshots (group_id, lock_media, lock_links, lock_stickers, lock_commands, activated_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id) DO UPDATE SET
+                lock_media = excluded.lock_media,
+                lock_links = excluded.lock_links,
+                lock_stickers = excluded.lock_stickers,
+                lock_commands = excluded.lock_commands,
+                activated_at = CURRENT_TIMESTAMP
+        """, (group_id, *prev))
+
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, night_mode_status, lock_media, lock_links, lock_stickers, lock_commands)
+            VALUES (?, 1, 1, 1, 1, 1)
+            ON CONFLICT(group_id) DO UPDATE SET
+                night_mode_status = 1,
+                lock_media = 1,
+                lock_links = 1,
+                lock_stickers = 1,
+                lock_commands = 1
+        """, (group_id,))
+        conn.commit()
+        return True
+
+
+def deactivate_universal_night_mode(group_id: int) -> bool:
+    """Levanta el modo nocturno restaurando con precisión los estados previos desde el snapshot."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT lock_media, lock_links, lock_stickers, lock_commands 
+            FROM night_snapshots WHERE group_id = ?
+        """, (group_id,))
+        snap = cursor.fetchone() or (0, 0, 0, 0)
+
+        cursor.execute("""
+            UPDATE group_settings SET
+                night_mode_status = 0,
+                lock_media = ?,
+                lock_links = ?,
+                lock_stickers = ?,
+                lock_commands = ?
+            WHERE group_id = ?
+        """, (*snap, group_id))
+        cursor.execute("DELETE FROM night_snapshots WHERE group_id = ?", (group_id,))
+        conn.commit()
+        return True
+
+
+def is_night_mode_time(start_str: str, end_str: str) -> bool:
+    """Determina si la hora actual cae dentro del intervalo de horario nocturno."""
+    try:
+        now = datetime.now().time()
+        start_t = datetime.strptime(start_str.strip(), "%H:%M").time()
+        end_t = datetime.strptime(end_str.strip(), "%H:%M").time()
+        if start_t <= end_t:
+            return start_t <= now <= end_t
+        else:
+            return now >= start_t or now <= end_t
+    except Exception:
+        return False
 
 
 VALID_FILTERS = {
@@ -1168,11 +1312,34 @@ def set_panic_status(group_id: int, status: int):
         conn.commit()
 
 
+def get_screen_shield_status(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT screen_shield_status FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 1
+        except sqlite3.OperationalError:
+            return 1
+
+
+def set_screen_shield_status(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, screen_shield_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET screen_shield_status = excluded.screen_shield_status
+        """, (group_id, status))
+        conn.commit()
+
+
 def get_shield_status(group_id: int) -> int:
     return get_screen_shield_status(group_id)
 
+
 def set_shield_status(group_id: int, status: int):
     set_screen_shield_status(group_id, status)
+
 
 def get_podcast_status(group_id: int) -> int:
     with get_db_connection() as conn:
@@ -1183,6 +1350,7 @@ def get_podcast_status(group_id: int) -> int:
             return row[0] if row and row[0] is not None else 0
         except sqlite3.OperationalError:
             return 0
+
 
 def set_podcast_status(group_id: int, status: int):
     set_podcast_mode(group_id, status)
@@ -1270,27 +1438,6 @@ def deactivate_panic(group_id: int) -> dict:
         conn.commit()
 
         return {"chat_permissions_json": chat_permissions_json}
-
-
-def get_screen_shield_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT screen_shield_status FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 1
-        except sqlite3.OperationalError:
-            return 1
-
-
-def set_screen_shield_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, screen_shield_status) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET screen_shield_status = excluded.screen_shield_status
-        """, (group_id, status))
-        conn.commit()
 
 
 def get_podcast_config(group_id: int) -> dict:
@@ -1418,6 +1565,69 @@ def clear_speaker_queue(group_id: int):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
         conn.commit()
+
+
+# ==========================================
+# 📡 TELEMETRÍA EN VIVO Y ESTADÍSTICAS TÁCTICAS
+# ==========================================
+def get_community_live_telemetry(group_id: int) -> dict:
+    """Extrae la telemetría en tiempo real de una comunidad blindada."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM vip_mic_passes WHERE group_id = ? AND expires_at > datetime('now')", (group_id,))
+        vip_active = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
+        speakers_in_queue = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT panic_active, screen_shield_status, podcast_mode_status, autolower, night_mode_status 
+            FROM group_settings WHERE group_id = ?
+        """, (group_id,))
+        row = cursor.fetchone() or (0, 1, 0, 1, 0)
+
+        cursor.execute("SELECT status FROM bot_clones WHERE group_id = ? AND status = 'active'", (group_id,))
+        clone_row = cursor.fetchone()
+
+        cursor.execute("SELECT status FROM owner_sessions WHERE group_id = ? AND status = 'active'", (group_id,))
+        session_row = cursor.fetchone()
+
+        return {
+            "vip_passes_active": vip_active,
+            "speakers_in_queue": speakers_in_queue,
+            "panic_active": row[0],
+            "shield_status": row[1],
+            "podcast_status": row[2],
+            "autolower_status": row[3],
+            "night_mode_status": row[4],
+            "has_active_clone": clone_row is not None,
+            "has_active_sentinel": session_row is not None
+        }
+
+
+def get_channel_live_telemetry(channel_id: int) -> dict:
+    """Extrae métricas en caliente de suscriptores, planes y donaciones de un canal."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM channel_subscriptions 
+            WHERE channel_id = ? AND status = 'active' AND expires_at > datetime('now')
+        """, (channel_id,))
+        active_subs = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM channel_plans WHERE channel_id = ? AND status = 'active'", (channel_id,))
+        active_plans = cursor.fetchone()[0]
+
+        cursor.execute("SELECT tips_enabled, tips_amount, tips_target_channel FROM group_settings WHERE group_id = ?", (channel_id,))
+        tips_row = cursor.fetchone() or (0, 10, "")
+
+        return {
+            "active_subscribers": active_subs,
+            "active_plans": active_plans,
+            "tips_enabled": tips_row[0],
+            "tips_amount": tips_row[1],
+            "tips_target": tips_row[2]
+        }
 
 
 # ==========================================
@@ -1643,6 +1853,9 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_captcha_config",
     "get_warns_config",
     "set_warns_config",
+    "add_user_strike",
+    "get_user_strikes",
+    "reset_user_strikes",
     "get_lock_status",
     "set_lock_status",
     "get_mic_vip_price",
@@ -1655,9 +1868,11 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_radar_config",
     "get_sentinel_payload_config",
     "set_sentinel_payload_config",
-    # --- MÓDULO FASE 4: MODO NOCTURNO ---
+    # --- MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL ---
     "get_night_mode_config",
     "set_night_mode_config",
+    "activate_universal_night_mode",
+    "deactivate_universal_night_mode",
     "get_antispam_filter",
     "set_antispam_filter",
     "get_antispam_delete",
@@ -1694,7 +1909,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "update_vc_call_status",
     "get_all_active_vc_schedules",
 
-    # --- FASE "THE BUNKER OS" & ELITE TOOLS ---
+    # --- TELEMETRÍA Y HERRAMIENTAS ULTRA ---
     "get_panic_status",
     "set_panic_status",
     "get_shield_status",
@@ -1716,6 +1931,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "pop_next_speaker",
     "remove_from_speaker_queue",
     "clear_speaker_queue",
+    "get_community_live_telemetry",
+    "get_channel_live_telemetry",
 
     # --- CANALES & MEMBRESÍAS ULTRA PRO ---
     "get_channel_settings",
