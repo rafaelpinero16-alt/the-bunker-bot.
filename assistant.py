@@ -28,21 +28,11 @@ from database.database import (
     get_all_active_sessions, get_session_by_group,
     get_all_active_vc_schedules, update_vc_call_status,
     get_radar_config, revoke_owner_session,
-    get_screen_shield_status, get_podcast_config
+    get_screen_shield_status, get_podcast_config,
+    get_night_mode_config
 )
 
 # --- Payload Multimedia del Centinela (Ultra Pro) ---
-# Import resiliente: si `database.py` todavía no expone `get_sentinel_payload_config`,
-# usamos un stub que devuelve "deshabilitado" en vez de tumbar el arranque en Railway.
-# Firma esperada en database.py:
-#   async def get_sentinel_payload_config(chat_id: int) -> dict:
-#       return {
-#           "enabled": 0 | 1,          # sólo comunidades Ultra Pro deberían poder activarlo
-#           "text": str | None,        # texto personalizado (soporta HTML de Telegram)
-#           "media_id": str | None,    # file_id de Telegram (foto/animación) subido por el owner
-#           "media_type": "photo" | "animation" | None,
-#           "auto_delete_after": int | None,  # segundos antes de autoborrar (opcional)
-#       }
 try:
     from database.database import get_sentinel_payload_config
 except ImportError:
@@ -93,32 +83,14 @@ FORBIDDEN_STRIKE_LIMIT = 3
 FORBIDDEN_COOLDOWN_SECONDS = 900  
 
 # --- FASE "THE BUNKER OS": estado en memoria por grupo para las nuevas capas del Centinela ---
-# Escudo Antinota: quién ya recibió el corte de señal esta ronda (evita reintentos en bucle).
 _screen_shield_flagged = {}
-
-# Escudo Antirruido: historial de timestamps de "unmute" por (chat_id, user_id) para detectar
-# ráfagas de picos anómalos (una cuenta no autorizada abriendo/cerrando el micro repetidamente
-# para sabotear la transmisión con gritos o ruidos súbitos).
 _noise_unmute_history = {}
 NOISE_SPIKE_WINDOW_SECONDS = 12
 NOISE_SPIKE_STRIKE_LIMIT = 3
-
-# Último estado de mute conocido por (chat_id, user_id), usado para detectar transiciones
-# mute->unmute (necesarias tanto para el Escudo Antirruido como para no re-disparar avisos).
 _last_mute_state = {}
-
-# Payload Multimedia Ultra Pro: evita reenviar el mismo payload personalizado si dos disparadores
-# (p. ej. optimización + programador VC) coinciden muy cerca en el tiempo para el mismo grupo.
 _sentinel_payload_last_sent = {}
 SENTINEL_PAYLOAD_MIN_GAP_SECONDS = 60
-
-# Estabilidad MTProto: un asyncio.Lock por grupo evita que dos operaciones concurrentes
-# (p. ej. un registro manual desde el panel + el propio ciclo de reconexión) intenten
-# arrancar/detener la sesión del mismo Centinela propio al mismo tiempo y corrompan
-# el estado in-memory de Pyrogram (llaves de auth, dialogs cacheados, etc.).
 _sentinel_launch_locks = {}
-# Límite de arranques simultáneos de sesiones MTProto propias (evita ráfagas de conexión
-# que Telegram puede interpretar como abuso al reiniciar el proceso con muchas comunidades).
 _sentinel_launch_semaphore = asyncio.Semaphore(4)
 
 
@@ -190,6 +162,21 @@ OPTIMIZATION_TEXT = (
     "🛡️ <i>Cloud Media Management</i>"
 )
 
+async def _is_night_active(chat_id: int) -> tuple[bool, str]:
+    try:
+        cfg = await get_night_mode_config(chat_id)
+        if not cfg or cfg.get("status") != 1:
+            return False, ""
+        now_time = datetime.now().strftime("%H:%M")
+        start, end = cfg.get("start", "22:00"), cfg.get("end", "06:00")
+        if start <= end:
+            active = start <= now_time <= end
+        else:
+            active = now_time >= start or now_time <= end
+        return active, cfg.get("action", "lock_media")
+    except Exception:
+        return False, ""
+
 async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
                                   media_type: str = None, auto_delete_after: int = None):
     if not _global_bot:
@@ -236,16 +223,6 @@ def _resolve_reset_text(custom_text: str) -> str:
 
 
 async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
-    """
-    Despacha el payload multimedia personalizado (texto + foto/animación) configurado por
-    un usuario Ultra Pro para su comunidad, leyendo la configuración desde la base de datos.
-
-    Se envía como un mensaje INDEPENDIENTE del aviso técnico de optimización/parpadeo (no se
-    mezcla con el texto de "mantenimiento"), para que quede claro para los miembros qué es
-    contenido curado por el owner de la comunidad y qué es un aviso operativo del sistema.
-
-    `origin` sólo se usa para logging/trazabilidad (qué ciclo disparó el envío).
-    """
     if not _global_bot:
         return None
 
@@ -265,7 +242,6 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     now = asyncio.get_event_loop().time()
     last_sent = _sentinel_payload_last_sent.get(chat_id, 0)
     if now - last_sent < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
-        logger.debug(f"⏭️ [Payload Ultra Pro] Omitido en {chat_id} (gap mínimo, origen={origin}).")
         return None
 
     sent = await _dispatch_radar_notice(
@@ -340,8 +316,6 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
                 pass
         logger.exception(f"🔥 [CRITICAL Auth Error] Falló start_phone_auth para {clean_phone}: {e}")
         return {"status": "error", "message": str(e)}
-
-
 async def verify_phone_code(user_id: int, code: str) -> dict:
     auth_data = pending_auth_sessions.get(user_id)
     if not auth_data:
@@ -427,13 +401,6 @@ def _register_forbidden_strike(chat_id: int, action: str):
 
 
 async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id: int, p_peer) -> bool:
-    """
-    Escudo Antinota: intenta primero cortar la señal de video/pantalla compartida del
-    participante dentro de la propia llamada (no destructivo, instantáneo). Como la API
-    de videollamadas de Telegram no expone un método dedicado para expulsar sólo de la
-    sala sin tocar la membresía del grupo, se escala de inmediato a un kick temporal del
-    grupo (ban + unban) para garantizar la remoción real de la transmisión.
-    """
     try:
         await client.invoke(
             EditGroupCallParticipant(
@@ -455,11 +422,6 @@ async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id
 
 
 def _register_noise_strike(chat_id: int, u_id: int) -> bool:
-    """
-    Registra un evento de 'unmute' de una cuenta no autorizada y determina si constituye
-    una ráfaga anómala (posible sabotaje con gritos/ruido súbito). Devuelve True cuando se
-    supera el umbral de reincidencia dentro de la ventana de tiempo.
-    """
     key = (chat_id, u_id)
     now = asyncio.get_event_loop().time()
     history = [t for t in _noise_unmute_history.get(key, []) if now - t < NOISE_SPIKE_WINDOW_SECONDS]
@@ -474,7 +436,7 @@ async def _verify_active_membership(client: Client, chat_id: int) -> bool:
         status_val = str(getattr(member.status, "value", member.status)).lower()
         return status_val not in ("left", "banned", "kicked")
     except Exception as e:
-        logger.debug(f"Membresía no confirmada inmediatamente en {chat_id} (posible desincronización): {e}")
+        logger.debug(f"Membresía no confirmada inmediatamente en {chat_id}: {e}")
         return True
 
 
@@ -596,9 +558,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         except Exception:
                             pass
 
-                        # 💎 Payload Ultra Pro: se despacha aparte del aviso técnico de arriba,
-                        # nunca oculto dentro de él, para que el contenido curado por el owner
-                        # se distinga claramente de un mensaje operativo del sistema.
                         try:
                             await _dispatch_sentinel_payload(chat_id, origin="optimizacion_3.5h")
                         except Exception as payload_err:
@@ -622,8 +581,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     continue
 
             if current_call:
+                night_active, night_action = await _is_night_active(chat_id)
                 autolower_enabled = await get_autolower_status(chat_id)
-                if autolower_enabled != 1:
+                if autolower_enabled != 1 and not night_active:
                     await asyncio.sleep(10)
                     continue
 
@@ -660,8 +620,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 users_map = {u.id: u for u in res.users} if getattr(res, 'users', None) else {}
                 active_users = set()
 
-                # --- 🎙️ Modo Podcast: primera pasada para saber si un orador autorizado
-                # (admin/dueño/Centinela) está hablando en vivo en esta ronda de polling.
                 podcast_cfg = await get_podcast_config(chat_id)
                 host_is_speaking = False
                 if podcast_cfg["status"] == 1:
@@ -693,8 +651,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         or await is_whitelisted(u_id) or await is_vip_mic_active(u_id, chat_id)
                     )
 
-                    # --- 🎥 Escudo Antinota (Screen-Sharing Shield) ---
-                    # `presentation` sólo viene poblado cuando la cuenta está compartiendo pantalla.
                     if not is_authorized and screen_shield_on and getattr(p, "presentation", None):
                         flag_key = (chat_id, u_id)
                         if not _screen_shield_flagged.get(flag_key):
@@ -728,7 +684,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     vol = p.volume if getattr(p, "volume", None) is not None else 10000
                     is_muted = getattr(p, "muted", True)
 
-                    # --- 🔇 Escudo Antirruido: ráfagas de mute/unmute anómalas ---
                     noise_spike = False
                     was_muted_before = _last_mute_state.get((chat_id, u_id), True)
                     if not is_muted and was_muted_before and podcast_cfg["noise_shield"] == 1:
@@ -737,16 +692,18 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                     ducking_active = (podcast_cfg["status"] == 1 and host_is_speaking and not noise_spike)
 
-                    if noise_spike:
+                    if night_active:
+                        desired_muted, desired_volume = True, 0
+                    elif noise_spike:
                         desired_muted, desired_volume = True, 0
                     elif ducking_active:
-                        # Atenuación real: permanecen desmutados pero a volumen mínimo (Director de Audio Automático).
                         desired_muted, desired_volume = False, podcast_cfg["duck_volume"]
                     else:
                         desired_muted, desired_volume = True, 200
 
                     action_needed = (
                         noise_spike
+                        or night_active
                         or (desired_muted and ((not is_muted) or vol > 200))
                         or (not desired_muted and (is_muted or abs(vol - desired_volume) > 50))
                     )
@@ -777,7 +734,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 break
                             continue
 
-                        if u_id not in alerted_users:
+                        if u_id not in alerted_users and not night_active:
                             alerted_users.add(u_id)
                             user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
                             if _global_bot:
@@ -809,7 +766,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     pass
 
                 if is_joined_audio and bot_client_id not in active_users:
-                    logger.info(f"🔁 [Rejoin Requerido] Centinela ausente de la llamada en {chat_id}; se reincorporará.")
                     is_joined_audio = False
 
                 alerted_users.intersection_update(active_users)
@@ -817,7 +773,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
         except FloodWait as fw:
             await asyncio.sleep(fw.value + 2)
         except PeerIdInvalid:
-            logger.warning(f"⚠️ [Peer ID Inválido] El chat {chat_id} generó error de peer. Silenciando aviso y esperando reconexión.")
             await asyncio.sleep(60)
         except Exception as e:
             err_str = str(e).upper()
@@ -903,10 +858,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
 
-        # 🔥 SOLUCIÓN CRÍTICA AL PEER ID INVALID EN MEMORIA 🔥
-        # Como usamos in_memory=True, Pyrogram olvida las llaves de acceso (access_hash).
-        # Al descargar los diálogos directamente desde Telegram, forzamos a Pyrogram
-        # a cachear las credenciales del grupo para que `resolve_peer` no explote.
         try:
             async for dialog in session_client.get_dialogs(limit=250):
                 if dialog.chat.id == group_id:
@@ -918,7 +869,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         if not is_member:
             logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
 
-        # Pyrogram ya se sabe el access_hash de memoria, ahora sí conectará impecable:
         peer = await session_client.resolve_peer(group_id)
 
         task = asyncio.create_task(monitor_single_group(group_id, peer, session_client, me.id, user_id))
@@ -977,7 +927,6 @@ async def _disconnect_sentinel_unlocked(group_id: int):
     _forbidden_strikes.pop(group_id, None)
     _autolower_cooldowns.pop(group_id, None)
 
-    # Limpieza de estado por-usuario de las capas "The Bunker OS" (Escudo Antinota / Antirruido)
     for key in [k for k in _screen_shield_flagged if k[0] == group_id]:
         _screen_shield_flagged.pop(key, None)
     for key in [k for k in _noise_unmute_history if k[0] == group_id]:
@@ -1002,9 +951,6 @@ async def load_all_sentinels():
                 except Exception:
                     pass
 
-    # Arranque en paralelo mas acotado por el semáforo (_sentinel_launch_semaphore):
-    # así no se abren decenas de sesiones MTProto propias al mismo instante contra
-    # Telegram cuando el proceso reinicia en Railway con muchas comunidades activas.
     await asyncio.gather(*[
         _load_one(row[0], row[1], row[2], row[3], row[4]) for row in sessions
     ])
@@ -1044,7 +990,6 @@ async def pending_auth_cleanup_loop():
             now = time.time()
             expired = [uid for uid, data in pending_auth_sessions.items() if now - data.get("ts", now) > TTL_SECONDS]
             for uid in expired:
-                logger.info(f"🧹 [Auth Expirada] Liberando sesión temporal abandonada del usuario {uid}.")
                 await cancel_phone_auth(uid)
         except Exception as e:
             logger.debug(f"Aviso en limpieza de sesiones pendientes: {e}")
@@ -1116,9 +1061,6 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
     except Exception as e:
         logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
         return False
-    except Exception as e:
-            logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
-            return False
 
 async def engage_screen_shield(group_id: int):
     logger.info(f"🎥 [Escudo Antinota] Activado para el grupo {group_id}")
@@ -1130,4 +1072,4 @@ async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
     logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% en el grupo {group_id}")
 
 async def disengage_podcast_ducking(group_id: int):
-    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")
+    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")    
