@@ -2042,9 +2042,21 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             text, keyboard = t["support_main"], get_support_keyboard(lang)
         elif target == "info":
             text, keyboard = t["info_main"], get_info_keyboard(lang)
-        elif target == "infohow":
+        elif target == "info" or target == "infohow":
             text, keyboard = t["info_how_main"], InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_info_{lang}")]
+                [InlineKeyboardButton(text="🛡️ " + ("Grupos y Perímetro" if lang == "es" else "Groups & Perimeter"), callback_data=f"menu_infomod_groups_{lang}")],
+                [InlineKeyboardButton(text="📡 " + ("Canales y Lives" if lang == "es" else "Channels & Lives"), callback_data=f"menu_infomod_channels_{lang}")],
+                [InlineKeyboardButton(text="💰 " + ("Monetización Stars" if lang == "es" else "Stars Monetization"), callback_data=f"menu_infomod_monetization_{lang}")],
+                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            ])
+        elif target.startswith("infomod_"):
+            mod_name = target.replace("infomod_", "")
+            mod_text_key = f"info_mod_{mod_name}"
+            mod_desc = t.get(mod_text_key, t["info_how_main"])
+            text = f"📖 <b>Centro de Conocimiento</b>\n\n{mod_desc}"
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Volver a Guías" if lang == "es" else "🔙 Back to Guides", callback_data=f"menu_infohow_{lang}")],
+                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
         elif target == "id":
             user, tier_db = callback.from_user, await get_user_global_tier(callback.from_user.id)
