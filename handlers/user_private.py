@@ -961,31 +961,78 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     results = await asyncio.gather(*(check_ownership(g_id, g_name) for g_id, g_name in raw_groups))
     return [res for res in results if res is not None]
 
-async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
-    if is_super_admin(callback.from_user.id):
-        return True
-    lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
-    t = TEXTS[lang]
+async def is_registered_owner_db(user_id: int, group_id: int) -> bool:
+    """
+    🛂 ADUANA DE PROPIEDAD — Fuente de verdad persistente.
+
+    Cruza `user_groups` (vínculo primario creado al enlazar el grupo) y `bot_clones`
+    (vínculo del Clon ULTRA PRO, excluyendo tokens revocados) para confirmar que
+    `user_id` es el Propietario legítimo de `group_id` según nuestra base de datos,
+    independientemente de lo que Telegram reporte en vivo.
+
+    ⚠️ Si en tu esquema real las columnas de `user_groups` o `bot_clones` tienen
+    otro nombre, ajusta ÚNICAMENTE las dos consultas SQL de abajo; el resto del
+    módulo no depende de la implementación interna.
+    """
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM user_groups WHERE user_id = ? AND group_id = ? LIMIT 1",
+                (user_id, group_id)
+            )
+            if cursor.fetchone():
+                return True
+            cursor.execute(
+                "SELECT 1 FROM bot_clones WHERE user_id = ? AND group_id = ? AND status != 'revoked' LIMIT 1",
+                (user_id, group_id)
+            )
+            return cursor.fetchone() is not None
     try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=callback.from_user.id)
+        return await asyncio.to_thread(_sync)
+    except Exception as ex:
+        logging.error(f"❌ [Aduana] Fallo al consultar propiedad en DB para user={user_id} group={group_id}: {ex}")
+        return False
+
+async def is_legitimate_owner(bot: Bot, user_id: int, group_id: int) -> bool:
+    """
+    🛂 ADUANA DE PROPIEDAD — Validación infalible de tres capas:
+
+    1. Arquitecto Supremo (SUPER_ADMIN_IDS) → inmunidad total.
+    2. Propietario registrado en la base de datos (user_groups / bot_clones).
+    3. Confirmación en vivo de Telegram (status == "creator") como respaldo,
+       para el caso de un grupo recién vinculado que aún no completó su registro.
+
+    Cualquier administrador común que NO cumpla ninguna de estas tres capas
+    es rechazado. No hay excepciones ni atajos.
+    """
+    if is_super_admin(user_id):
+        return True
+    if await is_registered_owner_db(user_id, group_id):
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
         if member.status == "creator":
             return True
     except Exception:
         pass
+    return False
+
+async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
+    lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
+    t = TEXTS[lang]
+    if await is_legitimate_owner(bot, callback.from_user.id, group_id):
+        return True
+    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={callback.from_user.id} intentó operar group={group_id} sin ser propietario.")
     await callback.answer(t["owner_only_alert"], show_alert=True)
     return False
 
 async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int) -> bool:
-    if is_super_admin(message.from_user.id):
-        return True
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS[lang]
-    try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=message.from_user.id)
-        if member.status == "creator":
-            return True
-    except Exception:
-        pass
+    if await is_legitimate_owner(bot, message.from_user.id, group_id):
+        return True
+    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={message.from_user.id} intentó operar group={group_id} sin ser propietario.")
     await message.answer(t["owner_only_alert"])
     return False
 
