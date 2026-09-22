@@ -24,7 +24,7 @@ def get_db_connection():
 
 
 def init_db():
-    """Inicializa el esquema relacional y ejecuta migraciones de columnas dinámicas para The Bunker OS."""
+    """Inicializa el esquema relacional, canales y migraciones dinámicas para The Bunker OS."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -150,6 +150,11 @@ def init_db():
             )
         """)
 
+        try:
+            cursor.execute("ALTER TABLE user_groups ADD COLUMN chat_type TEXT DEFAULT 'supergroup'")
+        except sqlite3.OperationalError:
+            pass
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bot_clones (
                 user_id INTEGER, 
@@ -225,6 +230,49 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
+
+        # --- MÓDULOS DE CANALES Y MEMBRESÍAS RECURRENTES ---
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_settings (
+                channel_id INTEGER PRIMARY KEY,
+                sub_price INTEGER DEFAULT 0,
+                grace_days INTEGER DEFAULT 1,
+                auto_kick INTEGER DEFAULT 1,
+                notify_renewal INTEGER DEFAULT 1,
+                custom_welcome TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_plans (
+                plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                plan_name TEXT NOT NULL,
+                duration_days INTEGER NOT NULL,
+                stars_price INTEGER NOT NULL,
+                status TEXT DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_channel ON channel_plans (channel_id, status)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                plan_id INTEGER,
+                stars_paid INTEGER NOT NULL,
+                invite_link TEXT,
+                subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL,
+                status TEXT DEFAULT 'active',
+                last_warned_at TIMESTAMP,
+                FOREIGN KEY(plan_id) REFERENCES channel_plans(plan_id),
+                UNIQUE(channel_id, user_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_subs_audit ON channel_subscriptions (status, expires_at)")
 
         conn.commit()
 
@@ -315,24 +363,37 @@ def remove_from_blacklist(word: str):
         conn.commit()
 
 
-def register_user_group(user_id: int, group_id: int, group_name: str):
+def register_user_group(user_id: int, group_id: int, group_name: str, chat_type: str = "supergroup"):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO user_groups (user_id, group_id, group_name) 
-            VALUES (?, ?, ?) 
-            ON CONFLICT(user_id, group_id) DO UPDATE SET group_name = excluded.group_name
-        """, (user_id, group_id, group_name))
+            INSERT INTO user_groups (user_id, group_id, group_name, chat_type) 
+            VALUES (?, ?, ?, ?) 
+            ON CONFLICT(user_id, group_id) DO UPDATE SET 
+                group_name = excluded.group_name,
+                chat_type = excluded.chat_type
+        """, (user_id, group_id, group_name, chat_type))
         conn.commit()
 
 
 def get_user_groups(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT group_id, group_name FROM user_groups WHERE user_id = ?", (user_id,))
+        cursor.execute("""
+            SELECT group_id, group_name FROM user_groups 
+            WHERE user_id = ? AND (chat_type = 'supergroup' OR chat_type = 'group' OR chat_type IS NULL)
+        """, (user_id,))
         return cursor.fetchall()
 
 
+def get_user_channels(user_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT group_id, group_name FROM user_groups 
+            WHERE user_id = ? AND chat_type = 'channel'
+        """, (user_id,))
+        return cursor.fetchall()
 def set_autolower_status(group_id: int, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -590,6 +651,8 @@ def set_radar_config(group_id: int, field: str, value):
             ON CONFLICT(group_id) DO UPDATE SET {col_name} = excluded.{col_name}
         """, (group_id, value))
         conn.commit()
+
+
 def get_sentinel_payload_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1064,25 +1127,10 @@ def set_panic_status(group_id: int, status: int):
 
 
 def get_shield_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT screen_shield_status FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 1
-        except sqlite3.OperationalError:
-            return 1
-
+    return get_screen_shield_status(group_id)
 
 def set_shield_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, screen_shield_status) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET screen_shield_status = excluded.screen_shield_status
-        """, (group_id, status))
-        conn.commit()
-
+    set_screen_shield_status(group_id, status)
 
 def get_podcast_status(group_id: int) -> int:
     with get_db_connection() as conn:
@@ -1094,15 +1142,8 @@ def get_podcast_status(group_id: int) -> int:
         except sqlite3.OperationalError:
             return 0
 
-
 def set_podcast_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, podcast_mode_status) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET podcast_mode_status = excluded.podcast_mode_status
-        """, (group_id, status))
-        conn.commit()
+    set_podcast_mode(group_id, status)
 
 
 def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
@@ -1335,8 +1376,202 @@ def clear_speaker_queue(group_id: int):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
         conn.commit()
+# ==========================================
+# 💎 MOTOR DE CANALES, PLANES Y MEMBRESÍAS ULTRA PRO
+# ==========================================
+def get_channel_settings(channel_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT sub_price, grace_days, auto_kick, notify_renewal, custom_welcome
+                FROM channel_settings WHERE channel_id = ?
+            """, (channel_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "sub_price": row[0] if row[0] is not None else 0,
+                    "grace_days": row[1] if row[1] is not None else 1,
+                    "auto_kick": row[2] if row[2] is not None else 1,
+                    "notify_renewal": row[3] if row[3] is not None else 1,
+                    "custom_welcome": row[4] or ""
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"sub_price": 0, "grace_days": 1, "auto_kick": 1, "notify_renewal": 1, "custom_welcome": ""}
 
 
+def set_channel_settings(channel_id: int, field: str, value):
+    valid_fields = ["sub_price", "grace_days", "auto_kick", "notify_renewal", "custom_welcome"]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO channel_settings (channel_id, {field}) VALUES (?, ?)
+            ON CONFLICT(channel_id) DO UPDATE SET {field} = excluded.{field}
+        """, (channel_id, value))
+        conn.commit()
+
+
+def create_channel_plan(channel_id: int, plan_name: str, duration_days: int, stars_price: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO channel_plans (channel_id, plan_name, duration_days, stars_price, status)
+            VALUES (?, ?, ?, ?, 'active')
+        """, (channel_id, plan_name.strip(), duration_days, stars_price))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if only_active:
+            cursor.execute("""
+                SELECT plan_id, plan_name, duration_days, stars_price, status, created_at
+                FROM channel_plans WHERE channel_id = ? AND status = 'active'
+                ORDER BY duration_days ASC
+            """, (channel_id,))
+        else:
+            cursor.execute("""
+                SELECT plan_id, plan_name, duration_days, stars_price, status, created_at
+                FROM channel_plans WHERE channel_id = ?
+                ORDER BY status ASC, duration_days ASC
+            """, (channel_id,))
+        return cursor.fetchall()
+
+
+def set_channel_plan_status(plan_id: int, status: str):
+    if status not in ["active", "archived"]:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE channel_plans SET status = ? WHERE plan_id = ?", (status, plan_id))
+        conn.commit()
+
+
+def delete_channel_plan(plan_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM channel_plans WHERE plan_id = ?", (plan_id,))
+        conn.commit()
+
+
+def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, stars_paid: int, duration_days: int, invite_link: str = None):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO channel_subscriptions (
+                channel_id, user_id, plan_id, stars_paid, invite_link,
+                subscribed_at, expires_at, status
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, datetime('now', '+{duration_days} days'), 'active')
+            ON CONFLICT(channel_id, user_id) DO UPDATE SET
+                plan_id = excluded.plan_id,
+                stars_paid = stars_paid + excluded.stars_paid,
+                invite_link = excluded.invite_link,
+                expires_at = datetime(
+                    CASE WHEN expires_at > datetime('now') THEN expires_at ELSE datetime('now') END,
+                    '+{duration_days} days'
+                ),
+                status = 'active',
+                last_warned_at = NULL
+        """, (channel_id, user_id, plan_id, stars_paid, invite_link))
+        conn.commit()
+
+
+def get_channel_subscription(channel_id: int, user_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, plan_id, stars_paid, invite_link, subscribed_at, expires_at, status, last_warned_at,
+                   datetime('now') > expires_at AS is_expired
+            FROM channel_subscriptions WHERE channel_id = ? AND user_id = ?
+        """, (channel_id, user_id))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "plan_id": row[1],
+                "stars_paid": row[2],
+                "invite_link": row[3],
+                "subscribed_at": row[4],
+                "expires_at": row[5],
+                "status": row[6],
+                "last_warned_at": row[7],
+                "is_expired": bool(row[8])
+            }
+        return None
+
+
+def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
+    """Obtiene suscripciones activas por vencer en las próximas horas que aún no han sido notificadas hoy."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT s.channel_id, s.user_id, s.expires_at, s.stars_paid, c.grace_days
+            FROM channel_subscriptions s
+            JOIN channel_settings c ON s.channel_id = c.channel_id
+            WHERE s.status = 'active'
+              AND s.expires_at > datetime('now')
+              AND s.expires_at <= datetime('now', '+{hours_ahead} hours')
+              AND (s.last_warned_at IS NULL OR s.last_warned_at < datetime('now', '-20 hours'))
+        """)
+        return cursor.fetchall()
+
+
+def get_expired_channel_subscriptions() -> list:
+    """Obtiene suscripciones cuyo periodo de vencimiento más los días de gracia ya caducó para auto-kick."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.channel_id, s.user_id, s.expires_at, c.grace_days, c.auto_kick
+            FROM channel_subscriptions s
+            JOIN channel_settings c ON s.channel_id = c.channel_id
+            WHERE s.status IN ('active', 'grace')
+              AND datetime('now') > datetime(s.expires_at, '+' || c.grace_days || ' days')
+        """)
+        return cursor.fetchall()
+
+
+def mark_subscription_warned(channel_id: int, user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE channel_subscriptions SET last_warned_at = CURRENT_TIMESTAMP
+            WHERE channel_id = ? AND user_id = ?
+        """, (channel_id, user_id))
+        conn.commit()
+
+
+def update_subscription_status(channel_id: int, user_id: int, status: str):
+    valid_statuses = ["active", "grace", "expired", "kicked"]
+    if status not in valid_statuses:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE channel_subscriptions SET status = ?
+            WHERE channel_id = ? AND user_id = ?
+        """, (status, channel_id, user_id))
+        conn.commit()
+
+
+def get_active_subscribers_count(channel_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM channel_subscriptions 
+            WHERE channel_id = ? AND status = 'active' AND expires_at > datetime('now')
+        """, (channel_id,))
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
+# ==========================================
+# ⚡ ENVOLTURA ASÍNCRONA DE ALTO RENDIMIENTO
+# ==========================================
 def _make_async(sync_fn):
     @functools.wraps(sync_fn)
     async def _async_wrapper(*args, **kwargs):
@@ -1355,6 +1590,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "remove_from_blacklist",
     "register_user_group",
     "get_user_groups",
+    "get_user_channels",
     "set_autolower_status",
     "get_autolower_status",
     "set_antispam_status",
@@ -1413,7 +1649,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "update_vc_call_status",
     "get_all_active_vc_schedules",
 
-    # --- FASE "THE BUNKER OS" ---
+    # --- FASE "THE BUNKER OS" & ELITE TOOLS ---
     "get_panic_status",
     "set_panic_status",
     "get_shield_status",
@@ -1435,6 +1671,21 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "pop_next_speaker",
     "remove_from_speaker_queue",
     "clear_speaker_queue",
+
+    # --- CANALES & MEMBRESÍAS ULTRA PRO ---
+    "get_channel_settings",
+    "set_channel_settings",
+    "create_channel_plan",
+    "get_channel_plans",
+    "set_channel_plan_status",
+    "delete_channel_plan",
+    "record_channel_subscription",
+    "get_channel_subscription",
+    "get_expiring_channel_subscriptions",
+    "get_expired_channel_subscriptions",
+    "mark_subscription_warned",
+    "update_subscription_status",
+    "get_active_subscribers_count",
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
@@ -1443,4 +1694,4 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
 
 dl = getattr(globals(), "dl", None)
 if "_fn_name" in globals():
-    del _fn_name        
+    del _fn_name            
