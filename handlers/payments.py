@@ -8,7 +8,8 @@ from aiogram.types import (
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
-    approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price
+    approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
+    get_vip_badge_title
 )
 from assistant import set_participant_mic
 from handlers.user_private import is_clone_bot, get_master_bot_username
@@ -545,6 +546,12 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.warning(f"Aviso Centinela al restaurar volumen de pase VIP: {radar_err}")
             
             try:
+                # 🏷️ Etiqueta VIP dinámica: ya no se hardcodea el título. Se lee la
+                # personalización guardada en group_settings por group_id (columna
+                # vip_mic_badge_title); si la comunidad Ultra Pro nunca la configuró,
+                # cae al valor de fábrica "Pase VIP 24h 🎙️" definido en database.py.
+                badge_title = await get_vip_badge_title(chat_id)
+
                 await bot.promote_chat_member(
                     chat_id=chat_id, user_id=user_id,
                     can_manage_chat=False, can_change_info=False, can_delete_messages=False,
@@ -552,7 +559,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                     can_promote_members=False, can_manage_video_chats=False
                 )
                 await bot.set_chat_administrator_custom_title(
-                    chat_id=chat_id, user_id=user_id, custom_title="Pase VIP 24h 🎙️"
+                    chat_id=chat_id, user_id=user_id, custom_title=badge_title
                 )
             except Exception:
                 pass
