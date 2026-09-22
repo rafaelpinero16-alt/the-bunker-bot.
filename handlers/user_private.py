@@ -27,23 +27,21 @@ from database.database import (
     register_bot_clone, get_bot_clone, get_db_connection,
     save_owner_session, get_owner_session, revoke_owner_session,
     get_vc_schedule, set_vc_schedule,
-    # 🚨 ULTRA PRO — Panel de Élite (Botón de Pánico / Escudo Antinota / Podcast)
-    # NOTA: si en tu database.py estos helpers ya existen con otro nombre,
-    # ajusta ÚNICAMENTE esta lista de imports; el resto del módulo no depende
-    # de la implementación interna (misma firma que get/set_autolower_status).
+    # 🚨 ULTRA PRO — Panel de Élite & Módulos Corporativos
     get_panic_status, set_panic_status,
     get_shield_status, set_shield_status,
     get_podcast_status, set_podcast_status,
+    get_service_msgs_mode, set_service_msgs_mode,
+    get_tips_config, set_tips_config,
+    get_sentinel_payload_config, set_sentinel_payload_config
 )
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
     start_phone_auth, verify_phone_code, verify_2fa_password, cancel_phone_auth,
-    # 🎥🎙️ Motor del Centinela (MTProto) para Escudo Antinota y Podcast/Ducking
     engage_screen_shield, disengage_screen_shield,
     engage_podcast_ducking, disengage_podcast_ducking
 )
 from .groups import (
-    # 🚨 Bloqueo/levantamiento de emergencia y cola de Speakers pagados
     execute_raid_lockdown, lift_raid_lockdown,
     add_speaker_to_queue, pop_next_speaker, clear_speaker_queue, get_speaker_queue
 )
@@ -54,15 +52,7 @@ router = Router()
 class CallbackAutoAnswerMiddleware(BaseMiddleware):
     """
     Telegram admite UNA sola respuesta por callback_query.
-
-    Antes, los handlers principales llamaban `callback.answer()` al inicio y, después, varias ramas
-    intentaban `callback.answer(texto, show_alert=True)`: esa segunda respuesta fallaba y las alertas
-    (owner_only_alert, clone_disc, mic_alert_set, planes PRO/ULTRA...) nunca se mostraban.
-
-    Ahora los handlers NO responden al inicio: si una rama necesita alerta, esa es su respuesta única;
-    y este middleware garantiza, al terminar (con o sin error), que el spinner del botón se libere.
-    Si la query ya fue respondida, el segundo intento se descarta en silencio.
-    Es agnóstico al bot: usa el CallbackQuery vinculado a la instancia que recibió el update.
+    Garantiza que el spinner del botón se libere siempre sin colisiones de respuesta doble.
     """
     async def __call__(self, handler, event: CallbackQuery, data: dict):
         try:
@@ -95,20 +85,12 @@ def is_super_admin(user_id: int) -> bool:
 MASTER_BOT_ID = 0
 
 def set_master_bot_id(bot_id: int) -> None:
-    """Fija el ID del Bot Maestro (lo invoca main.py al arrancar)."""
     global MASTER_BOT_ID
     MASTER_BOT_ID = int(bot_id)
 
 MASTER_BOT_USERNAME = ""
 
 def set_master_bot_username(username: str) -> None:
-    """
-    Fija el @username del Bot Maestro (lo invoca main.py al arrancar, tras get_me()).
-
-    Se usa para construir deep-links (t.me/<usuario>?start=sub_...) que garantizan
-    que la facturación de suscripciones PRO/ULTRA PRO SIEMPRE se cobre a través del
-    Maestro, incluso cuando el comando se ejecuta desde un Bot Clon. Ver payments.py.
-    """
     global MASTER_BOT_USERNAME
     MASTER_BOT_USERNAME = (username or "").lstrip("@")
 
@@ -118,24 +100,14 @@ def get_master_bot_username() -> str:
 def _resolve_master_bot_id() -> int:
     if MASTER_BOT_ID:
         return MASTER_BOT_ID
-    # Respaldo: el ID del bot es el prefijo numérico del token de BotFather
     head = os.getenv("BOT_TOKEN", "").split(":", 1)[0].strip()
     return int(head) if head.isdigit() else 0
 
 def is_clone_bot(bot: Bot) -> bool:
-    """True si la instancia ejecutora NO es el Bot Maestro (comparación por bot.id)."""
     master_id = _resolve_master_bot_id()
     return bool(master_id) and bot.id != master_id
 
 def _call_clone_trigger(name: str, token: str) -> None:
-    """
-    Invoca trigger_dynamic_clone / trigger_disconnect_clone del proceso que YA está en ejecución.
-
-    ⚠️ No usar `from main import ...`: al lanzar `python main.py` el archivo corre como `__main__`;
-    `import main` lo re-ejecuta como un módulo distinto, con un Dispatcher NUEVO y VACÍO (sin routers)
-    y otro `active_clone_tasks`. Los clones creados desde el panel quedaban escuchando ese Dispatcher
-    vacío → `Update is not handled` en cada callback.
-    """
     for mod_name in ("__main__", "main"):
         mod = sys.modules.get(mod_name)
         fn = getattr(mod, name, None) if mod else None
@@ -150,7 +122,6 @@ async def get_effective_group_tier(group_id: int, user_id: int) -> str:
     return await get_group_tier(group_id)
 
 async def revoke_bot_clone_db(user_id: int, group_id: int):
-    """Marca como revocado y desconectado el bot clon en la base de datos."""
     def _sync():
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -173,11 +144,15 @@ MIC_VIP_STATES = {}
 MIC_TAG_STATES = {}
 GROUP_MIC_PRICE = {}
 GROUP_VIP_TAG = {}
-# 🌟 ULTRA PRO — Podcast/Ducking y Cola de Speakers pagados
 PODCAST_DUCK_STATES = {}
 SPEAKER_PRICE_STATES = {}
 GROUP_DUCK_LEVEL = {}
 GROUP_SPEAKER_PRICE = {}
+TIPS_AMOUNT_STATES = {}
+TIPS_TARGET_STATES = {}
+SENTINEL_PAYLOAD_TEXT_STATES = {}
+SENTINEL_PAYLOAD_MEDIA_STATES = {}
+SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 
 FILTER_MAP = {
     "tglinks": "tg_links", "fwdchan": "fwd_channels", "fwdusr": "fwd_users",
@@ -240,23 +215,18 @@ TEXTS = {
             "📖 <b>How The Bunker Bot Works — The Master Guide</b>\n\n"
             "Follow this operational path to bring your Bunker online at full strength, "
             "from the first install to full Telegram Stars monetization:\n\n"
-            "1️⃣ <b>Deployment: Add the Bot &amp; Grant Admin Rights</b>\n"
+            "1️⃣ <b>Deployment: Add the Bot & Grant Admin Rights</b>\n"
             "• Add <b>@Alphacentinel</b> (or your own Bot Clone) to your group/supergroup using the 'Add to a Group' button.\n"
-            "• Promote it to <b>Administrator</b> with, at minimum: delete messages, restrict members, manage video chats, and pin messages. Without these, the Sentinel cannot run the Alphanumeric Captcha checkpoint or the AutoLower Radar.\n"
-            "• Once inside, run /pro or /ultra directly in the group to open the Command Center in this private chat.\n\n"
+            "• Promote it to <b>Administrator</b> with all key permissions.\n"
+            "• Run /pro or /ultra directly in the group to open the Command Center in this private chat.\n\n"
             "2️⃣ <b>Your Own Bot Clone (ULTRA PRO 💎)</b>\n"
-            "• Message <b>@BotFather</b>, create a fresh bot with /newbot, and copy the token it hands you.\n"
-            "• From the ULTRA PRO panel, tap 'Setup Clone' and paste that token: your private replica gets linked exclusively to your community, running in parallel to the Master Bot without interfering with it.\n"
-            "• Every Star your Clone collects through VIP mic passes (/micvip) lands 100% in YOUR balance — the platform never takes a cut of those passes.\n\n"
-            "3️⃣ <b>Dedicated Sentinel: Phone Number &amp; 2FA Linking</b>\n"
-            "• In the same ULTRA PRO panel, choose 'Link Sentinel' and enter your phone number with the international code (e.g. +1...).\n"
-            "• Telegram sends a verification code: type it exactly as received in this private chat. If your account has Two-Factor Authentication (2FA), the bot will also ask for your password — both travel encrypted and are <b>never stored as plain text</b>; only the resulting StringSession is kept, and strictly in volatile memory.\n"
-            "• This spins up your isolated, anti-ban node: every Sentinel runs on its own session, sharing no IP or fingerprint with the rest of the network, shielding your main account from association bans.\n"
-            "• With the Sentinel active, the <b>AutoLower Radar</b> engages automatically: any mic that opens in the voice chat without an active VIP pass or explicit authorization gets dialed down to <b>2% volume in milliseconds</b> — no human moderator needs to be watching.\n\n"
+            "• Message <b>@BotFather</b>, create a fresh bot with /newbot, and paste the token in our panel.\n"
+            "• Every Star your Clone collects through VIP mic passes (/micvip) lands 100% in YOUR balance.\n\n"
+            "3️⃣ <b>Dedicated Sentinel: Phone Number & 2FA Linking</b>\n"
+            "• Link your secondary account via phone and 2FA to activate a dedicated MTProto voice node.\n"
+            "• The <b>AutoLower Radar</b> dials unverified mics down to <b>2% volume</b> automatically.\n\n"
             "4️⃣ <b>Telegram Stars Monetization (/micvip)</b>\n"
-            "• Set your own Stars price for the 24-hour VIP Microphone Pass from the Economy panel.\n"
-            "• When a member pays, the Sentinel instantly restores their volume to 100% and auto-assigns an <b>immovable admin title</b> (e.g. \"VIP 24/7\"), fully customizable by you from the ULTRA PRO panel.\n"
-            "• Two clean, independent revenue streams: platform subscriptions (PRO/ULTRA PRO) are always billed through the Master Bot, while every VIP mic pass flows 100% into YOUR Clone.\n\n"
+            "• Set your own Stars price for the 24-hour VIP Microphone Pass and assign custom titles.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
@@ -307,7 +277,8 @@ TEXTS = {
             "• 🎥 <b>/cams:</b> Stream quality audit & continuous audiovisual optimization.\n"
             "• ⚙️ <b>/autolower:</b> Voice chat volume moderation (2% vs 100%).\n"
             "• 🗓️ <b>/vcsched:</b> Automated Voice Chat opening/closing cron.\n"
-            "• 🎙️ <b>/mic_vip:</b> VIP Microphone 24h pass pricing in Stars & Custom Tag.\n\n"
+            "• 🎙️ <b>/mic_vip:</b> VIP Microphone 24h pass pricing in Stars & Custom Tag.\n"
+            "• ⭐ <b>Tips & Propinas:</b> Monetization channel & custom donation presets.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_mod": "🛡️ Moderation Matrix",
@@ -319,7 +290,6 @@ TEXTS = {
         "btn_warns": "⚠️ Warns",
         "btn_delmsgs": "🗑️ Delete Messages",
         "btn_clone": "🧬 Clone & Sentinel",
-
         "captcha_main_title": (
             "🤖 <b>Captcha Protection (Captcha Pro)</b>\n\n"
             "When active, incoming recruits are restricted until they solve an alphanumeric challenge via Direct Message.\n\n"
@@ -379,29 +349,21 @@ TEXTS = {
             "💡 <i>Isolated sandbox grid for total trust, anti-ban protection, and 24/7 voice chat lockdown. All Stars revenue stays 100% yours!</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-
         "botfather_guide": (
             "🔑 <b>How to Connect Your Bot Clone — Step by Step</b>\n\n"
-            "Follow these simple instructions to link your custom bot instance:\n\n"
             "1️⃣ Open official Telegram bot: @BotFather.\n"
-            "2️⃣ Send the command <code>/newbot</code>.\n"
-            "3️⃣ Choose a display name for your bot (e.g. <i>Nexus Security</i>).\n"
-            "4️⃣ Choose a unique username ending in <code>bot</code> (e.g. <i>NexusSecurityBot</i>).\n"
-            "5️⃣ @BotFather will send you an <b>HTTP API Token</b> (a long string like <code>7123456789:AAFn_...</code>).\n"
-            "6️⃣ <b>Copy that token and paste it right here in this chat.</b>\n\n"
-            "⚠️ <i>Never share your token publicly. We store it securely in your private Bunker grid.</i>\n\n"
+            "2️⃣ Send <code>/newbot</code>.\n"
+            "3️⃣ Choose a display name and unique username ending in <code>bot</code>.\n"
+            "4️⃣ Copy the <b>HTTP API Token</b> and paste it right here.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "sentinel_phone_guide": (
             "🎙️ <b>Connect Dedicated Sentinel — Phone Login</b>\n\n"
-            "Link your secondary/burner account as a 24/7 voice moderator without needing any code or string sessions:\n\n"
-            "1️⃣ Send your <b>phone number with international country code</b> (e.g. <code>+12025550143</code> or <code>+573001234567</code>).\n"
-            "2️⃣ Telegram will send an official 5-digit login code directly to your Telegram app.\n"
-            "3️⃣ Send the code here to complete the connection.\n\n"
-            "💡 <i>Tip: We recommend using a secondary account as sentinel to keep your main personal profile clean.</i>\n\n"
+            "1️⃣ Send your <b>phone number with country code</b> (e.g. <code>+12025550143</code>).\n"
+            "2️⃣ Telegram will send an official 5-digit login code to your app.\n"
+            "3️⃣ Send the code here to complete connection.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        
         "captcha_saved": "✅ <b>Captcha custom message saved successfully!</b>\n\n<i>{text_input}</i>\n\n🛡️ <i>Cloud Media Management</i>",
         "token_verifying": "🔄 <b>Verifying bot token with Telegram servers...</b>",
         "token_success": "✅ <b>Token received and verified successfully!</b>\nReplica instance connected to The Bunker database.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -429,7 +391,7 @@ TEXTS = {
         "mic_updated": "⭐ <b>VIP Mic Rate Updated!</b>\n\n• <b>Community ID:</b> <code>{group_id}</code>\n• <b>24h Pass Price:</b> <code>{price_val} Stars (XTR)</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
         "mic_err": "⚠️ Enter a positive integer for Stars (e.g. 50).\n\n🛡️ <i>Cloud Media Management</i>",
         "tag_updated": "🏷️ <b>VIP Tag Updated Successfully!</b>\n\n• <b>Community ID:</b> <code>{group_id}</code>\n• <b>Native Tag:</b> <code>{text_input}</code> 🟢\n\n<i>This immovable title is auto-assigned on Stars tip.</i>\n\n🛡️ <i>Cloud Media Management</i>",
-        "tag_err": "⚠️ Tag must be between 1 and 16 characters (Telegram official admin title limit).\n\nExample: <code>VIP 24/7</code> or <code>VIP Gold</code>.",
+        "tag_err": "⚠️ Tag must be between 1 and 16 characters.\n\nExample: <code>VIP 24/7</code> or <code>VIP Gold</code>.",
         "mod_id_err": "⚠️ <b>Invalid Target.</b> Send a valid numerical User ID or @username.\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_cancel_ret": "❌ Cancel & Return",
         "btn_retry": "🔄 Retry",
@@ -440,20 +402,20 @@ TEXTS = {
         "al_updated_1": "AutoLower updated 🟢",
         "al_updated_0": "AutoLower disabled 🔴",
         "mic_alert_set": "Rate set to {price_int} Stars ⭐",
-        "wl_menu": "⚪ <b>Directive: Tactical Whitelist</b>\n\nRegistered identities receive <b>Absolute Immunity</b>. No anti-spam filters, locks, or captchas will bind them.\n\n• <b>Tactical Immunity:</b> ACTIVE 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "bl_menu": "⚫ <b>Directive: Global Blacklist</b>\n\nClassified glossary of forbidden terms. Any match in the chat triggers auto-purge and tactical warnings.\n\n• <b>Protocol:</b> Auto-purge and Warns 🔴\n\n🛡️ <i>Cloud Media Management</i>",
-        "cams_menu": "📹 <b>Camera & Video Chat Supervision</b>\n\nLive stream stability audit:\n\n• <b>Video Quality:</b> High Fidelity & continuous flow 🟢\n• <b>Transmission Priority:</b> Optimal (No drops/overloads)\n• <b>Continuous AV Optimization:</b> Active in background to prevent frozen cameras and black screens.\n\n🛡️ <i>Cloud Media Management</i>",
-        "al_menu": "⚙️ <b>Remote Control: Video Chat AutoLower</b>\n\nThe Sentinel dims unauthorized members' microphones to maintain absolute room order:\n\n• <b>Current Status:</b> {status_str}\n\nSelect a directive to change live behavior:\n\n🛡️ <i>Cloud Media Management</i>",
-        "mic_menu": "🎙️ <b>VIP Microphone Pass (Stars Monetization)</b>\n\nAllows members to unlock their voice at 100% continuously for 24h by paying Telegram Stars (XTR).\n\n💡 <i>Key Advantage:</i> By deploying your own <b>Bot Clone</b> and <b>Dedicated Sentinel</b>, 100% of the Stars collected from VIP passes go <b>directly to your bot's account</b>.\n\n• <b>Current Rate:</b> <code>{curr_price} Stars (XTR)</code> 🟢\n• <b>Assigned Tag:</b> <code>{curr_tag}</code> (Native & immovable)\n• <b>Pass Duration:</b> 24 automated hours\n\nSelect the billing rate or customize the tag:\n\n🛡️ <i>Cloud Media Management</i>",
-        "tag_menu_prompt": "🏷️ <b>Native VIP Tag Editor (ULTRA PRO)</b>\n\nCurrent tag: <code>{curr_tag}</code>\n\nSend in this private chat the text you want to auto-assign as an admin title (max 16 characters).\n\n<i>Example: VIP 24/7, Elite, Sponsor</i>\n\n🛡️ <i>Cloud Media Management</i>",
-        "mod_ask_time": "⚡ <b>Moderation Directive: /{sub_cmd}</b>\n\nSelect the duration of the directive for the user:",
-        "mod_ask_target": "🎯 <b>Target Configuration — /{sub_cmd_upper}</b>\n\nSend the <b>@username</b> or <b>numeric ID</b> of the target in this private chat:\n\n🛡️ <i>Cloud Media Management</i>",
-        "reg_ask": "📝 <b>Database Registration</b>\n\nSend {target_name} in this private chat:\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_menu": "⚪ <b>Directive: Tactical Whitelist</b>\n\nRegistered identities receive <b>Absolute Immunity</b>.\n\n• <b>Tactical Immunity:</b> ACTIVE 🟢\n\n🛡️ <i>Cloud Media Management</i>",
+        "bl_menu": "⚫ <b>Directive: Global Blacklist</b>\n\nClassified glossary of forbidden terms. Auto-purge and tactical warnings active.\n\n• <b>Protocol:</b> Auto-purge and Warns 🔴\n\n🛡️ <i>Cloud Media Management</i>",
+        "cams_menu": "📹 <b>Camera & Video Chat Supervision</b>\n\nLive stream stability audit active.\n\n🛡️ <i>Cloud Media Management</i>",
+        "al_menu": "⚙️ <b>Remote Control: Video Chat AutoLower</b>\n\n• <b>Current Status:</b> {status_str}\n\n🛡️ <i>Cloud Media Management</i>",
+        "mic_menu": "🎙️ <b>VIP Microphone Pass (Stars Monetization)</b>\n\n• <b>Current Rate:</b> <code>{curr_price} Stars (XTR)</code> 🟢\n• <b>Assigned Tag:</b> <code>{curr_tag}</code>\n• <b>Pass Duration:</b> 24 automated hours\n\n🛡️ <i>Cloud Media Management</i>",
+        "tag_menu_prompt": "🏷️ <b>Native VIP Tag Editor (ULTRA PRO)</b>\n\nCurrent tag: <code>{curr_tag}</code>\n\nSend the text for the admin title (max 16 chars):\n\n🛡️ <i>Cloud Media Management</i>",
+        "mod_ask_time": "⚡ <b>Moderation Directive: /{sub_cmd}</b>\n\nSelect the duration:",
+        "mod_ask_target": "🎯 <b>Target Configuration — /{sub_cmd_upper}</b>\n\nSend the @username or ID:\n\n🛡️ <i>Cloud Media Management</i>",
+        "reg_ask": "📝 <b>Database Registration</b>\n\nSend {target_name}:\n\n🛡️ <i>Cloud Media Management</i>",
         "reg_ask_wl": "the user ID for Whitelist",
         "reg_ask_bl": "the forbidden term for Blacklist",
-        "vcsched_prompt": "⏰ <b>VC Schedule Configuration</b>\n\nSend in this private chat the opening and closing interval in 24h format (example: <code>20:00-23:30</code>):\n\n🛡️ <i>Cloud Media Management</i>",
-        "mic_custom_prompt": "⭐ <b>Custom Stars Rate</b>\n\nSend in this private chat the number of Stars per 24h VIP pass (example: 75).\n\n<i>Remember that with your Bot Clone, Stars go directly to your balance.</i>\n\n🛡️ <i>Cloud Media Management</i>",
-        "vcsched_main": "🗓️ <b>Voice Chat Scheduler (ULTRA PRO)</b>\n\nConfigure the automated opening and closing of your voice rooms:\n\n• <b>Status:</b> {st_badge}\n• <b>Active Days:</b> <code>{days}</code>\n• <b>Schedule:</b> <code>{start} - {end}</code>\n\nSelect an option to modify parameters:\n\n🛡️ <i>Cloud Media Management</i>",
+        "vcsched_prompt": "⏰ <b>VC Schedule Configuration</b>\n\nSend opening/closing interval in 24h format (e.g. <code>20:00-23:30</code>):\n\n🛡️ <i>Cloud Media Management</i>",
+        "mic_custom_prompt": "⭐ <b>Custom Stars Rate</b>\n\nSend the number of Stars per 24h VIP pass:\n\n🛡️ <i>Cloud Media Management</i>",
+        "vcsched_main": "🗓️ <b>Voice Chat Scheduler (ULTRA PRO)</b>\n\n• <b>Status:</b> {st_badge}\n• <b>Active Days:</b> <code>{days}</code>\n• <b>Schedule:</b> <code>{start} - {end}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_add_wl": "➕ Register User to DB",
         "btn_add_bl": "➕ Register Term to DB",
         "btn_al_1": "🟢 Activate AutoLower (2%)",
@@ -463,7 +425,6 @@ TEXTS = {
         "btn_sched_mod": "⏰ Modify Schedule (HH:MM-HH:MM)",
         "btn_sched_off": "🔴 Disable Schedule",
         "btn_sched_on": "🟢 Enable Schedule",
-        
         "af_msgs": "📄 Messages Threshold",
         "af_time": "⏱️ Time Window",
         "af_off": "❌ Disable",
@@ -481,17 +442,14 @@ TEXTS = {
         "btn_contact_support": "💬 Contact Support",
         "btn_back_mod": "🔙 Moderation",
         "btn_back_eco": "🔙 Ecosystem",
-
-        # ==========================================
-        # 💎 ULTRA PRO — ELITE TOOLS PANEL
-        # ==========================================
         "ultra_tools_main": (
             "💎 <b>ULTRA PRO Elite Tools — {group_name}</b>\n\n"
-            "Direct panel control over your highest-tier automation modules, no group text commands required:\n\n"
+            "Direct panel control over your highest-tier automation modules:\n\n"
             "🚨 <b>Panic Button:</b> Instant emergency raid lockdown.\n"
             "🎥 <b>Screen-Share Shield:</b> Screen-sharing moderation.\n"
             "🎙️ <b>Podcast Mode:</b> Dynamic volume & noise-gate ducking.\n"
-            "🌟 <b>Speakers Queue:</b> Paid priority mic queue (/speakers).\n\n"
+            "🌟 <b>Speakers Queue:</b> Paid priority mic queue (/speakers).\n"
+            "💎 <b>Multimedia Payload:</b> Custom recurring branding broadcast.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_ultra_tools": "💎 ULTRA Elite Tools",
@@ -499,69 +457,68 @@ TEXTS = {
             "🔒 <i>This module is an advanced ULTRA PRO automation capability and is available exclusively at that tier.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        # --- Panic Button / Raid Lockdown ---
-        "panic_menu": (
-            "🚨 <b>Panic Button — Raid Lockdown</b>\n\n"
-            "Instantly locks the entire community in an emergency: default permissions are dropped to zero and invite links are revoked, freezing any raid or mass-spam attack in progress.\n\n"
-            "• <b>Current Status:</b> {status_str}\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "panic_confirm": (
-            "⚠️ <b>Confirm Emergency Lockdown</b>\n\n"
-            "This will immediately silence and restrict <b>all</b> members in the group until you manually lift the lockdown. Use this only during an active raid or attack.\n\n"
-            "Do you want to proceed?"
-        ),
-        "panic_activated": "🚨 <b>RAID LOCKDOWN ACTIVE</b>\n\nThe community has been locked down. Tap below to lift it once the threat has passed.\n\n🛡️ <i>Cloud Media Management</i>",
-        "panic_deactivated": "🟢 <b>Lockdown lifted.</b>\n\nNormal permissions have been restored to the community.\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_menu": "🚨 <b>Panic Button — Raid Lockdown</b>\n\n• <b>Current Status:</b> {status_str}\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_confirm": "⚠️ <b>Confirm Emergency Lockdown</b>\n\nThis will restrict all members in the group immediately. Proceed?",
+        "panic_activated": "🚨 <b>RAID LOCKDOWN ACTIVE</b>\n\nCommunity locked down.\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_deactivated": "🟢 <b>Lockdown lifted.</b>\n\nNormal permissions restored.\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_panic_activate": "🚨 Activate Lockdown",
         "btn_panic_confirm": "✅ Confirm Lockdown",
         "btn_panic_deactivate": "🟢 Lift Lockdown",
-        # --- Screen-Sharing Shield ---
-        "shield_menu": (
-            "🎥 <b>Screen-Share Shield</b>\n\n"
-            "The Sentinel monitors active screen shares in the voice chat and automatically moderates unauthorized or inappropriate broadcasts.\n\n"
-            "• <b>Current Status:</b> {status_str}\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
+        "shield_menu": "🎥 <b>Screen-Share Shield</b>\n\n• <b>Current Status:</b> {status_str}\n\n🛡️ <i>Cloud Media Management</i>",
         "shield_updated_1": "🎥 Screen-Share Shield activated 🟢",
         "shield_updated_0": "🎥 Screen-Share Shield disabled 🔴",
         "btn_shield_1": "🟢 Activate Shield",
         "btn_shield_0": "🔴 Disable Shield",
-        # --- Podcast Mode & Audio Ducking ---
-        "podcast_menu": (
-            "🎙️ <b>Podcast Mode & Audio Ducking</b>\n\n"
-            "When a designated speaker talks, background mics are automatically dimmed (\"ducked\") to keep the show clean, plus a noise-gate shield against background noise.\n\n"
-            "• <b>Current Status:</b> {status_str}\n"
-            "• <b>Ducking Level:</b> <code>{duck_level}%</code> (background volume while a speaker talks)\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
+        "podcast_menu": "🎙️ <b>Podcast Mode & Audio Ducking</b>\n\n• <b>Current Status:</b> {status_str}\n• <b>Ducking Level:</b> <code>{duck_level}%</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "podcast_updated_1": "🎙️ Podcast Mode activated 🟢",
         "podcast_updated_0": "🎙️ Podcast Mode disabled 🔴",
         "btn_podcast_1": "🟢 Activate Podcast Mode",
         "btn_podcast_0": "🔴 Disable",
         "btn_duck_level": "🎚️ Ducking Level: {duck_level}%",
-        "duck_custom_prompt": "🎚️ <b>Custom Ducking Level</b>\n\nSend in this private chat a number from 1 to 90 for the background mic volume percentage while a speaker talks (example: 15).\n\n🛡️ <i>Cloud Media Management</i>",
-        "duck_updated": "🎚️ <b>Ducking level updated!</b>\n\n• <b>Community ID:</b> <code>{group_id}</code>\n• <b>New Level:</b> <code>{duck_level}%</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "duck_err": "⚠️ Enter a whole number between 1 and 90.\n\n🛡️ <i>Cloud Media Management</i>",
-        # --- Paid Speakers Queue (/speakers) ---
-        "speakers_menu": (
-            "🌟 <b>Paid Speakers Queue (/speakers)</b>\n\n"
-            "Members can pay Stars to skip the line and get priority in the mic queue for the voice chat.\n\n"
-            "• <b>Current Status:</b> {status_str}\n"
-            "• <b>Priority Pass Rate:</b> <code>{price} Stars (XTR)</code>\n"
-            "• <b>Members in Queue:</b> <code>{queue_count}</code>\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
+        "duck_custom_prompt": "🎚️ <b>Custom Ducking Level</b>\n\nSend a number from 1 to 90 for background mic volume:\n\n🛡️ <i>Cloud Media Management</i>",
+        "duck_updated": "🎚️ <b>Ducking level updated to {duck_level}%!</b>",
+        "duck_err": "⚠️ Enter a number between 1 and 90.",
+        "speakers_menu": "🌟 <b>Paid Speakers Queue (/speakers)</b>\n\n• <b>Status:</b> {status_str}\n• <b>Rate:</b> <code>{price} Stars</code>\n• <b>In Queue:</b> <code>{queue_count}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "speakers_updated_1": "🌟 Speakers Queue activated 🟢",
         "speakers_updated_0": "🌟 Speakers Queue disabled 🔴",
         "btn_speakers_1": "🟢 Activate Queue",
         "btn_speakers_0": "🔴 Disable Queue",
         "btn_speakers_price": "⭐ Priority Rate: {price} Stars",
         "btn_speakers_clear": "🧹 Clear Queue",
-        "speakers_price_prompt": "⭐ <b>Custom Priority Rate</b>\n\nSend in this private chat the number of Stars to skip the speaker line (example: 30).\n\n🛡️ <i>Cloud Media Management</i>",
-        "speakers_price_updated": "⭐ <b>Priority Rate Updated!</b>\n\n• <b>Community ID:</b> <code>{group_id}</code>\n• <b>New Rate:</b> <code>{price} Stars (XTR)</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "speakers_price_err": "⚠️ Enter a positive integer for Stars (e.g. 30).\n\n🛡️ <i>Cloud Media Management</i>",
-        "speakers_cleared": "🧹 Speakers queue cleared 🟢"
+        "speakers_price_prompt": "⭐ <b>Custom Priority Rate</b>\n\nSend the number of Stars:\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_price_updated": "⭐ <b>Priority Rate Updated to {price} Stars!</b>",
+        "speakers_price_err": "⚠️ Enter a positive integer for Stars.",
+        "speakers_cleared": "🧹 Speakers queue cleared 🟢",
+        # --- NUEVOS TEXTOS FASES 3, 4 y 5 (EN) ---
+        "tips_main": (
+            "⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
+            "Monetize your voice chat or live event directly with Stars:\n\n"
+            "• <b>Status:</b> {st_badge}\n"
+            "• <b>Preset Amount:</b> <code>{amount} Stars</code>\n"
+            "• <b>Target Channel:</b> <code>{target}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_tips": "⭐ Stars Tips & Donations",
+        "tips_updated": "✅ Tips settings updated successfully!",
+        "tips_prompt_amount": "💰 <b>Suggested Tip Amount</b>\n\nSend the suggested Stars amount (e.g. 15):\n\n🛡️ <i>Cloud Media Management</i>",
+        "tips_prompt_target": "📢 <b>Destination Channel</b>\n\nSend @username or numeric ID of the destination channel:\n\n🛡️ <i>Cloud Media Management</i>",
+        "tips_amount_err": "⚠️ Enter a positive integer.",
+        "tips_target_err": "⚠️ Invalid target channel.",
+        "sentinel_payload_main": (
+            "💎 <b>Sentinel Multimedia Payload (ULTRA PRO)</b>\n\n"
+            "Configure the recurring promotional broadcast dispatched during audiovisual refresh cycles (every 3.5h) and scheduled VC openings:\n\n"
+            "• <b>Status:</b> {st_badge}\n"
+            "• <b>Custom Text:</b> {has_text}\n"
+            "• <b>Media Asset:</b> {has_media}\n"
+            "• <b>Auto-Delete:</b> <code>{autodel}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_sentinel_payload": "💎 Multimedia Payload",
+        "sentinel_payload_prompt_text": "✍️ <b>Custom Payload Text</b>\n\nSend the text for your broadcast in this chat (HTML formatting supported):\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_prompt_media": "🖼️ <b>Upload Media Asset</b>\n\nSend a <b>Photo</b>, <b>Animation (GIF)</b>, or <b>Video</b> to attach to the payload:\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_prompt_del": "⏱️ <b>Auto-Delete Timeout</b>\n\nSend the lifespan in seconds (e.g. 30) or 0 to keep messages persistent:\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_saved": "✅ <b>Payload asset updated successfully!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_err": "⚠️ Invalid input for payload asset."
     },
     "es": {
         "owner_only_alert": "⛔ Acceso Denegado: Esta consola táctica está reservada única y exclusivamente para el Dueño de la comunidad.",
@@ -616,22 +573,16 @@ TEXTS = {
             "Sigue esta ruta operativa para desplegar tu Búnker a máxima capacidad, "
             "desde la instalación inicial hasta la monetización total con Telegram Stars:\n\n"
             "1️⃣ <b>Despliegue: Añade el Bot y Otorga Administración</b>\n"
-            "• Agrega a <b>@Alphacentinel</b> (o tu propio Bot Clon) a tu grupo/supergrupo con el botón 'Añadir a un Grupo'.\n"
-            "• Promuévelo a <b>Administrador</b> con, como mínimo: eliminar mensajes, restringir miembros, gestionar videollamadas y fijar mensajes. Sin estos permisos, el Centinela no podrá operar la Aduana Captcha alfanumérica ni el Radar AutoLower.\n"
-            "• Una vez dentro, ejecuta /pro o /ultra directamente en el grupo para abrir el Centro de Mando en este chat privado.\n\n"
+            "• Agrega a <b>@Alphacentinel</b> (o tu Bot Clon) a tu comunidad como Administrador.\n"
+            "• Ejecuta /pro o /ultra en el grupo para abrir el Centro de Mando en privado.\n\n"
             "2️⃣ <b>Tu Propio Bot Clon (ULTRA PRO 💎)</b>\n"
-            "• Escribe a <b>@BotFather</b>, crea un bot nuevo con /newbot y copia el token que te entrega.\n"
-            "• Desde el panel ULTRA PRO, pulsa 'Configurar Clon' y pega ese token: tu réplica privada queda enlazada en exclusiva a tu comunidad, corriendo en paralelo al Bot Maestro sin interferir con él.\n"
-            "• Cada Star que tu Clon recauda por pases VIP de micrófono (/micvip) entra al <b>100%</b> a TU balance — la plataforma nunca retiene comisión sobre esos pases.\n\n"
-            "3️⃣ <b>Centinela Dedicado: Vinculación por Teléfono y 2FA</b>\n"
-            "• En el mismo panel ULTRA PRO, elige 'Vincular Centinela' e ingresa tu número telefónico con el indicativo internacional (ej. +57...).\n"
-            "• Telegram te enviará un código de verificación: escríbelo tal cual en este chat privado. Si tu cuenta tiene Verificación en Dos Pasos (2FA), el bot también te pedirá tu contraseña — ambos datos viajan cifrados y <b>nunca se guardan en texto plano</b>; solo se conserva la StringSession resultante, y siempre en memoria volátil.\n"
-            "• Esto activa tu nodo aislado antiban: cada Centinela corre con su propia sesión, sin compartir IP ni huella con el resto de la red, blindando tu cuenta principal contra baneos por asociación.\n"
-            "• Con el Centinela activo se habilita automáticamente el <b>Radar AutoLower</b>: cualquier micrófono que se abra en el videochat sin un pase VIP activo o autorización explícita es atenuado al <b>2% de volumen en milisegundos</b>, sin que un moderador humano tenga que estar presente.\n\n"
+            "• Crea tu bot en <b>@BotFather</b> y conecta el token desde el panel ULTRA.\n"
+            "• Las Stars recaudadas van 100% a tu saldo sin intermediarios.\n\n"
+            "3️⃣ <b>Centinela Dedicado: Teléfono y 2FA</b>\n"
+            "• Vincula tu cuenta secundaria vía teléfono para moderación 24/7 en llamadas.\n"
+            "• El <b>Radar AutoLower</b> atenúa micrófonos no autorizados al <b>2%</b> al instante.\n\n"
             "4️⃣ <b>Monetización con Telegram Stars (/micvip)</b>\n"
-            "• Define tu propio precio en Stars para el Pase VIP de Micrófono de 24 horas desde el panel de Economía.\n"
-            "• Cuando un miembro paga, el Centinela le restaura el volumen al 100% de inmediato y le asigna automáticamente una <b>etiqueta de administrador inamovible</b> (por ejemplo, \"VIP 24/7\"), totalmente personalizable por ti desde el panel ULTRA PRO.\n"
-            "• Dos flujos de ingreso limpios e independientes: las suscripciones de plataforma (PRO/ULTRA PRO) se facturan siempre a través del Bot Maestro, mientras que cada pase VIP de micrófono fluye 100% hacia TU Clon.\n\n"
+            "• Establece tarifas y etiquetas de administrador VIP automáticas e inamovibles.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
@@ -682,7 +633,8 @@ TEXTS = {
             "• 🎥 <b>/cams:</b> Calidad de video y optimización preventiva de llamadas.\n"
             "• ⚙️ <b>/autolower:</b> Control de atenuación de micrófonos en llamadas.\n"
             "• 🗓️ <b>/vcsched:</b> Cronograma de apertura/cierre automático de videochats.\n"
-            "• 🎙️ <b>/mic_vip:</b> Tarifa en Stars y Etiqueta VIP para pases de micrófono de 24h.\n\n"
+            "• 🎙️ <b>/mic_vip:</b> Tarifa en Stars y Etiqueta VIP para pases de micrófono de 24h.\n"
+            "• ⭐ <b>Tips & Propinas:</b> Canal y montos sugeridos de propinas en Stars.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_mod": "🛡️ Matriz de Moderación",
@@ -694,10 +646,9 @@ TEXTS = {
         "btn_warns": "⚠️ Advertencias",
         "btn_delmsgs": "🗑️ Borrar Mensajes",
         "btn_clone": "🧬 Clon & Centinela",
-
         "captcha_main_title": (
             "🤖 <b>Protección Captcha (Captcha Pro)</b>\n\n"
-            "Al estar activo, los nuevos reclutas son confinados y reciben un desafío alfanumérico por Mensaje Privado (DM).\n\n"
+            "Al estar activo, los nuevos reclutas son confinados y reciben un desafío alfanumérico por DM.\n\n"
             "• <b>Estado:</b> {status_text}\n"
             "• <b>Modo Alfanumérico:</b> {mode_text}\n"
             "• <b>Tiempo Límite:</b> {time_text}s\n"
@@ -706,13 +657,11 @@ TEXTS = {
         ),
         "captcha_action_title": (
             "⚖️ <b>Configuración de Castigo</b>\n\n"
-            "Selecciona la sanción aplicada si el recluta falla o expira el tiempo:\n\n"
             "• <b>Castigo Activo:</b> {mode_name} 🟢\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "antispam_main_title": (
             "✉️ <b>Matriz Anti-Spam Granular</b>\n\n"
-            "Inspecciona y blinda tu comunidad contra transmisiones no autorizadas. Capas activas:\n"
             "• 📘 <b>Enlaces Telegram:</b> {st_tg}\n"
             "• 📥 <b>Escudo de Reenvíos:</b> {st_fwd}\n"
             "• 💭 <b>Filtro de Citas:</b> {st_q}\n"
@@ -722,7 +671,6 @@ TEXTS = {
         ),
         "locks_main_title": (
             "🔒 <b>Panel de Cerraduras (Locks)</b>\n\n"
-            "Restringe el envío de contenido específico para mantener el orden absoluto en la comunidad:\n\n"
             "• <b>Multimedia (Fotos/Videos):</b> {media}\n"
             "• <b>Stickers y GIFs:</b> {stickers}\n"
             "• <b>Enlaces Web:</b> {links}\n"
@@ -731,7 +679,6 @@ TEXTS = {
         ),
         "warns_main_title": (
             "⚠️ <b>Matriz de Advertencias (Warns)</b>\n\n"
-            "Establece el umbral máximo de faltas y el castigo automático aplicado al alcanzarlas.\n\n"
             "• <b>Límite de Strikes:</b> {limit} advertencias\n"
             "• <b>Castigo Automático:</b> {action}\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -754,29 +701,21 @@ TEXTS = {
             "💡 <i>Infraestructura aislada para máxima confianza, blindaje antiban y control 24/7 en videochats. ¡Las Stars recaudadas quedan 100% en tu saldo!</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-
         "botfather_guide": (
             "🔑 <b>Guía Paso a Paso: Cómo Conectar tu Bot Clon</b>\n\n"
-            "Sigue estas sencillas instrucciones para desplegar tu propio bot:\n\n"
-            "1️⃣ Entra al bot oficial de Telegram: @BotFather.\n"
-            "2️⃣ Envía el comando <code>/newbot</code>.\n"
-            "3️⃣ Asigna un nombre a tu bot (ejemplo: <i>Comunidad Segura</i>).\n"
-            "4️⃣ Asigna un alias único terminado en <code>bot</code> (ejemplo: <i>ComunidadSeguraBot</i>).\n"
-            "5️⃣ @BotFather te responderá con tu <b>HTTP API Token</b> (un código largo como <code>7123456789:AAFn_...</code>).\n"
-            "6️⃣ <b>Copia ese token y pégalo directamente en este chat.</b>\n\n"
-            "⚠️ <i>Nunca compartas tu token con extraños. Se almacena cifrado en tu grid privado.</i>\n\n"
+            "1️⃣ Entra al bot oficial: @BotFather.\n"
+            "2️⃣ Envía <code>/newbot</code>.\n"
+            "3️⃣ Asigna un nombre y alias único terminado en <code>bot</code>.\n"
+            "4️⃣ Copia el <b>HTTP API Token</b> y pégalo directamente en este chat.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "sentinel_phone_guide": (
             "🎙️ <b>Guía Paso a Paso: Conexión de Centinela Propio</b>\n\n"
-            "Vincula tu cuenta secundaria como asistente 24/7 en llamadas de manera totalmente automática:\n\n"
-            "1️⃣ Envía a este chat tu <b>número de teléfono con código de país</b> (ejemplo: <code>+573001234567</code> o <code>+34600123456</code>).\n"
-            "2️⃣ Telegram te enviará un código oficial de 5 dígitos en tu app de Telegram.\n"
-            "3️⃣ Ingresa el código en este chat para completar la sincronización.\n\n"
-            "💡 <i>Recomendación táctica: Usa una cuenta secundaria o número de respaldo para aislar tu cuenta personal de cualquier reporte.</i>\n\n"
+            "1️⃣ Envía a este chat tu <b>número de teléfono con código de país</b> (ej. <code>+573001234567</code>).\n"
+            "2️⃣ Telegram te enviará un código oficial de 5 dígitos.\n"
+            "3️⃣ Ingrésalo en este chat para completar la sincronización.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        
         "captcha_saved": "✅ <b>¡Mensaje personalizado de Captcha guardado con éxito!</b>\n\n<i>{text_input}</i>\n\n🛡️ <i>Cloud Media Management</i>",
         "token_verifying": "🔄 <b>Verificando token de bot con los servidores de Telegram...</b>",
         "token_success": "✅ <b>¡Token recibido y verificado correctamente!</b>\nInstancia de réplica conectada a la base de datos de The Bunker.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -788,12 +727,12 @@ TEXTS = {
         "sentinel_success": "💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\n• <b>Comunidad:</b> Blindada con tu propia cuenta\n• <b>Radar de Transmisiones:</b> Activo 24/7 en la nube\n• <b>Aislamiento Total:</b> Operando sin riesgo de baneo global\n\n<i>Asegúrate de haber añadido tu cuenta al grupo con permiso de Administrar Videollamadas.</i>\n\n🛡️ <i>Cloud Media Management</i>",
         "sentinel_error": "❌ <b>Error al inicializar la sesión.</b> Inténtalo nuevamente desde el menú.",
         "clone_disc": "🛑 <b>Bot Clon desconectado con éxito.</b>\nLa instancia ha sido detenida y liberada del clúster.",
-        "twofa_required": "🔐 <b>Verificación en Dos Pasos (2FA) Requerida</b>\n\nTu cuenta de Telegram tiene activada una contraseña en la nube.\n\n<b>Ingresa tu contraseña de verificación en dos pasos:</b>\n\n🛡️ <i>Cloud Media Management</i>",
-        "code_invalid": "❌ <b>Código inválido o expirado.</b>\nVerifica el código recibido en tu aplicación oficial de Telegram e inténtalo nuevamente.",
+        "twofa_required": "🔐 <b>Verificación en Dos Pasos (2FA) Requerida</b>\n\nTu cuenta tiene contraseña en la nube.\n\n<b>Ingresa tu contraseña de verificación en dos pasos:</b>\n\n🛡️ <i>Cloud Media Management</i>",
+        "code_invalid": "❌ <b>Código inválido o expirado.</b>\nVerifica el código recibido en tu app oficial e inténtalo nuevamente.",
         "twofa_verifying": "🔄 <b>Validando contraseña 2FA...</b>",
         "twofa_invalid": "❌ <b>Contraseña de 2FA incorrecta.</b>\nVerifica tu clave e inténtalo nuevamente.",
         "sched_updated": "✅ <b>¡Horario Actualizado!</b>\n\n• Inicio: <code>{start}</code>\n• Cierre: <code>{end}</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "sched_err": "⚠️ Formato incorrecto. Usa el formato HH:MM-HH:MM (Ejemplo: <code>20:00-23:30</code>).\n\n🛡️ <i>Cloud Media Management</i>",
+        "sched_err": "⚠️ Formato incorrecto. Usa HH:MM-HH:MM (Ejemplo: <code>20:00-23:30</code>).\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_success": "✅ <b>¡Usuario registrado en la Whitelist con éxito!</b>\n\n• <b>Identificador:</b> <code>{target_id}</code>\n• <b>Inmunidad Táctica:</b> ACTIVA 🟢\n\n🛡️ <i>Cloud Media Management</i>",
         "id_err": "⚠️ <b>Identificador no válido.</b> Envía la ID numérica del usuario a autorizar.\n\n🛡️ <i>Cloud Media Management</i>",
         "bl_success": "✅ <b>¡Término clasificado registrado en la Blacklist con éxito!</b>\n\n• <b>Término Prohibido:</b> <code>{word}</code>\n• <b>Protocolo:</b> Purga automática y advertencias tácticas activas 🔴\n\n🛡️ <i>Cloud Media Management</i>",
@@ -805,7 +744,7 @@ TEXTS = {
         "mic_updated": "⭐ <b>¡Tarifa VIP de Micrófono Actualizada!</b>\n\n• <b>Comunidad ID:</b> <code>{group_id}</code>\n• <b>Precio por Pase 24h:</b> <code>{price_val} Stars (XTR)</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
         "mic_err": "⚠️ Ingresa un número entero positivo de Stars (por ejemplo: 50).\n\n🛡️ <i>Cloud Media Management</i>",
         "tag_updated": "🏷️ <b>¡Etiqueta VIP Actualizada con Éxito!</b>\n\n• <b>Comunidad ID:</b> <code>{group_id}</code>\n• <b>Etiqueta Nativa Asignada:</b> <code>{text_input}</code> 🟢\n\n<i>Al recibir propina de Stars o ejecutar /mic_vip, el usuario recibirá este título inamovible de forma automática.</i>\n\n🛡️ <i>Cloud Media Management</i>",
-        "tag_err": "⚠️ La etiqueta debe tener entre 1 y 16 caracteres (límite oficial de Telegram para títulos de administrador).\n\nEjemplo: <code>VIP 24/7</code> o <code>VIP Gold</code>.",
+        "tag_err": "⚠️ La etiqueta debe tener entre 1 y 16 caracteres.\n\nEjemplo: <code>VIP 24/7</code> o <code>VIP Gold</code>.",
         "mod_id_err": "⚠️ <b>Objetivo inválido.</b> Envía una ID numérica válida o un @usuario.\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_cancel_ret": "❌ Cancelar y Volver",
         "btn_retry": "🔄 Reintentar",
@@ -815,20 +754,20 @@ TEXTS = {
         "al_updated_1": "AutoLower actualizado 🟢",
         "al_updated_0": "AutoLower desactivado 🔴",
         "mic_alert_set": "Tarifa configurada a {price_int} Stars ⭐",
-        "wl_menu": "⚪ <b>Directiva: Lista Blanca Táctica (Whitelist)</b>\n\nLas identidades registradas reciben <b>Inmunidad Absoluta</b>. Ningún filtro anti-spam, cerradura o captcha los confinará.\n\n• <b>Inmunidad Táctica:</b> ACTIVA 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "bl_menu": "⚫ <b>Directiva: Lista Negra Global (Blacklist)</b>\n\nGlosario clasificado de términos prohibidos. Cualquier coincidencia en el chat activará purga inmediata y advertencias tácticas.\n\n• <b>Protocolo:</b> Purga automática y faltas (Warns) 🔴\n\n🛡️ <i>Cloud Media Management</i>",
-        "cams_menu": "📹 <b>Supervisión y Control de Cámaras & Videochats</b>\n\nAuditoría en vivo de estabilidad de transmisiones:\n\n• <b>Calidad de Video:</b> Alta Fidelidad y fluidez continua 🟢\n• <b>Prioridad de Transmisión:</b> Óptima (Sin cortes ni sobrecargas)\n• <b>Optimización Audiovisual Continua:</b> Activa en segundo plano para evitar cámaras congeladas y pantallas negras.\n\n🛡️ <i>Cloud Media Management</i>",
-        "al_menu": "⚙️ <b>Control Remoto: AutoLower de Videollamada</b>\n\nEl Centinela atenúa el micrófono de los miembros no autorizados para mantener la sala en orden absoluto:\n\n• <b>Estado Actual:</b> {status_str}\n\nSelecciona una directiva para cambiar el comportamiento en vivo:\n\n🛡️ <i>Cloud Media Management</i>",
-        "mic_menu": "🎙️ <b>Pase VIP de Micrófono (Monetización en Stars)</b>\n\nPermite a los miembros desbloquear su voz al 100% continuo durante 24h pagando Telegram Stars (XTR).\n\n💡 <i>Ventaja Clave:</i> Al desplegar tu propio <b>Bot Clone</b> y <b>Centinela Dedicado</b>, el 100% de las Stars recaudadas por pases VIP van <b>directas a la cuenta de tu bot</b>, monetizando tu comunidad de forma totalmente automatizada.\n\n• <b>Tarifa Actual:</b> <code>{curr_price} Stars (XTR)</code> 🟢\n• <b>Etiqueta Asignada:</b> <code>{curr_tag}</code> (Nativa e inamovible)\n• <b>Duración del Pase:</b> 24 Horas automáticas\n\nSelecciona la tarifa de cobro o personaliza la etiqueta:\n\n🛡️ <i>Cloud Media Management</i>",
-        "tag_menu_prompt": "🏷️ <b>Editor de Etiqueta VIP Nativa (ULTRA PRO)</b>\n\nEtiqueta actual: <code>{curr_tag}</code>\n\nEnvía en este chat privado el texto que deseas asignar automáticamente como título de administrador (máximo 16 caracteres).\n\n<i>Ejemplo: VIP 24/7, VIP Elite, Sponsor</i>\n\n🛡️ <i>Cloud Media Management</i>",
-        "mod_ask_time": "⚡ <b>Directiva de Moderación: /{sub_cmd}</b>\n\nSelecciona la duración de la directiva sobre el usuario:",
-        "mod_ask_target": "🎯 <b>Configuración de Objetivo — /{sub_cmd_upper}</b>\n\nEnvía a este chat privado el <b>@usuario</b> o la <b>ID numérica</b> del miembro a ejecutar:\n\n🛡️ <i>Cloud Media Management</i>",
-        "reg_ask": "📝 <b>Registro en Base de Datos</b>\n\nEnvía en este chat privado {target_name}:\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_menu": "⚪ <b>Directiva: Lista Blanca Táctica (Whitelist)</b>\n\n• <b>Inmunidad Táctica:</b> ACTIVA 🟢\n\n🛡️ <i>Cloud Media Management</i>",
+        "bl_menu": "⚫ <b>Directiva: Lista Negra Global (Blacklist)</b>\n\n• <b>Protocolo:</b> Purga automática y faltas (Warns) 🔴\n\n🛡️ <i>Cloud Media Management</i>",
+        "cams_menu": "📹 <b>Supervisión y Control de Cámaras & Videochats</b>\n\nAuditoría en vivo de estabilidad de transmisiones activa.\n\n🛡️ <i>Cloud Media Management</i>",
+        "al_menu": "⚙️ <b>Control Remoto: AutoLower de Videollamada</b>\n\n• <b>Estado Actual:</b> {status_str}\n\n🛡️ <i>Cloud Media Management</i>",
+        "mic_menu": "🎙️ <b>Pase VIP de Micrófono (Monetización en Stars)</b>\n\n• <b>Tarifa Actual:</b> <code>{curr_price} Stars (XTR)</code> 🟢\n• <b>Etiqueta Asignada:</b> <code>{curr_tag}</code>\n• <b>Duración del Pase:</b> 24 Horas automáticas\n\n🛡️ <i>Cloud Media Management</i>",
+        "tag_menu_prompt": "🏷️ <b>Editor de Etiqueta VIP Nativa (ULTRA PRO)</b>\n\nEtiqueta actual: <code>{curr_tag}</code>\n\nEnvía el texto para el título de administrador (máx 16 caracteres):\n\n🛡️ <i>Cloud Media Management</i>",
+        "mod_ask_time": "⚡ <b>Directiva de Moderación: /{sub_cmd}</b>\n\nSelecciona la duración:",
+        "mod_ask_target": "🎯 <b>Configuración de Objetivo — /{sub_cmd_upper}</b>\n\nEnvía el @usuario o ID:\n\n🛡️ <i>Cloud Media Management</i>",
+        "reg_ask": "📝 <b>Registro en Base de Datos</b>\n\nEnvía {target_name}:\n\n🛡️ <i>Cloud Media Management</i>",
         "reg_ask_wl": "la ID del usuario para Whitelist",
         "reg_ask_bl": "el término prohibido para Blacklist",
-        "vcsched_prompt": "⏰ <b>Configuración de Horario VC</b>\n\nEnvía a este chat privado el intervalo de apertura y cierre en formato 24h (ejemplo: <code>20:00-23:30</code>):\n\n🛡️ <i>Cloud Media Management</i>",
-        "mic_custom_prompt": "⭐ <b>Tarifa Personalizada de Stars</b>\n\nEnvía en este chat privado el número de Stars por pase VIP de 24h (ejemplo: 75).\n\n<i>Recuerda que con tu Bot Clone las Stars ingresan de forma directa a tu balance.</i>\n\n🛡️ <i>Cloud Media Management</i>",
-        "vcsched_main": "🗓️ <b>Programador de Videochats (ULTRA PRO)</b>\n\nConfigura la apertura y cierre automático de tus salas de voz:\n\n• <b>Estado:</b> {st_badge}\n• <b>Días Activos:</b> <code>{days}</code>\n• <b>Horario:</b> <code>{start} - {end}</code>\n\nSelecciona una opción para modificar los parámetros:\n\n🛡️ <i>Cloud Media Management</i>",
+        "vcsched_prompt": "⏰ <b>Configuración de Horario VC</b>\n\nEnvía el intervalo en formato 24h (ej. <code>20:00-23:30</code>):\n\n🛡️ <i>Cloud Media Management</i>",
+        "mic_custom_prompt": "⭐ <b>Tarifa Personalizada de Stars</b>\n\nEnvía el número de Stars por pase VIP de 24h:\n\n🛡️ <i>Cloud Media Management</i>",
+        "vcsched_main": "🗓️ <b>Programador de Videochats (ULTRA PRO)</b>\n\n• <b>Estado:</b> {st_badge}\n• <b>Días Activos:</b> <code>{days}</code>\n• <b>Horario:</b> <code>{start} - {end}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_add_wl": "➕ Registrar Usuario en BD",
         "btn_add_bl": "➕ Registrar Término en BD",
         "btn_al_1": "🟢 Activar AutoLower (2%)",
@@ -838,7 +777,6 @@ TEXTS = {
         "btn_sched_mod": "⏰ Modificar Horario (HH:MM-HH:MM)",
         "btn_sched_off": "🔴 Desactivar Cronograma",
         "btn_sched_on": "🟢 Activar Cronograma",
-
         "af_msgs": "📄 Umbral Mensajes",
         "af_time": "⏱️ Ventana de Tiempo",
         "af_off": "❌ Desactivar",
@@ -856,17 +794,14 @@ TEXTS = {
         "btn_contact_support": "💬 Contactar Soporte",
         "btn_back_mod": "🔙 Moderación",
         "btn_back_eco": "🔙 Ecosistema",
-
-        # ==========================================
-        # 💎 ULTRA PRO — PANEL DE HERRAMIENTAS DE ÉLITE
-        # ==========================================
         "ultra_tools_main": (
             "💎 <b>Herramientas de Élite ULTRA PRO — {group_name}</b>\n\n"
-            "Control directo desde el panel sobre tus módulos de automatización de mayor nivel, sin depender de comandos de texto en el grupo:\n\n"
+            "Control directo desde el panel sobre tus módulos de automatización de mayor nivel:\n\n"
             "🚨 <b>Botón de Pánico:</b> Bloqueo total de emergencia ante raids.\n"
             "🎥 <b>Escudo Antinota:</b> Moderación de pantalla compartida.\n"
             "🎙️ <b>Modo Podcast:</b> Volumen dinámico y escudo antirruido.\n"
-            "🌟 <b>Cola de Speakers:</b> Cola de micrófono con prioridad pagada (/speakers).\n\n"
+            "🌟 <b>Cola de Speakers:</b> Cola de micrófono con prioridad pagada (/speakers).\n"
+            "💎 <b>Payload Multimedia:</b> Inyección de publicidad o avisos personalizados.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_ultra_tools": "💎 Herramientas ULTRA",
@@ -874,72 +809,70 @@ TEXTS = {
             "🔒 <i>Este módulo es una capacidad avanzada de automatización y está disponible exclusivamente en el nivel ULTRA PRO.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        # --- Botón de Pánico / Raid Lockdown ---
-        "panic_menu": (
-            "🚨 <b>Botón de Pánico — Bloqueo de Emergencia</b>\n\n"
-            "Bloquea instantáneamente toda la comunidad ante una emergencia: los permisos por defecto se llevan a cero y los enlaces de invitación quedan revocados, congelando cualquier raid o ataque de spam masivo en curso.\n\n"
-            "• <b>Estado Actual:</b> {status_str}\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "panic_confirm": (
-            "⚠️ <b>Confirmar Bloqueo de Emergencia</b>\n\n"
-            "Esto silenciará y restringirá de inmediato a <b>todos</b> los miembros del grupo hasta que levantes el bloqueo manualmente. Úsalo únicamente durante un raid o ataque activo.\n\n"
-            "¿Deseas continuar?"
-        ),
-        "panic_activated": "🚨 <b>BLOQUEO DE EMERGENCIA ACTIVO</b>\n\nLa comunidad ha quedado bloqueada. Toca abajo para levantarlo una vez que la amenaza haya pasado.\n\n🛡️ <i>Cloud Media Management</i>",
-        "panic_deactivated": "🟢 <b>Bloqueo levantado.</b>\n\nSe restauraron los permisos normales de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_menu": "🚨 <b>Botón de Pánico — Bloqueo de Emergencia</b>\n\n• <b>Estado Actual:</b> {status_str}\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_confirm": "⚠️ <b>Confirmar Bloqueo de Emergencia</b>\n\nEsto silenciará y restringirá de inmediato a todos los miembros del grupo. ¿Deseas continuar?",
+        "panic_activated": "🚨 <b>BLOQUEO DE EMERGENCIA ACTIVO</b>\n\nComunidad bloqueada.\n\n🛡️ <i>Cloud Media Management</i>",
+        "panic_deactivated": "🟢 <b>Bloqueo levantado.</b>\n\nSe restauraron los permisos normales.\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_panic_activate": "🚨 Activar Bloqueo",
         "btn_panic_confirm": "✅ Confirmar Bloqueo",
         "btn_panic_deactivate": "🟢 Levantar Bloqueo",
-        # --- Escudo Antinota / Screen-Sharing Shield ---
-        "shield_menu": (
-            "🎥 <b>Escudo Antinota (Pantalla Compartida)</b>\n\n"
-            "El Centinela supervisa las transmisiones de pantalla activas en el videochat y modera automáticamente difusiones no autorizadas o inapropiadas.\n\n"
-            "• <b>Estado Actual:</b> {status_str}\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
+        "shield_menu": "🎥 <b>Escudo Antinota (Pantalla Compartida)</b>\n\n• <b>Estado Actual:</b> {status_str}\n\n🛡️ <i>Cloud Media Management</i>",
         "shield_updated_1": "🎥 Escudo Antinota activado 🟢",
         "shield_updated_0": "🎥 Escudo Antinota desactivado 🔴",
         "btn_shield_1": "🟢 Activar Escudo",
         "btn_shield_0": "🔴 Desactivar Escudo",
-        # --- Modo Podcast & Audio Ducking ---
-        "podcast_menu": (
-            "🎙️ <b>Modo Podcast & Audio Ducking</b>\n\n"
-            "Cuando un orador designado habla, los micrófonos de fondo se atenúan automáticamente (\"ducking\") para mantener la transmisión limpia, además de un escudo antirruido de fondo.\n\n"
-            "• <b>Estado Actual:</b> {status_str}\n"
-            "• <b>Nivel de Ducking:</b> <code>{duck_level}%</code> (volumen de fondo mientras habla un orador)\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
+        "podcast_menu": "🎙️ <b>Modo Podcast & Audio Ducking</b>\n\n• <b>Estado Actual:</b> {status_str}\n• <b>Nivel de Ducking:</b> <code>{duck_level}%</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "podcast_updated_1": "🎙️ Modo Podcast activado 🟢",
         "podcast_updated_0": "🎙️ Modo Podcast desactivado 🔴",
         "btn_podcast_1": "🟢 Activar Modo Podcast",
         "btn_podcast_0": "🔴 Desactivar",
         "btn_duck_level": "🎚️ Nivel de Ducking: {duck_level}%",
-        "duck_custom_prompt": "🎚️ <b>Nivel de Ducking Personalizado</b>\n\nEnvía en este chat privado un número del 1 al 90 para el porcentaje de volumen de los micrófonos de fondo mientras habla un orador (ejemplo: 15).\n\n🛡️ <i>Cloud Media Management</i>",
-        "duck_updated": "🎚️ <b>¡Nivel de Ducking actualizado!</b>\n\n• <b>ID Comunidad:</b> <code>{group_id}</code>\n• <b>Nuevo Nivel:</b> <code>{duck_level}%</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "duck_err": "⚠️ Ingresa un número entero entre 1 y 90.\n\n🛡️ <i>Cloud Media Management</i>",
-        # --- Cola de Speakers pagada (/speakers) ---
-        "speakers_menu": (
-            "🌟 <b>Cola de Speakers Pagada (/speakers)</b>\n\n"
-            "Los miembros pueden pagar con Stars para saltarse la fila y obtener prioridad en la cola del micrófono en el videochat.\n\n"
-            "• <b>Estado Actual:</b> {status_str}\n"
-            "• <b>Tarifa de Prioridad:</b> <code>{price} Stars (XTR)</code>\n"
-            "• <b>Miembros en Cola:</b> <code>{queue_count}</code>\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
+        "duck_custom_prompt": "🎚️ <b>Nivel de Ducking Personalizado</b>\n\nEnvía un número del 1 al 90 para el volumen de fondo:\n\n🛡️ <i>Cloud Media Management</i>",
+        "duck_updated": "🎚️ <b>¡Nivel de Ducking actualizado al {duck_level}%!</b>",
+        "duck_err": "⚠️ Ingresa un número entero entre 1 y 90.",
+        "speakers_menu": "🌟 <b>Cola de Speakers Pagada (/speakers)</b>\n\n• <b>Estado Actual:</b> {status_str}\n• <b>Tarifa de Prioridad:</b> <code>{price} Stars (XTR)</code>\n• <b>Miembros en Cola:</b> <code>{queue_count}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "speakers_updated_1": "🌟 Cola de Speakers activada 🟢",
         "speakers_updated_0": "🌟 Cola de Speakers desactivada 🔴",
         "btn_speakers_1": "🟢 Activar Cola",
         "btn_speakers_0": "🔴 Desactivar Cola",
         "btn_speakers_price": "⭐ Tarifa Prioridad: {price} Stars",
         "btn_speakers_clear": "🧹 Vaciar Cola",
-        "speakers_price_prompt": "⭐ <b>Tarifa de Prioridad Personalizada</b>\n\nEnvía en este chat privado el número de Stars para saltar la fila de oradores (ejemplo: 30).\n\n🛡️ <i>Cloud Media Management</i>",
-        "speakers_price_updated": "⭐ <b>¡Tarifa de Prioridad Actualizada!</b>\n\n• <b>ID Comunidad:</b> <code>{group_id}</code>\n• <b>Nueva Tarifa:</b> <code>{price} Stars (XTR)</code> 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "speakers_price_err": "⚠️ Ingresa un entero positivo de Stars (ej. 30).\n\n🛡️ <i>Cloud Media Management</i>",
-        "speakers_cleared": "🧹 Cola de speakers vaciada 🟢"
+        "speakers_price_prompt": "⭐ <b>Tarifa de Prioridad Personalizada</b>\n\nEnvía el número de Stars:\n\n🛡️ <i>Cloud Media Management</i>",
+        "speakers_price_updated": "⭐ <b>¡Tarifa de Prioridad Actualizada a {price} Stars!</b>",
+        "speakers_price_err": "⚠️ Ingresa un entero positivo de Stars.",
+        "speakers_cleared": "🧹 Cola de speakers vaciada 🟢",
+        # --- NUEVOS TEXTOS FASES 3, 4 y 5 (ES) ---
+        "tips_main": (
+            "⭐ <b>Propinas y Donaciones con Telegram Stars (XTR)</b>\n\n"
+            "Monetiza tu comunidad permitiendo a los miembros enviar propinas directas en tus eventos o salas:\n\n"
+            "• <b>Estado:</b> {st_badge}\n"
+            "• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
+            "• <b>Canal Destino:</b> <code>{target}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_tips": "⭐ Propinas Stars",
+        "tips_updated": "✅ ¡Ajustes de propinas actualizados con éxito!",
+        "tips_prompt_amount": "💰 <b>Monto Sugerido de Propinas</b>\n\nEnvía a este chat el monto sugerido en Stars (ejemplo: 15):\n\n🛡️ <i>Cloud Media Management</i>",
+        "tips_prompt_target": "📢 <b>Canal o Chat Destino</b>\n\nEnvía el @usuario o la ID numérica del canal donde se recibirán las propinas:\n\n🛡️ <i>Cloud Media Management</i>",
+        "tips_amount_err": "⚠️ Ingresa un número entero positivo.",
+        "tips_target_err": "⚠️ Canal objetivo no válido.",
+        "sentinel_payload_main": (
+            "💎 <b>Payload Multimedia del Centinela (ULTRA PRO)</b>\n\n"
+            "Configura el broadcast corporativo que el Centinela despachará de forma independiente tras los reinicios de optimización audiovisual (cada 3.5h) y al abrirse videochats programados:\n\n"
+            "• <b>Estado:</b> {st_badge}\n"
+            "• <b>Texto Personalizado:</b> {has_text}\n"
+            "• <b>Archivo Multimedia:</b> {has_media}\n"
+            "• <b>Auto-Borrado:</b> <code>{autodel}</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_sentinel_payload": "💎 Payload Multimedia",
+        "sentinel_payload_prompt_text": "✍️ <b>Texto Personalizado del Payload</b>\n\nEnvía en este chat privado el texto para tu broadcast (admite formato HTML):\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_prompt_media": "🖼️ <b>Carga de Multimedia del Payload</b>\n\nEnvía a este chat una <b>Foto</b>, <b>Animación (GIF)</b> o <b>Video</b> para adjuntarlo al broadcast:\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_prompt_del": "⏱️ <b>Tiempo de Auto-Borrado</b>\n\nEnvía los segundos de permanencia en el chat (ejemplo: 30) o 0 para que el mensaje no se elimine:\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_saved": "✅ <b>¡Activo de payload guardado correctamente!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+        "sentinel_payload_err": "⚠️ Entrada no válida para el activo multimedia del payload."
     }
 }
-
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
@@ -962,18 +895,6 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     return [res for res in results if res is not None]
 
 async def is_registered_owner_db(user_id: int, group_id: int) -> bool:
-    """
-    🛂 ADUANA DE PROPIEDAD — Fuente de verdad persistente.
-
-    Cruza `user_groups` (vínculo primario creado al enlazar el grupo) y `bot_clones`
-    (vínculo del Clon ULTRA PRO, excluyendo tokens revocados) para confirmar que
-    `user_id` es el Propietario legítimo de `group_id` según nuestra base de datos,
-    independientemente de lo que Telegram reporte en vivo.
-
-    ⚠️ Si en tu esquema real las columnas de `user_groups` o `bot_clones` tienen
-    otro nombre, ajusta ÚNICAMENTE las dos consultas SQL de abajo; el resto del
-    módulo no depende de la implementación interna.
-    """
     def _sync():
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -995,17 +916,6 @@ async def is_registered_owner_db(user_id: int, group_id: int) -> bool:
         return False
 
 async def is_legitimate_owner(bot: Bot, user_id: int, group_id: int) -> bool:
-    """
-    🛂 ADUANA DE PROPIEDAD — Validación infalible de tres capas:
-
-    1. Arquitecto Supremo (SUPER_ADMIN_IDS) → inmunidad total.
-    2. Propietario registrado en la base de datos (user_groups / bot_clones).
-    3. Confirmación en vivo de Telegram (status == "creator") como respaldo,
-       para el caso de un grupo recién vinculado que aún no completó su registro.
-
-    Cualquier administrador común que NO cumpla ninguna de estas tres capas
-    es rechazado. No hay excepciones ni atajos.
-    """
     if is_super_admin(user_id):
         return True
     if await is_registered_owner_db(user_id, group_id):
@@ -1037,11 +947,6 @@ async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int)
     return False
 
 def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
-    """
-    Teclado principal oficial.
-    - Maestro (is_clone=False): 7 botones, incluido ⚡ Command Center (WebApp).
-    - Clon (is_clone=True): oculta ÚNICAMENTE ⚡ Command Center.
-    """
     t = TEXTS.get(lang, TEXTS["es"])
     add_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
 
@@ -1062,7 +967,6 @@ def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str = None) -> None:
-    """Bienvenida oficial única para Maestro y Clones (fuente de verdad compartida)."""
     if not bot_username:
         bot_username = (await bot.get_me()).username or "BunkerBot"
     lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
@@ -1129,15 +1033,11 @@ def get_ultra_tools_keyboard(group_id: int, lang: str):
         [InlineKeyboardButton(text="🎥 " + ("Escudo Antinota" if lang == "es" else "Screen-Share Shield"), callback_data=f"shield_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🌟 " + ("Gestión de Speakers" if lang == "es" else "Speakers Management"), callback_data=f"speakers_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="💎 " + ("Payload Multimedia" if lang == "es" else "Multimedia Payload"), callback_data=f"payload_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
 
 def build_ultra_lock_view(group_id: int, lang: str, feature_title: str):
-    """
-    Vista de muro de pago reutilizable para cualquier submódulo ULTRA PRO
-    de este panel (Pánico / Escudo / Podcast / Speakers). Sigue el mismo
-    patrón visual que ya usan autolower, vcsched y clone en este archivo.
-    """
     t = TEXTS.get(lang, TEXTS["es"])
     lock_text = f"{feature_title}\n\n{t['ultra_lock_generic']}"
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1205,6 +1105,39 @@ def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int):
         ],
         [InlineKeyboardButton(text=t["btn_speakers_clear"], callback_data=f"speakers_clear_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+
+def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict):
+    t = TEXTS.get(lang, TEXTS["es"])
+    st = cfg.get("enabled", 0)
+    has_text = "🟢" if cfg.get("text") else "🔴"
+    has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
+    autodel = f"{cfg.get('auto_delete_after')}s" if cfg.get("auto_delete_after") else ("Desactivado" if lang == "es" else "Off")
+    st_label = f"💎 {'Payload: 🟢' if st == 1 else 'Payload: 🔴'}" if lang == "es" else f"💎 {'Payload: 🟢' if st == 1 else 'Payload: 🔴'}"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=st_label, callback_data=f"payload_toggle_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"{'✍️ Texto Personalizado' if lang == 'es' else '✍️ Custom Text'} {has_text}", callback_data=f"payload_text_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"{'🖼️ Multimedia (Foto/Anim)' if lang == 'es' else '🖼️ Media (Photo/Anim)'} {has_media}", callback_data=f"payload_media_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"{'⏱️ Auto-Borrado' if lang == 'es' else '⏱️ Auto-Delete'}: {autodel}", callback_data=f"payload_autodel_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+
+def get_tips_keyboard(group_id: int, lang: str, cfg: dict):
+    t = TEXTS.get(lang, TEXTS["es"])
+    st = cfg.get("enabled", 0)
+    amount = cfg.get("amount", 10)
+    target = cfg.get("target_channel") or ("No asignado" if lang == "es" else "Not set")
+
+    st_label = f"⭐ {'Propinas: 🟢' if st == 1 else 'Propinas: 🔴'}" if lang == "es" else f"⭐ {'Tips: 🟢' if st == 1 else 'Tips: 🔴'}"
+    amt_label = f"💰 {amount} Stars"
+    target_label = f"📢 {target[:15]}"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=st_label, callback_data=f"tips_toggle_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"{'Monto Sugerido' if lang == 'es' else 'Suggested'}: {amt_label}", callback_data=f"tips_setamount_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"{'Canal Destino' if lang == 'es' else 'Target'}: {target_label}", callback_data=f"tips_settarget_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
     ])
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
@@ -1372,14 +1305,19 @@ async def get_warns_keyboard(group_id: int, lang: str):
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
 
-async def get_delmsgs_keyboard(group_id: int, lang: str):
+async def get_delmsgs_keyboard(group_id: int, user_id: int, lang: str):
+    """
+    Control de purga con resolución de privilegios basada en usuario real (Super Admin / Dueño legítimo).
+    """
     t = TEXTS.get(lang, TEXTS["es"])
-    tier = await get_group_tier(group_id)
+    tier = await get_effective_group_tier(group_id, user_id)
     cfg = await get_captcha_config(group_id)
-    
+    srv_mode = await get_service_msgs_mode(group_id)
+
     srv_del = "🟢" if cfg["service_del"] == 1 else "🔴"
     main_chat = "🟢" if await get_antispam_delete(group_id) == 1 else "🔴"
     block_cmds = "🟢" if await get_lock_status(group_id, "lock_commands") == 1 else "🔴"
+    srv_mode_st = "🟢" if srv_mode == 1 else "🔴"
 
     if tier == "free":
         tier_text = "⭐ Tier: FREE (3 purges/day)" if lang == "en" else "⭐ Plan: BÁSICO (3 purgas/día)"
@@ -1389,6 +1327,7 @@ async def get_delmsgs_keyboard(group_id: int, lang: str):
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=tier_text, callback_data=f"delmsgs_tier_{group_id}_{lang}")],
             [InlineKeyboardButton(text=f"{'🗑️ Service Msgs' if lang == 'en' else '🗑️ Msgs de Servicio'} {srv_del}", callback_data=f"cap_set_srvdel_{group_id}_{lang}")],
+            [InlineKeyboardButton(text=f"{'🧹 Service Mode' if lang == 'en' else '🧹 Modo Servicio'} {srv_mode_st}", callback_data=f"delmsgs_srvmode_{group_id}_{lang}")],
             [
                 InlineKeyboardButton(text=pro_btn, callback_data=f"pay_pro_{group_id}_{lang}"),
                 InlineKeyboardButton(text=ultra_btn, callback_data=f"pay_ultra_{group_id}_{lang}")
@@ -1400,10 +1339,12 @@ async def get_delmsgs_keyboard(group_id: int, lang: str):
         purge_lbl = "🗑️ Purge Service Msgs" if lang == "en" else "🗑️ Purgar Mensajes de Servicio"
         main_chat_lbl = "🧹 Main Chat Cleanup" if lang == "en" else "🧹 Limpieza Chat Principal"
         cmd_block_lbl = "🛡️ Block Cmds to Regulars" if lang == "en" else "🛡️ Bloquear Cmds a Regulares"
+        srv_mode_lbl = "🧹 Service Msgs Mode" if lang == "en" else "🧹 Modo Mensajes de Servicio"
 
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=tier_text, callback_data=f"delmsgs_tier_{group_id}_{lang}")],
             [InlineKeyboardButton(text=f"{purge_lbl} {srv_del}", callback_data=f"cap_set_srvdel_{group_id}_{lang}")],
+            [InlineKeyboardButton(text=f"{srv_mode_lbl} {srv_mode_st}", callback_data=f"delmsgs_srvmode_{group_id}_{lang}")],
             [InlineKeyboardButton(text=f"{main_chat_lbl} {main_chat}", callback_data=f"delmsgs_main_{group_id}_{lang}")],
             [InlineKeyboardButton(text=f"{cmd_block_lbl} {block_cmds}", callback_data=f"delmsgs_cmds_{group_id}_{lang}")],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
@@ -1481,6 +1422,7 @@ def get_eco_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text="🎙️ /mic_vip", callback_data=f"cmd_mic_{group_id}_{lang}"),
             InlineKeyboardButton(text="🏷️ Etiqueta VIP" if lang == "es" else "🏷️ VIP Tag", callback_data=f"cmd_mictag_{group_id}_{lang}")
         ],
+        [InlineKeyboardButton(text=t["btn_tips"], callback_data=f"tips_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
 
@@ -1515,8 +1457,7 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
             disc_text = "🛑 Desconectar Centinela" if lang == "es" else "🛑 Disconnect Sentinel"
             kb.append([InlineKeyboardButton(text=disc_text, callback_data=f"clone_discsentinel_{group_id}_{lang}")])
 
-        kb.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
-        )
+        kb.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
         return InlineKeyboardMarkup(inline_keyboard=kb)
     else:
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -1542,7 +1483,6 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         except Exception as db_ex:
             logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
 
-        # Deep link para configurar grupos directamente desde el botón en comunidad
         if command.args and command.args.startswith("gset_"):
             try:
                 group_id = int(command.args.split("_")[1])
@@ -1557,7 +1497,6 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             except Exception as g_ex:
                 logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
 
-        # 👑 RESPUESTA UNIVERSAL CLON/MAESTRO (misma bienvenida; el clon oculta solo ⚡ Command Center)
         await send_official_welcome(bot, message.chat.id, message.from_user, bot_username)
         logging.info(f"✅ [cmd_start ÉXITO] Matriz completa desplegada en @{bot_username} para {message.from_user.id}.")
     except Exception as e:
@@ -1565,7 +1504,6 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery):
-    # La respuesta la emite CallbackAutoAnswerMiddleware
     return
 
 @router.message(F.chat.type == "private")
@@ -1582,14 +1520,9 @@ async def handle_private_inputs(message: Message, bot: Bot):
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t.get("btn_back_captcha", "🔙 Volver"), callback_data=f"gset_captcha_{group_id}_{lang}")]
         ])
-        await message.answer(
-            t["captcha_saved"].format(text_input=text_input),
-            reply_markup=back_kb,
-            parse_mode="HTML"
-        )
+        await message.answer(t["captcha_saved"].format(text_input=text_input), reply_markup=back_kb, parse_mode="HTML")
         return
 
-    # 🔑 CAPTURA DEL TOKEN DE BOTFATHER (CON VERIFICACIÓN API Y ACTIVACIÓN DINÁMICA)
     if (bot.id, user_id) in CLONE_STATES:
         state_data = CLONE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
@@ -1600,12 +1533,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
         if ":" in token and len(token) > 30:
             status_msg = await message.answer(t["token_verifying"], parse_mode="HTML")
-            
             test_bot = Bot(token=token)
             try:
                 bot_info = await test_bot.get_me()
                 await test_bot.session.close()
-
                 bot_username = bot_info.username or ""
 
                 old_clone = await get_bot_clone(user_id, group_id)
@@ -1616,7 +1547,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
                         pass
 
                 await register_bot_clone(user_id, group_id, token, bot_username)
-
                 try:
                     _call_clone_trigger("trigger_dynamic_clone", token)
                 except Exception:
@@ -1632,17 +1562,16 @@ async def handle_private_inputs(message: Message, bot: Bot):
                     f"• <b>Bot Clon:</b> @{bot_username}\n"
                     f"• <b>Estado:</b> Operativo 🟢\n"
                     f"• <b>Comunidad:</b> Blindada con tu propia réplica\n\n"
-                    f"<i>¡Listo! Ya puedes abrir @{bot_username} y presionar /start. Responderá con toda la interfaz de The Bunker.</i>\n\n"
+                    f"<i>¡Listo! Ya puedes abrir @{bot_username} y presionar /start.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ) if lang == "es" else (
                     f"✅ <b>Replica Instance Connected and Active!</b>\n\n"
                     f"• <b>Clone Bot:</b> @{bot_username}\n"
                     f"• <b>Status:</b> Operational 🟢\n"
                     f"• <b>Community:</b> Shielded with your own replica\n\n"
-                    f"<i>All set! You can now open @{bot_username} and press /start. It will respond with the full Bunker interface.</i>\n\n"
+                    f"<i>All set! You can now open @{bot_username} and press /start.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 )
-
                 await message.answer(success_text, reply_markup=back_kb, parse_mode="HTML")
             except Exception:
                 try:
@@ -1658,13 +1587,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await message.answer(t["token_error"], reply_markup=back_kb, parse_mode="HTML")
         return
 
-    # 📱 PASO 1: CAPTURA DE NÚMERO DE TELÉFONO PARA CENTINELA
     if (bot.id, user_id) in SENTINEL_PHONE_STATES:
         state_data = SENTINEL_PHONE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
-
         status_msg = await message.answer(t["phone_requesting"], parse_mode="HTML")
-
         res = await start_phone_auth(user_id, group_id, text_input)
         try:
             await status_msg.delete()
@@ -1676,31 +1602,20 @@ async def handle_private_inputs(message: Message, bot: Bot):
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
-            await message.answer(
-                t["phone_sent"].format(phone=res['phone']),
-                reply_markup=cancel_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["phone_sent"].format(phone=res['phone']), reply_markup=cancel_kb, parse_mode="HTML")
         else:
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
             ])
             error_reason = "Número telefónico no válido." if res.get("message") == "invalid_phone" else f"Telegram: {res.get('message')}"
-            await message.answer(
-                t["phone_error"].format(reason=error_reason),
-                reply_markup=cancel_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["phone_error"].format(reason=error_reason), reply_markup=cancel_kb, parse_mode="HTML")
         return
 
-    # 📩 PASO 2: VERIFICACIÓN DEL CÓDIGO TELEGRÁFICO
     if (bot.id, user_id) in SENTINEL_CODE_STATES:
         state_data = SENTINEL_CODE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
-
         status_msg = await message.answer(t["code_verifying"], parse_mode="HTML")
-
         res = await verify_phone_code(user_id, text_input)
         try:
             await status_msg.delete()
@@ -1718,7 +1633,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
             else:
                 await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
-
         elif res["status"] == "2fa_required":
             SENTINEL_2FA_STATES[(bot.id, user_id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1733,13 +1647,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await message.answer(t["code_invalid"], reply_markup=cancel_kb, parse_mode="HTML")
         return
 
-    # 🔐 PASO 3: VERIFICACIÓN DE CONTRASEÑA 2FA
     if (bot.id, user_id) in SENTINEL_2FA_STATES:
         state_data = SENTINEL_2FA_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
-
         status_msg = await message.answer(t["twofa_verifying"], parse_mode="HTML")
-
         res = await verify_2fa_password(user_id, text_input)
         try:
             await status_msg.delete()
@@ -1768,27 +1679,20 @@ async def handle_private_inputs(message: Message, bot: Bot):
     if (bot.id, user_id) in VC_SCHED_STATES:
         sched_data = VC_SCHED_STATES.pop((bot.id, user_id))
         group_id = sched_data["group_id"]
-        mode = sched_data["mode"]
-        
         current_sched = await get_vc_schedule(group_id)
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"vcsched_menu_{group_id}_{lang}")]
         ])
 
-        if mode == "times":
-            if "-" in text_input and len(text_input.split("-")) == 2:
-                parts = text_input.split("-")
-                start = parts[0].strip()
-                end = parts[1].strip()
-                await set_vc_schedule(group_id, current_sched["days"], start, end, current_sched["status"])
-                await message.answer(
-                    t["sched_updated"].format(start=start, end=end),
-                    reply_markup=back_kb,
-                    parse_mode="HTML"
-                )
-            else:
-                await message.answer(t["sched_err"], reply_markup=back_kb, parse_mode="HTML")
-            return
+        if "-" in text_input and len(text_input.split("-")) == 2:
+            parts = text_input.split("-")
+            start = parts[0].strip()
+            end = parts[1].strip()
+            await set_vc_schedule(group_id, current_sched["days"], start, end, current_sched["status"])
+            await message.answer(t["sched_updated"].format(start=start, end=end), reply_markup=back_kb, parse_mode="HTML")
+        else:
+            await message.answer(t["sched_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
 
     if (bot.id, user_id) in DB_REG_STATES:
         data = DB_REG_STATES.pop((bot.id, user_id))
@@ -1808,24 +1712,15 @@ async def handle_private_inputs(message: Message, bot: Bot):
                     target_id = c.id
                 except Exception:
                     target_id = None
-            
             if target_id:
                 await add_to_whitelist(target_id)
-                await message.answer(
-                    t["wl_success"].format(target_id=target_id),
-                    reply_markup=back_kb,
-                    parse_mode="HTML"
-                )
+                await message.answer(t["wl_success"].format(target_id=target_id), reply_markup=back_kb, parse_mode="HTML")
             else:
                 await message.answer(t["id_err"], reply_markup=back_kb, parse_mode="HTML")
         else:
             word = text_input.lower()
             await add_to_blacklist(word)
-            await message.answer(
-                t["bl_success"].format(word=word),
-                reply_markup=back_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["bl_success"].format(word=word), reply_markup=back_kb, parse_mode="HTML")
         return
 
     if (bot.id, user_id) in MOD_TARGET_STATES:
@@ -1834,7 +1729,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         group_id = st["group_id"]
         duration = st["duration"]
         dur_label = st["dur_label"]
-
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_mod"], callback_data=f"menu_mod_{group_id}_{lang}")]
         ])
@@ -1857,36 +1751,22 @@ async def handle_private_inputs(message: Message, bot: Bot):
             if action == "ban":
                 until = int(time.time() + duration) if duration > 0 else 0
                 await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=until if until > 0 else None)
-                await message.answer(
-                    t["dir_ban"].format(target_id=target_id, dur_label=dur_label),
-                    reply_markup=back_kb,
-                    parse_mode="HTML"
-                )
+                await message.answer(t["dir_ban"].format(target_id=target_id, dur_label=dur_label), reply_markup=back_kb, parse_mode="HTML")
             elif action == "kick":
                 await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
                 await bot.unban_chat_member(chat_id=group_id, user_id=target_id)
-                await message.answer(
-                    t["dir_kick"].format(target_id=target_id),
-                    reply_markup=back_kb,
-                    parse_mode="HTML"
-                )
+                await message.answer(t["dir_kick"].format(target_id=target_id), reply_markup=back_kb, parse_mode="HTML")
             elif action == "mute":
                 until = int(time.time() + duration) if duration > 0 else 0
                 await bot.restrict_chat_member(
-                    chat_id=group_id,
-                    user_id=target_id,
+                    chat_id=group_id, user_id=target_id,
                     permissions=ChatPermissions(can_send_messages=False),
                     until_date=until if until > 0 else None
                 )
-                await message.answer(
-                    t["dir_mute"].format(target_id=target_id, dur_label=dur_label),
-                    reply_markup=back_kb,
-                    parse_mode="HTML"
-                )
+                await message.answer(t["dir_mute"].format(target_id=target_id, dur_label=dur_label), reply_markup=back_kb, parse_mode="HTML")
             elif action == "unmute":
                 await bot.restrict_chat_member(
-                    chat_id=group_id,
-                    user_id=target_id,
+                    chat_id=group_id, user_id=target_id,
                     permissions=ChatPermissions(
                         can_send_messages=True, can_send_audios=True, can_send_documents=True,
                         can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -1894,11 +1774,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                         can_add_web_page_previews=True
                     )
                 )
-                await message.answer(
-                    t["dir_unmute"].format(target_id=target_id),
-                    reply_markup=back_kb,
-                    parse_mode="HTML"
-                )
+                await message.answer(t["dir_unmute"].format(target_id=target_id), reply_markup=back_kb, parse_mode="HTML")
         except Exception as ex:
             await message.answer(t["dir_err"].format(ex=ex), reply_markup=back_kb, parse_mode="HTML")
         return
@@ -1912,11 +1788,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if text_input.isdigit() and int(text_input) > 0:
             price_val = int(text_input)
             GROUP_MIC_PRICE[group_id] = price_val
-            await message.answer(
-                t["mic_updated"].format(group_id=group_id, price_val=price_val),
-                reply_markup=back_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["mic_updated"].format(group_id=group_id, price_val=price_val), reply_markup=back_kb, parse_mode="HTML")
         else:
             await message.answer(t["mic_err"], reply_markup=back_kb, parse_mode="HTML")
         return
@@ -1927,14 +1799,9 @@ async def handle_private_inputs(message: Message, bot: Bot):
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
         ])
-        
         if 1 <= len(text_input) <= 16:
             GROUP_VIP_TAG[group_id] = text_input
-            await message.answer(
-                t["tag_updated"].format(group_id=group_id, text_input=text_input),
-                reply_markup=back_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["tag_updated"].format(group_id=group_id, text_input=text_input), reply_markup=back_kb, parse_mode="HTML")
         else:
             await message.answer(t["tag_err"], reply_markup=back_kb, parse_mode="HTML")
         return
@@ -1950,11 +1817,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             GROUP_DUCK_LEVEL[group_id] = duck_level
             await disengage_podcast_ducking(group_id)
             await engage_podcast_ducking(group_id, duck_level)
-            await message.answer(
-                t["duck_updated"].format(group_id=group_id, duck_level=duck_level),
-                reply_markup=back_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["duck_updated"].format(group_id=group_id, duck_level=duck_level), reply_markup=back_kb, parse_mode="HTML")
         else:
             await message.answer(t["duck_err"], reply_markup=back_kb, parse_mode="HTML")
         return
@@ -1968,18 +1831,107 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if text_input.isdigit() and int(text_input) > 0:
             price_val = int(text_input)
             GROUP_SPEAKER_PRICE[group_id] = price_val
-            await message.answer(
-                t["speakers_price_updated"].format(group_id=group_id, price=price_val),
-                reply_markup=back_kb,
-                parse_mode="HTML"
-            )
+            await message.answer(t["speakers_price_updated"].format(group_id=group_id, price=price_val), reply_markup=back_kb, parse_mode="HTML")
         else:
             await message.answer(t["speakers_price_err"], reply_markup=back_kb, parse_mode="HTML")
         return
 
-@router.callback_query(F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") | F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") | F.data.startswith("reg_") | F.data.startswith("vcsched_"))
+    # --- MODALES DE PROPINAS / TIPS EN STARS ---
+    if (bot.id, user_id) in TIPS_AMOUNT_STATES:
+        st_data = TIPS_AMOUNT_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"tips_menu_{group_id}_{lang}")]
+        ])
+        if text_input.isdigit() and int(text_input) > 0:
+            await set_tips_config(group_id, "tips_amount", int(text_input))
+            await message.answer(t["tips_updated"], reply_markup=back_kb, parse_mode="HTML")
+        else:
+            await message.answer(t["tips_amount_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
+    if (bot.id, user_id) in TIPS_TARGET_STATES:
+        st_data = TIPS_TARGET_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"tips_menu_{group_id}_{lang}")]
+        ])
+        if text_input:
+            await set_tips_config(group_id, "tips_target_channel", text_input)
+            await message.answer(t["tips_updated"], reply_markup=back_kb, parse_mode="HTML")
+        else:
+            await message.answer(t["tips_target_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
+    # --- MODALES DEL PAYLOAD MULTIMEDIA CENTINELA ---
+    if (bot.id, user_id) in SENTINEL_PAYLOAD_TEXT_STATES:
+        st_data = SENTINEL_PAYLOAD_TEXT_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"payload_menu_{group_id}_{lang}")]
+        ])
+        await set_sentinel_payload_config(group_id, "sentinel_payload_text", text_input)
+        await message.answer(t["sentinel_payload_saved"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
+    if (bot.id, user_id) in SENTINEL_PAYLOAD_AUTODEL_STATES:
+        st_data = SENTINEL_PAYLOAD_AUTODEL_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"payload_menu_{group_id}_{lang}")]
+        ])
+        if text_input.isdigit() and int(text_input) >= 0:
+            val = int(text_input)
+            await set_sentinel_payload_config(group_id, "sentinel_payload_auto_delete", val if val > 0 else None)
+            await message.answer(t["sentinel_payload_saved"], reply_markup=back_kb, parse_mode="HTML")
+        else:
+            await message.answer(t["sentinel_payload_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
+    if (bot.id, user_id) in SENTINEL_PAYLOAD_MEDIA_STATES:
+        st_data = SENTINEL_PAYLOAD_MEDIA_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"payload_menu_{group_id}_{lang}")]
+        ])
+
+        media_id = None
+        media_type = None
+
+        if message.photo:
+            media_id = message.photo[-1].file_id
+            media_type = "photo"
+        elif message.animation:
+            media_id = message.animation.file_id
+            media_type = "animation"
+        elif message.video:
+            media_id = message.video.file_id
+            media_type = "video"
+
+        if media_id and media_type:
+            await set_sentinel_payload_config(group_id, "sentinel_payload_media_id", media_id)
+            await set_sentinel_payload_config(group_id, "sentinel_payload_media_type", media_type)
+            await message.answer(t["sentinel_payload_saved"], reply_markup=back_kb, parse_mode="HTML")
+        else:
+            await message.answer(t["sentinel_payload_err"], reply_markup=back_kb, parse_mode="HTML")
+        return
+
+
+@router.callback_query(
+    F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | 
+    F.data.startswith("gpanel_") | F.data.startswith("cmd_") | F.data.startswith("pay_") | 
+    F.data.startswith("time_") | F.data.startswith("clone_") | F.data.startswith("alset_") | 
+    F.data.startswith("micval_") | F.data.startswith("reg_") | F.data.startswith("vcsched_") |
+    F.data.startswith("tips_")
+)
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
-    for state_dict in [CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES, PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES]:
+    for state_dict in [
+        CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, 
+        SENTINEL_2FA_STATES, VC_SCHED_STATES, DB_REG_STATES, MOD_TARGET_STATES, 
+        MIC_VIP_STATES, MIC_TAG_STATES, PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES,
+        TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, SENTINEL_PAYLOAD_TEXT_STATES,
+        SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES
+    ]:
         state_dict.pop((bot.id, callback.from_user.id), None)
     await cancel_phone_auth(callback.from_user.id)
 
@@ -2052,7 +2004,40 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 g_name = "Comunidad" if lang == "es" else "Community"
             text = t["ultra_tools_main"].format(group_name=g_name)
             keyboard = get_ultra_tools_keyboard(group_id, lang)
-            
+
+    elif action == "tips":
+        sub = data[1]
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        cfg = await get_tips_config(group_id)
+        if sub == "menu":
+            st_badge = "🟢 ACTIVADAS" if cfg.get("enabled") == 1 else "🔴 DESACTIVADAS"
+            if lang == "en":
+                st_badge = "🟢 ACTIVE" if cfg.get("enabled") == 1 else "🔴 DISABLED"
+            target_str = cfg.get("target_channel") or ("No configurado" if lang == "es" else "Not set")
+            text = t["tips_main"].format(st_badge=st_badge, amount=cfg.get("amount", 10), target=target_str)
+            keyboard = get_tips_keyboard(group_id, lang, cfg)
+        elif sub == "toggle":
+            new_st = 0 if cfg.get("enabled") == 1 else 1
+            await set_tips_config(group_id, "tips_enabled", new_st)
+            cfg = await get_tips_config(group_id)
+            st_badge = "🟢 ACTIVADAS" if cfg.get("enabled") == 1 else "🔴 DESACTIVADAS"
+            if lang == "en":
+                st_badge = "🟢 ACTIVE" if cfg.get("enabled") == 1 else "🔴 DISABLED"
+            target_str = cfg.get("target_channel") or ("No configurado" if lang == "es" else "Not set")
+            text = t["tips_main"].format(st_badge=st_badge, amount=cfg.get("amount", 10), target=target_str)
+            keyboard = get_tips_keyboard(group_id, lang, cfg)
+        elif sub == "setamount":
+            TIPS_AMOUNT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["tips_prompt_amount"], parse_mode="HTML")
+            return
+        elif sub == "settarget":
+            TIPS_TARGET_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["tips_prompt_target"], parse_mode="HTML")
+            return
+
     elif action == "pay":
         tier_level = data[1]
         group_id = int(data[2])
@@ -2075,12 +2060,12 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if tier != "ultra_pro":
             sched_lock_text = (
                 "🗓️ <b>Programador Automático de Videochats (ULTRA PRO)</b>\n\n"
-                "Apertura y cierre automático de tus transmisiones según los días y horas que elijas, con optimización continua en segundo plano para evitar cámaras congeladas.\n\n"
-                "🔒 <i>Esta función es de automatización avanzada y está disponible exclusivamente en el nivel ULTRA PRO.</i>\n\n"
+                "Apertura y cierre automático de tus transmisiones según cronograma.\n\n"
+                "🔒 <i>Esta función es exclusiva del nivel ULTRA PRO.</i>\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 "🗓️ <b>Automated VC Scheduler (ULTRA PRO)</b>\n\n"
-                "Automated opening and closing of your community live streams on the days and hours you set, including continuous background refresh to prevent frozen camera feeds.\n\n"
+                "Automated opening and closing of your community live streams.\n\n"
                 "🔒 <i>This automated module is exclusively unlocked at the ULTRA PRO tier.</i>\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             )
@@ -2106,14 +2091,13 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 st_badge = "🟢 ACTIVE" if sched["status"] == 1 else "🔴 DISABLED"
 
             text = t["vcsched_main"].format(st_badge=st_badge, days=sched['days'], start=sched['start_time'], end=sched['end_time'])
-            
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_sched_off"] if sched["status"] == 1 else t["btn_sched_on"], callback_data=f"vcsched_toggle_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_sched_mod"], callback_data=f"vcsched_timeprompt_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
         elif sub == "timeprompt":
-            VC_SCHED_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang, "mode": "times"}
+            VC_SCHED_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             await callback.message.answer(t["vcsched_prompt"], parse_mode="HTML")
             return
 
@@ -2123,21 +2107,16 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if not await verify_admin_privileges(callback, bot, group_id):
             return
 
-        # 🔒 Blindaje por licencia: Clonación de Bot y Centinela Dedicado son
-        # exclusivos ULTRA PRO. El teclado ya oculta estos botones para Free/PRO,
-        # pero se revalida aquí para no depender únicamente de la UI.
         if sub in ("token", "phone"):
             tier = await get_effective_group_tier(group_id, callback.from_user.id)
             if tier != "ultra_pro":
                 clone_lock_text = (
                     "🧬 <b>Clonación de Bot & Centinela Dedicado (ULTRA PRO)</b>\n\n"
-                    "Desplegar tu propio Bot Clon bajo token de @BotFather y vincular un Centinela Dedicado vía número de teléfono son capacidades exclusivas del nivel ULTRA PRO.\n\n"
-                    "🔒 <i>Actualiza tu licencia para desbloquear infraestructura aislada, blindaje antiban y monetización directa en Stars.</i>\n\n"
+                    "Desplegar tu propio Bot Clon y vincular un Centinela vía teléfono son capacidades exclusivas de ULTRA PRO.\n\n"
                     "🛡️ <i>Cloud Media Management</i>"
                 ) if lang == "es" else (
                     "🧬 <b>Bot Cloning & Dedicated Sentinel (ULTRA PRO)</b>\n\n"
-                    "Deploying your own Bot Clone under a @BotFather token and linking a Dedicated Sentinel via phone number are exclusive ULTRA PRO capabilities.\n\n"
-                    "🔒 <i>Upgrade your license to unlock isolated infrastructure, anti-ban protection, and direct Stars monetization.</i>\n\n"
+                    "Deploying your own Bot Clone and linking a Dedicated Sentinel are exclusive ULTRA PRO capabilities.\n\n"
                     "🛡️ <i>Cloud Media Management</i>"
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2157,7 +2136,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             ])
             await callback.message.answer(t["botfather_guide"], reply_markup=cancel_kb, parse_mode="HTML")
             return
-
         elif sub == "phone":
             SENTINEL_PHONE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -2165,13 +2143,11 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             ])
             await callback.message.answer(t["sentinel_phone_guide"], reply_markup=cancel_kb, parse_mode="HTML")
             return
-
         elif sub == "cancel":
             for d in [CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES]:
                 d.pop((bot.id, callback.from_user.id), None)
             await cancel_phone_auth(callback.from_user.id)
             await callback.answer(t["op_canceled"], show_alert=False)
-
             tier = await get_effective_group_tier(group_id, callback.from_user.id)
             try:
                 g_name = (await bot.get_chat(group_id)).title
@@ -2180,24 +2156,11 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
-
-            if tier == "ultra_pro":
-                if has_clone:
-                    c_user = f"@{clone_info[1]}" if clone_info[1] else ""
-                    status = f"Operativo ({c_user}) 🟢" if lang == "es" else f"Operational ({c_user}) 🟢"
-                else:
-                    status = "No Configurado 🔴" if lang == "es" else "Not Configured 🔴"
-            else:
-                status = "Bloqueado 🔴" if lang == "es" else "Locked 🔴"
-            
+            status = f"Operativo 🟢" if has_clone else "No Configurado 🔴"
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
-            if lang == "en":
-                sentinel_status = "Connected 🟢" if session_info else "Not Configured 🔴"
-            
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
-
         elif sub == "discbot":
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             if clone_info and clone_info[0]:
@@ -2205,47 +2168,30 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                     _call_clone_trigger("trigger_disconnect_clone", clone_info[0])
                 except Exception:
                     pass
-
             await revoke_bot_clone_db(callback.from_user.id, group_id)
             await callback.answer(t["clone_disc"], show_alert=True)
-
             tier = await get_effective_group_tier(group_id, callback.from_user.id)
             try:
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
                 g_name = "Comunidad" if lang == "es" else "Community"
-            status = "Desconectado 🔴" if lang == "es" else "Disconnected 🔴"
-
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
-            if lang == "en":
-                sentinel_status = "Connected 🟢" if session_info else "Not Configured 🔴"
-
-            text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
+            text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status="Desconectado 🔴", sentinel_status=sentinel_status)
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
-
         elif sub == "discsentinel":
             await disconnect_sentinel(group_id)
             await revoke_owner_session(callback.from_user.id, group_id)
             await callback.answer(t["sentinel_disc"], show_alert=True)
-            
             tier = await get_effective_group_tier(group_id, callback.from_user.id)
             try:
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
                 g_name = "Comunidad" if lang == "es" else "Community"
-            
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
-            if has_clone:
-                c_user = f"@{clone_info[1]}" if clone_info[1] else ""
-                status = f"Operativo ({c_user}) 🟢" if lang == "es" else f"Operational ({c_user}) 🟢"
-            else:
-                status = "No Configurado 🔴" if lang == "es" else "Not Configured 🔴"
-
-            sentinel_status = "Desconectado 🔴" if lang == "es" else "Disconnected 🔴"
-            
-            text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
+            status = "Operativo 🟢" if has_clone else "No Configurado 🔴"
+            text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status="Desconectado 🔴")
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
 
     elif action == "cmd":
@@ -2276,12 +2222,10 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             if tier != "ultra_pro":
                 al_lock_text = (
                     "🔇 <b>Radar de Transmisiones / AutoLower (ULTRA PRO)</b>\n\n"
-                    "La atenuación acústica automática de micrófonos no autorizados durante las transmisiones en vivo es una capacidad avanzada del Centinela.\n\n"
                     "🔒 <i>Este módulo de radar está disponible exclusivamente en el nivel ULTRA PRO.</i>\n\n"
                     "🛡️ <i>Cloud Media Management</i>"
                 ) if lang == "es" else (
                     "🔇 <b>Stream Radar / AutoLower (ULTRA PRO)</b>\n\n"
-                    "Automatic acoustic dimming of unauthorized microphones during live voice chats is an advanced Sentinel capability.\n\n"
                     "🔒 <i>This radar module is available exclusively at the ULTRA PRO tier.</i>\n\n"
                     "🛡️ <i>Cloud Media Management</i>"
                 )
@@ -2320,9 +2264,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                     InlineKeyboardButton(text="⭐ 100 Stars", callback_data=f"micval_100_{group_id}_{lang}"),
                     InlineKeyboardButton(text=t["btn_custom_rate"], callback_data=f"micval_custom_{group_id}_{lang}")
                 ],
-                [
-                    InlineKeyboardButton(text=t["btn_mictag"].format(curr_tag=curr_tag), callback_data=f"cmd_mictag_{group_id}_{lang}")
-                ],
+                [InlineKeyboardButton(text=t["btn_mictag"].format(curr_tag=curr_tag), callback_data=f"cmd_mictag_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
         elif sub_cmd == "mictag":
@@ -2330,7 +2272,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             if tier != "ultra_pro":
                 await callback.answer(t["tag_pro_req"], show_alert=True)
                 return
-            
             MIC_TAG_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
             await callback.message.answer(t["tag_menu_prompt"].format(curr_tag=curr_tag), parse_mode="HTML")
@@ -2363,17 +2304,12 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
         tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
-            await callback.answer(
-                "🔒 El Radar AutoLower requiere licencia ULTRA PRO." if lang == "es" else "🔒 AutoLower Radar requires the ULTRA PRO license.",
-                show_alert=True
-            )
+            await callback.answer("🔒 Requiere ULTRA PRO.", show_alert=True)
             return
         await set_autolower_status(group_id, new_st)
         await callback.answer(t["al_updated_1"] if new_st == 1 else t["al_updated_0"])
         curr_al = await get_autolower_status(group_id)
         status_str = "🟢 ACTIVADO (2% para no autorizados)" if curr_al == 1 else "🔴 DESACTIVADO (Micrófonos Libres)"
-        if lang == "en":
-            status_str = "🟢 ACTIVE (2% for unauthorized)" if curr_al == 1 else "🔴 DISABLED (Free Mics)"
         text = t["al_menu"].format(status_str=status_str)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [
@@ -2407,9 +2343,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                     InlineKeyboardButton(text="⭐ 100 Stars", callback_data=f"micval_100_{group_id}_{lang}"),
                     InlineKeyboardButton(text=t["btn_custom_rate"], callback_data=f"micval_custom_{group_id}_{lang}")
                 ],
-                [
-                    InlineKeyboardButton(text=t["btn_mictag"].format(curr_tag=curr_tag), callback_data=f"cmd_mictag_{group_id}_{lang}")
-                ],
+                [InlineKeyboardButton(text=t["btn_mictag"].format(curr_tag=curr_tag), callback_data=f"cmd_mictag_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
 
@@ -2457,6 +2391,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 pass
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
+
 @router.callback_query(
     F.data.startswith("gset_") | F.data.startswith("astog_") | F.data.startswith("as_") | 
     F.data.startswith("togcap_") | F.data.startswith("togmode_") | F.data.startswith("cap_set_") | 
@@ -2468,15 +2403,6 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
     action = data[0]
 
-    # 🩹 FIX: los prefijos de un solo token (gset, astog, togcap, capval, afset...)
-    # quedan correctamente aislados en data[0]. Pero "cap_set_*" es un prefijo
-    # COMPUESTO por dos tokens ("cap" + "set"): con action = data[0], quedaba
-    # reducido a "cap" y el `elif action == "cap_set":` de más abajo nunca
-    # coincidía, dejando mudos los sub-botones de tiempo límite, castigo,
-    # mensaje personalizado y borrado de servicio del Captcha. Se normaliza
-    # aquí, antes de cualquier despacho, para que el resto de los índices
-    # (data[1]=="set", data[2]==sub, data[-2]==group_id, data[-1]==lang) seguidos
-    # más abajo permanezcan exactamente iguales a como ya estaban escritos.
     if callback.data.startswith("cap_set_"):
         action = "cap_set"
 
@@ -2547,7 +2473,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 
             await callback.message.edit_text(
                 t["delmsgs_main_title"].format(tier_display=tier_display, quota_desc=quota_desc),
-                reply_markup=await get_delmsgs_keyboard(group_id, lang),
+                reply_markup=await get_delmsgs_keyboard(group_id, callback.from_user.id, lang),
                 parse_mode="HTML"
             )
         elif module == "antispam": 
@@ -2573,20 +2499,9 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
-
-            if tier == "ultra_pro":
-                if has_clone:
-                    c_user = f"@{clone_info[1]}" if clone_info[1] else ""
-                    status = f"Operativo ({c_user}) 🟢" if lang == "es" else f"Operational ({c_user}) 🟢"
-                else:
-                    status = "No Configurado 🔴" if lang == "es" else "Not Configured 🔴"
-            else:
-                status = "Bloqueado 🔴" if lang == "es" else "Locked 🔴"
-            
+            status = f"Operativo 🟢" if has_clone else "No Configurado 🔴"
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
-            if lang == "en":
-                sentinel_status = "Connected 🟢" if session_info else "Not Configured 🔴"
             
             await callback.message.edit_text(
                 t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status),
@@ -2637,6 +2552,9 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 info = "ℹ️ Free Tier: 3 daily purges limit." if tier == "free" else f"⭐ Tier {tier.upper()}: Automated monthly quota."
             await callback.answer(info, show_alert=True)
             return
+        elif sub == "srvmode":
+            current_srv = await get_service_msgs_mode(group_id)
+            await set_service_msgs_mode(group_id, 0 if current_srv == 1 else 1)
         elif sub == "main":
             if tier == "free":
                 err_msg = "⚠️ La limpieza del chat principal requiere nivel PRO o ULTRA." if lang == "es" else "⚠️ Main chat cleanup requires PRO or ULTRA tier."
@@ -2653,7 +2571,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             await set_lock_status(group_id, "lock_commands", 0 if current_cmd == 1 else 1)
         
         try:
-            await callback.message.edit_reply_markup(reply_markup=await get_delmsgs_keyboard(group_id, lang))
+            await callback.message.edit_reply_markup(reply_markup=await get_delmsgs_keyboard(group_id, callback.from_user.id, lang))
         except TelegramBadRequest:
             pass
 
@@ -2662,7 +2580,6 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         lock_key = f"lock_{lock_type}"
         current = await get_lock_status(group_id, lock_key)
         await set_lock_status(group_id, lock_key, 0 if current == 1 else 1)
-
         media_lbl = "Bloqueado 🟢" if lang == "es" else "Locked 🟢"
         media_free = "Permitido 🔴" if lang == "es" else "Allowed 🔴"
         media = media_lbl if await get_lock_status(group_id, "lock_media") == 1 else media_free
@@ -2724,7 +2641,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     elif action == "cap_set":
         sub = data[2]
         if sub == "time":
-            prompt = "⏱️ <b>Configuración de Tiempo Límite</b>\n\nSelecciona el tiempo máximo que tiene el recluta para resolver el desafío:" if lang == "es" else "⏱️ <b>Time Limit Configuration</b>\n\nSelect the maximum time the recruit has to solve the challenge:"
+            prompt = "⏱️ <b>Configuración de Tiempo Límite</b>" if lang == "es" else "⏱️ <b>Time Limit Configuration</b>"
             await callback.message.edit_text(prompt, reply_markup=get_captcha_time_keyboard(group_id, lang), parse_mode="HTML")
         elif sub == "action":
             cfg = await get_captcha_config(group_id)
@@ -2738,13 +2655,11 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             if tier_check not in ["pro", "ultra_pro"]:
                 upsell_text = (
                     "⭐ <b>Aduana Captcha Pro — Mensaje Personalizado</b>\n\n"
-                    "Personalizar el mensaje de bienvenida y las instrucciones de la aduana alfanumérica requiere el nivel <b>PRO</b> o <b>ULTRA PRO</b>.\n\n"
-                    "<i>¡Haz que tus nuevos miembros lean tus propias reglas, bienvenida y enlaces desde el primer contacto!</i>\n\n"
+                    "Personalizar el mensaje requiere nivel PRO o ULTRA PRO.\n\n"
                     "🛡️ <i>Cloud Media Management</i>"
                 ) if lang == "es" else (
                     "⭐ <b>Captcha Pro — Custom Welcome Message</b>\n\n"
-                    "Customizing the welcome copy and challenge instructions requires the <b>PRO</b> or <b>ULTRA PRO</b> tier.\n\n"
-                    "<i>Greet your recruits with your own custom branding, community rules, and verified links!</i>\n\n"
+                    "Customizing the welcome copy requires the PRO or ULTRA PRO tier.\n\n"
                     "🛡️ <i>Cloud Media Management</i>"
                 )
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -2761,7 +2676,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 return
 
             CAPTCHA_STATES[(bot.id, callback.from_user.id)] = group_id
-            prompt = "✍️ <b>Editor de Captcha — Mensaje Personalizado</b>\n\nEnvía en este chat privado el mensaje que se enviará al usuario al ingresar.\n\n🛡️ <i>Cloud Media Management</i>" if lang == "es" else "✍️ <b>Captcha Editor — Custom Message</b>\n\nSend in this private chat the message that will be sent to the user upon joining.\n\n🛡️ <i>Cloud Media Management</i>"
+            prompt = "✍️ <b>Editor de Captcha — Mensaje Personalizado</b>\n\nEnvía el mensaje que recibirá el usuario al ingresar:\n\n🛡️ <i>Cloud Media Management</i>"
             await callback.message.answer(prompt, parse_mode="HTML")
         elif sub == "srvdel":
             cfg = await get_captcha_config(group_id)
@@ -2776,7 +2691,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 try:
                     await callback.message.edit_text(
                         t["delmsgs_main_title"].format(tier_display=tier.upper(), quota_desc=quota_desc),
-                        reply_markup=await get_delmsgs_keyboard(group_id, lang),
+                        reply_markup=await get_delmsgs_keyboard(group_id, callback.from_user.id, lang),
                         parse_mode="HTML"
                     )
                 except TelegramBadRequest:
@@ -2815,9 +2730,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 
     elif action == "afset": 
         sub_mode = data[1]
-        prompt = f"<b>{t['af_msgs']}</b>\nSelecciona el límite numérico:" if lang == "es" else f"<b>{t['af_msgs']}</b>\nSelect the numerical limit:"
-        if sub_mode != "msgs":
-            prompt = f"<b>{t['af_time']}</b>\nSelecciona la ventana en segundos:" if lang == "es" else f"<b>{t['af_time']}</b>\nSelect the window in seconds:"
+        prompt = f"<b>{t['af_msgs']}</b>\nSelecciona el límite:" if lang == "es" else f"<b>{t['af_msgs']}</b>\nSelect the limit:"
         await callback.message.edit_text(prompt, reply_markup=get_antiflood_number_keyboard(group_id, lang, sub_mode), parse_mode="HTML")
 
     elif action == "afval":
@@ -2848,26 +2761,26 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             parse_mode="HTML"
         )
 
+
 # ==========================================
 # 💎 ULTRA PRO — HERRAMIENTAS DE ÉLITE
-# (Botón de Pánico, Escudo Antinota, Modo Podcast/Ducking, Cola de Speakers)
-#
-# Dispatcher independiente, igual en espíritu al de "gset_/astog_/..." más
-# arriba: aislado del árbol principal de process_menu_navigation para no
-# tocar su regex ni su lógica y así blindar los menús ya existentes
-# (Captcha, Cerraduras, Antispam, etc.) contra cualquier regresión.
+# (Botón de Pánico, Escudo Antinota, Modo Podcast, Speakers y Payload Multimedia)
 # ==========================================
 @router.callback_query(
     F.data.startswith("panic_") | F.data.startswith("shield_") |
-    F.data.startswith("podcast_") | F.data.startswith("speakers_")
+    F.data.startswith("podcast_") | F.data.startswith("speakers_") |
+    F.data.startswith("payload_")
 )
 async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
-    for state_dict in [PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES]:
+    for state_dict in [
+        PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES,
+        SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES
+    ]:
         state_dict.pop((bot.id, callback.from_user.id), None)
 
     data = callback.data.split("_")
-    module = data[0]           # panic | shield | podcast | speakers
-    sub = data[1]               # menu | toggle | confirm | activate | ...
+    module = data[0]
+    sub = data[1]
     lang = data[-1] if data[-1] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
 
@@ -2875,7 +2788,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
     keyboard = None
 
     # ------------------------------------------------------------
-    # 🚨 BOTÓN DE PÁNICO / RAID LOCKDOWN
+    # 🚨 BOTÓN DE PÁNICO
     # ------------------------------------------------------------
     if module == "panic":
         group_id = int(data[2])
@@ -2914,7 +2827,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             keyboard = get_panic_keyboard(group_id, lang, 0)
 
     # ------------------------------------------------------------
-    # 🎥 ESCUDO ANTINOTA / SCREEN-SHARING SHIELD
+    # 🎥 ESCUDO ANTINOTA
     # ------------------------------------------------------------
     elif module == "shield":
         if sub == "toggle":
@@ -2996,7 +2909,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                     await disengage_podcast_ducking(group_id)
                     await engage_podcast_ducking(group_id, duck_level)
                 except Exception as ex:
-                    logging.error(f"❌ [Podcast] Fallo al actualizar el ducking en {group_id}: {ex}")
+                    logging.error(f"❌ [Podcast] Fallo al actualizar ducking en {group_id}: {ex}")
             await callback.answer(t["duck_updated"].format(group_id=group_id, duck_level=duck_level), show_alert=True)
             status_str = ("🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO") if lang == "es" else ("🟢 ACTIVE" if status == 1 else "🔴 DISABLED")
             text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
@@ -3061,6 +2974,54 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             status_str = "🟢 ACTIVA" if lang == "es" else "🟢 ACTIVE"
             text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=0)
             keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+
+    # ------------------------------------------------------------
+    # 💎 PAYLOAD MULTIMEDIA DEL CENTINELA (ULTRA PRO)
+    # ------------------------------------------------------------
+    elif module == "payload":
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = "💎 <b>Payload Multimedia del Centinela</b>" if lang == "es" else "💎 <b>Sentinel Multimedia Payload</b>"
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title)
+        elif sub == "menu":
+            cfg = await get_sentinel_payload_config(group_id)
+            st_badge = "🟢 ACTIVADO" if cfg.get("enabled") == 1 else "🔴 DESACTIVADO"
+            if lang == "en":
+                st_badge = "🟢 ACTIVE" if cfg.get("enabled") == 1 else "🔴 DISABLED"
+            has_text = "🟢" if cfg.get("text") else "🔴"
+            has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
+            autodel = f"{cfg.get('auto_delete_after')}s" if cfg.get("auto_delete_after") else ("Desactivado" if lang == "es" else "Off")
+            text = t["sentinel_payload_main"].format(st_badge=st_badge, has_text=has_text, has_media=has_media, autodel=autodel)
+            keyboard = get_sentinel_payload_keyboard(group_id, lang, cfg)
+        elif sub == "toggle":
+            cfg = await get_sentinel_payload_config(group_id)
+            new_st = 0 if cfg.get("enabled") == 1 else 1
+            await set_sentinel_payload_config(group_id, "sentinel_payload_enabled", new_st)
+            cfg = await get_sentinel_payload_config(group_id)
+            st_badge = "🟢 ACTIVADO" if cfg.get("enabled") == 1 else "🔴 DESACTIVADO"
+            if lang == "en":
+                st_badge = "🟢 ACTIVE" if cfg.get("enabled") == 1 else "🔴 DISABLED"
+            has_text = "🟢" if cfg.get("text") else "🔴"
+            has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
+            autodel = f"{cfg.get('auto_delete_after')}s" if cfg.get("auto_delete_after") else ("Desactivado" if lang == "es" else "Off")
+            text = t["sentinel_payload_main"].format(st_badge=st_badge, has_text=has_text, has_media=has_media, autodel=autodel)
+            keyboard = get_sentinel_payload_keyboard(group_id, lang, cfg)
+        elif sub == "text":
+            SENTINEL_PAYLOAD_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["sentinel_payload_prompt_text"], parse_mode="HTML")
+            return
+        elif sub == "media":
+            SENTINEL_PAYLOAD_MEDIA_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["sentinel_payload_prompt_media"], parse_mode="HTML")
+            return
+        elif sub == "autodel":
+            SENTINEL_PAYLOAD_AUTODEL_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            await callback.message.answer(t["sentinel_payload_prompt_del"], parse_mode="HTML")
+            return
 
     if text and keyboard:
         try:
