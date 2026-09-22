@@ -255,6 +255,51 @@ TEXTS = {
             "4️⃣ <b>Dedicated Sentinel:</b> Connect secondary phone for 24/7 autonomous audio control.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
+        "info_mod_groups": (
+            "🛡️ <b>Groups & Perimeter — Operations Guide</b>\n\n"
+            "🔐 <b>Captcha Customs Pro:</b> Every new member faces a private DM challenge before "
+            "gaining access to the group. The challenge carries a countdown timer — if the member fails "
+            "to respond or answers incorrectly, they are automatically removed at the door, keeping bots "
+            "and raiders out before they ever touch the community.\n\n"
+            "🔒 <b>Granular Locks:</b> Independent switches let you restrict, per category, what regular "
+            "members can post: Media (photos/videos), Links, Stickers & GIFs, and Bot Commands. Each toggle "
+            "applies instantly and does not affect admins.\n\n"
+            "🚫 <b>Anti-Spam Shield:</b> Continuously scans the chat for forwarded messages and quoted/reply "
+            "spam patterns, deleting them automatically to stop flood attacks and copy-paste raids before "
+            "they spread.\n\n"
+            "📡 <b>AutoLower Radar:</b> During active voice chats, automatically attenuates every "
+            "participant's ambient microphone down to 2% volume, eliminating background noise interference "
+            "in real time without requiring manual moderation.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_channels": (
+            "📡 <b>Channels & Lives — Operations Guide</b>\n\n"
+            "🎙️ <b>Live Sentinel:</b> Automatically opens a member's microphone the moment they raise their "
+            "hand during a live broadcast, granting speaking access without manual admin intervention and "
+            "muting it back once they finish.\n\n"
+            "🔗 <b>Paywalled Invites:</b> Generates single-use, cryptographically signed invite links tied "
+            "to a specific subscriber and plan. The link self-destructs — it burns permanently — the instant "
+            "it is used to join, making it impossible to resell or redistribute.\n\n"
+            "🔁 <b>Recurring Audit:</b> Continuously monitors active subscriptions and sends an automatic "
+            "renewal alert 48 hours before expiration. If the member does not renew in time, the system "
+            "executes an auto-kick, removing delinquent accounts without manual follow-up.\n\n"
+            "⭐ <b>Live Tips:</b> Allows viewers to send Stars-based tips directly during a live broadcast, "
+            "crediting the channel owner's balance in real time.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_monetization": (
+            "💰 <b>Stars Monetization — Operations Guide</b>\n\n"
+            "🎙️ <b>VIP Microphone Pass (/micvip):</b> Sells temporary 24-hour speaking privileges in a "
+            "voice chat. The buyer pays in Stars and automatically receives microphone access for the full "
+            "duration, after which the privilege expires on its own — no manual revocation needed.\n\n"
+            "🧬 <b>Bot Clone Architecture:</b> Owners can link their own BotFather token to run a fully "
+            "independent clone of the system. 100% of the Stars generated through that clone are credited "
+            "directly to the owner's own balance, with zero platform commission.\n\n"
+            "💎 <b>Recurring Channel Plans:</b> Lets channel owners configure commercial subscription plans "
+            "(e.g. Monthly VIP Pass) with a fixed duration and Stars price. Each plan generates its own "
+            "deep-link for subscribers, and active subscriber counts are tracked automatically per plan.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
         "channel_panel_title": "📡 <b>Broadcast Studio:</b> {channel_name}\n\nSelect a module to manage lives, memberships, or studio automation.",
         "pay_pro_title": (
@@ -579,6 +624,56 @@ TEXTS = {
             "2️⃣ <b>Canales:</b> Añade como admin para cobrar membresías en Stars y moderar Lives.\n"
             "3️⃣ <b>Bot Clon:</b> Conecta tu token de BotFather para conservar el 100% de ingresos.\n"
             "4️⃣ <b>Centinela Dedicado:</b> Asocia tu número de teléfono para moderación de voz 24/7 autónoma.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_groups": (
+            "🛡️ <b>Grupos y Perímetro — Guía Operativa</b>\n\n"
+            "🔐 <b>Aduana Captcha Pro:</b> Cada nuevo miembro enfrenta un desafío privado en DM antes de "
+            "obtener acceso al grupo. El desafío tiene un temporizador de cuenta regresiva — si el miembro "
+            "no responde a tiempo o falla la respuesta, es expulsado automáticamente en la puerta, "
+            "manteniendo bots y raiders fuera antes de que toquen la comunidad.\n\n"
+            "🔒 <b>Cerraduras Granulares:</b> Interruptores independientes te permiten restringir, por "
+            "categoría, lo que los miembros regulares pueden publicar: Multimedia (fotos/videos), Enlaces, "
+            "Stickers y GIFs, y Comandos de Bots. Cada interruptor aplica de forma instantánea y no afecta "
+            "a los administradores.\n\n"
+            "🚫 <b>Escudo Anti-Spam:</b> Escanea continuamente el chat en busca de mensajes reenviados y "
+            "patrones de spam por citas/respuestas, eliminándolos automáticamente para frenar ataques de "
+            "flood y raids de copiar-pegar antes de que se propaguen.\n\n"
+            "📡 <b>Radar AutoLower:</b> Durante llamadas de voz activas, atenúa automáticamente el "
+            "micrófono ambiental de cada participante hasta un 2% de volumen, eliminando la interferencia "
+            "de ruido de fondo en tiempo real sin requerir moderación manual.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_channels": (
+            "📡 <b>Canales y Lives — Guía Operativa</b>\n\n"
+            "🎙️ <b>Centinela en Vivo:</b> Abre automáticamente el micrófono de un miembro en el instante "
+            "en que levanta la mano durante una transmisión en vivo, otorgando acceso para hablar sin "
+            "intervención manual del administrador, y lo silencia de nuevo al terminar.\n\n"
+            "🔗 <b>Paywalled Invites:</b> Genera enlaces de invitación de un solo uso, firmados "
+            "criptográficamente y ligados a un suscriptor y plan específicos. El enlace se autodestruye "
+            "— se quema permanentemente — en el instante en que se usa para unirse, haciendo imposible "
+            "revenderlo o redistribuirlo.\n\n"
+            "🔁 <b>Auditoría Recurrente:</b> Monitorea de forma continua las suscripciones activas y envía "
+            "una alerta automática de renovación 48 horas antes del vencimiento. Si el miembro no renueva "
+            "a tiempo, el sistema ejecuta un auto-kick, removiendo cuentas morosas sin seguimiento manual.\n\n"
+            "⭐ <b>Propinas en Directo:</b> Permite a los espectadores enviar propinas en Stars directamente "
+            "durante una transmisión en vivo, acreditando el balance del dueño del canal en tiempo real.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_monetization": (
+            "💰 <b>Monetización Stars — Guía Operativa</b>\n\n"
+            "🎙️ <b>Pase VIP de Micrófono (/micvip):</b> Vende privilegios temporales de 24 horas para "
+            "hablar en una llamada de voz. El comprador paga en Stars y recibe automáticamente acceso al "
+            "micrófono durante toda la duración, tras lo cual el privilegio expira por sí solo — sin "
+            "revocación manual necesaria.\n\n"
+            "🧬 <b>Arquitectura de Bots Clones:</b> Los dueños pueden conectar su propio token de "
+            "BotFather para operar un clon totalmente independiente del sistema. El 100% de las Stars "
+            "generadas a través de ese clon se acreditan directamente al balance del propio dueño, sin "
+            "comisión alguna de la plataforma.\n\n"
+            "💎 <b>Planes Comerciales de Canales Recurrentes:</b> Permite a los dueños de canales "
+            "configurar planes de suscripción comercial (ej. Pase Mensual VIP) con duración fija y precio "
+            "en Stars. Cada plan genera su propio deep-link para suscriptores, y el conteo de suscriptores "
+            "activos se rastrea automáticamente por plan.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
@@ -929,6 +1024,22 @@ async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int)
     return False
 
 
+# ==========================================
+# 🧭 BLINDAJE DE NAVEGACIÓN CONTEXTUAL (CANAL VS GRUPO)
+# ==========================================
+async def resolve_chat_kind(bot: Bot, chat_id: int) -> str:
+    """
+    Determina si el chat_id pertenece a un Canal ('c') o a un Grupo/Supergrupo ('g').
+    Se usa para blindar el enrutamiento de los botones de retorno en las Herramientas Ultra,
+    evitando que un canal sea desviado erróneamente al panel de grupo (gpanel) o viceversa.
+    """
+    try:
+        chat_obj = await bot.get_chat(chat_id)
+        return "c" if chat_obj.type == "channel" else "g"
+    except Exception:
+        return "g"
+
+
 def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
     """Teclado principal con bifurcación dual independiente para Grupos y Canales."""
     t = TEXTS.get(lang, TEXTS["es"])
@@ -1062,15 +1173,20 @@ def get_group_panel_keyboard(group_id: int, lang: str):
     ])
 
 
-def get_ultra_tools_keyboard(group_id: int, lang: str):
+def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚨 " + ("Botón de Pánico" if lang == "es" else "Panic Button"), callback_data=f"panic_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎥 " + ("Escudo Antinota" if lang == "es" else "Screen-Share Shield"), callback_data=f"shield_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🌟 " + ("Gestión de Speakers" if lang == "es" else "Speakers Management"), callback_data=f"speakers_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="💎 " + ("Payload Multimedia" if lang == "es" else "Multimedia Payload"), callback_data=f"payload_menu_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
+        [back_btn]
     ])
 
 
@@ -1084,16 +1200,21 @@ def build_ultra_lock_view(group_id: int, lang: str, feature_title: str):
     return lock_text, keyboard
 
 
-def get_panic_keyboard(group_id: int, lang: str, status: int):
+def get_panic_keyboard(group_id: int, lang: str, status: int, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     action_btn = (
         InlineKeyboardButton(text=t["btn_panic_deactivate"], callback_data=f"panic_deactivate_{group_id}_{lang}")
         if status == 1 else
         InlineKeyboardButton(text=t["btn_panic_activate"], callback_data=f"panic_confirm_{group_id}_{lang}")
     )
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [action_btn],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+        [back_btn]
     ])
 def get_night_keyboard(group_id: int, lang: str, status: int):
     t = TEXTS.get(lang, TEXTS["es"])
@@ -1117,19 +1238,29 @@ def get_panic_confirm_keyboard(group_id: int, lang: str):
     ])
 
 
-def get_shield_keyboard(group_id: int, lang: str, status: int):
+def get_shield_keyboard(group_id: int, lang: str, status: int, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=t["btn_shield_1"], callback_data=f"shield_toggle_1_{group_id}_{lang}"),
             InlineKeyboardButton(text=t["btn_shield_0"], callback_data=f"shield_toggle_0_{group_id}_{lang}")
         ],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+        [back_btn]
     ])
 
 
-def get_podcast_keyboard(group_id: int, lang: str, status: int, duck_level: int):
+def get_podcast_keyboard(group_id: int, lang: str, status: int, duck_level: int, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=t["btn_podcast_1"], callback_data=f"podcast_toggle_1_{group_id}_{lang}"),
@@ -1141,12 +1272,17 @@ def get_podcast_keyboard(group_id: int, lang: str, status: int, duck_level: int)
             InlineKeyboardButton(text="30%", callback_data=f"podcast_duckval_30_{group_id}_{lang}")
         ],
         [InlineKeyboardButton(text=t["btn_duck_level"].format(duck_level=duck_level), callback_data=f"podcast_duckset_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+        [back_btn]
     ])
 
 
-def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int):
+def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")
+    )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=t["btn_speakers_1"], callback_data=f"speakers_toggle_1_{group_id}_{lang}"),
@@ -1158,24 +1294,29 @@ def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int):
             InlineKeyboardButton(text=t["btn_speakers_price"].format(price=price), callback_data=f"speakers_priceset_{group_id}_{lang}")
         ],
         [InlineKeyboardButton(text=t["btn_speakers_clear"], callback_data=f"speakers_clear_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+        [back_btn]
     ])
 
 
-def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict):
+def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     st = cfg.get("enabled", 0)
     has_text = "🟢" if cfg.get("text") else "🔴"
     has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
     autodel = f"{cfg.get('auto_delete_after')}s" if cfg.get("auto_delete_after") else ("Desactivado" if lang == "es" else "Off")
     st_label = f"💎 {'Payload: 🟢' if st == 1 else 'Payload: 🔴'}"
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=st_label, callback_data=f"payload_toggle_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"{'✍️ Texto Personalizado' if lang == 'es' else '✍️ Custom Text'} {has_text}", callback_data=f"payload_text_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"{'🖼️ Multimedia (Foto/Anim)' if lang == 'es' else '🖼️ Media (Photo/Anim)'} {has_media}", callback_data=f"payload_media_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"{'⏱️ Auto-Borrado' if lang == 'es' else '⏱️ Auto-Delete'}: {autodel}", callback_data=f"payload_autodel_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+        [back_btn]
     ])
 
 
@@ -1354,15 +1495,37 @@ async def get_locks_keyboard(group_id: int, lang: str):
 
 
 async def get_warns_keyboard(group_id: int, lang: str):
+    """
+    Matriz granular de Advertencias (Strikes):
+    - Interruptores independientes por categoría de infracción (enlaces, lista negra, anti-flood).
+    - Selector cíclico de límite de faltas (3 / 4 / 5).
+    - Selector cíclico de castigo automático asignado (mute / kick / ban).
+    """
     t = TEXTS.get(lang, TEXTS["es"])
     cfg = await get_warns_config(group_id)
     limit = cfg["limit"]
     action = cfg["action"].upper()
 
+    # Interruptores por categoría — por defecto ACTIVADOS (🟢) si la config aún no los define.
+    links_on = cfg.get("warn_links", 1) == 1
+    blacklist_on = cfg.get("warn_blacklist", 1) == 1
+    flood_on = cfg.get("warn_flood", 1) == 1
+
+    links_dot = "🟢" if links_on else "🔴"
+    blacklist_dot = "🟢" if blacklist_on else "🔴"
+    flood_dot = "🟢" if flood_on else "🔴"
+
+    links_lbl = f"🔗 {'Warn by Forbidden Links' if lang == 'en' else 'Aviso por Enlaces Prohibidos'} {links_dot}"
+    blacklist_lbl = f"🚫 {'Warn by Blacklisted Words' if lang == 'en' else 'Aviso por Lista Negra'} {blacklist_dot}"
+    flood_lbl = f"🌊 {'Warn by Anti-Flood' if lang == 'en' else 'Aviso por Anti-Flood'} {flood_dot}"
+
     limit_lbl = f"🔢 Strike Limit: {limit}" if lang == "en" else f"🔢 Límite: {limit} Faltas"
     action_lbl = f"⚖️ Punishment: {action}" if lang == "en" else f"⚖️ Castigo: {action}"
 
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=links_lbl, callback_data=f"warnset_toglink_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=blacklist_lbl, callback_data=f"warnset_togblack_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=flood_lbl, callback_data=f"warnset_togflood_{group_id}_{lang}")],
         [
             InlineKeyboardButton(text=limit_lbl, callback_data=f"warnset_limit_{group_id}_{lang}"),
             InlineKeyboardButton(text=action_lbl, callback_data=f"warnset_action_{group_id}_{lang}")
@@ -2203,8 +2366,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 g_name = (await bot.get_chat(group_id)).title
             except Exception:
                 g_name = "Comunidad" if lang == "es" else "Community"
+            chat_kind = await resolve_chat_kind(bot, group_id)
             text = t["ultra_tools_main"].format(group_name=g_name)
-            keyboard = get_ultra_tools_keyboard(group_id, lang)
+            keyboard = get_ultra_tools_keyboard(group_id, lang, chat_type=chat_kind)
 
     elif action == "tips":
         sub = data[1]
@@ -2794,7 +2958,16 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             curr = cfg["action"]
             next_act = actions[(actions.index(curr) + 1) % len(actions)] if curr in actions else "mute"
             await set_warns_config(group_id, "warns_action", next_act)
-        
+        elif sub == "toglink":
+            current = cfg.get("warn_links", 1)
+            await set_warns_config(group_id, "warn_links", 0 if current == 1 else 1)
+        elif sub == "togblack":
+            current = cfg.get("warn_blacklist", 1)
+            await set_warns_config(group_id, "warn_blacklist", 0 if current == 1 else 1)
+        elif sub == "togflood":
+            current = cfg.get("warn_flood", 1)
+            await set_warns_config(group_id, "warn_flood", 0 if current == 1 else 1)
+
         updated_cfg = await get_warns_config(group_id)
         try:
             await callback.message.edit_text(
@@ -2965,6 +3138,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
+        chat_kind = await resolve_chat_kind(bot, group_id)
 
         tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
@@ -2974,7 +3148,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             status = await get_panic_status(group_id)
             status_str = "🚨 BLOQUEADO" if status == 1 else "🟢 Normal"
             text = t["panic_menu"].format(status_str=status_str)
-            keyboard = get_panic_keyboard(group_id, lang, status)
+            keyboard = get_panic_keyboard(group_id, lang, status, chat_type=chat_kind)
         elif sub == "confirm":
             text = t["panic_confirm"]
             keyboard = get_panic_confirm_keyboard(group_id, lang)
@@ -2985,7 +3159,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             except Exception as ex:
                 logging.error(f"❌ [Panic] Fallo lockdown en {group_id}: {ex}")
             text = t["panic_activated"]
-            keyboard = get_panic_keyboard(group_id, lang, 1)
+            keyboard = get_panic_keyboard(group_id, lang, 1, chat_type=chat_kind)
         elif sub == "deactivate":
             await set_panic_status(group_id, 0)
             try:
@@ -2993,7 +3167,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             except Exception as ex:
                 logging.error(f"❌ [Panic] Fallo levantar lockdown en {group_id}: {ex}")
             text = t["panic_deactivated"]
-            keyboard = get_panic_keyboard(group_id, lang, 0)
+            keyboard = get_panic_keyboard(group_id, lang, 0, chat_type=chat_kind)
 
     elif module == "shield":
         if sub == "toggle":
@@ -3003,6 +3177,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
+        chat_kind = await resolve_chat_kind(bot, group_id)
 
         tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
@@ -3012,7 +3187,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             status = await get_shield_status(group_id)
             status_str = "🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO"
             text = t["shield_menu"].format(status_str=status_str)
-            keyboard = get_shield_keyboard(group_id, lang, status)
+            keyboard = get_shield_keyboard(group_id, lang, status, chat_type=chat_kind)
         elif sub == "toggle":
             await set_shield_status(group_id, new_status)
             try:
@@ -3026,7 +3201,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             status = await get_shield_status(group_id)
             status_str = "🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO"
             text = t["shield_menu"].format(status_str=status_str)
-            keyboard = get_shield_keyboard(group_id, lang, status)
+            keyboard = get_shield_keyboard(group_id, lang, status, chat_type=chat_kind)
 
     elif module == "podcast":
         if sub in ("toggle", "duckval"):
@@ -3036,6 +3211,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
+        chat_kind = await resolve_chat_kind(bot, group_id)
 
         tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
@@ -3046,7 +3222,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             duck_level = GROUP_DUCK_LEVEL.get(group_id, 20)
             status_str = "🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO"
             text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
-            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level)
+            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level, chat_type=chat_kind)
         elif sub == "toggle":
             new_status = int(val)
             await set_podcast_status(group_id, new_status)
@@ -3062,7 +3238,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             status = await get_podcast_status(group_id)
             status_str = "🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO"
             text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
-            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level)
+            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level, chat_type=chat_kind)
         elif sub == "duckval":
             duck_level = int(val)
             GROUP_DUCK_LEVEL[group_id] = duck_level
@@ -3076,7 +3252,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.answer(t["duck_updated"].format(group_id=group_id, duck_level=duck_level), show_alert=True)
             status_str = "🟢 ACTIVADO" if status == 1 else "🔴 DESACTIVADO"
             text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
-            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level)
+            keyboard = get_podcast_keyboard(group_id, lang, status, duck_level, chat_type=chat_kind)
         elif sub == "duckset":
             PODCAST_DUCK_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(t["duck_custom_prompt"], parse_mode="HTML")
@@ -3091,6 +3267,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
+        chat_kind = await resolve_chat_kind(bot, group_id)
 
         tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
@@ -3102,7 +3279,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             queue_count = len(queue) if queue else 0
             status_str = "🟢 ACTIVA"
             text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
-            keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+            keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
         elif sub == "toggle":
             new_status = int(val)
             await callback.answer(t["speakers_updated_1"] if new_status == 1 else t["speakers_updated_0"])
@@ -3111,7 +3288,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             queue_count = len(queue) if queue else 0
             status_str = "🟢 ACTIVADA" if new_status == 1 else "🔴 DESACTIVADA"
             text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
-            keyboard = get_speakers_keyboard(group_id, lang, new_status, price)
+            keyboard = get_speakers_keyboard(group_id, lang, new_status, price, chat_type=chat_kind)
         elif sub == "priceval":
             price = int(val)
             GROUP_SPEAKER_PRICE[group_id] = price
@@ -3120,7 +3297,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             queue_count = len(queue) if queue else 0
             status_str = "🟢 ACTIVA"
             text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
-            keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+            keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
         elif sub == "priceset":
             SPEAKER_PRICE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(t["speakers_price_prompt"], parse_mode="HTML")
@@ -3135,12 +3312,13 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             price = GROUP_SPEAKER_PRICE.get(group_id, 20)
             status_str = "🟢 ACTIVA"
             text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=0)
-            keyboard = get_speakers_keyboard(group_id, lang, 1, price)
+            keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
 
     elif module == "payload":
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
+        chat_kind = await resolve_chat_kind(bot, group_id)
 
         tier = await get_effective_group_tier(group_id, callback.from_user.id)
         if tier != "ultra_pro":
@@ -3153,7 +3331,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
             autodel = f"{cfg.get('auto_delete_after')}s" if cfg.get("auto_delete_after") else "Off"
             text = t["sentinel_payload_main"].format(st_badge=st_badge, has_text=has_text, has_media=has_media, autodel=autodel)
-            keyboard = get_sentinel_payload_keyboard(group_id, lang, cfg)
+            keyboard = get_sentinel_payload_keyboard(group_id, lang, cfg, chat_type=chat_kind)
         elif sub == "toggle":
             cfg = await get_sentinel_payload_config(group_id)
             new_st = 0 if cfg.get("enabled") == 1 else 1
@@ -3164,7 +3342,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
             autodel = f"{cfg.get('auto_delete_after')}s" if cfg.get("auto_delete_after") else "Off"
             text = t["sentinel_payload_main"].format(st_badge=st_badge, has_text=has_text, has_media=has_media, autodel=autodel)
-            keyboard = get_sentinel_payload_keyboard(group_id, lang, cfg)
+            keyboard = get_sentinel_payload_keyboard(group_id, lang, cfg, chat_type=chat_kind)
         elif sub == "text":
             SENTINEL_PAYLOAD_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(t["sentinel_payload_prompt_text"], parse_mode="HTML")
