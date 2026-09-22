@@ -25,7 +25,8 @@ from database.database import (
     is_vip_mic_active, is_group_approved, 
     get_autolower_status, is_whitelisted,
     get_all_active_sessions, get_session_by_group,
-    get_all_active_vc_schedules, update_vc_call_status
+    get_all_active_vc_schedules, update_vc_call_status,
+    get_radar_config
 )
 
 logger = logging.getLogger("assistant_radar")
@@ -95,6 +96,65 @@ OPTIMIZATION_TEXT = (
     "🇺🇸 <i>Giving the live stream a quick background refresh to clear video lag and keep camera feeds smooth. Reopening fresh in 3 seconds! VIP passes stay active.</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
+
+# ==========================================
+# 🎛️ DESPACHO DINÁMICO DE AVISOS PERSONALIZABLES (Req. #2 — Matriz del Centinela)
+# ==========================================
+async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
+                                  media_type: str = None, auto_delete_after: int = None):
+    """
+    Envía un aviso del Centinela (AutoLower o pre-reinicio de 3.5h) respetando
+    la personalización guardada en BD para ese group_id. Si la comunidad
+    configuró multimedia propia (foto/video/gif), se envía como caption;
+    si no, se envía como texto plano — siempre con fallback seguro si algo falla.
+    """
+    if not _global_bot:
+        return None
+
+    try:
+        if media_id and media_type == "video":
+            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=text, parse_mode="HTML")
+        elif media_id and media_type == "animation":
+            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=text, parse_mode="HTML")
+        elif media_id and media_type == "photo":
+            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=text, parse_mode="HTML")
+        else:
+            sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+    except Exception as e:
+        logger.warning(f"Aviso al despachar notificación personalizada del Centinela en {chat_id}: {e}")
+        # Fallback defensivo: si el media_id personalizado ya no es válido (borrado, expirado),
+        # se reintenta en texto plano para que el aviso nunca se pierda del todo.
+        try:
+            sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        except Exception:
+            return None
+
+    if auto_delete_after and sent:
+        async def _watchdog(m):
+            await asyncio.sleep(auto_delete_after)
+            try:
+                await m.delete()
+            except Exception:
+                pass
+        asyncio.create_task(_watchdog(sent))
+
+    return sent
+
+
+def _resolve_autolower_text(custom_text: str, user_name: str) -> str:
+    """Usa el texto personalizado de la comunidad si existe; si no, el default bilingüe de fábrica."""
+    template = custom_text if custom_text else RADAR_TEXTS["combined"]
+    try:
+        return template.format(user_name=user_name)
+    except (KeyError, IndexError):
+        # El operador personalizó el texto sin dejar el placeholder {user_name}: se envía tal cual.
+        return template
+
+
+def _resolve_reset_text(custom_text: str) -> str:
+    """Usa el aviso previo al reinicio de 3.5h personalizado si existe; si no, el default de fábrica."""
+    return custom_text if custom_text else OPTIMIZATION_TEXT
+
 
 VC_SCHED_MESSAGES = {
     "start": (
@@ -301,24 +361,24 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
-            # 🛡️ MANTENIMIENTO PREVENTIVO (3.5 horas / 12600 segundos)
+            # 🛡️ MANTENIMIENTO PREVENTIVO — INAMOVIBLE: 3.5 horas / 12600 segundos.
+            # Este umbral NUNCA se lee de la base de datos: permanece nativo y estricto
+            # en el código del userbot para evitar congelamientos de stream (Req. #2).
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
                     if _global_bot:
                         try:
-                            notice = await _global_bot.send_message(
+                            # EDITABLE: texto/multimedia del aviso previo al reinicio, personalizable por BD.
+                            radar_cfg = await get_radar_config(chat_id)
+                            reset_text = _resolve_reset_text(radar_cfg.get("reset_text"))
+                            await _dispatch_radar_notice(
                                 chat_id=chat_id,
-                                text=OPTIMIZATION_TEXT,
-                                parse_mode="HTML"
+                                text=reset_text,
+                                media_id=radar_cfg.get("reset_media_id"),
+                                media_type=radar_cfg.get("reset_media_type"),
+                                auto_delete_after=20
                             )
-                            async def auto_del_watchdog(m):
-                                await asyncio.sleep(20)
-                                try:
-                                    await m.delete()
-                                except Exception:
-                                    pass
-                            asyncio.create_task(auto_del_watchdog(notice))
                         except Exception:
                             pass
 
@@ -417,18 +477,16 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
                             if _global_bot:
                                 try:
-                                    sent_msg = await _global_bot.send_message(
-                                        chat_id=chat_id, 
-                                        text=RADAR_TEXTS["combined"].format(user_name=user_name), 
-                                        parse_mode="HTML"
+                                    # EDITABLE: texto/multimedia del aviso de AutoLower, personalizable por BD.
+                                    radar_cfg = await get_radar_config(chat_id)
+                                    autolower_text = _resolve_autolower_text(radar_cfg.get("autolower_text"), user_name)
+                                    await _dispatch_radar_notice(
+                                        chat_id=chat_id,
+                                        text=autolower_text,
+                                        media_id=radar_cfg.get("autolower_media_id"),
+                                        media_type=radar_cfg.get("autolower_media_type"),
+                                        auto_delete_after=40
                                     )
-                                    async def auto_delete_notice(m):
-                                        await asyncio.sleep(40)
-                                        try:
-                                            await m.delete()
-                                        except Exception:
-                                            pass
-                                    asyncio.create_task(auto_delete_notice(sent_msg))
                                 except Exception:
                                     pass
 

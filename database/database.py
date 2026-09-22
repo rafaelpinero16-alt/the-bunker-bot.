@@ -104,7 +104,23 @@ def init_db():
             ("lock_commands", "INTEGER DEFAULT 0"),
             ("mic_vip_price", "INTEGER DEFAULT 50"),
             ("free_badge_status", "INTEGER DEFAULT 0"),
-            ("free_badge_title", "TEXT DEFAULT 'VIP Free 🎙️'")
+            ("free_badge_title", "TEXT DEFAULT 'VIP Free 🎙️'"),
+
+            # --- Requerimiento #1: Etiqueta VIP personalizada persistente (Ultra Pro) ---
+            # Título de administrador que el Centinela asigna al comprador del Pase VIP
+            # de Micrófono (24h). Antes vivía sólo como string hardcodeado en payments.py.
+            ("vip_mic_badge_title", "TEXT DEFAULT 'Pase VIP 24h 🎙️'"),
+
+            # --- Requerimiento #2: Matriz personalizable del Centinela (assistant.py) ---
+            # Textos y multimedia editables para el aviso de Atenuación Acústica (AutoLower)
+            # y para el aviso previo al reinicio preventivo de las 3.5h. El ciclo de 12,600s
+            # en sí permanece inamovible y nativo en el código (no se toca desde BD).
+            ("autolower_custom_text", "TEXT"),
+            ("autolower_custom_media_id", "TEXT"),
+            ("autolower_custom_media_type", "TEXT"),
+            ("reset_notice_custom_text", "TEXT"),
+            ("reset_notice_custom_media_id", "TEXT"),
+            ("reset_notice_custom_media_type", "TEXT")
         ]
 
         for col_name, col_def in settings_columns:
@@ -480,6 +496,101 @@ def set_free_badge_config(group_id: int, field: str, value):
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
+# ==========================================
+# 🏷️ ETIQUETA VIP PERSONALIZADA (PASE DE MICRÓFONO — ULTRA PRO)
+# ==========================================
+def get_vip_badge_title(group_id: int) -> str:
+    """
+    Devuelve el título de administrador que se asigna al usuario cuando
+    adquiere el Pase VIP de Micrófono (24h). Lee de forma dinámica desde la
+    BD para que cada comunidad Ultra Pro tenga su etiqueta personalizada;
+    si el grupo nunca la configuró, cae al valor por defecto de la fábrica.
+
+    NOTA: Telegram limita el custom_title de administrador a 16 caracteres.
+    Se trunca aquí como última barrera de seguridad, pero el panel de
+    configuración (handlers) debería validar esto también al guardar.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT vip_mic_badge_title FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            title = row[0] if row and row[0] else "Pase VIP 24h 🎙️"
+        except sqlite3.OperationalError:
+            title = "Pase VIP 24h 🎙️"
+    return title[:16]
+
+
+def set_vip_badge_title(group_id: int, title: str):
+    """Persiste la etiqueta VIP personalizada por group_id. Trunca a 16 chars (límite de Telegram)."""
+    clean_title = (title or "").strip()[:16]
+    if not clean_title:
+        clean_title = "Pase VIP 24h 🎙️"[:16]
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, vip_mic_badge_title) VALUES (?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET vip_mic_badge_title = excluded.vip_mic_badge_title
+        """, (group_id, clean_title))
+        conn.commit()
+
+
+# ==========================================
+# 🛰️ MATRIZ PERSONALIZABLE DEL CENTINELA (AUTOLOWER Y AVISO DE RESETEO 3.5H)
+# ==========================================
+_RADAR_CONFIG_FIELDS = {
+    "autolower_text": "autolower_custom_text",
+    "autolower_media_id": "autolower_custom_media_id",
+    "autolower_media_type": "autolower_custom_media_type",
+    "reset_text": "reset_notice_custom_text",
+    "reset_media_id": "reset_notice_custom_media_id",
+    "reset_media_type": "reset_notice_custom_media_type",
+}
+
+
+def get_radar_config(group_id: int) -> dict:
+    """
+    Devuelve la configuración personalizada (texto + multimedia) del Centinela
+    para un group_id: aviso de AutoLower (2%) y aviso previo al reinicio
+    preventivo de 3.5h. Cualquier campo no configurado vuelve como None, y
+    assistant.py debe aplicar su propio fallback bilingüe por defecto.
+
+    El ciclo de 12,600s (3.5h) NO se lee de aquí: es nativo e inamovible.
+    """
+    cols = list(_RADAR_CONFIG_FIELDS.values())
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(f"SELECT {', '.join(cols)} FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+        except sqlite3.OperationalError:
+            row = None
+
+    if not row:
+        return {key: None for key in _RADAR_CONFIG_FIELDS}
+    return {key: row[i] for i, key in enumerate(_RADAR_CONFIG_FIELDS)}
+
+
+def set_radar_config(group_id: int, field: str, value):
+    """
+    Actualiza un único campo de la matriz del Centinela (texto o multimedia)
+    para un group_id. `field` debe ser una de las claves lógicas de
+    _RADAR_CONFIG_FIELDS (autolower_text, autolower_media_id,
+    autolower_media_type, reset_text, reset_media_id, reset_media_type),
+    nunca el nombre de columna crudo, para evitar inyección vía f-string.
+    """
+    col_name = _RADAR_CONFIG_FIELDS.get(field)
+    if not col_name:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {col_name}) VALUES (?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET {col_name} = excluded.{col_name}
         """, (group_id, value))
         conn.commit()
 
@@ -877,6 +988,10 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_mic_vip_price",
     "get_free_badge_config",
     "set_free_badge_config",
+    "get_vip_badge_title",
+    "set_vip_badge_title",
+    "get_radar_config",
+    "set_radar_config",
     "get_antispam_filter",
     "set_antispam_filter",
     "get_antispam_delete",
