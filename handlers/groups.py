@@ -3,18 +3,25 @@ import string
 import random
 import asyncio
 import os
+import json
 import logging
 from aiogram import Router, F, Bot
+from aiogram.filters import Command
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
-    CallbackQuery, ChatMemberUpdated, ChatJoinRequest
+    CallbackQuery, ChatMemberUpdated, ChatJoinRequest, LabeledPrice, PreCheckoutQuery
 )
 from database.database import (
     get_antispam_filter, get_antispam_delete,
     get_antiflood_config, is_whitelisted, get_captcha_config,
     get_lock_status, get_warns_config, add_warning, ban_user,
     approve_group, register_user_group, get_blacklist,
-    get_session_by_group
+    get_session_by_group,
+    get_panic_status, activate_panic, deactivate_panic,
+    get_screen_shield_status, set_screen_shield_status,
+    get_podcast_config, set_podcast_mode, set_podcast_duck_volume, set_noise_shield_status,
+    get_speaker_price, set_speaker_price, add_to_speaker_queue,
+    get_speaker_queue, pop_next_speaker, remove_from_speaker_queue, clear_speaker_queue
 )
 from assistant import active_sentinels, set_participant_mic
 
@@ -28,6 +35,17 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+async def _is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Valida si el usuario es Dueño/Administrador de la comunidad (o Arquitecto Supremo)."""
+    if is_super_admin(user_id):
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in ("creator", "administrator")
+    except Exception:
+        return False
 
 # Memoria temporal en RAM optimizada
 FLOOD_CACHE = {}
@@ -546,6 +564,406 @@ async def purge_general_service_messages(message: Message):
             await message.delete()
         except Exception: 
             pass
+
+
+# ==========================================
+# 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
+# ==========================================
+_FULL_PERMISSION_FIELDS = [
+    "can_send_messages", "can_send_audios", "can_send_documents", "can_send_photos",
+    "can_send_videos", "can_send_video_notes", "can_send_voice_notes", "can_send_polls",
+    "can_send_other_messages", "can_add_web_page_previews", "can_change_info",
+    "can_invite_users", "can_pin_messages", "can_manage_topics"
+]
+
+
+def _permissions_to_dict(perms: ChatPermissions) -> dict:
+    return {field: getattr(perms, field, None) for field in _FULL_PERMISSION_FIELDS}
+
+
+def _lockdown_permissions() -> ChatPermissions:
+    """Silencio perimetral: nadie salvo administradores puede enviar nada en el chat general."""
+    return ChatPermissions(**{field: False for field in _FULL_PERMISSION_FIELDS})
+
+
+async def _engage_panic(bot: Bot, chat, activated_by: int):
+    group_id = chat.id
+
+    try:
+        full_chat = await bot.get_chat(group_id)
+        current_perms = full_chat.permissions or ChatPermissions()
+    except Exception:
+        current_perms = ChatPermissions()
+
+    snapshot_json = json.dumps(_permissions_to_dict(current_perms))
+    was_activated = await activate_panic(group_id, activated_by, snapshot_json)
+    if not was_activated:
+        return False
+
+    # 1. Cerraduras al máximo + captcha estricto + antispam elevado: ya aplicado en activate_panic().
+    # 2. Silencio perimetral: sólo administradores pueden hablar en el chat general.
+    try:
+        await bot.set_chat_permissions(chat_id=group_id, permissions=_lockdown_permissions())
+    except Exception as e:
+        logger.warning(f"Aviso: no se pudieron restringir los permisos globales de {group_id} en /panic: {e}")
+
+    # 3. Reporte de alerta a la consola privada del dueño del grupo.
+    try:
+        admins = await bot.get_chat_administrators(group_id)
+        owner = next((a for a in admins if a.status == "creator"), None)
+        if owner:
+            alert_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🟢 Desactivar Raid Lockdown", callback_data=f"panic_off_{group_id}")]
+            ])
+            await bot.send_message(
+                chat_id=owner.user.id,
+                text=(
+                    f"🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\n"
+                    f"Comunidad: <b>{chat.title or 'Sin título'}</b> (<code>{group_id}</code>)\n"
+                    f"Activado por: <code>{activated_by}</code>\n\n"
+                    f"Se elevaron todas las cerraduras, el Captcha entró en modo estricto, el Anti-Spam "
+                    f"subió su sensibilidad y el chat general quedó restringido sólo a administradores.\n\n"
+                    f"🇺🇸 <i>Raid Lockdown engaged: locks maxed, strict captcha, tighter anti-spam and the "
+                    f"general chat is now admin-only.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                ),
+                reply_markup=alert_kb,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.warning(f"Aviso: no se pudo notificar al dueño de {group_id} sobre /panic: {e}")
+
+    return True
+
+
+@router.message(Command("panic"), F.chat.type.in_({"group", "supergroup"}))
+async def panic_command(message: Message, bot: Bot):
+    group_id = message.chat.id
+    user_id = message.from_user.id
+    username = message.from_user.username or ""
+
+    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
+        warn = await message.answer(
+            "⛔ El Botón de Pánico es exclusivo para administradores de la comunidad.\n"
+            "🇺🇸 <i>The Panic Button is restricted to community administrators.</i>",
+            parse_mode="HTML"
+        )
+        asyncio.create_task(auto_delete_msg(warn, 8))
+        return
+
+    if await get_panic_status(group_id) == 1:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🟢 Desactivar Raid Lockdown", callback_data=f"panic_off_{group_id}")]
+        ])
+        await message.answer(
+            "🛡️ El Protocolo Raid Lockdown ya está <b>activo</b> en esta comunidad.\n\n"
+            "🛡️ <i>Cloud Media Management</i>",
+            reply_markup=kb, parse_mode="HTML"
+        )
+        return
+
+    engaged = await _engage_panic(bot, message.chat, user_id)
+    if engaged:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🟢 Desactivar Raid Lockdown", callback_data=f"panic_off_{group_id}")]
+        ])
+        await message.answer(
+            "🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\n"
+            "Cerraduras al máximo, Captcha estricto, Anti-Spam elevado y chat general restringido "
+            "sólo a administradores.\n\n"
+            "🇺🇸 <i>Raid Lockdown engaged. Perimeter secured.</i>\n\n"
+            "🛡️ <i>Cloud Media Management</i>",
+            reply_markup=kb, parse_mode="HTML"
+        )
+
+
+@router.callback_query(F.data.startswith("panic_off_"))
+async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
+    group_id = int(callback.data.split("_")[-1])
+    user_id = callback.from_user.id
+
+    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, callback.from_user.username or "")):
+        await callback.answer("⛔ Sólo administradores pueden desactivar el Protocolo.", show_alert=True)
+        return
+
+    result = await deactivate_panic(group_id)
+    perms_json = result.get("chat_permissions_json")
+    if perms_json:
+        try:
+            perms_dict = json.loads(perms_json)
+            await bot.set_chat_permissions(chat_id=group_id, permissions=ChatPermissions(**perms_dict))
+        except Exception as e:
+            logger.warning(f"Aviso restaurando permisos de {group_id} tras desactivar /panic: {e}")
+
+    try:
+        await callback.message.edit_text(
+            "✅ <b>Protocolo Raid Lockdown desactivado.</b>\n\n"
+            "El perímetro de la comunidad fue restaurado a su estado previo a la alerta.\n\n"
+            "🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+    await callback.answer("Perímetro restaurado ✅")
+
+
+# ==========================================
+# 🌉 PUENTE PÚBLICO PARA EL PANEL PRIVADO (user_private.py)
+#
+# El Botón de Pánico ULTRA PRO del Command Center privado no tiene acceso a un
+# Message/ChatJoinRequest de grupo, sólo a `bot` y `group_id`. Estas dos
+# funciones son el contrato de importación que consume user_private.py y
+# reutilizan EXACTAMENTE la misma lógica que ya corre para /panic y el botón
+# "panic_off_" en el grupo (_engage_panic / deactivate_panic), sin duplicar
+# reglas de negocio ni tocar la firma de las funciones de database.database.
+# ==========================================
+async def execute_raid_lockdown(bot: Bot, group_id: int) -> bool:
+    """
+    Activa el Raid Lockdown desde fuera del grupo (panel privado ULTRA PRO).
+    Devuelve True si el bloqueo se aplicó, False si ya estaba activo o si el
+    chat no pudo resolverse (p. ej. el bot fue removido del grupo).
+    """
+    if await get_panic_status(group_id) == 1:
+        return False
+
+    try:
+        chat = await bot.get_chat(group_id)
+    except Exception as e:
+        logger.warning(f"Aviso: no se pudo resolver el chat {group_id} en execute_raid_lockdown (panel privado): {e}")
+        return False
+
+    # activated_by=0 identifica activaciones disparadas desde el panel privado
+    # (sin un Message de grupo del que tomar el user_id del solicitante).
+    return await _engage_panic(bot, chat, activated_by=0)
+
+
+async def lift_raid_lockdown(bot: Bot, group_id: int) -> bool:
+    """
+    Levanta el Raid Lockdown desde el panel privado ULTRA PRO, restaurando los
+    permisos que existían antes del bloqueo (snapshot guardado por
+    activate_panic()). Devuelve True si se desactivó y se intentó restaurar
+    permisos, False si el protocolo no estaba activo.
+    """
+    result = await deactivate_panic(group_id)
+    if not result:
+        return False
+
+    perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
+    if perms_json:
+        try:
+            perms_dict = json.loads(perms_json)
+            await bot.set_chat_permissions(chat_id=group_id, permissions=ChatPermissions(**perms_dict))
+        except Exception as e:
+            logger.warning(f"Aviso restaurando permisos de {group_id} en lift_raid_lockdown (panel privado): {e}")
+
+    return True
+
+
+# ==========================================
+# 🎥🎙️ INTERRUPTORES RÁPIDOS: ESCUDO ANTINOTA, MODO PODCAST & ESCUDO ANTIRRUIDO
+# ==========================================
+def _parse_on_off(args: list, default_on: bool = True) -> int:
+    if not args:
+        return 1 if default_on else 0
+    val = args[0].strip().lower()
+    if val in ("off", "0", "desactivar", "no"):
+        return 0
+    return 1
+
+
+@router.message(Command("screenshield"), F.chat.type.in_({"group", "supergroup"}))
+async def screenshield_toggle(message: Message, bot: Bot):
+    group_id = message.chat.id
+    if not await _is_group_admin(bot, group_id, message.from_user.id):
+        return
+    args = message.text.split()[1:]
+    status = _parse_on_off(args)
+    await set_screen_shield_status(group_id, status)
+    await message.answer(
+        f"🎥 Escudo Antinota (Screen-Sharing Shield): <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
+    )
+
+
+@router.message(Command("podcast"), F.chat.type.in_({"group", "supergroup"}))
+async def podcast_toggle(message: Message, bot: Bot):
+    group_id = message.chat.id
+    if not await _is_group_admin(bot, group_id, message.from_user.id):
+        return
+    args = message.text.split()[1:]
+    status = _parse_on_off(args, default_on=True)
+    await set_podcast_mode(group_id, status)
+    await message.answer(
+        f"🎙️ Modo Podcast (Audio Ducking Dinámico): <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n"
+        f"Cuando el orador principal hable, el resto de participantes no autorizados se atenuará "
+        f"automáticamente en segundo plano.\n\n🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
+    )
+
+
+@router.message(Command("duckvolume"), F.chat.type.in_({"group", "supergroup"}))
+async def duck_volume_command(message: Message, bot: Bot):
+    group_id = message.chat.id
+    if not await _is_group_admin(bot, group_id, message.from_user.id):
+        return
+    args = message.text.split()[1:]
+    if not args or not args[0].strip().isdigit():
+        await message.answer("Uso: /duckvolume <porcentaje 1-100> — Ej: /duckvolume 5")
+        return
+    pct = max(1, min(100, int(args[0].strip())))
+    await set_podcast_duck_volume(group_id, pct * 100)
+    await message.answer(f"🎚️ Volumen de atenuación del Modo Podcast ajustado a <b>{pct}%</b>.", parse_mode="HTML")
+
+
+@router.message(Command("noiseshield"), F.chat.type.in_({"group", "supergroup"}))
+async def noiseshield_toggle(message: Message, bot: Bot):
+    group_id = message.chat.id
+    if not await _is_group_admin(bot, group_id, message.from_user.id):
+        return
+    args = message.text.split()[1:]
+    status = _parse_on_off(args)
+    await set_noise_shield_status(group_id, status)
+    await message.answer(
+        f"🔇 Escudo Antirruido: <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
+    )
+
+
+# ==========================================
+# 💰 COLA DE PREGUNTAS PAGADA (/speakers — TELEGRAM STARS XTR)
+# ==========================================
+@router.message(Command("speakers"), F.chat.type.in_({"group", "supergroup"}))
+async def speakers_command(message: Message, bot: Bot):
+    group_id = message.chat.id
+    user_id = message.from_user.id
+    args = message.text.split(maxsplit=2)[1:]
+    sub = args[0].lower() if args else ""
+    is_admin = await _is_group_admin(bot, group_id, user_id)
+
+    if sub == "next":
+        if not is_admin:
+            return
+        row = await pop_next_speaker(group_id)
+        if not row:
+            await message.answer("📭 La cola de preguntas está vacía por ahora.")
+            return
+        _, spk_user_id, full_name, spk_username, stars_paid = row
+        mention = f"<a href='tg://user?id={spk_user_id}'>{full_name}</a>"
+        tag = f" (⭐ {stars_paid} XTR)" if stars_paid else ""
+        await message.answer(
+            f"🎙️ <b>Siguiente turno en la ronda de preguntas:</b> {mention}{tag}\n\n"
+            f"🇺🇸 <i>Next up in the AMA queue: {mention}{tag}</i>\n\n🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    if sub == "clear":
+        if not is_admin:
+            return
+        await clear_speaker_queue(group_id)
+        await message.answer("🧹 Cola de oradores vaciada.")
+        return
+
+    if sub == "price":
+        if not is_admin:
+            return
+        if len(args) > 1 and args[1].strip().isdigit():
+            new_price = int(args[1].strip())
+            await set_speaker_price(group_id, new_price)
+            await message.answer(f"⭐ Tarifa de turno prioritario actualizada a <b>{new_price} Stars (XTR)</b>.", parse_mode="HTML")
+        else:
+            await message.answer("Uso: /speakers price <cantidad_de_stars>")
+        return
+
+    queue = await get_speaker_queue(group_id)
+    price = await get_speaker_price(group_id)
+
+    if queue:
+        lines = []
+        for idx, row in enumerate(queue[:10], start=1):
+            _, spk_user_id, full_name, spk_username, stars_paid, _ts = row
+            tag = f" ⭐{stars_paid}" if stars_paid else ""
+            lines.append(f"{idx}. {full_name}{tag}")
+        queue_text = "\n".join(lines)
+    else:
+        queue_text = "— La cola está vacía —"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🎟️ Asegurar turno prioritario ({price} ⭐)", callback_data=f"speak_buy_{group_id}_{price}")]
+    ])
+    await message.answer(
+        f"🎙️ <b>Cola de Preguntas (AMA) — {message.chat.title}</b>\n\n{queue_text}\n\n"
+        f"💰 Paga <b>{price} Telegram Stars</b> y asegura tu prioridad en la próxima ronda de preguntas.\n\n"
+        f"🇺🇸 <i>Pay {price} Telegram Stars to lock in priority in the next AMA round.</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>",
+        reply_markup=kb, parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("speak_buy_"))
+async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
+    parts = callback.data.split("_")
+    group_id = int(parts[2])
+    price = int(parts[3])
+    await callback.answer()
+
+    try:
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title="🎙️ Turno Prioritario — Cola de Preguntas",
+            description="Asegura tu prioridad en la próxima ronda de preguntas (AMA) de la comunidad.",
+            payload=f"speak_{group_id}_{callback.from_user.id}",
+            currency="XTR",
+            prices=[LabeledPrice(label="Turno prioritario", amount=price)],
+        )
+    except Exception as e:
+        logger.warning(f"Error enviando invoice de /speakers a {callback.from_user.id}: {e}")
+        try:
+            await bot.send_message(
+                chat_id=callback.from_user.id,
+                text="⚠️ No pude generarte la factura. Abre un chat privado conmigo primero e inténtalo de nuevo."
+            )
+        except Exception:
+            try:
+                await callback.message.answer("⚠️ Abre un privado con el bot primero para poder pagar con Stars.")
+            except Exception:
+                pass
+
+
+@router.pre_checkout_query(F.invoice_payload.startswith("speak_"))
+async def speakers_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+
+@router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith("speak_"))
+async def speakers_successful_payment(message: Message, bot: Bot):
+    payload = message.successful_payment.invoice_payload
+    try:
+        _, group_id_str, user_id_str = payload.split("_")
+        group_id, buyer_id = int(group_id_str), int(user_id_str)
+    except Exception:
+        return
+
+    stars_paid = message.successful_payment.total_amount
+    full_name = message.from_user.full_name
+    username = message.from_user.username or ""
+
+    await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
+
+    await message.answer(
+        f"✅ <b>¡Turno asegurado!</b>\n\nPagaste <b>{stars_paid} Stars</b> por prioridad en la cola de preguntas.\n\n"
+        f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
+    )
+    try:
+        await bot.send_message(
+            chat_id=group_id,
+            text=(
+                f"🎙️ <a href='tg://user?id={buyer_id}'>{full_name}</a> aseguró un turno prioritario en la "
+                f"cola de preguntas (⭐ {stars_paid} XTR).\n\n🛡️ <i>Cloud Media Management</i>"
+            ),
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 
 # ==========================================
