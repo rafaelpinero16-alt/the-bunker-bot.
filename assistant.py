@@ -33,7 +33,9 @@ from database.database import (
     get_expiring_channel_subscriptions,
     get_expired_channel_subscriptions,
     mark_subscription_warned,
-    update_subscription_status
+    update_subscription_status,
+    activate_universal_night_mode,
+    deactivate_universal_night_mode
 )
 
 try:
@@ -468,6 +470,8 @@ async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int)
         admin_caches[chat_id] = {'admins': new_admins, 'ts': asyncio.get_event_loop().time()}
     except Exception as e:
         logger.debug(f"Aviso actualizando admin cache en chat {chat_id}: {e}")
+
+
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
     alerted_users = set()
     current_call = None
@@ -840,6 +844,63 @@ async def vc_scheduler_loop():
 
 
 # ==========================================
+# 🌙 BUCLE AUTÓNOMO DE MODO NOCTURNO UNIVERSAL (FASE 2)
+# ==========================================
+async def night_mode_autonomous_loop():
+    logger.info("🌙 [Modo Nocturno Autónomo] Bucle de automatización perimetral iniciado.")
+    while True:
+        try:
+            for group_id in list(active_sentinels.keys()):
+                try:
+                    cfg = await get_night_mode_config(group_id)
+                    if not cfg or cfg.get("status") != 1:
+                        continue
+
+                    start_str = cfg.get("start", "22:00")
+                    end_str = cfg.get("end", "06:00")
+                    in_night_time = is_night_mode_time(start_str, end_str)
+
+                    # Verificamos estado actual en la base de datos para evitar re-aplicaciones redundantes
+                    from database.database import get_lock_status
+                    current_media_lock = await get_lock_status(group_id, "lock_media")
+
+                    if in_night_time and current_media_lock == 0:
+                        await activate_universal_night_mode(group_id)
+                        if _global_bot:
+                            try:
+                                await _global_bot.send_message(
+                                    chat_id=group_id,
+                                    text="🌙 <b>Modo Nocturno Autónomo:</b> 🟢 Activado automáticamente según el horario programado.\n\n🛡️ <i>Cloud Media Management</i>",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                pass
+                        logger.info(f"🌙 [Modo Nocturno Activado] Perímetro asegurado automáticamente en comunidad {group_id}.")
+
+                    elif not in_night_time and current_media_lock == 1:
+                        # Solo desactivamos si estaba activado por el modo nocturno automático
+                        night_cfg = await get_night_mode_config(group_id)
+                        if night_cfg.get("status") == 1:
+                            await deactivate_universal_night_mode(group_id)
+                            if _global_bot:
+                                try:
+                                    await _global_bot.send_message(
+                                        chat_id=group_id,
+                                        text="☀️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>",
+                                        parse_mode="HTML"
+                                    )
+                                except Exception:
+                                    pass
+                            logger.info(f"☀️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
+                except Exception as inner_err:
+                    logger.debug(f"Aviso evaluando modo nocturno autónomo en grupo {group_id}: {inner_err}")
+        except Exception as e:
+            logger.error(f"Error en bucle autónomo de modo nocturno: {e}")
+
+        await asyncio.sleep(60)
+
+
+# ==========================================
 # 📢 FASE 6: BUCLE DE AUDITORÍA Y EXPULSIÓN DE CANALES
 # ==========================================
 async def channel_subscription_audit_loop():
@@ -1075,6 +1136,7 @@ async def init_assistant_master():
     asyncio.create_task(vc_scheduler_loop())
     asyncio.create_task(pending_auth_cleanup_loop())
     asyncio.create_task(channel_subscription_audit_loop())
+    asyncio.create_task(night_mode_autonomous_loop())
 
 
 def start_voice_radar(bot):
@@ -1135,4 +1197,4 @@ async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
 
 
 async def disengage_podcast_ducking(group_id: int):
-    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")        
+    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")

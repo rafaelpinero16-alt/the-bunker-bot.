@@ -306,7 +306,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
 
 
 # ==========================================================
-# 🎛️ CONTROLES RÁPIDOS DE AUDIO Y TRANSMISIÓN
+# 🎛️ CONTROLES RÁPIDOS DE AUDIO Y TRANSMISIÓN (BLINDADOS)
 # ==========================================================
 @router.message(Command("autolower"))
 async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bot):
@@ -326,8 +326,8 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=t["autolower_on_btn"], callback_data=f"autolower_on_{lang}"),
-            InlineKeyboardButton(text=t["autolower_off_btn"], callback_data=f"autolower_off_{lang}")
+            InlineKeyboardButton(text=t["autolower_on_btn"], callback_data=f"gautolower_on_{lang}"),
+            InlineKeyboardButton(text=t["autolower_off_btn"], callback_data=f"gautolower_off_{lang}")
         ]
     ])
     status_text = t["status_active"] if current_status == 1 else t["status_inactive"]
@@ -336,15 +336,19 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
         asyncio.create_task(auto_delete_pair(message, msg, 25))
 
 
-@router.callback_query(F.data.startswith("autolower_"))
-async def process_autolower_callback(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("gautolower_"))
+async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
+    group_id = callback.message.chat.id
+    if not await is_user_creator(bot, group_id, callback.from_user.id):
+        await callback.answer("⛔ Acceso denegado.", show_alert=True)
+        return
+
     await callback.answer()
     data_parts = callback.data.split("_")
     action = data_parts[1]
     lang = data_parts[2] if len(data_parts) > 2 else get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
 
-    group_id = callback.message.chat.id
     new_status = 1 if action == "on" else 0
     await set_autolower_status(group_id, new_status)
     
@@ -373,8 +377,8 @@ async def cmd_podcast_config(message: Message, bot: Bot):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=t["podcast_on_btn"], callback_data=f"podcast_on_{lang}"),
-            InlineKeyboardButton(text=t["podcast_off_btn"], callback_data=f"podcast_off_{lang}")
+            InlineKeyboardButton(text=t["podcast_on_btn"], callback_data=f"gpodcast_on_{lang}"),
+            InlineKeyboardButton(text=t["podcast_off_btn"], callback_data=f"gpodcast_off_{lang}")
         ]
     ])
     status_text = t["status_active_pod"] if current_status == 1 else t["status_inactive_pod"]
@@ -383,15 +387,19 @@ async def cmd_podcast_config(message: Message, bot: Bot):
         asyncio.create_task(auto_delete_pair(message, msg, 25))
 
 
-@router.callback_query(F.data.startswith("podcast_"))
-async def process_podcast_callback(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("gpodcast_"))
+async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
+    group_id = callback.message.chat.id
+    if not await is_user_creator(bot, group_id, callback.from_user.id):
+        await callback.answer("⛔ Acceso denegado.", show_alert=True)
+        return
+
     await callback.answer()
     data_parts = callback.data.split("_")
     action = data_parts[1]
     lang = data_parts[2] if len(data_parts) > 2 else get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
 
-    group_id = callback.message.chat.id
     new_status = 1 if action == "on" else 0
     await set_podcast_status(group_id, new_status)
     
@@ -425,8 +433,8 @@ async def cmd_shield_config(message: Message, bot: Bot):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=t["shield_on_btn"], callback_data=f"shield_on_{lang}"),
-            InlineKeyboardButton(text=t["shield_off_btn"], callback_data=f"shield_off_{lang}")
+            InlineKeyboardButton(text=t["shield_on_btn"], callback_data=f"gshield_on_{lang}"),
+            InlineKeyboardButton(text=t["shield_off_btn"], callback_data=f"gshield_off_{lang}")
         ]
     ])
     status_text = t["status_active_shield"] if current_status == 1 else t["status_inactive_shield"]
@@ -435,15 +443,19 @@ async def cmd_shield_config(message: Message, bot: Bot):
         asyncio.create_task(auto_delete_pair(message, msg, 25))
 
 
-@router.callback_query(F.data.startswith("shield_"))
-async def process_shield_callback(callback: CallbackQuery):
+@router.callback_query(F.data.startswith("gshield_"))
+async def process_shield_callback(callback: CallbackQuery, bot: Bot):
+    group_id = callback.message.chat.id
+    if not await is_user_creator(bot, group_id, callback.from_user.id):
+        await callback.answer("⛔ Acceso denegado.", show_alert=True)
+        return
+
     await callback.answer()
     data_parts = callback.data.split("_")
     action = data_parts[1]
     lang = data_parts[2] if len(data_parts) > 2 else get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
 
-    group_id = callback.message.chat.id
     new_status = 1 if action == "on" else 0
     await set_screen_shield_status(group_id, new_status)
 

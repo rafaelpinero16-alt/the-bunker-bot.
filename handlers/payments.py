@@ -196,7 +196,7 @@ TEXTS = {
             "💎 <b>¡Pago Confirmado! Nivel ULTRA PRO Activado</b>\n\n"
             "• Comunidad <code>{chat_id}</code> elevada a <b>ULTRA PRO 💎</b>.\n"
             "• Clonación autónoma con @BotFather, Centinela aislado antiban y cronograma semanal de videochats desbloqueados.\n"
-            "• <b>Monetización Directa:</b> El 100% de las Stars cobradas van directamente a tu propio bot clon.\n\n"
+            "• <b>Monetización Directa:</b> El 100% de las Stars cobradas van directamente y sin comisiones a tu propio bot clon.\n\n"
             "💡 <b>Paso Siguiente:</b> Conecta tu token de bot y tu sesión de Pyrogram en el panel privado:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -510,13 +510,15 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 
 
 # ==========================================
-# 💎 PROCESADOR DE PAGO EXITOSO Y ACTIVACIÓN INMEDIATA
+# 💎 PROCESADOR DE PAGO EXITOSO Y ACTIVACIÓN INMEDIATA (CON REEMBOLSO AUTOMÁTICO ANTE FALLO)
 # ==========================================
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     payload = message.successful_payment.invoice_payload
+    user_id = message.from_user.id
+    charge_id = message.successful_payment.telegram_payment_charge_id
 
     # CASO 1: SUSCRIPCIONES PRO / ULTRA PRO
     if payload.startswith("sub_"):
@@ -549,7 +551,11 @@ async def process_successful_payment(message: Message, bot: Bot):
                     reply_markup=confirm_markup
                 )
         except Exception as e:
-            logger.error(f"Error procesando la entrega de suscripción adquirida: {e}")
+            logger.error(f"Error procesando la entrega de suscripción adquirida (Iniciando reembolso automático): {e}")
+            try:
+                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+            except Exception as ref_err:
+                logger.error(f"Error crítico al ejecutar reembolso de Stars para suscripción: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
     # CASO 2: FASE 6 — MEMBRESÍAS DE CANAL Y ENLACES CRIPTOGRÁFICOS DE UN SOLO USO
@@ -559,7 +565,6 @@ async def process_successful_payment(message: Message, bot: Bot):
             channel_id = int(parts[2])
             plan_id = int(parts[3])
             duration_days = int(parts[4])
-            user_id = message.from_user.id
             stars_paid = message.successful_payment.total_amount
 
             # Genera un enlace de invitación de un solo uso que se quema al entrar
@@ -595,14 +600,17 @@ async def process_successful_payment(message: Message, bot: Bot):
             )
             await message.answer(success_text, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Error procesando el pago de membresía para canal: {e}")
+            logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
+            try:
+                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+            except Exception as ref_err:
+                logger.error(f"Error crítico al ejecutar reembolso de Stars para membresía de canal: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
     # CASO 3: PASES VIP DE MICRÓFONO (24 HORAS)
     elif payload.startswith("vip_mic_"):
         try:
             chat_id = int(payload.split("_")[2])
-            user_id = message.from_user.id
             
             await grant_vip_mic(user_id=user_id, group_id=chat_id)
             
@@ -638,5 +646,9 @@ async def process_successful_payment(message: Message, bot: Bot):
             ])
             await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
         except Exception as e:
-            logger.error(f"Error procesando la entrega del pase VIP de micrófono: {e}")
+            logger.error(f"Error procesando la entrega del pase VIP de micrófono (Iniciando reembolso automático): {e}")
+            try:
+                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+            except Exception as ref_err:
+                logger.error(f"Error crítico al ejecutar reembolso de Stars para pase VIP: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
