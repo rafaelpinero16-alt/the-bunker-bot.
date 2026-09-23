@@ -133,16 +133,13 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
 
 
 async def _clone_worker(clone_bot: Bot, token: str):
-    """
-    Worker de polling dedicado para clones. Reenvía TODAS las actualizaciones
-    (Message, CallbackQuery, eventos de grupo y pagos) al Dispatcher central.
-    """
     allowed_updates = [
         "message", "callback_query", "pre_checkout_query", 
         "chat_join_request", "chat_member", "my_chat_member"
     ]
     
     try:
+        # Forzar la eliminación de cualquier webhook previo antes del polling
         await clone_bot.delete_webhook(drop_pending_updates=True)
         bot_info = await clone_bot.get_me()
         bot_username = bot_info.username or "BotClon"
