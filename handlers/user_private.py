@@ -178,6 +178,9 @@ SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 CHAN_PLAN_STATES = {}
 
+# 🎚️ Cupos de planes de membresía activos por nivel de licencia del Canal
+CHAN_PLAN_TIER_LIMITS = {"free": 1, "pro": 3, "ultra_pro": 10}
+
 FILTER_MAP = {
     "tglinks": "tg_links", "fwdchan": "fwd_channels", "fwdusr": "fwd_users",
     "fwdgrp": "fwd_groups", "fwdbot": "fwd_bots", "quotes": "quotes", "weblinks": "web_links"
@@ -1320,7 +1323,7 @@ def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict, chat_type
     ])
 
 
-def get_tips_keyboard(group_id: int, lang: str, cfg: dict):
+def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     st = cfg.get("enabled", 0)
     amount = cfg.get("amount", 10)
@@ -1330,15 +1333,22 @@ def get_tips_keyboard(group_id: int, lang: str, cfg: dict):
     amt_label = f"💰 {amount} Stars"
     target_label = f"📢 {target[:15]}"
 
+    # 🧭 Blindaje contextual: un canal jamás debe caer en el panel general de grupos (menu_eco).
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")
+    )
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=st_label, callback_data=f"tips_toggle_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"{'Monto Sugerido' if lang == 'es' else 'Suggested'}: {amt_label}", callback_data=f"tips_setamount_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"{'Canal Destino' if lang == 'es' else 'Target'}: {target_label}", callback_data=f"tips_settarget_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
+        [back_btn]
     ])
 
 
-def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
+def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     stars_price = "300 XTR" if tier_level == "pro" else "600 XTR"
     stars_label = f"⭐ Pagar con Stars ({stars_price})" if lang == "es" else f"⭐ Pay with Stars ({stars_price})"
@@ -1355,7 +1365,14 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro"):
         btn_text = "🧬 Configurar Clon & Centinela Propio" if lang == "es" else "🧬 Setup Own Clone & Sentinel"
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"gset_clone_{group_id}_{lang}")])
 
-    keyboard_rows.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
+    # 🧭 Blindaje contextual: si la compra se originó desde un Canal, el regreso es al cpanel,
+    # nunca al gpanel general de grupos.
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")
+    )
+    keyboard_rows.append([back_btn])
     return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 
@@ -2202,31 +2219,95 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 fire_and_forget_auto_delete([message, resp], delay=60)
                 return
 
-            price_stars = int(text_input)
+            CHAN_PLAN_STATES[(bot.id, user_id)]["price"] = int(text_input)
+            CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "promo"
+            prompt_promo = (
+                "📝 <b>Mensaje promocional (Copy):</b>\n\n"
+                "Envía el texto que verán tus suscriptores antes de pagar. Soporta formato HTML "
+                "(<code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;a href&gt;</code>, etc.):"
+            ) if lang == "es" else (
+                "📝 <b>Promotional message (Copy):</b>\n\n"
+                "Send the text your subscribers will see before paying. HTML formatting is supported "
+                "(<code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>, <code>&lt;a href&gt;</code>, etc.):"
+            )
+            resp = await message.answer(prompt_promo, reply_markup=back_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "promo":
+            promo_text = text_input[:1000].strip()
+            if not promo_text:
+                resp = await message.answer("⚠️ El mensaje promocional no puede estar vacío.", reply_markup=back_kb)
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
+            CHAN_PLAN_STATES[(bot.id, user_id)]["promo"] = promo_text
+            CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "media"
+
+            skip_label = "⏭️ Omitir Multimedia" if lang == "es" else "⏭️ Skip Media"
+            media_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=skip_label, callback_data=f"chplans_skip_{channel_id}_{lang}")],
+                [InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")]
+            ])
+            prompt_media = (
+                "🖼️ <b>Multimedia del anuncio (opcional):</b>\n\n"
+                "Envía una Foto, Video o Animación/GIF para acompañar el mensaje promocional, "
+                "o pulsa «Omitir» para publicarlo solo en texto:"
+            ) if lang == "es" else (
+                "🖼️ <b>Promo media (optional):</b>\n\n"
+                "Send a Photo, Video or Animation/GIF to accompany the promo message, "
+                "or tap «Skip» to publish it as text only:"
+            )
+            resp = await message.answer(prompt_media, reply_markup=media_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "media":
+            media_id = None
+            media_type = None
+            if message.photo:
+                media_id = message.photo[-1].file_id
+                media_type = "photo"
+            elif message.video:
+                media_id = message.video.file_id
+                media_type = "video"
+            elif message.animation:
+                media_id = message.animation.file_id
+                media_type = "animation"
+
+            if not media_id:
+                skip_label = "⏭️ Omitir Multimedia" if lang == "es" else "⏭️ Skip Media"
+                retry_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=skip_label, callback_data=f"chplans_skip_{channel_id}_{lang}")],
+                    [InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")]
+                ])
+                warn_text = (
+                    "⚠️ Envía una Foto, Video o Animación válida, o pulsa «Omitir»."
+                    if lang == "es" else
+                    "⚠️ Send a valid Photo, Video or Animation, or tap «Skip»."
+                )
+                resp = await message.answer(warn_text, reply_markup=retry_kb, parse_mode="HTML")
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
             plan_name = st_data["name"]
             duration_days = st_data["days"]
+            price_stars = st_data["price"]
+            promo_text = st_data.get("promo", "")
             CHAN_PLAN_STATES.pop((bot.id, user_id), None)
 
-            plan_id = await create_channel_plan(channel_id, plan_name, duration_days, price_stars)
-            bot_info = await bot.get_me()
-            deep_link = f"https://t.me/{bot_info.username}?start=chanplan_{plan_id}_{channel_id}"
-
-            done_text = (
-                f"✅ <b>¡Plan de Membresía Creado con Éxito!</b>\n\n"
-                f"• <b>Plan:</b> {plan_name}\n"
-                f"• <b>Duración:</b> {duration_days} días\n"
-                f"• <b>Precio:</b> {price_stars} Stars (XTR)\n\n"
-                f"🔗 <b>Enlace de Pago para tus suscriptores:</b>\n<code>{deep_link}</code>\n\n"
-                f"<i>Al pagar, el bot generará automáticamente un enlace criptográfico de un solo uso que se quemará al unirse.</i>"
-            ) if lang == "es" else (
-                f"✅ <b>Membership Plan Created Successfully!</b>\n\n"
-                f"• <b>Plan:</b> {plan_name}\n"
-                f"• <b>Duration:</b> {duration_days} days\n"
-                f"• <b>Price:</b> {price_stars} Stars (XTR)\n\n"
-                f"🔗 <b>Payment Link for subscribers:</b>\n<code>{deep_link}</code>"
+            await _finalize_and_preview_channel_plan(
+                bot=bot,
+                chat_id=message.chat.id,
+                channel_id=channel_id,
+                lang=lang,
+                name=plan_name,
+                days=duration_days,
+                price=price_stars,
+                promo_text=promo_text,
+                media_id=media_id,
+                media_type=media_type
             )
-            resp = await message.answer(done_text, reply_markup=back_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
 @router.callback_query(
@@ -2244,7 +2325,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         MIC_VIP_STATES, MIC_TAG_STATES, PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES,
         TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, SENTINEL_PAYLOAD_TEXT_STATES,
         SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
-        NIGHT_STATES
+        NIGHT_STATES, CHAN_PLAN_STATES
     ]:
         state_dict.pop((bot.id, callback.from_user.id), None)
     await cancel_phone_auth(callback.from_user.id)
@@ -2376,12 +2457,13 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if not await verify_admin_privileges(callback, bot, group_id):
             return
 
+        chat_kind = await resolve_chat_kind(bot, group_id)
         cfg = await get_tips_config(group_id)
         if sub == "menu":
             st_badge = "🟢 ACTIVADAS" if cfg.get("enabled") == 1 else "🔴 DESACTIVADAS"
             target_str = cfg.get("target_channel") or ("No configurado" if lang == "es" else "Not set")
             text = t["tips_main"].format(st_badge=st_badge, amount=cfg.get("amount", 10), target=target_str)
-            keyboard = get_tips_keyboard(group_id, lang, cfg)
+            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
         elif sub == "toggle":
             new_st = 0 if cfg.get("enabled") == 1 else 1
             await set_tips_config(group_id, "tips_enabled", new_st)
@@ -2389,7 +2471,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             st_badge = "🟢 ACTIVADAS" if cfg.get("enabled") == 1 else "🔴 DESACTIVADAS"
             target_str = cfg.get("target_channel") or ("No configurado" if lang == "es" else "Not set")
             text = t["tips_main"].format(st_badge=st_badge, amount=cfg.get("amount", 10), target=target_str)
-            keyboard = get_tips_keyboard(group_id, lang, cfg)
+            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
         elif sub == "setamount":
             TIPS_AMOUNT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(t["tips_prompt_amount"], parse_mode="HTML")
@@ -2410,8 +2492,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             g_name = (await bot.get_chat(group_id)).title
         except Exception:
             g_name = "Comunidad" if lang == "es" else "Community"
+        chat_kind = await resolve_chat_kind(bot, group_id)
         text = t[f"pay_{tier_level}_title"].format(group_name=g_name)
-        keyboard = get_payment_keyboard(group_id, lang, tier_level=tier_level)
+        keyboard = get_payment_keyboard(group_id, lang, tier_level=tier_level, chat_type=chat_kind)
 
     elif action == "vcsched":
         sub = data[1]
@@ -3372,6 +3455,72 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
 # ==========================================
 # 📢 FASE 6: DISPATCHER DE PLANES DE CANAL
 # ==========================================
+async def _finalize_and_preview_channel_plan(
+    bot: Bot, chat_id: int, channel_id: int, lang: str,
+    name: str, days: int, price: int, promo_text: str,
+    media_id: str = None, media_type: str = None
+):
+    """
+    Registra el plan en base de datos, genera el deep-link de pago (chanplan_{plan_id}_{channel_id})
+    y despacha en el chat privado del dueño la Vista Previa exacta del mensaje promocional —
+    con Foto/Video/Animación si se cargó, y su botón de pago interactivo — lista para pinear
+    o reenviar al canal. Justo después, envía un resumen de confirmación con botón de regreso
+    al panel exclusivo del canal (cpanel_{channel_id}_{lang}).
+    """
+    t = TEXTS.get(lang, TEXTS["es"])
+
+    # NOTA DE INTEGRACIÓN: create_channel_plan debe aceptar y persistir promo_text/media_id/
+    # media_type (columnas nuevas en channel_plans) además de los 4 argumentos originales.
+    plan_id = await create_channel_plan(
+        channel_id, name, days, price,
+        promo_text=promo_text, media_id=media_id, media_type=media_type
+    )
+
+    bot_info = await bot.get_me()
+    deep_link = f"https://t.me/{bot_info.username}?start=chanplan_{plan_id}_{channel_id}"
+
+    buy_label = f"💳 Suscribirme — {price} ⭐" if lang == "es" else f"💳 Subscribe — {price} ⭐"
+    preview_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=buy_label, url=deep_link)]
+    ])
+
+    caption_text = promo_text.strip() if promo_text and promo_text.strip() else (
+        f"💎 <b>{name}</b>\n\n{days} días — {price} ⭐" if lang == "es" else f"💎 <b>{name}</b>\n\n{days} days — {price} ⭐"
+    )
+
+    try:
+        if media_id and media_type == "photo":
+            await bot.send_photo(chat_id=chat_id, photo=media_id, caption=caption_text, reply_markup=preview_kb, parse_mode="HTML")
+        elif media_id and media_type == "video":
+            await bot.send_video(chat_id=chat_id, video=media_id, caption=caption_text, reply_markup=preview_kb, parse_mode="HTML")
+        elif media_id and media_type == "animation":
+            await bot.send_animation(chat_id=chat_id, animation=media_id, caption=caption_text, reply_markup=preview_kb, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=chat_id, text=caption_text, reply_markup=preview_kb, parse_mode="HTML")
+    except Exception as e:
+        logging.warning(f"Aviso: fallo al despachar vista previa del plan {plan_id} en canal {channel_id}: {e}")
+
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")]
+    ])
+    done_text = (
+        f"✅ <b>¡Plan de Membresía Creado con Éxito!</b>\n\n"
+        f"• <b>Plan:</b> {name}\n"
+        f"• <b>Duración:</b> {days} días\n"
+        f"• <b>Precio:</b> {price} Stars (XTR)\n\n"
+        f"👆 <i>La vista previa de arriba es el mensaje exacto que verán tus suscriptores. Puedes pinearlo o reenviarlo a tu canal.</i>\n\n"
+        f"🔗 <b>Enlace directo:</b>\n<code>{deep_link}</code>"
+    ) if lang == "es" else (
+        f"✅ <b>Membership Plan Created Successfully!</b>\n\n"
+        f"• <b>Plan:</b> {name}\n"
+        f"• <b>Duration:</b> {days} days\n"
+        f"• <b>Price:</b> {price} Stars (XTR)\n\n"
+        f"👆 <i>The preview above is the exact message your subscribers will see. Pin or forward it to your channel.</i>\n\n"
+        f"🔗 <b>Direct link:</b>\n<code>{deep_link}</code>"
+    )
+    await bot.send_message(chat_id=chat_id, text=done_text, reply_markup=back_kb, parse_mode="HTML")
+
+
 @router.callback_query(F.data.startswith("chplans_"))
 async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
     await callback.answer()
@@ -3435,6 +3584,40 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             pass
 
     elif sub == "add":
+        # 🎚️ Restricción de Planes por Nivel de Licencia (Free=1 / PRO=3 / ULTRA PRO=10)
+        tier = await get_effective_group_tier(channel_id, callback.from_user.id)
+        limit = CHAN_PLAN_TIER_LIMITS.get(tier, CHAN_PLAN_TIER_LIMITS["free"])
+        active_plans = await get_channel_plans(channel_id, only_active=True)
+
+        if len(active_plans) >= limit:
+            limit_text = (
+                f"🔒 <b>Límite de Planes Alcanzado</b>\n\n"
+                f"Tu licencia actual (<b>{tier.upper()}</b>) permite un máximo de <b>{limit}</b> plan(es) de membresía activos, "
+                f"y ya tienes <b>{len(active_plans)}</b> configurado(s).\n\n"
+                f"Elimina un plan existente o mejora tu licencia para desbloquear más cupos.\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"🔒 <b>Plan Limit Reached</b>\n\n"
+                f"Your current license (<b>{tier.upper()}</b>) allows a maximum of <b>{limit}</b> active membership plan(s), "
+                f"and you already have <b>{len(active_plans)}</b> configured.\n\n"
+                f"Delete an existing plan or upgrade your license to unlock more slots.\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            limit_kb_rows = []
+            if tier == "free":
+                up_label = "⭐ Mejorar a PRO (3 Planes)" if lang == "es" else "⭐ Upgrade to PRO (3 Plans)"
+                limit_kb_rows.append([InlineKeyboardButton(text=up_label, callback_data=f"pay_pro_{channel_id}_{lang}")])
+            if tier in ("free", "pro"):
+                up_label_ultra = "💎 Mejorar a ULTRA PRO (10 Planes)" if lang == "es" else "💎 Upgrade to ULTRA PRO (10 Plans)"
+                limit_kb_rows.append([InlineKeyboardButton(text=up_label_ultra, callback_data=f"pay_ultra_{channel_id}_{lang}")])
+            limit_kb_rows.append([InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"chplans_menu_{channel_id}_{lang}")])
+
+            try:
+                await callback.message.edit_text(limit_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=limit_kb_rows), parse_mode="HTML")
+            except TelegramBadRequest:
+                await callback.message.answer(limit_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=limit_kb_rows), parse_mode="HTML")
+            return
+
         CHAN_PLAN_STATES[(bot.id, callback.from_user.id)] = {"channel_id": channel_id, "step": "name", "lang": lang}
         prompt_name = (
             "✍️ <b>Nombre del nuevo plan:</b>\n\n"
@@ -3444,6 +3627,38 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         )
         prompt = await callback.message.answer(prompt_name, parse_mode="HTML")
         fire_and_forget_auto_delete([prompt], delay=60)
+
+    elif sub == "skip":
+        # ⏭️ Paso 5 (multimedia) omitido: el plan se finaliza solo con el copy de texto.
+        st_data = CHAN_PLAN_STATES.pop((bot.id, callback.from_user.id), None)
+        if not st_data or st_data.get("channel_id") != channel_id or st_data.get("step") != "media":
+            info_text = "ℹ️ No hay una creación de plan en curso para omitir." if lang == "es" else "ℹ️ There's no plan creation in progress to skip."
+            info_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")]
+            ])
+            try:
+                await callback.message.edit_text(info_text, reply_markup=info_kb, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
+            return
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        await _finalize_and_preview_channel_plan(
+            bot=bot,
+            chat_id=callback.message.chat.id,
+            channel_id=channel_id,
+            lang=lang,
+            name=st_data["name"],
+            days=st_data["days"],
+            price=st_data["price"],
+            promo_text=st_data.get("promo", ""),
+            media_id=None,
+            media_type=None
+        )
 
     elif sub == "del":
         await delete_channel_plan(plan_id)

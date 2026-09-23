@@ -10,7 +10,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
     approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
-    get_vip_badge_title, get_channel_plans, record_channel_subscription
+    get_vip_badge_title, get_channel_plans, get_channel_plan, record_channel_subscription
 )
 from assistant import set_participant_mic
 from handlers.user_private import is_clone_bot, get_master_bot_username
@@ -38,7 +38,7 @@ def get_lang(lang_code: str) -> str:
 
 
 async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Verifica si el usuario ostenta el rango máximo de Dueño / Creador del grupo."""
+    """Verifica si el usuario ostenta el rango máximo de Dueño / Creador del grupo o canal."""
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status == "creator"
@@ -57,6 +57,20 @@ async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 15):
         await msg2.delete()
     except Exception: 
         pass
+
+
+async def resolve_chat_context(bot: Bot, chat_id: int) -> tuple[str, str]:
+    """
+    Identifica si el chat_id corresponde a un Canal o a un Grupo/Supergrupo.
+    Retorna ('c', callback_back) o ('g', callback_back) para garantizar navegación contextual sin desvíos.
+    """
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.type == "channel":
+            return "c", f"cpanel_{chat_id}"
+    except Exception:
+        pass
+    return "g", f"gpanel_{chat_id}"
 
 
 def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
@@ -115,7 +129,7 @@ TEXTS = {
         "btn_binance": "🟡 Binance Pay (Instant)",
         "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_back": "🔙 Back to Main Menu",
-        "btn_back_group": "🔙 Back to Group Panel",
+        "btn_back_group": "🔙 Back to Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
         
         "inv_pro_t": "PRO Subscription (300 XTR)",
@@ -127,14 +141,14 @@ TEXTS = {
         
         "pmt_ok_pro": (
             "🎉 <b>Payment Confirmed! PRO Plan Active</b>\n\n"
-            "• Community: <code>{chat_id}</code> upgraded to <b>PRO ⭐</b>\n"
+            "• Environment: <code>{chat_id}</code> upgraded to <b>PRO ⭐</b>\n"
             "• All daily command caps and service message purge quotas have been removed.\n\n"
             "💡 <b>Deployment Step:</b> Add our Master Sentinel to your voice chats to manage microphones:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pmt_ok_ultra": (
             "💎 <b>Payment Confirmed! ULTRA PRO License Active</b>\n\n"
-            "• Community: <code>{chat_id}</code> upgraded to <b>ULTRA PRO 💎</b>\n"
+            "• Environment: <code>{chat_id}</code> upgraded to <b>ULTRA PRO 💎</b>\n"
             "• Autonomous Bot Clone deployment, isolated Voice Sentinel node, and Weekly VC Cron unlocked.\n"
             "• <b>Direct Monetization:</b> 100% of all Telegram Stars collected enter your bot clone balance!\n\n"
             "💡 <b>Deployment Step:</b> Link your @BotFather token and secondary session string to activate your private node:\n\n"
@@ -148,24 +162,25 @@ TEXTS = {
         ),
         "btn_add_master": "🤖 Add Master Sentinel (@Alphacentinel)",
         "btn_setup_clone": "🧬 Setup Clone & Dedicated Sentinel",
+        "btn_join_channel": "🚀 Join Secure Channel",
         "err_inv": "⚠️ An error occurred while generating the invoice. Please try again.",
         "err_link": "⚠️ Invalid activation link or expired parameters.",
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
     },
     "es": {
-        "owner_only": "⛔ <b>Acceso Denegado:</b> Las opciones de suscripción y facturación son exclusivas para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "owner_only": "⛔ <b>Acceso Denegado:</b> Las opciones de suscripción y facturación son exclusivas para el Dueño de la comunidad o canal.\n\n🛡️ <i>Cloud Media Management</i>",
         "active": (
             "✨ <b>Centro de Mando: Suscripciones y Licencias</b>\n\n"
-            "• <b>Comunidad ID:</b> <code>{chat_id}</code>\n"
+            "• <b>Entorno ID:</b> <code>{chat_id}</code>\n"
             "• <b>Nivel Operativo:</b> <code>{tier}</code>\n\n"
             "✅ <i>Este ecosistema opera bajo una licencia premium activa. Todas las barreras de antispam, aduana y control de voz están desbloqueadas.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "free": (
             "🤖 <b>Centro de Mando: Suscripciones y Licencias</b>\n\n"
-            "• <b>Comunidad ID:</b> <code>{chat_id}</code>\n"
+            "• <b>Entorno ID:</b> <code>{chat_id}</code>\n"
             "• <b>Nivel Operativo:</b> <code>BÁSICO (Plan Gratuito)</code>\n\n"
-            "Eleva tu comunidad para eliminar los topes de comandos diarios, activar purgas automatizadas y desplegar clones autónomos:\n\n"
+            "Eleva tu entorno para eliminar topes de comandos diarios, activar purgas automatizadas y desplegar clones autónomos:\n\n"
             "<i>Selecciona tu pasarela preferida para activar al instante:</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
@@ -175,7 +190,7 @@ TEXTS = {
         "btn_binance": "🟡 Binance Pay (Instantáneo)",
         "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_back": "🔙 Volver al Menú Principal",
-        "btn_back_group": "🔙 Volver al Panel del Grupo",
+        "btn_back_group": "🔙 Volver al Panel",
         "btn_pay_stars": "⭐ Pagar con Stars",
         
         "inv_pro_t": "Suscripción PRO (300 XTR)",
@@ -187,15 +202,15 @@ TEXTS = {
         
         "pmt_ok_pro": (
             "🎉 <b>¡Pago Confirmado! Plan PRO Activado</b>\n\n"
-            "• Comunidad <code>{chat_id}</code> elevada al estándar <b>PRO ⭐</b> con éxito.\n"
+            "• Entorno <code>{chat_id}</code> elevado al estándar <b>PRO ⭐</b> con éxito.\n"
             "• Los topes diarios de 3 comandos y restricciones de purga han sido levantados.\n\n"
-            "💡 <b>Paso Siguiente:</b> Añade al Centinela Maestro a tu grupo para moderar llamadas de voz:\n\n"
+            "💡 <b>Paso Siguiente:</b> Añade al Centinela Maestro a tu comunidad para moderar llamadas de voz:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pmt_ok_ultra": (
             "💎 <b>¡Pago Confirmado! Nivel ULTRA PRO Activado</b>\n\n"
-            "• Comunidad <code>{chat_id}</code> elevada a <b>ULTRA PRO 💎</b>.\n"
-            "• Clonación autónoma con @BotFather, Centinela aislado antiban y cronograma semanal de videochats desbloqueados.\n"
+            "• Entorno <code>{chat_id}</code> elevado a <b>ULTRA PRO 💎</b>.\n"
+            "• Clonación autónoma con @BotFather, Centinela aislado antiban y cronograma semanal desbloqueados.\n"
             "• <b>Monetización Directa:</b> El 100% de las Stars cobradas van directamente y sin comisiones a tu propio bot clon.\n\n"
             "💡 <b>Paso Siguiente:</b> Conecta tu token de bot y tu sesión de Pyrogram en el panel privado:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -208,8 +223,9 @@ TEXTS = {
         ),
         "btn_add_master": "🤖 Añadir Centinela Maestro (@Alphacentinel)",
         "btn_setup_clone": "🧬 Configurar Clon & Centinela Propio",
+        "btn_join_channel": "🚀 Entrar al Canal Seguro",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
-        "err_link": "⚠️ Enlace de facturación no válido, sin grupo asociado o expirado.",
+        "err_link": "⚠️ Enlace de facturación no válido, sin entorno asociado o expirado.",
         "private_only": "⚠️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
     }
 }
@@ -225,7 +241,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
 
     if message.chat.type == "private":
         await message.answer(
-            f"⚠️ Por favor ejecuta /{command.command} dentro de tu comunidad para vincular la facturación a ese grupo.",
+            f"⚠️ Por favor ejecuta /{command.command} dentro de tu comunidad para vincular la facturación a ese entorno.",
             parse_mode="HTML"
         )
         return
@@ -291,7 +307,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     t = TEXTS[lang]
     args = command.args or ""
 
-    # 1. FLUJO SUSCRIPCIONES DE GRUPO (sub_pro / sub_ultra)
+    # 1. FLUJO SUSCRIPCIONES PRO / ULTRA PRO (GRUPOS Y CANALES)
     if args.startswith("sub_"):
         if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
             redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
@@ -335,8 +351,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
 
+            _, back_cb = await resolve_chat_context(bot, chat_id_target)
             prices = [LabeledPrice(label=title, amount=price)]
-            back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id_target}_{lang}")
+            back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")
             
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
@@ -369,18 +386,38 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             plan_id = int(parts[1])
             channel_id = int(parts[2])
 
-            plans = await get_channel_plans(channel_id, only_active=True)
-            target_plan = next((p for p in plans if p[0] == plan_id), None)
-            if not target_plan:
+            target_plan = await get_channel_plan(plan_id)
+            if not target_plan or target_plan.get("channel_id") != channel_id or target_plan.get("status") != "active":
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
 
-            plan_name = target_plan[1]
-            duration_days = target_plan[2]
-            stars_price = target_plan[3]
+            plan_name = target_plan["plan_name"]
+            duration_days = target_plan["duration_days"]
+            stars_price = target_plan["stars_price"]
+            promo_text = target_plan.get("promo_text") or ""
+            media_id = target_plan.get("media_id")
+            media_type = target_plan.get("media_type")
+
+            # Despacho opcional del activo promocional (Foto/Video/Animación) previo a la factura
+            if media_id and media_type:
+                try:
+                    caption = promo_text if promo_text else f"💎 <b>{plan_name}</b>"
+                    if media_type == "photo":
+                        await bot.send_photo(chat_id=message.chat.id, photo=media_id, caption=caption, parse_mode="HTML")
+                    elif media_type == "video":
+                        await bot.send_video(chat_id=message.chat.id, video=media_id, caption=caption, parse_mode="HTML")
+                    elif media_type == "animation":
+                        await bot.send_animation(chat_id=message.chat.id, animation=media_id, caption=caption, parse_mode="HTML")
+                except Exception as promo_err:
+                    logger.warning(f"Aviso despachando multimedia promocional en chanplan: {promo_err}")
+            elif promo_text:
+                try:
+                    await message.answer(promo_text, parse_mode="HTML")
+                except Exception:
+                    pass
 
             title = f"Membresía: {plan_name}"[:32]
-            desc = f"Acceso exclusivo al canal por {duration_days} días."[:255]
+            desc = (f"Acceso exclusivo al canal por {duration_days} días." if not promo_text else promo_text[:250])[:255]
             payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
 
             prices = [LabeledPrice(label=title, amount=stars_price)]
@@ -479,10 +516,11 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
             desc = t["inv_ultra_d"]
             payload = f"sub_ultra_{chat_id}"
 
+        _, back_cb = await resolve_chat_context(bot, chat_id)
         prices = [LabeledPrice(label=title, amount=price)]
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
-            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
+            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
         ])
         
         try:
@@ -520,7 +558,7 @@ async def process_successful_payment(message: Message, bot: Bot):
     user_id = message.from_user.id
     charge_id = message.successful_payment.telegram_payment_charge_id
 
-    # CASO 1: SUSCRIPCIONES PRO / ULTRA PRO
+    # CASO 1: SUSCRIPCIONES PRO / ULTRA PRO (GRUPOS Y CANALES)
     if payload.startswith("sub_"):
         try:
             parts = payload.split("_")
@@ -530,10 +568,12 @@ async def process_successful_payment(message: Message, bot: Bot):
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
             await approve_group(group_id=chat_id, tier=tier_db, duration_days=30)
             
+            chat_kind, back_cb = await resolve_chat_context(bot, chat_id)
+
             if plan_type == "pro":
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=t["btn_add_master"], url=ASSISTANT_INVITE_URL)],
-                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
+                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
                 ])
                 await message.answer(
                     t["pmt_ok_pro"].format(chat_id=chat_id),
@@ -541,9 +581,10 @@ async def process_successful_payment(message: Message, bot: Bot):
                     reply_markup=confirm_markup
                 )
             else:
+                clone_cb = f"gset_clone_{chat_id}_{lang}"
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=f"gset_clone_g_{chat_id}_{lang}")],
-                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
+                    [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=clone_cb)],
+                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
                 ])
                 await message.answer(
                     t["pmt_ok_ultra"].format(chat_id=chat_id),
@@ -585,6 +626,10 @@ async def process_successful_payment(message: Message, bot: Bot):
                 invite_link=invite_link
             )
 
+            join_markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
+            ])
+
             success_text = (
                 f"💎 <b>¡Membresía de Canal Activada con Éxito!</b>\n\n"
                 f"• Pago procesado: <b>{stars_paid} Stars (XTR)</b>\n"
@@ -598,7 +643,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 f"🔗 <a href='{invite_link}'>Join Secure Channel</a>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
-            await message.answer(success_text, parse_mode="HTML")
+            await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
             try:

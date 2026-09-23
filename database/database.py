@@ -289,10 +289,25 @@ def init_db():
                 duration_days INTEGER NOT NULL,
                 stars_price INTEGER NOT NULL,
                 status TEXT DEFAULT 'active',
+                promo_text TEXT,
+                media_id TEXT,
+                media_type TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_channel ON channel_plans (channel_id, status)")
+
+        # Migraciones dinámicas para tablas channel_plans existentes
+        channel_plan_cols = [
+            ("promo_text", "TEXT"),
+            ("media_id", "TEXT"),
+            ("media_type", "TEXT")
+        ]
+        for col_name, col_def in channel_plan_cols:
+            try:
+                cursor.execute(f"ALTER TABLE channel_plans ADD COLUMN {col_name} {col_def}")
+            except sqlite3.OperationalError:
+                pass
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS channel_subscriptions (
@@ -1675,15 +1690,53 @@ def set_channel_settings(channel_id: int, field: str, value):
         conn.commit()
 
 
-def create_channel_plan(channel_id: int, plan_name: str, duration_days: int, stars_price: int) -> int:
+def create_channel_plan(
+    channel_id: int, 
+    plan_name: str, 
+    duration_days: int, 
+    stars_price: int,
+    promo_text: str = None,
+    media_id: str = None,
+    media_type: str = None
+) -> int:
+    """Registra un nuevo plan comercial de membresía para canales con soporte de copy y multimedia."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO channel_plans (channel_id, plan_name, duration_days, stars_price, status)
-            VALUES (?, ?, ?, ?, 'active')
-        """, (channel_id, plan_name.strip(), duration_days, stars_price))
+            INSERT INTO channel_plans (
+                channel_id, plan_name, duration_days, stars_price, status,
+                promo_text, media_id, media_type
+            )
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
+        """, (channel_id, plan_name.strip(), duration_days, stars_price, promo_text, media_id, media_type))
         conn.commit()
         return cursor.lastrowid
+
+
+def get_channel_plan(plan_id: int) -> dict:
+    """Recupera un plan de membresía específico por su identificador."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT plan_id, channel_id, plan_name, duration_days, stars_price, status,
+                   promo_text, media_id, media_type, created_at
+            FROM channel_plans WHERE plan_id = ?
+        """, (plan_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "plan_id": row[0],
+                "channel_id": row[1],
+                "plan_name": row[2],
+                "duration_days": row[3],
+                "stars_price": row[4],
+                "status": row[5],
+                "promo_text": row[6],
+                "media_id": row[7],
+                "media_type": row[8],
+                "created_at": row[9]
+            }
+        return None
 
 
 def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
@@ -1691,13 +1744,15 @@ def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
         cursor = conn.cursor()
         if only_active:
             cursor.execute("""
-                SELECT plan_id, plan_name, duration_days, stars_price, status, created_at
+                SELECT plan_id, plan_name, duration_days, stars_price, status, created_at,
+                       promo_text, media_id, media_type
                 FROM channel_plans WHERE channel_id = ? AND status = 'active'
                 ORDER BY duration_days ASC
             """, (channel_id,))
         else:
             cursor.execute("""
-                SELECT plan_id, plan_name, duration_days, stars_price, status, created_at
+                SELECT plan_id, plan_name, duration_days, stars_price, status, created_at,
+                       promo_text, media_id, media_type
                 FROM channel_plans WHERE channel_id = ?
                 ORDER BY status ASC, duration_days ASC
             """, (channel_id,))
@@ -1940,6 +1995,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_channel_settings",
     "set_channel_settings",
     "create_channel_plan",
+    "get_channel_plan",
     "get_channel_plans",
     "set_channel_plan_status",
     "delete_channel_plan",
