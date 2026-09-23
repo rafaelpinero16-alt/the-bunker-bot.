@@ -3,24 +3,33 @@ import functools
 import sqlite3
 import os
 import contextlib
+import threading
 from datetime import datetime, time
 
 DB_PATH = "database/bot_data.db"
+
+# Thread-local storage para reutilización de conexiones por hilo bajo alta concurrencia (Fase 4)
+_thread_local = threading.local()
 
 
 @contextlib.contextmanager
 def get_db_connection():
     """
-    Genera una conexión SQLite optimizada contra colisiones y bloqueos de concurrencia.
+    Genera y reutiliza conexiones SQLite por hilo optimizadas con WAL y modo concurrente.
+    Evita la saturación del ThreadPoolExecutor reutilizando la conexión en hilos de trabajo.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=30.0)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA busy_timeout = 30000;")
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        _thread_local.conn = conn
     try:
         yield conn
-    finally:
-        conn.close()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def init_db():
@@ -117,7 +126,6 @@ def init_db():
             ("sentinel_payload_media_id", "TEXT"),
             ("sentinel_payload_media_type", "TEXT"),
             ("sentinel_payload_auto_delete", "INTEGER"),
-            # --- MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL ---
             ("night_mode_status", "INTEGER DEFAULT 0"),
             ("night_mode_start", "TEXT DEFAULT '22:00'"),
             ("night_mode_end", "TEXT DEFAULT '06:00'"),
@@ -225,7 +233,6 @@ def init_db():
             )
         """)
 
-        # --- FASE 4: SNAPSHOTS DE MODO NOCTURNO UNIVERSAL ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS night_snapshots (
                 group_id INTEGER PRIMARY KEY,
@@ -237,7 +244,6 @@ def init_db():
             )
         """)
 
-        # --- FASE 4: REGISTRO CENTRALIZADO DE STRIKES (WARNS MATRIX) ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_strikes (
                 group_id INTEGER,
@@ -264,7 +270,6 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
 
-        # --- MÓDULOS DE CANALES Y MEMBRESÍAS RECURRENTES ---
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS channel_settings (
                 channel_id INTEGER PRIMARY KEY,
@@ -524,9 +529,6 @@ def set_captcha_config(group_id: int, field: str, value):
         conn.commit()
 
 
-# ==========================================
-# ⚠️ MATRIZ DE ADVERTENCIAS CENTRALIZADA (WARNS MATRIX)
-# ==========================================
 def get_warns_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -562,7 +564,6 @@ def set_warns_config(group_id: int, field: str, value):
 
 
 def add_user_strike(group_id: int, user_id: int, reason: str = "Infracción de reglas") -> int:
-    """Registra una falta contra un miembro en la matriz y retorna el total acumulado."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -628,6 +629,8 @@ def get_mic_vip_price(group_id: int) -> int:
             return row[0] if row and row[0] is not None else 50
         except sqlite3.OperationalError:
             return 50
+
+
 def set_mic_vip_price(group_id: int, price: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -842,7 +845,10 @@ def activate_universal_night_mode(group_id: int) -> bool:
 
 
 def deactivate_universal_night_mode(group_id: int) -> bool:
-    """Levanta el modo nocturno restaurando con precisión los estados previos desde el snapshot."""
+    """
+    Levanta el modo nocturno restaurando con precisión los estados previos desde el snapshot.
+    Optimizado con UPSERT para evitar fallos silenciosos si no existe la fila previa.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -852,14 +858,15 @@ def deactivate_universal_night_mode(group_id: int) -> bool:
         snap = cursor.fetchone() or (0, 0, 0, 0)
 
         cursor.execute("""
-            UPDATE group_settings SET
+            INSERT INTO group_settings (group_id, night_mode_status, lock_media, lock_links, lock_stickers, lock_commands)
+            VALUES (?, 0, ?, ?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
                 night_mode_status = 0,
-                lock_media = ?,
-                lock_links = ?,
-                lock_stickers = ?,
-                lock_commands = ?
-            WHERE group_id = ?
-        """, (*snap, group_id))
+                lock_media = excluded.lock_media,
+                lock_links = excluded.lock_links,
+                lock_stickers = excluded.lock_stickers,
+                lock_commands = excluded.lock_commands
+        """, (group_id, *snap))
         cursor.execute("DELETE FROM night_snapshots WHERE group_id = ?", (group_id,))
         conn.commit()
         return True
@@ -1868,7 +1875,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_radar_config",
     "get_sentinel_payload_config",
     "set_sentinel_payload_config",
-    # --- MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL ---
     "get_night_mode_config",
     "set_night_mode_config",
     "activate_universal_night_mode",
@@ -1908,8 +1914,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_vc_schedule",
     "update_vc_call_status",
     "get_all_active_vc_schedules",
-
-    # --- TELEMETRÍA Y HERRAMIENTAS ULTRA ---
     "get_panic_status",
     "set_panic_status",
     "get_shield_status",
@@ -1933,8 +1937,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "clear_speaker_queue",
     "get_community_live_telemetry",
     "get_channel_live_telemetry",
-
-    # --- CANALES & MEMBRESÍAS ULTRA PRO ---
     "get_channel_settings",
     "set_channel_settings",
     "create_channel_plan",
