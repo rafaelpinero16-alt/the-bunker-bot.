@@ -598,7 +598,9 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                 await bot.unban_chat_member(chat_id=group_id, user_id=target_user_id)
         except Exception as ex:
             logger.error(f"Error aplicando sanción por fallo de captcha: {ex}")
-            # ==========================================
+
+
+# ==========================================
 # 🧹 PURGA DE MENSAJES DE SERVICIO
 # ==========================================
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.left_chat_member)
