@@ -4,6 +4,7 @@ import random
 import os
 import time
 from datetime import datetime
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client
 from pyrogram.enums import ChatMembersFilter, ChatType
 from pyrogram.errors import (
@@ -30,6 +31,7 @@ from database.database import (
     get_radar_config, revoke_owner_session,
     get_screen_shield_status, get_podcast_config,
     get_night_mode_config, is_night_mode_time,
+    get_lock_status, get_db_connection,
     get_expiring_channel_subscriptions,
     get_expired_channel_subscriptions,
     mark_subscription_warned,
@@ -846,11 +848,27 @@ async def vc_scheduler_loop():
 # ==========================================
 # 🌙 BUCLE AUTÓNOMO DE MODO NOCTURNO UNIVERSAL (FASE 2)
 # ==========================================
+async def _get_all_night_groups() -> list[int]:
+    """Recupera de la base de datos todas las comunidades con modo nocturno activado."""
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT group_id FROM group_settings WHERE night_mode_status = 1")
+            return [row[0] for row in cursor.fetchall()]
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception:
+        return list(active_sentinels.keys())
+
+
 async def night_mode_autonomous_loop():
     logger.info("🌙 [Modo Nocturno Autónomo] Bucle de automatización perimetral iniciado.")
     while True:
         try:
-            for group_id in list(active_sentinels.keys()):
+            night_configured_groups = await _get_all_night_groups()
+            all_target_groups = set(night_configured_groups).union(active_sentinels.keys())
+
+            for group_id in all_target_groups:
                 try:
                     cfg = await get_night_mode_config(group_id)
                     if not cfg or cfg.get("status") != 1:
@@ -860,8 +878,6 @@ async def night_mode_autonomous_loop():
                     end_str = cfg.get("end", "06:00")
                     in_night_time = is_night_mode_time(start_str, end_str)
 
-                    # Verificamos estado actual en la base de datos para evitar re-aplicaciones redundantes
-                    from database.database import get_lock_status
                     current_media_lock = await get_lock_status(group_id, "lock_media")
 
                     if in_night_time and current_media_lock == 0:
@@ -878,7 +894,6 @@ async def night_mode_autonomous_loop():
                         logger.info(f"🌙 [Modo Nocturno Activado] Perímetro asegurado automáticamente en comunidad {group_id}.")
 
                     elif not in_night_time and current_media_lock == 1:
-                        # Solo desactivamos si estaba activado por el modo nocturno automático
                         night_cfg = await get_night_mode_config(group_id)
                         if night_cfg.get("status") == 1:
                             await deactivate_universal_night_mode(group_id)
@@ -913,13 +928,25 @@ async def channel_subscription_audit_loop():
                 channel_id, user_id, expires_at, stars_paid, grace_days = row
                 if _global_bot:
                     try:
+                        bot_info = await _global_bot.get_me()
+                        renew_kb = InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(
+                                text="💎 Renovar Membresía", 
+                                url=f"https://t.me/{bot_info.username}?start=cset_{channel_id}"
+                            )]
+                        ])
                         warning_text = (
                             f"⏳ <b>Aviso de Renovación — The Bunker OS</b>\n\n"
                             f"Tu membresía en el canal expira el <code>{expires_at}</code>.\n"
                             f"Renueva a tiempo para mantener tus privilegios de acceso exclusivo.\n\n"
                             f"🛡️ <i>Cloud Media Management</i>"
                         )
-                        await _global_bot.send_message(chat_id=user_id, text=warning_text, parse_mode="HTML")
+                        await _global_bot.send_message(
+                            chat_id=user_id, 
+                            text=warning_text, 
+                            reply_markup=renew_kb, 
+                            parse_mode="HTML"
+                        )
                         await mark_subscription_warned(channel_id, user_id)
                     except Exception as e:
                         logger.debug(f"Aviso al notificar expiración a {user_id} para canal {channel_id}: {e}")
