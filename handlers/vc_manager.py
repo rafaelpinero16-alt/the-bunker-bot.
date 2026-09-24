@@ -8,10 +8,9 @@ from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
     add_to_whitelist, remove_from_whitelist, is_group_approved, 
-    is_vip_mic_active, get_autolower_status, set_autolower_status,
     get_mic_vip_price, get_session_by_group,
-    get_night_mode_config, get_podcast_status, get_screen_shield_status,
-    get_community_live_telemetry, get_speaker_queue, get_panic_status,
+    get_night_mode_config,
+    get_community_live_telemetry,
     get_vc_monitor_status, set_vc_monitor_status
 )
 from assistant import set_participant_mic
@@ -104,8 +103,6 @@ TEXTS = {
             "• Thread ID: <code>{thread_id}</code>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "autolower_on": "🎚️ <b>AutoLower Protocol:</b> 🟢 ACTIVATED (Mics dialed down to 2% for unverified users)\n\n🛡️ <i>Cloud Media Management</i>",
-        "autolower_off": "🎚️ <b>AutoLower Protocol:</b> 🔴 DEACTIVATED (Open microphones at 100%)\n\n🛡️ <i>Cloud Media Management</i>",
         "micvip_msg": (
             "🔇 <b>The Bunker Bot — Voice Chat Sentinel</b>\n\n"
             "• Regular microphones are moderated automatically to keep the transmission clean.\n"
@@ -169,8 +166,6 @@ TEXTS = {
             "• Hilo: <code>{thread_id}</code>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "autolower_on": "🎚️ <b>Protocolo AutoLower:</b> 🟢 ACTIVADO (Volumen reducido al 2% a no autorizados)\n\n🛡️ <i>Cloud Media Management</i>",
-        "autolower_off": "🎚️ <b>Protocolo AutoLower:</b> 🔴 DESACTIVADO (Micrófonos libres al 100%)\n\n🛡️ <i>Cloud Media Management</i>",
         "micvip_msg": (
             "🔇 <b>The Bunker Bot — Centinela de Videochat</b>\n\n"
             "• Los micrófonos regulares se moderan automáticamente para mantener la sala limpia.\n"
@@ -629,21 +624,6 @@ async def cmd_get_id(message: Message, bot: Bot):
             thread_id=message.message_thread_id or ('Ninguno' if lang == 'es' else 'None')
         )
     )
-
-
-@router.message(Command("autolower"))
-async def cmd_auto_lower(message: Message, bot: Bot):
-    if not await verify_creator_and_approved(message, bot):
-        return
-    chat_id = message.chat.id
-    current_st = await get_autolower_status(chat_id)
-    new_st = 0 if current_st == 1 else 1
-    await set_autolower_status(chat_id, new_st)
-
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
-    res_text = t["autolower_on"] if new_st == 1 else t["autolower_off"]
-    await send_private_response(message, res_text)
 
 
 # ==========================================

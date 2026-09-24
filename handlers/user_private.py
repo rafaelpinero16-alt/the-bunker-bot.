@@ -1135,7 +1135,7 @@ async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str 
     await bot.send_message(
         chat_id=chat_id,
         text=t["welcome"].format(name=name),
-        reply_markup="get_main_keyboard"(bot_username, lang, is_clone=is_clone_bot(bot)),
+        reply_markup=get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot)),
         parse_mode="HTML"
     )
 
