@@ -1764,12 +1764,14 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: 
             [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Unlock with ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
             [back_btn]
         ])
-
-
+    # ==========================================
+# 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO (BLINDADO CONTRA PAGOS)
 # ==========================================
-# 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO
-# ==========================================
-@router.message(CommandStart(), F.chat.type == "private")
+@router.message(
+    CommandStart(), 
+    F.chat.type == "private", 
+    ~F.text.regexp(r"^/start\s+(sub_|vipmic_|chanplan_)")
+)
 async def cmd_start(message: Message, bot: Bot, command: CommandObject):
     try:
         bot_info = await bot.get_me()
@@ -1785,6 +1787,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         except Exception as db_ex:
             logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
 
+        # Apertura de panel de configuración de grupo vía deep link (gset_{group_id})
         if command.args and command.args.startswith("gset_"):
             try:
                 group_id = int(command.args.split("_")[1])
@@ -1797,7 +1800,22 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                 await message.answer(t["group_panel_title"].format(group_name=g_name), reply_markup=get_group_panel_keyboard(group_id, lang), parse_mode="HTML")
                 return
             except Exception as g_ex:
-                logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
+                logging.error(f"❌ [cmd_start Deeplink Grupo Error]: {g_ex}")
+
+        # Apertura de consola de estudio de canal vía deep link (cset_{channel_id})
+        elif command.args and command.args.startswith("cset_"):
+            try:
+                channel_id = int(command.args.split("_")[1])
+                if not await verify_admin_privileges_msg(message, bot, channel_id):
+                    return
+                try:
+                    c_name = (await bot.get_chat(channel_id)).title
+                except Exception:
+                    c_name = "Canal" if lang == "es" else "Channel"
+                await message.answer(t["channel_panel_title"].format(channel_name=c_name), reply_markup=get_channel_panel_keyboard(channel_id, lang), parse_mode="HTML")
+                return
+            except Exception as c_ex:
+                logging.error(f"❌ [cmd_start Deeplink Canal Error]: {c_ex}")
 
         await send_official_welcome(bot, message.chat.id, message.from_user, bot_username)
         logging.info(f"✅ [cmd_start ÉXITO] Matriz desplegada en @{bot_username} para {message.from_user.id}.")
@@ -2406,6 +2424,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 target_link=target_link
             )
             return
+
+
 @router.callback_query(
     F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | 
     F.data.startswith("langcpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cpanel_") | 

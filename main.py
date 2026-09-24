@@ -28,12 +28,12 @@ from database.database import (
 )
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
+    payments,
     user_private, 
-    payments, 
-    ecosystem, 
     moderation, 
-    vc_manager, 
     admin_group, 
+    ecosystem, 
+    vc_manager, 
     groups
 )
 from handlers.user_private import (
@@ -259,8 +259,9 @@ async def main():
     # ==========================================
     # 📡 PIPELINE ARQUITECTÓNICO DE ROUTERS SINCRONIZADO
     # ==========================================
-    dp.include_router(user_private.router)
+    # payments.router DEBE ir antes de user_private.router para procesar deep links de compras
     dp.include_router(payments.router)
+    dp.include_router(user_private.router)
     dp.include_router(moderation.router)
     dp.include_router(admin_group.router)
     dp.include_router(ecosystem.router)

@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 import time
@@ -19,6 +20,16 @@ logger = logging.getLogger("payments_gateway")
 router = Router()
 
 # ==========================================
+# 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
+# ==========================================
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
+# ==========================================
 # 💰 TARIFAS Y CONFIGURACIÓN DE FACTURACIÓN
 # ==========================================
 PRICE_PRO_STARS = 300          # 300 Stars Telegram (~$3.00 USD)
@@ -38,7 +49,9 @@ def get_lang(lang_code: str) -> str:
 
 
 async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Verifica si el usuario ostenta el rango máximo de Dueño / Creador del grupo o canal."""
+    """Verifica si el usuario ostenta el rango de Creador del grupo/canal o Arquitecto Supremo."""
+    if is_super_admin(user_id):
+        return True
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status == "creator"
@@ -547,17 +560,17 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
 
 
 # ==========================================
-# 🛡️ VALIDACIÓN DE PRE-CHECKOUT (STARS GATEWAY)
+# 🛡️ VALIDACIÓN DE PRE-CHECKOUT FILTRADA (NO CAPTURA /speakers)
 # ==========================================
-@router.pre_checkout_query()
+@router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
 
 
 # ==========================================
-# 💎 PROCESADOR DE PAGO EXITOSO Y ACTIVACIÓN INMEDIATA (CON REEMBOLSO AUTOMÁTICO ANTE FALLO)
+# 💎 PROCESADOR DE PAGO EXITOSO FILTRADO (PERMITE QUE speak_ LLEGUE A GROUPS.PY)
 # ==========================================
-@router.message(F.successful_payment)
+@router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
 async def process_successful_payment(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
