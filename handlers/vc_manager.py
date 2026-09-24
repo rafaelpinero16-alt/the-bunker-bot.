@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import time
 from aiogram import Router, F, Bot
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command, CommandObject
@@ -25,6 +26,7 @@ RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
+
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
@@ -34,12 +36,24 @@ def get_lang(lang_code: str) -> str:
     return "es" if lang_code and lang_code.startswith("es") else "en"
 
 
+async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Valida si el ejecutor cuenta con rango administrativo o inmunidad de Arquitecto."""
+    if is_super_admin(user_id):
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in ["creator", "administrator"]
+    except Exception:
+        return False
+
+
 # ==========================================
 # 🌐 DICCIONARIO BILINGÜE DE GESTIÓN DE VOZ
 # ==========================================
 TEXTS = {
     "en": {
         "owner_only": "⛔ <b>Access Denied:</b> This protocol is strictly reserved for the Community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, please start a private chat with me first to view this control console: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
         "unauthorized_start": "⚠️ @{name}, this command is strictly reserved for community administrators.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 Voice chat monitoring and AutoLower sentinel are now <b>activated</b> for your group.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -59,11 +73,11 @@ TEXTS = {
             "• <b>Background Optimization:</b> Cleans video lag & refreshes room every 3.5h automatically\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "kickcam_success": "⚡ User {target} has been disconnected from the voice room.\n\n🛡️ <i>Cloud Media Management</i>",
+        "kickcam_success": "⚡ User {target} has been disconnected and evicted from the voice room.\n\n🛡️ <i>Cloud Media Management</i>",
         "kickcam_needed": "⚠️ Reply to a user's message or specify their ID/@username to disconnect.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "✅ User {target} registered to Whitelist with full voice immunity.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_removed": "❌ User {target} removed from Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_needed": "⚠️ Reply to the message of the user you wish to authorize.\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_needed": "⚠️ Reply to the message of the user you wish to authorize or provide ID/@username.\n\n🛡️ <i>Cloud Media Management</i>",
         "status_text": (
             "🎙️ <b>Voice Room & Radar Live Telemetry</b>\n\n"
             "• <b>Supervision State:</b> {status}\n"
@@ -97,13 +111,14 @@ TEXTS = {
             "• Regular microphones are moderated automatically to keep the transmission clean.\n"
             "• Unlock your voice continuously at <b>100% volume</b> for 24 hours with your VIP Pass.\n\n"
             "💡 <i>Ecosystem Perk:</i> With a dedicated Sentinel & Bot Clone, <b>100% of the Stars paid go straight to the community owner's balance</b>!\n\n"
-            "👤 @{name}, tap below to unlock the mic:\n\n"
+            "👤 {mention}, tap below to unlock the mic:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_pay_stars": "⭐ Get VIP Voice Pass ({price} Stars)"
     },
     "es": {
         "owner_only": "⛔ <b>Acceso Denegado:</b> Este protocolo está reservado exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto o Rango de Administrador.\n\n🛡️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, para ver esta información debes iniciar un chat privado conmigo primero: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
         "unauthorized_start": "⚠️ @{name}, este comando está reservado exclusivamente para los administradores del grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 El sistema de control acústico y radar centinela ha sido <b>activado</b> para tu grupo.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -123,11 +138,11 @@ TEXTS = {
             "• <b>Optimización en Segundo Plano:</b> Purgado de lag y refresco automático cada 3.5h activado\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "kickcam_success": "⚡ El usuario {target} ha sido desconectado de la sala de voz.\n\n🛡️ <i>Cloud Media Management</i>",
+        "kickcam_success": "⚡ El usuario {target} ha sido desconectado y expulsado de la sala de voz.\n\n🛡️ <i>Cloud Media Management</i>",
         "kickcam_needed": "⚠️ Debes responder al mensaje del usuario o indicar su ID/@usuario para desconectarlo.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "✅ Usuario {target} registrado en Whitelist con inmunidad de voz total.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_removed": "❌ Usuario {target} retirado de la Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_needed": "⚠️ Responde al mensaje del usuario que deseas autorizar.\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_needed": "⚠️ Responde al mensaje del usuario que deseas autorizar o proporciona su ID/@usuario.\n\n🛡️ <i>Cloud Media Management</i>",
         "status_text": (
             "🎙️ <b>Telemetría en Vivo de la Sala de Voz y Radar</b>\n\n"
             "• <b>Supervisión Acústica:</b> {status}\n"
@@ -161,12 +176,21 @@ TEXTS = {
             "• Los micrófonos regulares se moderan automáticamente para mantener la sala limpia.\n"
             "• Desbloquea tu voz al <b>100% de volumen continuo</b> durante 24 horas con tu Pase VIP.\n\n"
             "💡 <i>Ventaja del Ecosistema:</i> Con Centinela y Bot Clon propio, <b>el 100% de las Stars pagadas van directas al saldo del dueño del grupo</b>.\n\n"
-            "👤 @{name}, haz clic abajo para activar tu micrófono:\n\n"
+            "👤 {mention}, haz clic abajo para activar tu micrófono:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_pay_stars": "⭐ Obtener Pase VIP ({price} Stars)"
     }
 }
+
+
+async def auto_delete_msg(msg: Message, delay: int = 15):
+    """Elimina automáticamente mensajes temporales de alerta."""
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
 
 async def get_active_sentinel_label(group_id: int) -> str:
@@ -181,26 +205,34 @@ async def get_active_sentinel_label(group_id: int) -> str:
 # 📡 FUENTE ÚNICA DE VERDAD: TELEMETRÍA EN CALIENTE
 # ==========================================
 async def get_telemetry_context(chat_id: int, lang: str) -> dict:
-    """
-    Punto único de acceso a la telemetría en tiempo real de la sala.
-    Invoca get_community_live_telemetry(chat_id) + get_night_mode_config(chat_id)
-    y devuelve los strings ya formateados y bilingües.
-    """
-    telem = await get_community_live_telemetry(chat_id)
-    night_cfg = await get_night_mode_config(chat_id)
+    """Punto único de acceso a la telemetría en tiempo real de la sala."""
+    try:
+        telem = await get_community_live_telemetry(chat_id)
+    except Exception:
+        telem = {
+            "shield_status": 0, "autolower_status": 0,
+            "podcast_status": 0, "panic_active": 0,
+            "vip_passes_active": 0, "speakers_in_queue": 0
+        }
+
+    try:
+        night_cfg = await get_night_mode_config(chat_id)
+    except Exception:
+        night_cfg = {"status": 0}
+
     sentinel_label = await get_active_sentinel_label(chat_id)
 
     if lang == "en":
-        shield = "🟢 Active" if telem["shield_status"] == 1 else "🔴 Inactive"
-        autolower = "🟢 Active at 2%" if telem["autolower_status"] == 1 else "🔴 Inactive"
-        podcast = "🟢 Active" if telem["podcast_status"] == 1 else "🔴 Inactive"
-        panic = "🚨 RAID LOCKDOWN ACTIVE" if telem["panic_active"] == 1 else "🟢 Normal"
+        shield = "🟢 Active" if telem.get("shield_status") == 1 else "🔴 Inactive"
+        autolower = "🟢 Active at 2%" if telem.get("autolower_status") == 1 else "🔴 Inactive"
+        podcast = "🟢 Active" if telem.get("podcast_status") == 1 else "🔴 Inactive"
+        panic = "🚨 RAID LOCKDOWN ACTIVE" if telem.get("panic_active") == 1 else "🟢 Normal"
         night = "🟢 Active" if night_cfg and night_cfg.get("status") == 1 else "🔴 Inactive"
     else:
-        shield = "🟢 Activo" if telem["shield_status"] == 1 else "🔴 Inactivo"
-        autolower = "🟢 Activo al 2%" if telem["autolower_status"] == 1 else "🔴 Inactivo"
-        podcast = "🟢 Activo" if telem["podcast_status"] == 1 else "🔴 Inactivo"
-        panic = "🚨 BLOQUEO ACTIVO" if telem["panic_active"] == 1 else "🟢 Normal"
+        shield = "🟢 Activo" if telem.get("shield_status") == 1 else "🔴 Inactivo"
+        autolower = "🟢 Activo al 2%" if telem.get("autolower_status") == 1 else "🔴 Inactivo"
+        podcast = "🟢 Activo" if telem.get("podcast_status") == 1 else "🔴 Inactivo"
+        panic = "🚨 BLOQUEO ACTIVO" if telem.get("panic_active") == 1 else "🟢 Normal"
         night = "🟢 Activo" if night_cfg and night_cfg.get("status") == 1 else "🔴 Inactivo"
 
     return {
@@ -210,43 +242,43 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
         "podcast": podcast,
         "panic": panic,
         "night": night,
-        "vip_count": telem["vip_passes_active"],
-        "speakers_count": telem["speakers_in_queue"],
+        "vip_count": telem.get("vip_passes_active", 0),
+        "speakers_count": telem.get("speakers_in_queue", 0),
     }
 
 
 async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
-    """Valida la aprobación del grupo y rango exclusivo de Dueño (Creator) o Arquitecto."""
-    if message.chat.type != "private":
-        try:
-            await message.delete()
-        except Exception:
-            pass
-            
+    """Valida la aprobación del grupo y rango de Dueño o Arquitecto."""
     if message.chat.type == "private":
         return True
-        
+
     chat_id = message.chat.id
     if not await is_group_approved(chat_id):
         return False
 
     if is_super_admin(message.from_user.id):
+        try:
+            await message.delete()
+        except Exception:
+            pass
         return True
 
     try:
         member = await bot.get_chat_member(chat_id, message.from_user.id)
-        if member.status == "creator":
+        if member.status in ["creator", "administrator"]:
+            try:
+                await message.delete()
+            except Exception:
+                pass
             return True
         else:
+            try:
+                await message.delete()
+            except Exception:
+                pass
             lang = get_lang(message.from_user.language_code)
-            warn = await message.answer(TEXTS[lang]["owner_only"], parse_mode="HTML")
-            async def auto_del_warn(msg):
-                await asyncio.sleep(8)
-                try: 
-                    await msg.delete()
-                except Exception: 
-                    pass
-            asyncio.create_task(auto_del_warn(warn))
+            warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
+            asyncio.create_task(auto_delete_msg(warn, 8))
             return False
     except Exception:
         return False
@@ -263,17 +295,12 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
         bot_info = await message.bot.get_me()
         name = message.from_user.username or message.from_user.first_name
         try:
-            temp_msg = await message.answer(
-                t["private_warning"].format(name=name, bot_user=bot_info.username),
+            temp_msg = await message.bot.send_message(
+                chat_id=message.chat.id,
+                text=t["private_warning"].format(name=name, bot_user=bot_info.username),
                 parse_mode="HTML"
             )
-            async def auto_del_warn(msg):
-                await asyncio.sleep(12)
-                try: 
-                    await msg.delete()
-                except Exception: 
-                    pass
-            asyncio.create_task(auto_del_warn(temp_msg))
+            asyncio.create_task(auto_delete_msg(temp_msg, 12))
         except Exception:
             pass
 
@@ -301,17 +328,12 @@ async def cmd_start_group(message: Message, bot: Bot):
         if member.status not in ["creator", "administrator"] and not is_super_admin(message.from_user.id):
             lang = get_lang(message.from_user.language_code)
             name = message.from_user.username or message.from_user.first_name
-            temp_msg = await message.answer(
-                TEXTS[lang]["unauthorized_start"].format(name=name),
+            temp_msg = await bot.send_message(
+                chat_id=message.chat.id,
+                text=TEXTS[lang]["unauthorized_start"].format(name=name),
                 parse_mode="HTML"
             )
-            async def auto_del_start(msg):
-                await asyncio.sleep(8)
-                try: 
-                    await msg.delete()
-                except Exception: 
-                    pass
-            asyncio.create_task(auto_del_start(temp_msg))
+            asyncio.create_task(auto_delete_msg(temp_msg, 8))
     except Exception:
         pass
 
@@ -382,17 +404,29 @@ async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
                 target_id = None
 
     if target_id:
+        if is_super_admin(target_id) or await is_operator_admin(bot, message.chat.id, target_id):
+            await send_private_response(message, t["target_protected"])
+            return
+
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
         except Exception:
             pass
+
+        try:
+            await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id, until_date=int(time.time() + 35))
+            await bot.unban_chat_member(chat_id=message.chat.id, user_id=target_id, only_if_banned=True)
+        except Exception as e:
+            logger.warning(f"Aviso al forzar salida del videochat para {target_id}: {e}")
+
         await send_private_response(message, t["kickcam_success"].format(target=target_mention))
     else:
         await send_private_response(message, t["kickcam_needed"])
 
 
-@router.message(Command("whitelist"))
-async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
+@router.message(Command("vcwhitelist", "vcwl"))
+async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
+    """Permite autorizar identidades para no ser atenuadas por el Centinela."""
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
@@ -425,8 +459,9 @@ async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
         await send_private_response(message, t["wl_needed"])
 
 
-@router.message(Command("unwhitelist"))
-async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
+@router.message(Command("vcunwhitelist", "vcunwl"))
+async def cmd_vc_unwhitelist(message: Message, command: CommandObject, bot: Bot):
+    """Retira una identidad de la whitelist de voz."""
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
@@ -469,7 +504,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
     t = TEXTS[lang]
 
     ctx = await get_telemetry_context(chat_id, lang)
-    mic_price = await get_mic_vip_price(chat_id)
+    mic_price = await get_mic_vip_price(chat_id) or 50
 
     if lang == "en":
         status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
@@ -498,26 +533,38 @@ async def cmd_status_vc(message: Message, bot: Bot):
 
 
 @router.callback_query(F.data.startswith("vc_"))
-async def process_vc_callback(callback: CallbackQuery):
+async def process_vc_callback(callback: CallbackQuery, bot: Bot):
     await callback.answer()
+    
+    if callback.data == "vc_close_panel":
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        return
+
     data = callback.data.split("_")
+    if len(data) < 3:
+        return
+
     action = f"{data[0]}_{data[1]}"
-    chat_id = int(data[2]) if len(data) > 2 else callback.message.chat.id
+    try:
+        chat_id = int(data[2])
+    except ValueError:
+        return
+
     lang = get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
+
+    if not await is_operator_admin(bot, chat_id, callback.from_user.id):
+        await callback.answer(t["owner_only"], show_alert=True)
+        return
     
     try:
-        if action == "vc_close":
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            return
-
-        elif action == "vc_status":
+        if action == "vc_status":
             is_active = (await get_vc_monitor_status(chat_id)) == 1
             ctx = await get_telemetry_context(chat_id, lang)
-            mic_price = await get_mic_vip_price(chat_id)
+            mic_price = await get_mic_vip_price(chat_id) or 50
 
             if lang == "en":
                 status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
@@ -604,17 +651,24 @@ async def cmd_auto_lower(message: Message, bot: Bot):
 # ==========================================
 @router.message(Command("micvip", "mic_vip"))
 async def trigger_mic_vip_offer(message: Message, bot: Bot):
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+
+    if message.chat.type == "private":
+        await message.answer(
+            "⚠️ Este comando debe ejecutarse dentro de la comunidad con videochat activo para desbloquear tu micrófono.\n\n🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+        return
+
     chat_id = message.chat.id
-    
     if not await is_group_approved(chat_id):
         return
 
     bot_info = await bot.get_me()
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
-    name = message.from_user.username or message.from_user.first_name
-    
-    price = await get_mic_vip_price(chat_id)
+    price = await get_mic_vip_price(chat_id) or 50
+
+    mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -626,7 +680,7 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
     ])
 
     sent_msg = await message.answer(
-        t["micvip_msg"].format(name=name),
+        t["micvip_msg"].format(mention=mention),
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -636,10 +690,4 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
     except Exception:
         pass
 
-    async def auto_clean_offer():
-        await asyncio.sleep(45)
-        try:
-            await sent_msg.delete()
-        except Exception:
-            pass
-    asyncio.create_task(auto_clean_offer())
+    asyncio.create_task(auto_delete_msg(sent_msg, 45))
