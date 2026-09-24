@@ -207,25 +207,25 @@ TEXTS = {
         "btn_info": "ℹ️ Information",
         "btn_how_works": "📖 How The Bunker Works",
         "settings_main": (
-            "🛡️ <b>Tactical Community Command (Groups)</b>\n\n"
-            "Take total perimeter control over your community:\n\n"
-            "• 🤖 Alphanumeric Captcha checkpoint.\n"
-            "• 🔒 Content Locks and Anti-Spam shields.\n"
-            "• 🎙️ Voice Sentinel and acoustic ducking.\n"
-            "• 💰 Telegram Stars Monetization with custom VIP tags.\n\n"
-            "<i>Select the group below you wish to audit and shield:</i>\n\n"
-            "© <i>Cloud Media Management</i>"
-        ),
-        "chsettings_main": (
-            "📡 <b>Live Studio & Membership Command (Channels)</b>\n\n"
-            "Direct broadcasting studio and subscriber monetizer:\n\n"
-            "• 🎙️ <b>Live Sentinel:</b> Instant mic unmuting upon 'Raise Hand' verification.\n"
-            "• 💎 <b>Paywalled Invites:</b> Cryptographic single-use links burned on join.\n"
-            "• ⏳ <b>Subscription Auditor:</b> Auto-renewal alerts & automated kick for unpaid members.\n"
-            "• ⭐ <b>Live Stars Tipping:</b> Direct monetized broadcasts.\n\n"
-            "<i>Select the channel below you wish to manage:</i>\n\n"
-            "© <i>Cloud Media Management</i>"
-        ),
+    "🛡️ <b>Tactical Community Command (Groups)</b>\n\n"
+    "Take total perimeter control over your community:\n\n"
+    "• 🤖 Alphanumeric Captcha checkpoint.\n"
+    "• 🔒 Content Locks and Anti-Spam shields.\n"
+    "• 🎙️ Voice Sentinel and acoustic ducking.\n"
+    "• 💰 Telegram Stars Monetization with custom VIP tags.\n\n"
+    "<i>Select the group below you wish to audit and shield:</i>\n\n"
+    "© <i>Cloud Media Management</i>"
+),
+"chsettings_main": (
+    "📡 <b>Live Studio & Membership Command (Channels)</b>\n\n"
+    "Direct broadcasting studio and subscriber monetizer:\n\n"
+    "• 🎙️ <b>Live Sentinel:</b> Instant mic unmuting upon 'Raise Hand' verification.\n"
+    "• 💎 <b>Paywalled Invites:</b> Cryptographic single-use links burned on join.\n"
+    "• ⏳ <b>Subscription Auditor:</b> Auto-renewal alerts & automated kick for unpaid members.\n"
+    "• ⭐ <b>Live Stars Tipping:</b> Direct monetized broadcasts.\n\n"
+    "<i>Select the channel below you wish to manage:</i>\n\n"
+    "© <i>Cloud Media Management</i>"
+),
         "support_main": (
             "🆘 <b>Official Tactical Support</b>\n\n"
             "For direct assistance, elite passes, or custom architectures, contact our Chief Architect:\n\n"
@@ -523,6 +523,32 @@ TEXTS = {
         "btn_support": "🆘 Soporte",
         "btn_info": "ℹ️ Información",
         "btn_how_works": "📖 ¿Cómo funciona el Búnker?",
+        "settings_main": (
+            "🛡️ <b>Centro de Mando de Comunidades (Grupos)</b>\n\n"
+            "Toma el control perimetral total de tu comunidad:\n\n"
+            "• 🤖 Aduana Captcha alfanumérica.\n"
+            "• 🔒 Cerraduras de contenido y filtros Anti-Spam.\n"
+            "• 🎙️ Centinela Dedicado y atenuación acústica en videollamadas.\n"
+            "• 💰 Monetización con Telegram Stars y etiquetas VIP personalizadas.\n\n"
+            "<i>Selecciona abajo el grupo que deseas auditar y blindar:</i>\n\n"
+            "© <i>Cloud Media Management</i>"
+        ),
+        "chsettings_main": (
+            "📡 <b>Estudio de Lives & Membresías (Canales)</b>\n\n"
+            "Consola de transmisión en vivo y gestión de suscriptores para canales:\n\n"
+            "• 🎙️ <b>Centinela en Vivo:</b> Apertura de micrófono al levantar la mano solo a usuarios verificados.\n"
+            "• 💎 <b>Aduana de Suscripciones:</b> Enlaces criptográficos de un solo uso que se queman al entrar.\n"
+            "• ⏳ <b>Auditoría Recurrente:</b> Alertas previas y expulsión automática de miembros morosos.\n"
+            "• ⭐ <b>Propinas en Directo:</b> Monetización transparente con Telegram Stars.\n\n"
+            "<i>Selecciona abajo el canal que deseas gestionar:</i>\n\n"
+            "© <i>Cloud Media Management</i>"
+        ),
+        "support_main": (
+            "🆘 <b>Soporte Táctico Oficial</b>\n\n"
+            "Para asistencia directa, pases élite o arquitecturas personalizadas, contacta con nuestro Arquitecto Jefe:\n\n"
+            "👤 <b>Contacto:</b> @therealonetom\n\n"
+            "© <i>Cloud Media Management</i>"
+        ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
         "channel_panel_title": "📡 <b>Estudio de Transmisión:</b> {channel_name}\n\nSelecciona un módulo para configurar transmisiones en vivo, suscripciones o automatizaciones.",
         "pay_pro_title": (
@@ -770,6 +796,9 @@ TEXTS = {
         "btn_night_mod": "⏰ Modificar Horario (HH:MM-HH:MM)"
     }
 }
+async def get_active_user_groups(bot: Bot, user_id: int) -> list:
+    # Function implementation goes here
+    pass
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
