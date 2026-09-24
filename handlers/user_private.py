@@ -338,7 +338,7 @@ TEXTS = {
         "btn_back_chsettings": "🔙 Back to Channels",
         "btn_back_group": "🔙 Group Panel",
         "btn_back_channel": "🔙 Channel Panel",
-        "btn_back_captcha": "🔙 Back to Captcha",
+        "btn_back_captcha": "🔙 Volver a Captcha",
         "btn_back_antispam": "🔙 Back to Anti-Spam",
         "btn_back_antiflood": "🔙 Back to Anti-Flood",
         "mod_main": (
@@ -1096,9 +1096,8 @@ async def resolve_chat_kind(bot: Bot, chat_id: int) -> str:
         return "c" if chat_obj.type == "channel" else "g"
     except Exception:
         return "g"
-
-
 def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
+
     """Teclado principal con bifurcación dual independiente para Grupos y Canales."""
     t = TEXTS.get(lang, TEXTS["es"])
     add_group_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
@@ -1136,7 +1135,7 @@ async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str 
     await bot.send_message(
         chat_id=chat_id,
         text=t["welcome"].format(name=name),
-        reply_markup=get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot)),
+        reply_markup="get_main_keyboard"(bot_username, lang, is_clone=is_clone_bot(bot)),
         parse_mode="HTML"
     )
 
