@@ -29,7 +29,8 @@ from database.database import (
     get_all_active_sessions, get_session_by_group,
     get_all_active_vc_schedules, update_vc_call_status,
     get_radar_config, revoke_owner_session,
-    get_screen_shield_status, get_podcast_config,
+    get_screen_shield_status, set_screen_shield_status,
+    get_podcast_config, set_podcast_mode, set_podcast_duck_volume,
     get_night_mode_config, is_night_mode_time,
     get_lock_status, get_db_connection,
     get_expiring_channel_subscriptions,
@@ -51,8 +52,20 @@ FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, UserDeactivated, User
 
 logger = logging.getLogger("assistant_radar")
 
-DEFAULT_API_ID = 37074591
-DEFAULT_API_HASH = "66c86c8b4f08a0c142749b204f673d81"
+# ==========================================
+# 👑 LISTA BLANCA DE ARQUITECTOS Y SERVICIO
+# ==========================================
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
+DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "37074591")))
+DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", "66c86c8b4f08a0c142749b204f673d81"))
 
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
@@ -410,6 +423,9 @@ def _register_forbidden_strike(chat_id: int, action: str):
 
 
 async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id: int, p_peer) -> bool:
+    if is_super_admin(u_id) or u_id in SERVICE_ACCOUNT_IDS:
+        return False
+
     try:
         await client.invoke(
             EditGroupCallParticipant(
@@ -672,8 +688,12 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         continue
 
                     is_authorized = (
-                        u_id == bot_client_id or u_id in cache_info['admins']
-                        or await is_whitelisted(u_id) or await is_vip_mic_active(u_id, chat_id)
+                        is_super_admin(u_id)
+                        or u_id in SERVICE_ACCOUNT_IDS
+                        or u_id == bot_client_id 
+                        or u_id in cache_info['admins']
+                        or await is_whitelisted(u_id) 
+                        or await is_vip_mic_active(u_id, chat_id)
                     )
 
                     # 1. Escudo Antinota (Pantalla no autorizada)
@@ -869,7 +889,7 @@ async def vc_scheduler_loop():
 
 
 # ==========================================
-# 🌙 BUCLE AUTÓNOMO DE MODO NOCTURNO UNIVERSAL (FASE 2)
+# 🌙 BUCLE AUTÓNOMO DE MODO NOCTURNO UNIVERSAL
 # ==========================================
 async def _get_all_night_groups() -> list[int]:
     """Recupera de la base de datos todas las comunidades con modo nocturno activado."""
@@ -939,7 +959,7 @@ async def night_mode_autonomous_loop():
 
 
 # ==========================================
-# 📢 FASE 6: BUCLE DE AUDITORÍA Y EXPULSIÓN DE CANALES
+# 📢 BUCLE DE AUDITORÍA Y EXPULSIÓN DE CANALES
 # ==========================================
 async def channel_subscription_audit_loop():
     logger.info("📡 [Auditor de Canales] Bucle de membresías y renovación automática iniciado.")
@@ -949,6 +969,9 @@ async def channel_subscription_audit_loop():
             expiring = await get_expiring_channel_subscriptions(hours_ahead=48)
             for row in expiring:
                 channel_id, user_id, expires_at, stars_paid, grace_days = row
+                if is_super_admin(user_id):
+                    continue
+
                 if _global_bot:
                     try:
                         bot_info = await _global_bot.get_me()
@@ -978,6 +1001,9 @@ async def channel_subscription_audit_loop():
             expired = await get_expired_channel_subscriptions()
             for row in expired:
                 channel_id, user_id, expires_at, grace_days, auto_kick = row
+                if is_super_admin(user_id):
+                    continue
+
                 if auto_kick == 1 and _global_bot:
                     try:
                         await _global_bot.ban_chat_member(chat_id=channel_id, user_id=user_id, until_date=int(time.time() + 35))
@@ -1235,16 +1261,25 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
 
 
 async def engage_screen_shield(group_id: int):
-    logger.info(f"🎥 [Escudo Antinota] Activado para el grupo {group_id}")
+    """Activa el Escudo Antinota y persiste el estado en la base de datos."""
+    await set_screen_shield_status(group_id, 1)
+    logger.info(f"🎥 [Escudo Antinota] Activado y persistido para el grupo {group_id}")
 
 
 async def disengage_screen_shield(group_id: int):
-    logger.info(f"🎥 [Escudo Antinota] Desactivado para el grupo {group_id}")
+    """Desactiva el Escudo Antinota y persiste el estado en la base de datos."""
+    await set_screen_shield_status(group_id, 0)
+    logger.info(f"🎥 [Escudo Antinota] Desactivado y persistido para el grupo {group_id}")
 
 
 async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
-    logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% en el grupo {group_id}")
+    """Activa el Modo Podcast y fija el nivel de atenuación en la base de datos."""
+    await set_podcast_mode(group_id, 1)
+    await set_podcast_duck_volume(group_id, duck_level * 100)
+    logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
 
 
 async def disengage_podcast_ducking(group_id: int):
-    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado en el grupo {group_id}")
+    """Desactiva el Modo Podcast y persiste el cambio en la base de datos."""
+    await set_podcast_mode(group_id, 0)
+    logger.info(f"🎙️ [Modo Podcast] Ducking desactivado y persistido en el grupo {group_id}")
