@@ -8,7 +8,7 @@ from datetime import datetime, time
 
 DB_PATH = "database/bot_data.db"
 
-# Thread-local storage para reutilización de conexiones por hilo bajo alta concurrencia (Fase 4)
+# Thread-local storage para reutilización de conexiones por hilo bajo alta concurrencia
 _thread_local = threading.local()
 
 
@@ -130,7 +130,13 @@ def init_db():
             ("night_mode_start", "TEXT DEFAULT '22:00'"),
             ("night_mode_end", "TEXT DEFAULT '06:00'"),
             ("night_action", "TEXT DEFAULT 'lock_universal'"),
-            ("vc_enabled", "INTEGER DEFAULT 1")  # 💎 Persistencia para el estado del monitor de voz
+            ("vc_enabled", "INTEGER DEFAULT 1"),
+            # 💎 Migración dinámica para Ghost Purge de Élite (Castigos y Programación)
+            ("purge_action", "TEXT DEFAULT 'ban'"),
+            ("purge_last_free_scan", "TIMESTAMP"),
+            ("purge_schedule_status", "INTEGER DEFAULT 0"),
+            ("purge_schedule_time", "TEXT DEFAULT '03:00'"),
+            ("purge_schedule_days", "TEXT DEFAULT '1,2,3,4,5,6,7'")
         ]
 
         for col_name, col_def in settings_columns:
@@ -271,7 +277,6 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
 
-        # 🕵️‍♂️ RASTREO Y BANEO PREVENTIVO DE USERBOTS MALICIOSOS
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS flagged_userbots (
                 user_id INTEGER,
@@ -315,7 +320,7 @@ def init_db():
             ("promo_text", "TEXT"),
             ("media_id", "TEXT"),
             ("media_type", "TEXT"),
-            ("target_link", "TEXT")  # 💎 Migración dinámica para enlace de destino/anuncio
+            ("target_link", "TEXT")
         ]
         for col_name, col_def in channel_plan_cols:
             try:
@@ -403,7 +408,6 @@ def add_warning(user_id: int):
 
 
 def reset_warnings(user_id: int):
-    """Restablece a cero las advertencias del usuario en la tabla users."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET warnings = 0 WHERE user_id = ?", (user_id,))
@@ -735,7 +739,6 @@ def set_vip_badge_title(group_id: int, title: str):
 # 💎 MÉTODOS DE PERSISTENCIA: MONITOR DE VOZ (VC_MANAGER)
 # ==========================================
 def get_vc_monitor_status(group_id: int) -> int:
-    """Recupera el estado de monitoreo de voz persistido en base de datos."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -747,7 +750,6 @@ def get_vc_monitor_status(group_id: int) -> int:
 
 
 def set_vc_monitor_status(group_id: int, status: int):
-    """Actualiza y persiste el estado de monitoreo de voz en la base de datos."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -836,6 +838,79 @@ def set_sentinel_payload_config(group_id: int, field: str, value):
 
 
 # ==========================================
+# 💎 GHOST PURGE DE ÉLITE: CONFIGURACIÓN & FRECUENCIA
+# ==========================================
+def get_ghost_purge_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT purge_action, purge_last_free_scan, purge_schedule_status, purge_schedule_time, purge_schedule_days
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "action": row[0] if row[0] else "ban",
+                    "last_free_scan": row[1],
+                    "schedule_status": row[2] if row[2] is not None else 0,
+                    "schedule_time": row[3] if row[3] else "03:00",
+                    "schedule_days": row[4] if row[4] else "1,2,3,4,5,6,7"
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"action": "ban", "last_free_scan": None, "schedule_status": 0, "schedule_time": "03:00", "schedule_days": "1,2,3,4,5,6,7"}
+
+
+def set_ghost_purge_config(group_id: int, field: str, value):
+    valid_fields = ["purge_action", "purge_last_free_scan", "purge_schedule_status", "purge_schedule_time", "purge_schedule_days"]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
+def check_can_free_purge(group_id: int) -> bool:
+    cfg = get_ghost_purge_config(group_id)
+    last_scan = cfg.get("last_free_scan")
+    if not last_scan:
+        return True
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT datetime('now') >= datetime(?, '+1 day')", (last_scan,))
+            row = cursor.fetchone()
+            return bool(row[0]) if row else True
+    except Exception:
+        return True
+
+
+def update_ghost_purge_scan_time(group_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, purge_last_free_scan) VALUES (?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id) DO UPDATE SET purge_last_free_scan = CURRENT_TIMESTAMP
+        """, (group_id,))
+        conn.commit()
+
+
+def get_all_active_purge_schedules() -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT group_id, purge_schedule_days, purge_schedule_time, purge_action FROM group_settings WHERE purge_schedule_status = 1")
+            return cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+
+
+# ==========================================
 # 🌙 MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL
 # ==========================================
 def get_night_mode_config(group_id: int) -> dict:
@@ -873,7 +948,6 @@ def set_night_mode_config(group_id: int, field: str, value):
 
 
 def activate_universal_night_mode(group_id: int) -> bool:
-    """Aplica el bloqueo universal del perímetro nocturno y captura snapshot de cerraduras."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -908,10 +982,6 @@ def activate_universal_night_mode(group_id: int) -> bool:
 
 
 def deactivate_universal_night_mode(group_id: int) -> bool:
-    """
-    Levanta el modo nocturno restaurando con precisión los estados previos desde el snapshot.
-    Optimizado con UPSERT para evitar fallos silenciosos si no existe la fila previa.
-    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -936,7 +1006,6 @@ def deactivate_universal_night_mode(group_id: int) -> bool:
 
 
 def is_night_mode_time(start_str: str, end_str: str) -> bool:
-    """Determina si la hora actual cae dentro del intervalo de horario nocturno."""
     try:
         now = datetime.now().time()
         start_t = datetime.strptime(start_str.strip(), "%H:%M").time()
@@ -1641,7 +1710,6 @@ def clear_speaker_queue(group_id: int):
 # 🕵️‍♂️ MÉTODOS SQL DE ÉLITE: USERBOT HUNTER & GHOST PURGE
 # ==========================================
 def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso de Userbot"):
-    """Registra o actualiza una cuenta marcada como Userbot malicioso."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1655,7 +1723,6 @@ def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso 
 
 
 def is_userbot_flagged(user_id: int, group_id: int) -> bool:
-    """Verifica si un usuario ya fue detectado y fichado como userbot en la comunidad."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
@@ -1663,7 +1730,6 @@ def is_userbot_flagged(user_id: int, group_id: int) -> bool:
 
 
 def purge_flagged_userbot_record(user_id: int, group_id: int):
-    """Elimina el registro de penalización del userbot si fuera necesario."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
@@ -1674,7 +1740,6 @@ def purge_flagged_userbot_record(user_id: int, group_id: int):
 # 📡 TELEMETRÍA EN VIVO Y ESTADÍSTICAS TÁCTICAS
 # ==========================================
 def get_community_live_telemetry(group_id: int) -> dict:
-    """Extrae la telemetría en tiempo real de una comunidad blindada."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM vip_mic_passes WHERE group_id = ? AND expires_at > datetime('now')", (group_id,))
@@ -1709,7 +1774,6 @@ def get_community_live_telemetry(group_id: int) -> dict:
 
 
 def get_channel_live_telemetry(channel_id: int) -> dict:
-    """Extrae métricas en caliente de suscriptores, planes y donaciones de un canal."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1781,7 +1845,6 @@ def create_channel_plan(
     media_type: str = None,
     target_link: str = None
 ) -> int:
-    """Registra un nuevo plan comercial de membresía para canales con soporte de copy, multimedia y enlace de destino."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1796,7 +1859,6 @@ def create_channel_plan(
 
 
 def get_channel_plan(plan_id: int) -> dict:
-    """Recupera un plan de membresía específico por su identificador."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2020,6 +2082,11 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_night_mode_config",
     "activate_universal_night_mode",
     "deactivate_universal_night_mode",
+    "get_ghost_purge_config",
+    "set_ghost_purge_config",
+    "check_can_free_purge",
+    "update_ghost_purge_scan_time",
+    "get_all_active_purge_schedules",
     "get_antispam_filter",
     "set_antispam_filter",
     "get_antispam_delete",
