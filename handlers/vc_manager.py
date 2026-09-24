@@ -1,8 +1,9 @@
+import os
 import asyncio
 import logging
 from aiogram import Router, F, Bot
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
     add_to_whitelist, remove_from_whitelist, is_group_approved, 
@@ -17,8 +18,15 @@ from assistant import set_participant_mic
 logger = logging.getLogger("vc_manager_gateway")
 router = Router()
 
-# 🧠 Nota de Arquitectura: Eliminado el diccionario volátil en RAM (vc_states).
-# Ahora el estado de monitoreo se persiste de forma segura en la base de datos SQLite con WAL.
+# ==========================================
+# 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
+# ==========================================
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
 
 
 def get_lang(lang_code: str) -> str:
@@ -52,7 +60,7 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "kickcam_success": "⚡ User {target} has been disconnected from the voice room.\n\n🛡️ <i>Cloud Media Management</i>",
-        "kickcam_needed": "⚠️ Reply to the message of the user you want to disconnect.\n\n🛡️ <i>Cloud Media Management</i>",
+        "kickcam_needed": "⚠️ Reply to a user's message or specify their ID/@username to disconnect.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "✅ User {target} registered to Whitelist with full voice immunity.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_removed": "❌ User {target} removed from Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_needed": "⚠️ Reply to the message of the user you wish to authorize.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -116,7 +124,7 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "kickcam_success": "⚡ El usuario {target} ha sido desconectado de la sala de voz.\n\n🛡️ <i>Cloud Media Management</i>",
-        "kickcam_needed": "⚠️ Debes responder al mensaje del usuario que deseas desconectar.\n\n🛡️ <i>Cloud Media Management</i>",
+        "kickcam_needed": "⚠️ Debes responder al mensaje del usuario o indicar su ID/@usuario para desconectarlo.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "✅ Usuario {target} registrado en Whitelist con inmunidad de voz total.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_removed": "❌ Usuario {target} retirado de la Whitelist.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_needed": "⚠️ Responde al mensaje del usuario que deseas autorizar.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -176,9 +184,7 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
     """
     Punto único de acceso a la telemetría en tiempo real de la sala.
     Invoca get_community_live_telemetry(chat_id) + get_night_mode_config(chat_id)
-    y devuelve los strings ya formateados y bilingües, listos para inyectar
-    en cams_report y status_text. Usado por /cams, /statusvc, vc_cams y vc_status
-    para garantizar que ambos reportes reflejen exactamente el mismo estado en vivo.
+    y devuelve los strings ya formateados y bilingües.
     """
     telem = await get_community_live_telemetry(chat_id)
     night_cfg = await get_night_mode_config(chat_id)
@@ -210,7 +216,7 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
 
 
 async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
-    """Valida la aprobación del grupo y rango exclusivo de Dueño (Creator)."""
+    """Valida la aprobación del grupo y rango exclusivo de Dueño (Creator) o Arquitecto."""
     if message.chat.type != "private":
         try:
             await message.delete()
@@ -223,6 +229,9 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
     chat_id = message.chat.id
     if not await is_group_approved(chat_id):
         return False
+
+    if is_super_admin(message.from_user.id):
+        return True
 
     try:
         member = await bot.get_chat_member(chat_id, message.from_user.id)
@@ -289,7 +298,7 @@ async def cmd_start_group(message: Message, bot: Bot):
         
     try:
         member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-        if member.status not in ["creator", "administrator"]:
+        if member.status not in ["creator", "administrator"] and not is_super_admin(message.from_user.id):
             lang = get_lang(message.from_user.language_code)
             name = message.from_user.username or message.from_user.first_name
             temp_msg = await message.answer(
@@ -315,7 +324,7 @@ async def cmd_enable_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    await set_vc_monitor_status(chat_id, 1)  # 💎 Persistido en base de datos
+    await set_vc_monitor_status(chat_id, 1)
     lang = get_lang(message.from_user.language_code)
     await send_private_response(message, TEXTS[lang]["vc_enabled"])
 
@@ -325,7 +334,7 @@ async def cmd_disable_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    await set_vc_monitor_status(chat_id, 0)  # 💎 Persistido en base de datos
+    await set_vc_monitor_status(chat_id, 0)
     lang = get_lang(message.from_user.language_code)
     await send_private_response(message, TEXTS[lang]["vc_disabled"])
 
@@ -346,16 +355,35 @@ async def cmd_cams(message: Message, bot: Bot):
 
 
 @router.message(Command("kickoffcam"))
-async def cmd_kickoff_cam(message: Message, bot: Bot):
+async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
+
+    target_id = None
+    target_mention = None
+
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
+        target_id = target_user.id
         target_mention = get_user_mention_html(target_user)
+    elif command and command.args:
+        arg = command.args.split()[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+            target_mention = f"<code>{target_id}</code>"
+        elif arg.startswith("@"):
+            try:
+                chat_info = await bot.get_chat(arg)
+                target_id = chat_info.id
+                target_mention = arg
+            except Exception:
+                target_id = None
+
+    if target_id:
         try:
-            await set_participant_mic(chat_id=message.chat.id, user_id=target_user.id, muted=True, volume=0)
+            await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
         except Exception:
             pass
         await send_private_response(message, t["kickcam_success"].format(target=target_mention))
@@ -364,30 +392,68 @@ async def cmd_kickoff_cam(message: Message, bot: Bot):
 
 
 @router.message(Command("whitelist"))
-async def cmd_whitelist(message: Message, bot: Bot):
+async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
+
+    target_id = None
+    target_mention = None
+
     if message.reply_to_message and message.reply_to_message.from_user:
-        uid = message.reply_to_message.from_user.id
-        await add_to_whitelist(uid)
-        target_mention = get_user_mention_html(message.reply_to_message.from_user)
+        target_user = message.reply_to_message.from_user
+        target_id = target_user.id
+        target_mention = get_user_mention_html(target_user)
+    elif command and command.args:
+        arg = command.args.split()[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+            target_mention = f"<code>{target_id}</code>"
+        elif arg.startswith("@"):
+            try:
+                chat_info = await bot.get_chat(arg)
+                target_id = chat_info.id
+                target_mention = arg
+            except Exception:
+                target_id = None
+
+    if target_id:
+        await add_to_whitelist(target_id)
         await send_private_response(message, t["wl_added"].format(target=target_mention))
     else:
         await send_private_response(message, t["wl_needed"])
 
 
 @router.message(Command("unwhitelist"))
-async def cmd_unwhitelist(message: Message, bot: Bot):
+async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
+
+    target_id = None
+    target_mention = None
+
     if message.reply_to_message and message.reply_to_message.from_user:
-        uid = message.reply_to_message.from_user.id
-        await remove_from_whitelist(uid)
-        target_mention = get_user_mention_html(message.reply_to_message.from_user)
+        target_user = message.reply_to_message.from_user
+        target_id = target_user.id
+        target_mention = get_user_mention_html(target_user)
+    elif command and command.args:
+        arg = command.args.split()[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+            target_mention = f"<code>{target_id}</code>"
+        elif arg.startswith("@"):
+            try:
+                chat_info = await bot.get_chat(arg)
+                target_id = chat_info.id
+                target_mention = arg
+            except Exception:
+                target_id = None
+
+    if target_id:
+        await remove_from_whitelist(target_id)
         await send_private_response(message, t["wl_removed"].format(target=target_mention))
     else:
         await send_private_response(message, t["wl_needed"])
@@ -398,7 +464,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    is_active = (await get_vc_monitor_status(chat_id)) == 1  # 💎 Consulta a base de datos
+    is_active = (await get_vc_monitor_status(chat_id)) == 1
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
@@ -449,7 +515,7 @@ async def process_vc_callback(callback: CallbackQuery):
             return
 
         elif action == "vc_status":
-            is_active = (await get_vc_monitor_status(chat_id)) == 1  # 💎 Consulta a base de datos
+            is_active = (await get_vc_monitor_status(chat_id)) == 1
             ctx = await get_telemetry_context(chat_id, lang)
             mic_price = await get_mic_vip_price(chat_id)
 
@@ -536,7 +602,7 @@ async def cmd_auto_lower(message: Message, bot: Bot):
 # ==========================================
 # PASE VIP DE MICRÓFONO (COMANDO PÚBLICO)
 # ==========================================
-@router.message(Command("micvip"))
+@router.message(Command("micvip", "mic_vip"))
 async def trigger_mic_vip_offer(message: Message, bot: Bot):
     chat_id = message.chat.id
     
