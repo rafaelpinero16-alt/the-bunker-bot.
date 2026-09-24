@@ -39,7 +39,10 @@ from database.database import (
     get_channel_plans, get_active_subscribers_count,
     create_channel_plan, delete_channel_plan,
     get_night_mode_config,
-    set_night_mode_config
+    set_night_mode_config,
+    # 🧹 Ghost Purge de Élite
+    get_ghost_purge_config, set_ghost_purge_config,
+    check_can_free_purge, update_ghost_purge_scan_time
 )
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
@@ -53,6 +56,7 @@ from .groups import (
 )
 
 router = Router()
+logger = logging.getLogger("user_private_handler")
 
 
 class CallbackAutoAnswerMiddleware(BaseMiddleware):
@@ -176,7 +180,6 @@ SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 CHAN_PLAN_STATES = {}
 
-# 🎚️ Cupos de planes de membresía activos por nivel de licencia del Canal
 CHAN_PLAN_TIER_LIMITS = {"free": 1, "pro": 3, "ultra_pro": 10}
 
 FILTER_MAP = {
@@ -184,9 +187,6 @@ FILTER_MAP = {
     "fwdgrp": "fwd_groups", "fwdbot": "fwd_bots", "quotes": "quotes", "weblinks": "web_links"
 }
 
-# ==========================================
-# 🌐 DICCIONARIO BILINGÜE CON IDENTIDAD DE MARCA
-# ==========================================
 TEXTS = {
     "en": {
         "owner_only_alert": "⛔ Access Denied: This command center is strictly restricted to the community/channel Owner.",
@@ -247,66 +247,6 @@ TEXTS = {
             "• <b>Architect:</b> Master Tom\n"
             "• <b>Tactical Focus:</b> Multi-Sentinel Grid, Channel Membreships, Native Badges, and Absolute Security.\n\n"
             "🛡️ <i>Developed and supported by <b>Cloud Media Management</b>.</i>"
-        ),
-        "info_how_main": (
-            "📖 <b>How The Bunker Bot Works — The Master Guide</b>\n\n"
-            "1️⃣ <b>Groups:</b> Add as admin to run Alphanumeric Captcha and AutoLower Radar.\n"
-            "2️⃣ <b>Channels:</b> Add as admin to automate Star subscriptions and moderate Lives.\n"
-            "3️⃣ <b>Clone Bots:</b> Link your BotFather token to keep 100% of pass revenues.\n"
-            "4️⃣ <b>Dedicated Sentinel:</b> Connect secondary phone for 24/7 autonomous audio control.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_groups": (
-            "🛡️ <b>Groups & Perimeter — Operations Guide</b>\n\n"
-            "🔐 <b>Captcha Customs Pro:</b> Every new member faces a private DM challenge before "
-            "gaining access to the group. The challenge carries a countdown timer — if the member fails "
-            "to respond or answers incorrectly, they are automatically removed at the door, keeping bots "
-            "and raiders out before they ever touch the community.\n\n"
-            "🔒 <b>Granular Locks:</b> Independent switches let you restrict, per category, what regular "
-            "members can post: Media (photos/videos), Links, Stickers & GIFs, and Bot Commands. Each toggle "
-            "applies instantly and does not affect admins.\n\n"
-            "🚫 <b>Anti-Spam Shield:</b> Continuously scans the chat for forwarded messages and quoted/reply "
-            "spam patterns, deleting them automatically to stop flood attacks and copy-paste raids before "
-            "they spread.\n\n"
-            "📡 <b>AutoLower Radar:</b> During active voice chats, automatically attenuates every "
-            "participant's ambient microphone down to 2% volume, eliminating background noise interference "
-            "in real time without requiring manual moderation.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_channels": (
-            "📡 <b>Channels & Lives — Operations Guide</b>\n\n"
-            "🎙️ <b>Live Sentinel:</b> Automatically opens a member's microphone the moment they raise their "
-            "hand during a live broadcast, granting speaking access without manual admin intervention and "
-            "muting it back once they finish.\n\n"
-            "🔗 <b>Paywalled Invites:</b> Generates single-use, cryptographically signed invite links tied "
-            "to a specific subscriber and plan. The link self-destructs — it burns permanently — the instant "
-            "it is used to join, making it impossible to resell or redistribute.\n\n"
-            "🔁 <b>Recurring Audit:</b> Continuously monitors active subscriptions and sends an automatic "
-            "renewal alert 48 hours before expiration. If the member does not renew in time, the system "
-            "executes an auto-kick, removing delinquent accounts without manual follow-up.\n\n"
-            "⭐ <b>Live Tips:</b> Allows viewers to send Stars-based tips directly during a live broadcast, "
-            "crediting the channel owner's balance in real time.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_monetization": (
-            "💰 <b>Stars Monetization — Operations Guide</b>\n\n"
-            "🎙️ <b>VIP Microphone Pass (/micvip):</b> Sells temporary 24-hour speaking privileges in a "
-            "voice chat. The buyer pays in Stars and automatically receives microphone access for the full "
-            "duration, after which the privilege expires on its own — no manual revocation needed.\n\n"
-            "💎 <b>Recurring Channel Plans:</b> Lets channel owners configure commercial subscription plans "
-            "(e.g. Monthly VIP Pass) with a fixed duration and Stars price. Each plan generates its own "
-            "deep-link for subscribers, and active subscriber counts are tracked automatically per plan.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_clones": (
-            "🧬 <b>Clone Bots & Dedicated Sentinel — Operations Guide</b>\n\n"
-            "🔑 <b>Bot Clone Architecture:</b> Connect your custom @BotFather token to deploy an independent "
-            "replica of The Bunker OS. All custom commands, member customs, and channel access pass through your own "
-            "bot instance, channeling 100% of Telegram Stars proceeds straight to your own balance without cuts.\n\n"
-            "🎙️ <b>Dedicated Voice Sentinel:</b> Link a secondary account via phone auth to moderate live stages "
-            "24/7 autonomously. The dedicated sentinel manages participant microphones in real time, applies dynamic "
-            "ducking, and cuts unauthorized screen-shares without risking your primary admin account.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
         "channel_panel_title": "📡 <b>Broadcast Studio:</b> {channel_name}\n\nSelect a module to manage lives, memberships, or studio automation.",
@@ -583,112 +523,6 @@ TEXTS = {
         "btn_support": "🆘 Soporte",
         "btn_info": "ℹ️ Información",
         "btn_how_works": "📖 ¿Cómo funciona el Búnker?",
-        "settings_main": (
-            "🛡️ <b>Centro de Mando de Comunidades (Grupos)</b>\n\n"
-            "Toma el control perimetral total de tu comunidad:\n\n"
-            "• 🤖 Aduana Captcha alfanumérica.\n"
-            "• 🔒 Cerraduras de contenido y filtros Anti-Spam.\n"
-            "• 🎙️ Centinela Dedicado y atenuación acústica en videollamadas.\n"
-            "• 💰 Monetización con Telegram Stars y etiquetas VIP personalizadas.\n\n"
-            "<i>Selecciona abajo el grupo que deseas auditar y blindar:</i>\n\n"
-            "© <i>Cloud Media Management</i>"
-        ),
-        "chsettings_main": (
-            "📡 <b>Estudio de Lives & Membresías (Canales)</b>\n\n"
-            "Consola de transmisión en vivo y gestión de suscriptores para canales:\n\n"
-            "• 🎙️ <b>Centinela en Vivo:</b> Apertura de micrófono al levantar la mano solo a usuarios verificados.\n"
-            "• 💎 <b>Aduana de Suscripciones:</b> Enlaces criptográficos de un solo uso que se queman al entrar.\n"
-            "• ⏳ <b>Auditoría Recurrente:</b> Alertas previas y expulsión automática de miembros morosos.\n"
-            "• ⭐ <b>Propinas en Directo:</b> Monetización transparente con Telegram Stars.\n\n"
-            "<i>Selecciona abajo el canal que deseas gestionar:</i>\n\n"
-            "© <i>Cloud Media Management</i>"
-        ),
-        "support_main": (
-            "🆘 <b>Soporte Táctico Oficial</b>\n\n"
-            "Para asistencia directa, pases de élite o arquitecturas personalizadas, contacta a nuestro Arquitecto Jefe:\n\n"
-            "👤 <b>Contacto Directo:</b> @therealonetom\n\n"
-            "© <i>Cloud Media Management</i>"
-        ),
-        "id_status": (
-            "🔍 <b>Telemetría de Identidad Táctica:</b>\n\n"
-            "• <b>User ID:</b> <code>{id}</code>\n"
-            "• <b>Alias:</b> @{username}\n"
-            "• <b>Rango Operativo:</b> {rank}\n"
-            "• <b>Estado:</b> Activo 🟢\n\n"
-            "<i>© Cloud Media Management</i>"
-        ),
-        "info_main": (
-            "ℹ️ <b>Núcleo del Sistema</b>\n\n"
-            "<b>The Bunker Bot</b>\n"
-            "• <b>Versión:</b> 6.0 (Núcleo Dual de Grupos y Canales)\n"
-            "• <b>Arquitecto:</b> Master Tom\n"
-            "• <b>Enfoque Táctico:</b> Red Multi-Centinela, Membresías en Canales, Etiquetas Nativas VIP y Seguridad Absoluta.\n\n"
-            "🛡️ <i>Desarrollado y respaldado por <b>Cloud Media Management</b>.</i>"
-        ),
-        "info_how_main": (
-            "📖 <b>¿Cómo Funciona The Bunker Bot? — Guía Maestra</b>\n\n"
-            "1️⃣ <b>Grupos:</b> Añade como admin para operar Captcha Alfanumérico y Radar AutoLower.\n"
-            "2️⃣ <b>Canales:</b> Añade como admin para cobrar membresías en Stars y moderar Lives.\n"
-            "3️⃣ <b>Bot Clon:</b> Conecta tu token de BotFather para conservar el 100% de ingresos.\n"
-            "4️⃣ <b>Centinela Dedicado:</b> Asocia tu número de teléfono para moderación de voz 24/7 autónoma.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_groups": (
-            "🛡️ <b>Grupos y Perímetro — Guía Operativa</b>\n\n"
-            "🔐 <b>Aduana Captcha Pro:</b> Cada nuevo miembro enfrenta un desafío privado en DM antes de "
-            "obtener acceso al grupo. El desafío tiene un temporizador de cuenta regresiva — si el miembro "
-            "no responde a tiempo o falla la respuesta, es expulsado automáticamente en la puerta, "
-            "manteniendo bots y raiders fuera antes de que toquen la comunidad.\n\n"
-            "🔒 <b>Cerraduras Granulares:</b> Interruptores independientes te permiten restringir, por "
-            "categoría, lo que los miembros regulares pueden publicar: Multimedia (fotos/videos), Enlaces, "
-            "Stickers y GIFs, y Comandos de Bots. Cada interruptor aplica de forma instantánea y no afecta "
-            "a los administradores.\n\n"
-            "🚫 <b>Escudo Anti-Spam:</b> Escanea continuamente el chat en busca de mensajes reenviados y "
-            "patrones de spam por citas/respuestas, eliminándolos automáticamente para frenar ataques de "
-            "flood y raids de copiar-pegar antes de que se propaguen.\n\n"
-            "📡 <b>Radar AutoLower:</b> Durante llamadas de voz activas, atenúa automáticamente el "
-            "micrófono ambiental de cada participante hasta un 2% de volumen, eliminando la interferencia "
-            "de ruido de fondo en tiempo real sin requerir moderación manual.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_channels": (
-            "📡 <b>Canales y Lives — Guía Operativa</b>\n\n"
-            "🎙️ <b>Centinela en Vivo:</b> Abre automáticamente el micrófono de un miembro en el instante "
-            "en que levanta la mano durante una transmisión en vivo, otorgando acceso para hablar sin "
-            "intervención manual del administrador, y lo silencia de nuevo al terminar.\n\n"
-            "🔗 <b>Paywalled Invites:</b> Genera enlaces de invitación de un solo uso, firmados "
-            "criptográficamente y ligados a un suscriptor y plan específicos. El enlace se autodestruye "
-            "— se quema permanentemente — en el instante en que se usa para unirse, haciendo imposible "
-            "revenderlo o redistribuirlo.\n\n"
-            "🔁 <b>Auditoría Recurrente:</b> Monitorea de forma continua las suscripciones activas y envía "
-            "una alerta automática de renovación 48 horas antes del vencimiento. Si el miembro no renueva "
-            "a tiempo, el sistema ejecuta un auto-kick, removiendo cuentas morosas sin seguimiento manual.\n\n"
-            "⭐ <b>Propinas en Directo:</b> Permite a los espectadores enviar propinas en Stars directamente "
-            "durante una transmisión en vivo, acreditando el balance del dueño del canal en tiempo real.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_monetization": (
-            "💰 <b>Monetización Stars — Guía Operativa</b>\n\n"
-            "🎙️ <b>Pase VIP de Micrófono (/micvip):</b> Vende privilegios temporales de 24 horas para "
-            "hablar en una llamada de voz. El comprador paga en Stars y recibe automáticamente acceso al "
-            "micrófono durante toda la duración, tras lo cual el privilegio expira por sí solo — sin "
-            "revocación manual necesaria.\n\n"
-            "💎 <b>Planes Comerciales de Canales Recurrentes:</b> Permite a los dueños de canales "
-            "configurar planes de suscripción comercial (ej. Pase Mensual VIP) con duración fija y precio "
-            "en Stars. Cada plan genera su propio deep-link para suscriptores, y el conteo de suscriptores "
-            "activos se rastrea automáticamente por plan.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
-        "info_mod_clones": (
-            "🧬 <b>Bot Clon & Centinela Dedicado — Guía Operativa</b>\n\n"
-            "🔑 <b>Arquitectura de Bot Clon:</b> Conecta tu propio token de @BotFather para operar una réplica "
-            "independiente de The Bunker OS. Todos los comandos, la aduana de seguridad y el cobro de membresías corren "
-            "bajo la identidad de tu propio bot, canalizando el 100% de las ganancias en Telegram Stars directo a tu balance.\n\n"
-            "🎙️ <b>Centinela Dedicado:</b> Asocia una línea secundaria mediante autenticación oficial por teléfono "
-            "para moderar llamadas de voz y videochats 24/7 de forma autónoma. El Centinela modula los micrófonos en tiempo real, "
-            "aplica audio ducking dinámico y corta pantallas no autorizadas de forma automática.\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
-        ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
         "channel_panel_title": "📡 <b>Estudio de Transmisión:</b> {channel_name}\n\nSelecciona un módulo para configurar transmisiones en vivo, suscripciones o automatizaciones.",
         "pay_pro_title": (
@@ -909,7 +743,7 @@ TEXTS = {
         "btn_tips": "⭐ Propinas Stars",
         "tips_updated": "✅ ¡Ajustes de propinas actualizados con éxito!",
         "tips_prompt_amount": "💰 <b>Monto Sugerido de Propinas (Stars):</b>",
-        "tips_prompt_target": "📢 <b>Canal Destino (@usuario o ID):</b>",
+        "tips_prompt_target": "📢 <b>Destination Channel (@username or ID):</b>",
         "tips_amount_err": "⚠️ Ingresa un número entero positivo.",
         "tips_target_err": "⚠️ Canal objetivo no válido.",
         "sentinel_payload_main": "💎 <b>Payload Multimedia del Centinela (ULTRA PRO)</b>\n\n• <b>Estado:</b> {st_badge}\n• <b>Texto:</b> {has_text}\n• <b>Multimedia:</b> {has_media}\n• <b>Auto-Borrado:</b> <code>{autodel}</code>",
@@ -937,13 +771,6 @@ TEXTS = {
     }
 }
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
-    """
-    Lista los grupos donde el usuario es propietario legítimo, verificando en vivo contra
-    Telegram para blindar contra cualquier pérdida de persistencia tras un reinicio (Railway).
-    Solo se descarta un grupo ante una confirmación DEFINITIVA de Telegram (bot expulsado/chat
-    inexistente); cualquier otro fallo (timeout, flood-control, hiccup transitorio del arranque)
-    conserva el registro persistido en base de datos en vez de ocultarlo.
-    """
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
         return []
@@ -956,15 +783,13 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
         try:
             bot_member = await bot.get_chat_member(chat_id=g_id, user_id=bot_id)
         except TelegramForbiddenError:
-            return None  # Baja definitiva: el bot fue expulsado o bloqueado del chat.
+            return None
         except TelegramBadRequest as e:
             msg = str(e).lower()
             if "chat not found" in msg or "kicked" in msg or "not a member" in msg:
-                return None  # Baja definitiva confirmada por Telegram.
-            logging.warning(f"⚠️ [Sync Grupos] Respuesta ambigua de Telegram para group={g_id}: {e}. Se conserva por persistencia de DB.")
+                return None
             return (g_id, g_name)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio (posible arranque en frío) verificando group={g_id}: {e}. Se conserva por persistencia de DB.")
+        except Exception:
             return (g_id, g_name)
 
         if bot_member.status not in ("administrator", "creator"):
@@ -972,8 +797,7 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
 
         try:
             user_member = await bot.get_chat_member(chat_id=g_id, user_id=user_id)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio verificando propietario user={user_id} group={g_id}: {e}. Se conserva por persistencia de DB.")
+        except Exception:
             return (g_id, g_name)
 
         return (g_id, g_name) if user_member.status == "creator" else None
@@ -983,11 +807,6 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
 
 
 async def get_active_user_channels(bot: Bot, user_id: int) -> list:
-    """
-    Verifica y lista los canales donde el bot es administrador y el usuario es propietario,
-    con el mismo blindaje anti-pérdida de persistencia que get_active_user_groups: solo se
-    descarta un canal ante una confirmación DEFINITIVA de Telegram, nunca por un fallo transitorio.
-    """
     raw_channels = await get_user_channels(user_id)
     if not raw_channels:
         return []
@@ -1000,15 +819,13 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
         try:
             bot_member = await bot.get_chat_member(chat_id=c_id, user_id=bot_id)
         except TelegramForbiddenError:
-            return None  # Baja definitiva: el bot fue expulsado o bloqueado del canal.
+            return None
         except TelegramBadRequest as e:
             msg = str(e).lower()
             if "chat not found" in msg or "kicked" in msg or "not a member" in msg:
-                return None  # Baja definitiva confirmada por Telegram.
-            logging.warning(f"⚠️ [Sync Canales] Respuesta ambigua de Telegram para channel={c_id}: {e}. Se conserva por persistencia de DB.")
+                return None
             return (c_id, c_name)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Canales] Fallo transitorio (posible arranque en frío) verificando channel={c_id}: {e}. Se conserva por persistencia de DB.")
+        except Exception:
             return (c_id, c_name)
 
         if bot_member.status not in ("administrator", "creator"):
@@ -1016,8 +833,7 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
 
         try:
             user_member = await bot.get_chat_member(chat_id=c_id, user_id=user_id)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando propietario user={user_id} channel={c_id}: {e}. Se conserva por persistencia de DB.")
+        except Exception:
             return (c_id, c_name)
 
         return (c_id, c_name) if user_member.status == "creator" else None
@@ -1067,7 +883,6 @@ async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: i
     t = TEXTS[lang]
     if await is_legitimate_owner(bot, callback.from_user.id, group_id):
         return True
-    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={callback.from_user.id} intentó operar group={group_id} sin ser propietario.")
     await callback.answer(t["owner_only_alert"], show_alert=True)
     return False
 
@@ -1077,28 +892,19 @@ async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int)
     t = TEXTS[lang]
     if await is_legitimate_owner(bot, message.from_user.id, group_id):
         return True
-    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={message.from_user.id} intentó operar group={group_id} sin ser propietario.")
     await message.answer(t["owner_only_alert"])
     return False
 
 
-# ==========================================
-# 🧭 BLINDAJE DE NAVEGACIÓN CONTEXTUAL (CANAL VS GRUPO)
-# ==========================================
 async def resolve_chat_kind(bot: Bot, chat_id: int) -> str:
-    """
-    Determina si el chat_id pertenece a un Canal ('c') o a un Grupo/Supergrupo ('g').
-    Se usa para blindar el enrutamiento de los botones de retorno en las Herramientas Ultra,
-    evitando que un canal sea desviado erróneamente al panel de grupo (gpanel) o viceversa.
-    """
     try:
         chat_obj = await bot.get_chat(chat_id)
         return "c" if chat_obj.type == "channel" else "g"
     except Exception:
         return "g"
-def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
 
-    """Teclado principal con bifurcación dual independiente para Grupos y Canales."""
+
+def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
     t = TEXTS.get(lang, TEXTS["es"])
     add_group_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
     add_channel_url = f"https://t.me/{bot_username}?startchannel=true&admin=post_messages+edit_messages+delete_messages+manage_video_chats+invite_users"
@@ -1175,7 +981,6 @@ def get_groups_keyboard(groups: list, lang: str):
 
 
 def get_channels_keyboard(channels: list, lang: str):
-    """Generador del selector de canales vinculados."""
     t = TEXTS.get(lang, TEXTS["es"])
     if not channels:
         no_ch_text = "⚠️ No hay canales activos vinculados" if lang == "es" else "⚠️ No active channels linked"
@@ -1189,7 +994,6 @@ def get_channels_keyboard(channels: list, lang: str):
 
 
 def get_channel_panel_keyboard(channel_id: int, lang: str):
-    """Consola especializada de estudio para canales (Lives, Membresías y Payload)."""
     t = TEXTS.get(lang, TEXTS["es"])
     toggle_lang = "en" if lang == "es" else "es"
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1218,6 +1022,7 @@ def get_group_panel_keyboard(group_id: int, lang: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐ PRO", callback_data=f"pay_pro_{group_id}_{lang}"), InlineKeyboardButton(text="💎 ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_mod"], callback_data=f"menu_mod_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_eco"], callback_data=f"menu_eco_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="🧹 Ghost Purge 🟢", callback_data=f"gset_purge_{group_id}_{lang}")],  # 🟩 Botón integrado con acento verde
         [InlineKeyboardButton(text=t["btn_antispam"], callback_data=f"gset_antispam_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_antiflood"], callback_data=f"gset_antiflood_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_captcha"], callback_data=f"gset_captcha_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_locks"], callback_data=f"gset_locks_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_warns"], callback_data=f"gset_warns_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_delmsgs"], callback_data=f"gset_delmsgs_{group_id}_{lang}")],
@@ -1565,12 +1370,6 @@ async def get_locks_keyboard(group_id: int, lang: str):
 
 
 async def get_warns_keyboard(group_id: int, lang: str):
-    """
-    Matriz granular de Advertencias (Strikes):
-    - Interruptores independientes por categoría de infracción (enlaces, lista negra, anti-flood).
-    - Selector cíclico de límite de faltas (3 / 4 / 5).
-    - Selector cíclico de castigo automático asignado (mute / kick / ban).
-    """
     t = TEXTS.get(lang, TEXTS["es"])
     cfg = await get_warns_config(group_id)
     limit = cfg["limit"]
@@ -1763,8 +1562,140 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: 
             [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Unlock with ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
             [back_btn]
         ])
-    # ==========================================
-# 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO (BLINDADO CONTRA PAGOS)
+
+
+# ==========================================
+# 🧹 PANEL INTERACTIVO: GHOST PURGE DE ÉLITE
+# ==========================================
+async def get_purge_keyboard(group_id: int, user_id: int, lang: str):
+    t = TEXTS.get(lang, TEXTS["es"])
+    tier = await get_effective_group_tier(group_id, user_id)
+    
+    purge_cfg = await get_ghost_purge_config(group_id)
+    action_mode = purge_cfg.get("action", "ban").upper()
+    action_badge = f"⚡ Castigo: {action_mode} 🟢"
+    
+    sched_st = purge_cfg.get("schedule_status", 0)
+    sched_badge = f"⏰ Programación: {'🟢 Activa' if sched_st == 1 else '🔴 Inactiva'}"
+    
+    kb_rows = [
+        [InlineKeyboardButton(text="🚀 Ejecutar Escaneo y Purga Ahora", callback_data=f"purge_run_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=action_badge, callback_data=f"purge_togaction_{group_id}_{lang}")],
+    ]
+    
+    if tier in ["pro", "ultra_pro"]:
+        kb_rows.append([InlineKeyboardButton(text=sched_badge, callback_data=f"purge_sched_{group_id}_{lang}")])
+    else:
+        kb_rows.append([InlineKeyboardButton(text="🔒 Programación (Requiere PRO o ULTRA)", callback_data=f"pay_pro_{group_id}_{lang}")])
+        
+    kb_rows.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@router.callback_query(F.data.startswith("gset_purge_"))
+async def cb_purge_menu(callback: CallbackQuery, bot: Bot):
+    data = callback.data.split("_")
+    group_id = int(data[3])
+    lang = data[4] if data[4] in ["es", "en"] else "es"
+    
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+
+    try:
+        g_name = (await bot.get_chat(group_id)).title
+    except Exception:
+        g_name = "Comunidad"
+
+    purge_cfg = await get_ghost_purge_config(group_id)
+    
+    text = (
+        f"🧹 <b>Ghost Purge & Userbot Defense — {g_name}</b>\n\n"
+        f"Sistema avanzado de barrido perimetral:\n"
+        f"• 👻 <b>Detección:</b> Cuentas eliminadas (fantasmas) e IDs inválidos.\n"
+        f"• ⚡ <b>Castigo Configurado:</b> <code>{purge_cfg.get('action', 'ban').upper()}</code>\n"
+        f"• ⏳ <b>Límite Plan Free:</b> 1 escaneo cada 24 horas (Ilimitado en PRO/ULTRA).\n\n"
+        f"<i>Selecciona una acción abajo:</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    ) if lang == "es" else (
+        f"🧹 <b>Ghost Purge & Userbot Defense — {g_name}</b>\n\n"
+        f"Advanced perimeter scanning system:\n"
+        f"• 👻 <b>Detection:</b> Deleted accounts (ghosts) & invalid IDs.\n"
+        f"• ⚡ <b>Configured Punishment:</b> <code>{purge_cfg.get('action', 'ban').upper()}</code>\n"
+        f"• ⏳ <b>Free Tier Limit:</b> 1 scan every 24 hours (Unlimited on PRO/ULTRA).\n\n"
+        f"<i>Select an action below:</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    keyboard = await get_purge_keyboard(group_id, callback.from_user.id, lang)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("purge_togaction_"))
+async def cb_purge_toggle_action(callback: CallbackQuery, bot: Bot):
+    data = callback.data.split("_")
+    group_id = int(data[2])
+    lang = data[3] if data[3] in ["es", "en"] else "es"
+
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+
+    cfg = await get_ghost_purge_config(group_id)
+    current_action = cfg.get("action", "ban")
+    new_action = "kick" if current_action == "ban" else "ban"
+    
+    set_ghost_purge_config(group_id, "purge_action", new_action)
+    await callback.answer(f"Castigo actualizado a: {new_action.upper()} 🟢", show_alert=False)
+
+    keyboard = await get_purge_keyboard(group_id, callback.from_user.id, lang)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    except TelegramBadRequest:
+        pass
+
+
+@router.callback_query(F.data.startswith("purge_run_"))
+async def cb_purge_execute(callback: CallbackQuery, bot: Bot):
+    data = callback.data.split("_")
+    group_id = int(data[2])
+    lang = data[3] if data[3] in ["es", "en"] else "es"
+
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+
+    tier = await get_effective_group_tier(group_id, callback.from_user.id)
+    
+    if tier == "free":
+        can_scan = await check_can_free_purge(group_id)
+        if not can_scan:
+            await callback.answer(
+                "⚠️ Límite diario alcanzado (Plan Free: 1 escaneo cada 24h).\nMejora a PRO o ULTRA para ejecuciones ilimitadas.",
+                show_alert=True
+            )
+            return
+        await update_ghost_purge_scan_time(group_id)
+
+    await callback.answer("🧹 Iniciando escaneo de cuentas fantasmas...", show_alert=False)
+    
+    try:
+        # Envía la notificación de inicio para que el comando purge_ghosts_command en groups.py se ejecute
+        from handlers.groups import purge_ghosts_command
+        # Creamos un objeto sintético o invocamos el proceso de escaneo directamente enviando mensaje al grupo
+        await bot.send_message(
+            chat_id=group_id,
+            text="🧹 <b>Ghost Purge iniciado por el Administrador desde el panel privado.</b> Escaneando comunidad...",
+            parse_mode="HTML"
+        )
+        await callback.message.answer("🚀 <b>Escaneo lanzado con éxito en la comunidad.</b>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error ejecutando purga rápida: {e}")
+
+
+# ==========================================
+# 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO
 # ==========================================
 @router.message(
     CommandStart(), 
@@ -1786,7 +1717,6 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         except Exception as db_ex:
             logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
 
-        # Apertura de panel de configuración de grupo vía deep link (gset_{group_id})
         if command.args and command.args.startswith("gset_"):
             try:
                 group_id = int(command.args.split("_")[1])
@@ -1801,7 +1731,6 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             except Exception as g_ex:
                 logging.error(f"❌ [cmd_start Deeplink Grupo Error]: {g_ex}")
 
-        # Apertura de consola de estudio de canal vía deep link (cset_{channel_id})
         elif command.args and command.args.startswith("cset_"):
             try:
                 channel_id = int(command.args.split("_")[1])
@@ -1835,7 +1764,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS.get(lang, TEXTS["es"])
 
-    # 1. CAPTCHA CUSTOM TEXT (Con Auto-Purga a 60s)
     if (bot.id, user_id) in CAPTCHA_STATES:
         group_id = CAPTCHA_STATES.pop((bot.id, user_id))
         await set_captcha_config(group_id, "captcha_text", text_input)
@@ -1846,7 +1774,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 2. TOKEN BOTFATHER
     if (bot.id, user_id) in CLONE_STATES:
         state_data = CLONE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
@@ -1907,7 +1834,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
             fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 3. CENTINELA TELÉFONO
     if (bot.id, user_id) in SENTINEL_PHONE_STATES:
         state_data = SENTINEL_PHONE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
@@ -1935,7 +1861,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
             fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 4. CENTINELA CÓDIGO 5 DÍGITOS
     if (bot.id, user_id) in SENTINEL_CODE_STATES:
         state_data = SENTINEL_CODE_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
@@ -1974,7 +1899,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
             fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 5. CENTINELA 2FA
     if (bot.id, user_id) in SENTINEL_2FA_STATES:
         state_data = SENTINEL_2FA_STATES.pop((bot.id, user_id))
         group_id = state_data["group_id"]
@@ -2005,7 +1929,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 6. PROGRAMADOR VC
     if (bot.id, user_id) in VC_SCHED_STATES:
         sched_data = VC_SCHED_STATES.pop((bot.id, user_id))
         group_id = sched_data["group_id"]
@@ -2024,7 +1947,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 7. REGISTRO WL / BL
     if (bot.id, user_id) in DB_REG_STATES:
         data = DB_REG_STATES.pop((bot.id, user_id))
         reg_type = data["type"]
@@ -2054,7 +1976,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 8. DIRECTIVAS DE MODERACIÓN
     if (bot.id, user_id) in MOD_TARGET_STATES:
         st = MOD_TARGET_STATES.pop((bot.id, user_id))
         action = st["action"]
@@ -2112,7 +2033,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 9. MIC VIP STARS & TAG
     if (bot.id, user_id) in MIC_VIP_STATES:
         data = MIC_VIP_STATES.pop((bot.id, user_id))
         group_id = data["group_id"]
@@ -2142,7 +2062,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 10. DUCKING PODCAST & SPEAKERS PRICE
     if (bot.id, user_id) in PODCAST_DUCK_STATES:
         data = PODCAST_DUCK_STATES.pop((bot.id, user_id))
         group_id = data["group_id"]
@@ -2175,7 +2094,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 11. PROPINAS EN STARS (TIPS)
     if (bot.id, user_id) in TIPS_AMOUNT_STATES:
         st_data = TIPS_AMOUNT_STATES.pop((bot.id, user_id))
         group_id = st_data["group_id"]
@@ -2205,7 +2123,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 12. PAYLOAD MULTIMEDIA CENTINELA
     if (bot.id, user_id) in SENTINEL_PAYLOAD_TEXT_STATES:
         st_data = SENTINEL_PAYLOAD_TEXT_STATES.pop((bot.id, user_id))
         group_id = st_data["group_id"]
@@ -2260,7 +2177,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 13. CREACIÓN DE PLANES DE MEMBRESÍA DE CANAL (FASE 6 CON ENLACE DESTINO)
     if (bot.id, user_id) in CHAN_PLAN_STATES:
         st_data = CHAN_PLAN_STATES[(bot.id, user_id)]
         channel_id = st_data["channel_id"]
@@ -3043,7 +2959,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             delete_st = "🟢" if cfg["delete"] == 1 else "🔴"
             await callback.message.edit_text(
                 t["antiflood_main_title"].format(msgs=cfg["msgs"], time=cfg["time"], action=cfg["action"].upper(), delete_st=delete_st), 
-                reply_markup=get_antiflood_keyboard(group_id, lang, cfg), 
+                reply_markup=await get_antiflood_keyboard(group_id, lang, cfg), 
                 parse_mode="HTML"
             )
         elif module == "clone":
@@ -3313,9 +3229,6 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         )
 
 
-# ==========================================
-# 💎 ULTRA PRO — HERRAMIENTAS DE ÉLITE
-# ==========================================
 @router.callback_query(
     F.data.startswith("panic_") | F.data.startswith("shield_") |
     F.data.startswith("podcast_") | F.data.startswith("speakers_") |
@@ -3573,19 +3486,12 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
-# ==========================================
-# 📢 FASE 6: DISPATCHER DE PLANES DE CANAL
-# ==========================================
 async def _finalize_and_preview_channel_plan(
     bot: Bot, chat_id: int, channel_id: int, lang: str,
     name: str, days: int, price: int, promo_text: str,
     media_id: str = None, media_type: str = None,
     target_link: str = None
 ):
-    """
-    Registra el plan en base de datos, genera el deep-link de pago (chanplan_{plan_id}_{channel_id})
-    y despacha en el chat privado del dueño la Vista Previa exacta del mensaje promocional con soporte para enlace publicitario o destino VIP.
-    """
     t = TEXTS.get(lang, TEXTS["es"])
 
     plan_id = await create_channel_plan(
