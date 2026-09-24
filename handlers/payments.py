@@ -163,6 +163,7 @@ TEXTS = {
         "btn_add_master": "🤖 Add Master Sentinel (@Alphacentinel)",
         "btn_setup_clone": "🧬 Setup Clone & Dedicated Sentinel",
         "btn_join_channel": "🚀 Join Secure Channel",
+        "btn_view_target": "🔗 Access VIP Target / Resource",
         "err_inv": "⚠️ An error occurred while generating the invoice. Please try again.",
         "err_link": "⚠️ Invalid activation link or expired parameters.",
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
@@ -224,6 +225,7 @@ TEXTS = {
         "btn_add_master": "🤖 Añadir Centinela Maestro (@Alphacentinel)",
         "btn_setup_clone": "🧬 Configurar Clon & Centinela Propio",
         "btn_join_channel": "🚀 Entrar al Canal Seguro",
+        "btn_view_target": "🔗 Ver Destino / Canal VIP",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
         "err_link": "⚠️ Enlace de facturación no válido, sin entorno asociado o expirado.",
         "private_only": "⚠️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
@@ -397,11 +399,16 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             promo_text = target_plan.get("promo_text") or ""
             media_id = target_plan.get("media_id")
             media_type = target_plan.get("media_type")
+            target_link = target_plan.get("target_link")
+
+            # Construcción de la leyenda promocional integrando target_link si existe
+            caption = promo_text.strip() if promo_text and promo_text.strip() else f"💎 <b>{plan_name}</b>\n\n{duration_days} días — {stars_price} ⭐"
+            if target_link:
+                caption += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>" if lang == "es" else f"\n\n🔗 <b>VIP Target:</b> <code>{target_link}</code>"
 
             # Despacho opcional del activo promocional (Foto/Video/Animación) previo a la factura
             if media_id and media_type:
                 try:
-                    caption = promo_text if promo_text else f"💎 <b>{plan_name}</b>"
                     if media_type == "photo":
                         await bot.send_photo(chat_id=message.chat.id, photo=media_id, caption=caption, parse_mode="HTML")
                     elif media_type == "video":
@@ -410,9 +417,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                         await bot.send_animation(chat_id=message.chat.id, animation=media_id, caption=caption, parse_mode="HTML")
                 except Exception as promo_err:
                     logger.warning(f"Aviso despachando multimedia promocional en chanplan: {promo_err}")
-            elif promo_text:
+            elif caption:
                 try:
-                    await message.answer(promo_text, parse_mode="HTML")
+                    await message.answer(caption, parse_mode="HTML")
                 except Exception:
                     pass
 
@@ -599,7 +606,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para suscripción: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 2: FASE 6 — MEMBRESÍAS DE CANAL Y ENLACES CRIPTOGRÁFICOS DE UN SOLO USO
+    # CASO 2: FASE 6 / FASE 4 — MEMBRESÍAS DE CANAL, ENLACES DE 1 USO Y ENTREGA DE DESTINO VIP
     elif payload.startswith("chan_sub_"):
         try:
             parts = payload.split("_")
@@ -607,6 +614,10 @@ async def process_successful_payment(message: Message, bot: Bot):
             plan_id = int(parts[3])
             duration_days = int(parts[4])
             stars_paid = message.successful_payment.total_amount
+
+            # Recuperar el plan para obtener el target_link configurado
+            target_plan = await get_channel_plan(plan_id)
+            target_link = target_plan.get("target_link") if target_plan else None
 
             # Genera un enlace de invitación de un solo uso que se quema al entrar
             invite = await bot.create_chat_invite_link(
@@ -626,21 +637,34 @@ async def process_successful_payment(message: Message, bot: Bot):
                 invite_link=invite_link
             )
 
-            join_markup = InlineKeyboardMarkup(inline_keyboard=[
+            # Construcción de botones post-pago: Enlace de 1 uso + Enlace de destino VIP
+            kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
-            ])
+            ]
+            
+            target_extra = ""
+            if target_link:
+                target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
+                kb_rows.append([InlineKeyboardButton(text=t["btn_view_target"], url=target_url)])
+                target_extra = (
+                    f"\n• <b>Destino VIP Adicional:</b> <a href='{target_url}'>{target_link}</a>"
+                    if lang == "es" else
+                    f"\n• <b>Additional VIP Resource:</b> <a href='{target_url}'>{target_link}</a>"
+                )
+
+            join_markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
             success_text = (
                 f"💎 <b>¡Membresía de Canal Activada con Éxito!</b>\n\n"
                 f"• Pago procesado: <b>{stars_paid} Stars (XTR)</b>\n"
                 f"• Tu <b>enlace criptográfico de un solo uso</b> está listo (se quemará automáticamente al unirte):\n\n"
-                f"🔗 <a href='{invite_link}'>Entrar al Canal Seguro</a>\n\n"
+                f"🔗 <a href='{invite_link}'>Entrar al Canal Seguro</a>{target_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 f"💎 <b>Channel Membership Activated Successfully!</b>\n\n"
                 f"• Payment processed: <b>{stars_paid} Stars (XTR)</b>\n"
                 f"• Your <b>single-use cryptographic invite link</b> is ready (burns automatically upon joining):\n\n"
-                f"🔗 <a href='{invite_link}'>Join Secure Channel</a>\n\n"
+                f"🔗 <a href='{invite_link}'>Join Secure Channel</a>{target_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
