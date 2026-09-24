@@ -1554,27 +1554,6 @@ async def _bootstrap_registry_from_sentinel(group_id: int) -> int:
         logger.warning(f"Bootstrap del padrón falló: {e}")
     return 0
 
-    try:
-        result = fetcher(group_id)
-        if inspect.isawaitable(result):
-            result = await result
-        ids = [int(x) for x in (result or []) if int(x) > 0 and int(x) not in SERVICE_ACCOUNT_IDS]
-    except Exception as e:
-        logger.warning(f"Bootstrap del padrón vía Centinela falló en {group_id}: {e}")
-        return 0
-
-    if not ids:
-        return 0
-
-    try:
-        before = len(await registry_members(group_id))
-        await asyncio.to_thread(_registry_upsert_sync, group_id, ids)
-        after = len(await registry_members(group_id))
-        return max(0, after - before)
-    except Exception as e:
-        logger.warning(f"No se pudo volcar el roster del Centinela al padrón de {group_id}: {e}")
-        return 0
-
 
 # ==========================================
 # 🕵️‍♂️ USERBOT HUNTER — NEUTRALIZACIÓN INSTANTÁNEA DE CUENTAS FICHADAS

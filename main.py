@@ -19,7 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, ErrorEvent, Update
-from aiogram.exceptions import TelegramUnauthorizedError  # 💎 Nueva importación para capturar tokens revocados
+from aiogram.exceptions import TelegramUnauthorizedError
 
 from database.database import (
     init_db, 
@@ -40,7 +40,7 @@ from handlers.user_private import (
     send_official_welcome,
     set_master_bot_id,
     set_master_bot_username,
-    revoke_bot_clone_db  # 💎 Para autodesactivar el token en la base de datos
+    revoke_bot_clone_db
 )
 from assistant import (
     start_voice_radar, 
@@ -119,8 +119,6 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
 
         result = await dp.feed_update(clone_bot, update)
 
-        # Red de seguridad: si /start privado no fue reclamado por ningún router,
-        # se despliega la misma bienvenida oficial (idéntica al Maestro, sin Command Center).
         if result is UNHANDLED and is_private_start:
             user = update.message.from_user
             logging.warning(f"⚠️ [Clon @{bot_username}] /start sin handler; aplicando bienvenida de respaldo.")
@@ -141,7 +139,6 @@ async def _clone_worker(clone_bot: Bot, token: str):
     ]
     
     try:
-        # Forzar la eliminación de cualquier webhook previo antes del polling
         await clone_bot.delete_webhook(drop_pending_updates=True)
         bot_info = await clone_bot.get_me()
         bot_username = bot_info.username or "BotClon"
@@ -149,10 +146,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
     except TelegramUnauthorizedError as auth_err:
         logging.error(f"❌ [Error Fatal] El token del clon {token[:10]} fue revocado o es inválido: {auth_err}")
         try:
-            # 💎 Identificamos al usuario y grupo para revocarlo en BD y evitar el bucle infinito
             from database.database import get_db_connection
-            import sqlite3
-            
             def _revoke_sync():
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
@@ -202,7 +196,6 @@ async def _clone_worker(clone_bot: Bot, token: str):
 
 
 async def start_clone_polling_task(token: str):
-    """Instancia y levanta la tarea de escucha en segundo plano para un bot clon."""
     if not token or token in active_clone_tasks:
         return
 
@@ -221,7 +214,6 @@ async def start_clone_polling_task(token: str):
 
 
 async def stop_clone_polling_task(token: str):
-    """Detiene la tarea del clon y cierra su sesión de forma limpia."""
     task_data = active_clone_tasks.pop(token, None)
     if task_data:
         task_data["task"].cancel()
@@ -233,12 +225,10 @@ async def stop_clone_polling_task(token: str):
 
 
 def trigger_dynamic_clone(token: str):
-    """Disparador dinámico llamado al registrar un nuevo token."""
     asyncio.create_task(start_clone_polling_task(token))
 
 
 def trigger_disconnect_clone(token: str):
-    """Disparador dinámico para desconectar un clon."""
     asyncio.create_task(stop_clone_polling_task(token))
 
 
@@ -257,25 +247,23 @@ async def main():
         token=BOT_TOKEN, 
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
-    # Identidad del Maestro: cmd_start / teclados comparan bot.id contra este valor
     set_master_bot_id(master_bot.id)
-    # @username real del Maestro: payments.py lo usa para forzar que las suscripciones
-    # PRO/ULTRA PRO se cobren siempre a través del Maestro, nunca de un Bot Clon.
     try:
         master_info = await master_bot.get_me()
         set_master_bot_username(master_info.username or "")
     except Exception as e:
         print(f"⚠️ [Aviso Identidad Maestro]: No se pudo resolver el @username del Maestro: {e}")
 
-    # El anti-spam solo intercepta mensajes; los callbacks nunca pasan por él.
     dp.message.middleware(AntiSpamMiddleware())
 
-    # Routers perimetrales
+    # ==========================================
+    # 📡 PIPELINE ARQUITECTÓNICO DE ROUTERS SINCRONIZADO
+    # ==========================================
     dp.include_router(user_private.router)
     dp.include_router(payments.router)
+    dp.include_router(moderation.router)
     dp.include_router(admin_group.router)
     dp.include_router(ecosystem.router)
-    dp.include_router(moderation.router)
     dp.include_router(vc_manager.router)
     dp.include_router(groups.router)
     dp.include_router(fallback_router)  # SIEMPRE el último
