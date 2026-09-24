@@ -319,6 +319,7 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_channel ON channel_plans (channel_id, status)")
 
         channel_plan_cols = [
+            ("status", "TEXT DEFAULT 'active'"),
             ("promo_text", "TEXT"),
             ("media_id", "TEXT"),
             ("media_type", "TEXT"),
@@ -347,6 +348,27 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_subs_audit ON channel_subscriptions (status, expires_at)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_owner_registry (
+                user_id    INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                title      TEXT,
+                updated_at INTEGER,
+                PRIMARY KEY (user_id, channel_id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversation_state_store (
+                bot_id     INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                kind       TEXT    NOT NULL,
+                payload    TEXT,
+                updated_at INTEGER,
+                PRIMARY KEY (bot_id, user_id, kind)
+            )
+        """)
 
         conn.commit()
 
@@ -2211,3 +2233,9 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
 dl = getattr(globals(), "dl", None)
 if "_fn_name" in globals():
     del _fn_name
+
+# Garantiza la inicialización relacional inmediata al cargar el módulo
+try:
+    init_db()
+except Exception:
+    pass
