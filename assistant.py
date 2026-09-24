@@ -39,8 +39,20 @@ from database.database import (
     update_subscription_status,
     activate_universal_night_mode,
     deactivate_universal_night_mode,
-    flag_userbot, is_userbot_flagged
+    flag_userbot, is_userbot_flagged,
+    get_ai_sentinel_config
 )
+
+# 🤖 Integración del SDK oficial de Mistral AI para el Guardián de Voz y Copiloto AMA
+try:
+    from importlib import import_module
+
+    Mistral = import_module("mistralai").Mistral
+except ImportError:
+    Mistral = None
+
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+mistral_client = Mistral(api_key=MISTRAL_API_KEY) if (Mistral and MISTRAL_API_KEY) else None
 
 try:
     from database.database import get_sentinel_payload_config
@@ -117,6 +129,42 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
         _sentinel_launch_locks[group_id] = lock
     return lock
 
+
+# ==========================================
+# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (MISTRAL AI)
+# ==========================================
+async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> dict:
+    """
+    Analiza un fragmento de texto transcrito del videochat utilizando Mistral AI
+    para detectar toxicidad, insultos o estafas financieras en tiempo real[cite: 12].
+    """
+    if not mistral_client:
+        return {"toxic": False, "reason": "Mistral API Key no configurada en el entorno"}
+
+    system_prompt = custom_prompt if custom_prompt else (
+        "Eres el Guardián de Voz de The Bunker OS. Analiza el siguiente texto transcrito de una "
+        "comunidad de Telegram. Determina si contiene insultos graves, toxicidad extrema o intentos de estafa financiera. "
+        "Responde estrictamente en formato JSON con dos campos: 'toxic' (true/false) y 'reason' (breve explicación en español)."
+    )
+
+    try:
+        response = await asyncio.to_thread(
+            mistral_client.chat.complete,
+            model="mistral-small-latest",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text_snippet}
+            ],
+            response_format={"type": "json_object"}
+        )
+        result_text = response.choices[0].message.content
+        import json
+        return json.loads(result_text)
+    except Exception as e:
+        logger.error(f"❌ [Error API Mistral AI Guardián]: {e}")
+        return {"toxic": False, "reason": str(e)}
+
+
 DUCK_TEXT = (
     "🎙️ <b>The Bunker Bot: Modo Podcast — Atenuación Dinámica</b>\n\n"
     "El volumen de fondo de <b>{user_name}</b> fue atenuado automáticamente al <b>{pct}%</b> "
@@ -141,6 +189,12 @@ NOISE_SHIELD_ALERT_TEXT = (
     "repetidos en la transmisión.\n\n"
     "🇺🇸 <i><b>{user_name}</b> was auto-muted after repeated anomalous noise spikes were detected "
     "in the live stream.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
+AI_GUARDIAN_ALERT_TEXT = (
+    "🤖 <b>The Bunker Bot: Guardián de IA Activo</b>\n\n"
+    "<b>{user_name}</b> fue silenciado por la IA tras detectar infracción verbal: <i>{reason}</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
 
@@ -965,7 +1019,6 @@ async def channel_subscription_audit_loop():
     logger.info("📡 [Auditor de Canales] Bucle de membresías y renovación automática iniciado.")
     while True:
         try:
-            # 1. Alertas de expiración cercana (48h antes)
             expiring = await get_expiring_channel_subscriptions(hours_ahead=48)
             for row in expiring:
                 channel_id, user_id, expires_at, stars_paid, grace_days = row
@@ -997,7 +1050,6 @@ async def channel_subscription_audit_loop():
                     except Exception as e:
                         logger.debug(f"Aviso al notificar expiración a {user_id} para canal {channel_id}: {e}")
 
-            # 2. Expirados y expulsión automática resiliente
             expired = await get_expired_channel_subscriptions()
             for row in expired:
                 channel_id, user_id, expires_at, grace_days, auto_kick = row

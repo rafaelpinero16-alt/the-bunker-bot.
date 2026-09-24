@@ -131,12 +131,14 @@ def init_db():
             ("night_mode_end", "TEXT DEFAULT '06:00'"),
             ("night_action", "TEXT DEFAULT 'lock_universal'"),
             ("vc_enabled", "INTEGER DEFAULT 1"),
-            # 💎 Migración dinámica para Ghost Purge de Élite (Castigos y Programación)
             ("purge_action", "TEXT DEFAULT 'ban'"),
             ("purge_last_free_scan", "TIMESTAMP"),
             ("purge_schedule_status", "INTEGER DEFAULT 0"),
             ("purge_schedule_time", "TEXT DEFAULT '03:00'"),
-            ("purge_schedule_days", "TEXT DEFAULT '1,2,3,4,5,6,7'")
+            ("purge_schedule_days", "TEXT DEFAULT '1,2,3,4,5,6,7'"),
+            ("ai_guardian_status", "INTEGER DEFAULT 0"),
+            ("ai_copilot_status", "INTEGER DEFAULT 0"),
+            ("ai_custom_prompt", "TEXT")
         ]
 
         for col_name, col_def in settings_columns:
@@ -826,6 +828,42 @@ def set_sentinel_payload_config(group_id: int, field: str, value):
         "sentinel_payload_media_id", "sentinel_payload_media_type", 
         "sentinel_payload_auto_delete"
     ]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
+
+
+# ==========================================
+# 🤖 MÉTODOS DE PERSISTENCIA: CENTINELA DE IA (ULTRA PRO)
+# ==========================================
+def get_ai_sentinel_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT ai_guardian_status, ai_copilot_status, ai_custom_prompt
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "guardian_status": row[0] if row[0] is not None else 0,
+                    "copilot_status": row[1] if row[1] is not None else 0,
+                    "custom_prompt": row[2] if row[2] is not None else ""
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"guardian_status": 0, "copilot_status": 0, "custom_prompt": ""}
+
+
+def set_ai_sentinel_config(group_id: int, field: str, value):
+    valid_fields = ["ai_guardian_status", "ai_copilot_status", "ai_custom_prompt"]
     if field not in valid_fields:
         return
     with get_db_connection() as conn:
@@ -2078,6 +2116,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_radar_config",
     "get_sentinel_payload_config",
     "set_sentinel_payload_config",
+    "get_ai_sentinel_config",
+    "set_ai_sentinel_config",
     "get_night_mode_config",
     "set_night_mode_config",
     "activate_universal_night_mode",
