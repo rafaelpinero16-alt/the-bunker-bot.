@@ -2121,7 +2121,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             GROUP_VIP_TAG[group_id] = text_input
             resp = await message.answer(t["tag_updated"].format(group_id=group_id, text_input=text_input), reply_markup=back_kb, parse_mode="HTML")
         else:
-            resp = await message.answer(t["tag_err"], reply_kb=back_kb, parse_mode="HTML")
+            resp = await message.answer(t["tag_err"], reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
