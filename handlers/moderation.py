@@ -84,11 +84,7 @@ def format_duration(minutes: int, lang: str) -> str:
 TEXTS = {
     "en": {
         "admin_only": "⛔ Access denied. Only community administrators can execute this protocol.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_ban": "⚠️ Target required. Reply to a message or use: <code>/ban [ID or @username]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_kick": "⚠️ Target required. Reply to a message or use: <code>/kick [ID or @username]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_mute": "⚠️ Target required. Reply to a message or use: <code>/mute [ID or @username]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_unmute": "⚠️ Target required. Reply to a message or use: <code>/unmute [ID or @username]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_unwl": "⚠️ Target required. Reply to a message or use: <code>/unwhitelist [ID or @username]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed": "⚠️ Target required. Reply to a message or use: <code>/{cmd} [ID or @username]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Action Denied:</b> This user holds protected status (Architect, Admin, or Whitelist).\n\n🛡️ <i>Cloud Media Management</i>",
         "self_sanction": "⚠️ You cannot execute moderation protocols on yourself.\n\n🛡️ <i>Cloud Media Management</i>",
         "bot_sanction": "⚠️ System bots cannot be targeted with sanctions.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -125,11 +121,7 @@ TEXTS = {
     },
     "es": {
         "admin_only": "⛔ Acceso denegado. Solo los administradores pueden ejecutar este protocolo.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_ban": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/ban [ID o @usuario]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_kick": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/kick [ID o @usuario]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_mute": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/mute [ID o @usuario]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_unmute": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/unmute [ID o @usuario]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_unwl": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/unwhitelist [ID o @usuario]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/{cmd} [ID o @usuario]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Acción Denegada:</b> Este usuario posee rango protegido (Arquitecto, Admin o Whitelist).\n\n🛡️ <i>Cloud Media Management</i>",
         "self_sanction": "⚠️ No puedes aplicarte una sanción a ti mismo.\n\n🛡️ <i>Cloud Media Management</i>",
         "bot_sanction": "⚠️ No puedes sancionar a los bots del sistema.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -224,66 +216,79 @@ async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKey
             pass
 
 
-@router.message(Command("ban"))
-async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
-    """Apertura del selector remoto de duración de baneo."""
-    if message.chat.type == "private": 
-        return
+async def validate_moderation_target(message: Message, command: CommandObject, bot: Bot, cmd_name: str):
+    """
+    Función unificada para validar permisos, extraer el objetivo y aplicar filtros de protección.
+    Evita código duplicado en /ban, /kick y /mute[cite: 16].
+    """
+    if message.chat.type == "private":
+        return None, None, None
+
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
     if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
+        try:
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
-        return
+        return None, None, None
 
     target = await extract_target_user(message, command)
     if not target:
-        msg = await message.reply(t["target_needed_ban"], parse_mode="HTML")
+        msg = await message.reply(t["target_needed"].format(cmd=cmd_name), parse_mode="HTML")
         await asyncio.sleep(10)
         try:
             await msg.delete()
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
-        return
+        return None, None, None
 
     bot_info = await bot.get_me()
     if target.id == bot_info.id:
         msg = await message.reply(t["bot_sanction"], parse_mode="HTML")
-        await asyncio.sleep(8)
+        asyncio.sleep(8)
         try:
             await msg.delete()
             await message.delete()
         except Exception:
             pass
-        return
+        return None, None, None
 
     if target.id == message.from_user.id:
         msg = await message.reply(t["self_sanction"], parse_mode="HTML")
-        await asyncio.sleep(8)
+        asyncio.sleep(8)
         try:
             await msg.delete()
             await message.delete()
         except Exception:
             pass
-        return
+        return None, None, None
 
     if await is_target_protected(bot, message.chat.id, target.id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        await asyncio.sleep(8)
+        asyncio.sleep(8)
         try:
             await msg.delete()
             await message.delete()
         except Exception:
             pass
-        return
+        return None, None, None
 
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "ban", lang, bot)
+    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, cmd_name, lang, bot)
     if limit_text:
         await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
+        return None, None, None
+
+    return lang, t, target
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
+    """Apertura del selector remoto de duración de baneo."""
+    lang, t, target = await validate_moderation_target(message, command, bot, "ban")
+    if not target:
         return
 
     target_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
@@ -309,63 +314,8 @@ async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
 @router.message(Command("kick"))
 async def cmd_kick(message: Message, command: CommandObject, bot: Bot):
     """Apertura de la confirmación remota de expulsión inmediata."""
-    if message.chat.type == "private": 
-        return
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
-
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
-    target = await extract_target_user(message, command)
+    lang, t, target = await validate_moderation_target(message, command, bot, "kick")
     if not target:
-        msg = await message.reply(t["target_needed_kick"], parse_mode="HTML")
-        await asyncio.sleep(10)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
-    bot_info = await bot.get_me()
-    if target.id == bot_info.id:
-        msg = await message.reply(t["bot_sanction"], parse_mode="HTML")
-        await asyncio.sleep(8)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    if target.id == message.from_user.id:
-        msg = await message.reply(t["self_sanction"], parse_mode="HTML")
-        await asyncio.sleep(8)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    if await is_target_protected(bot, message.chat.id, target.id):
-        msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        await asyncio.sleep(8)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "kick", lang, bot)
-    if limit_text:
-        await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
         return
 
     target_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
@@ -380,63 +330,8 @@ async def cmd_kick(message: Message, command: CommandObject, bot: Bot):
 @router.message(Command("mute"))
 async def cmd_mute(message: Message, command: CommandObject, bot: Bot):
     """Apertura del selector remoto de duración de restricción de chat y voz."""
-    if message.chat.type == "private": 
-        return
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
-
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
-    target = await extract_target_user(message, command)
+    lang, t, target = await validate_moderation_target(message, command, bot, "mute")
     if not target:
-        msg = await message.reply(t["target_needed_mute"], parse_mode="HTML")
-        await asyncio.sleep(10)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception: 
-            pass
-        return
-
-    bot_info = await bot.get_me()
-    if target.id == bot_info.id:
-        msg = await message.reply(t["bot_sanction"], parse_mode="HTML")
-        await asyncio.sleep(8)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    if target.id == message.from_user.id:
-        msg = await message.reply(t["self_sanction"], parse_mode="HTML")
-        await asyncio.sleep(8)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    if await is_target_protected(bot, message.chat.id, target.id):
-        msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        await asyncio.sleep(8)
-        try:
-            await msg.delete()
-            await message.delete()
-        except Exception:
-            pass
-        return
-
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "mute", lang, bot)
-    if limit_text:
-        await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
         return
 
     target_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
@@ -553,7 +448,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
 
     target = await extract_target_user(message, command)
     if not target:
-        msg = await message.reply(t["target_needed_unmute"], parse_mode="HTML")
+        msg = await message.reply(t["target_needed"].format(cmd="unmute"), parse_mode="HTML")
         await asyncio.sleep(10)
         try:
             await msg.delete()
@@ -671,7 +566,7 @@ async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
         text = t["wl_removed"].format(name=f"ID: {target_id}")
         await send_remote_menu(message, lang, text, None)
     else:
-        msg = await message.reply(t["target_needed_unwl"], parse_mode="HTML")
+        msg = await message.reply(t["target_needed"].format(cmd="unwhitelist"), parse_mode="HTML")
         await asyncio.sleep(10)
         try:
             await msg.delete()

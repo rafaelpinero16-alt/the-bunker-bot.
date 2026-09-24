@@ -45,9 +45,12 @@ async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 async def get_active_sentinel_label(group_id: int, lang: str = "es") -> str:
     """Detecta si la comunidad usa un centinela propio ULTRA PRO o el maestro."""
-    session_data = await get_session_by_group(group_id)
-    if session_data:
-        return "Centinela Dedicado Propio 💎" if lang == "es" else "Dedicated Sentinel 💎"
+    try:
+        session_data = await get_session_by_group(group_id)
+        if session_data:
+            return "Centinela Dedicado Propio 💎" if lang == "es" else "Dedicated Sentinel 💎"
+    except Exception:
+        pass
     return "Centinela Maestro (@Alphacentinel) 🤖" if lang == "es" else "Master Sentinel (@Alphacentinel) 🤖"
 
 
@@ -140,8 +143,16 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
             return
 
     chat_id = message.chat.id
-    tier = (await get_group_tier(chat_id) or "FREE").upper()
-    autolower_status = await get_autolower_status(chat_id)
+    try:
+        tier = (await get_group_tier(chat_id) or "FREE").upper()
+    except Exception:
+        tier = "FREE"
+
+    try:
+        autolower_status = await get_autolower_status(chat_id)
+    except Exception:
+        autolower_status = 0
+
     sentinel_label = await get_active_sentinel_label(chat_id, lang)
 
     al_status = "🟢 ACTIVO" if autolower_status == 1 else "🔴 INACTIVO"
@@ -181,8 +192,16 @@ async def cb_refresh_status(callback: CallbackQuery):
 
     await callback.answer(t["refreshed"])
 
-    tier = (await get_group_tier(chat_id) or "FREE").upper()
-    autolower_status = await get_autolower_status(chat_id)
+    try:
+        tier = (await get_group_tier(chat_id) or "FREE").upper()
+    except Exception:
+        tier = "FREE"
+
+    try:
+        autolower_status = await get_autolower_status(chat_id)
+    except Exception:
+        autolower_status = 0
+
     sentinel_label = await get_active_sentinel_label(chat_id, lang)
 
     al_status = "🟢 ACTIVO" if autolower_status == 1 else "🔴 INACTIVO"
@@ -218,8 +237,16 @@ async def cb_open_radar_private(callback: CallbackQuery):
     t = TEXTS.get(lang, TEXTS["es"])
     await callback.answer()
 
-    tier = (await get_group_tier(chat_id) or "FREE").upper()
-    autolower_status = await get_autolower_status(chat_id)
+    try:
+        tier = (await get_group_tier(chat_id) or "FREE").upper()
+    except Exception:
+        tier = "FREE"
+
+    try:
+        autolower_status = await get_autolower_status(chat_id)
+    except Exception:
+        autolower_status = 0
+
     sentinel_label = await get_active_sentinel_label(chat_id, lang)
 
     al_status = "🟢 ACTIVO" if autolower_status == 1 else "🔴 INACTIVO"

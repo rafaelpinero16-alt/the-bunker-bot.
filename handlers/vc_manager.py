@@ -190,17 +190,47 @@ async def auto_delete_msg(msg: Message, delay: int = 15):
 
 async def get_active_sentinel_label(group_id: int) -> str:
     """Devuelve la etiqueta del centinela activo para el grupo (Dedicado o Maestro)."""
-    session_data = await get_session_by_group(group_id)
-    if session_data:
-        return "Centinela Dedicado Propio 💎"
+    try:
+        session_data = await get_session_by_group(group_id)
+        if session_data:
+            return "Centinela Dedicado Propio 💎"
+    except Exception:
+        pass
     return "Centinela Maestro (@Alphacentinel) 🤖"
+
+
+def get_user_mention_html(user) -> str:
+    """Genera una mención válida en formato HTML."""
+    if getattr(user, "username", None):
+        return f"@{user.username}"
+    name = getattr(user, "full_name", getattr(user, "first_name", "Usuario"))
+    return f'<a href="tg://user?id={user.id}">{name}</a>'
+
+
+async def extract_vc_target(message: Message, command: CommandObject, bot: Bot):
+    """Función unificada para extraer el objetivo de voz por respuesta, mención o ID[cite: 17]."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        return target_user.id, get_user_mention_html(target_user)
+    elif command and command.args:
+        arg = command.args.split()[0].strip()
+        if arg.isdigit():
+            target_id = int(arg)
+            return target_id, f"<code>{target_id}</code>"
+        elif arg.startswith("@"):
+            try:
+                chat_info = await bot.get_chat(arg)
+                return chat_info.id, arg
+            except Exception:
+                return None, None
+    return None, None
 
 
 # ==========================================
 # 📡 FUENTE ÚNICA DE VERDAD: TELEMETRÍA EN CALIENTE
 # ==========================================
 async def get_telemetry_context(chat_id: int, lang: str) -> dict:
-    """Punto único de acceso a la telemetría en tiempo real de la sala."""
+    """Punto único de acceso a la telemetría en tiempo real de la sala[cite: 17]."""
     try:
         telem = await get_community_live_telemetry(chat_id)
     except Exception:
@@ -280,7 +310,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
 
 
 async def send_private_response(message: Message, text: str, reply_markup=None):
-    """Fuerza que las respuestas a comandos de administración lleguen al chat privado."""
+    """Fuerza que las respuestas a comandos de administración lleguen al chat privado[cite: 17]."""
     user_id = message.from_user.id
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
@@ -298,14 +328,6 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
             asyncio.create_task(auto_delete_msg(temp_msg, 12))
         except Exception:
             pass
-
-
-def get_user_mention_html(user) -> str:
-    """Genera una mención válida en formato HTML."""
-    if getattr(user, "username", None):
-        return f"@{user.username}"
-    name = getattr(user, "full_name", getattr(user, "first_name", "Usuario"))
-    return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 
 # ==========================================
@@ -378,25 +400,7 @@ async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    target_mention = None
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-        target_id = target_user.id
-        target_mention = get_user_mention_html(target_user)
-    elif command and command.args:
-        arg = command.args.split()[0].strip()
-        if arg.isdigit():
-            target_id = int(arg)
-            target_mention = f"<code>{target_id}</code>"
-        elif arg.startswith("@"):
-            try:
-                chat_info = await bot.get_chat(arg)
-                target_id = chat_info.id
-                target_mention = arg
-            except Exception:
-                target_id = None
+    target_id, target_mention = await extract_vc_target(message, command, bot)
 
     if target_id:
         if is_super_admin(target_id) or await is_operator_admin(bot, message.chat.id, target_id):
@@ -421,31 +425,13 @@ async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("vcwhitelist", "vcwl"))
 async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
-    """Permite autorizar identidades para no ser atenuadas por el Centinela."""
+    """Permite autorizar identidades para no ser atenuadas por el Centinela[cite: 17]."""
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    target_mention = None
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-        target_id = target_user.id
-        target_mention = get_user_mention_html(target_user)
-    elif command and command.args:
-        arg = command.args.split()[0].strip()
-        if arg.isdigit():
-            target_id = int(arg)
-            target_mention = f"<code>{target_id}</code>"
-        elif arg.startswith("@"):
-            try:
-                chat_info = await bot.get_chat(arg)
-                target_id = chat_info.id
-                target_mention = arg
-            except Exception:
-                target_id = None
+    target_id, target_mention = await extract_vc_target(message, command, bot)
 
     if target_id:
         await add_to_whitelist(target_id)
@@ -456,31 +442,13 @@ async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("vcunwhitelist", "vcunwl"))
 async def cmd_vc_unwhitelist(message: Message, command: CommandObject, bot: Bot):
-    """Retira una identidad de la whitelist de voz."""
+    """Retira una identidad de la whitelist de voz[cite: 17]."""
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    target_id = None
-    target_mention = None
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        target_user = message.reply_to_message.from_user
-        target_id = target_user.id
-        target_mention = get_user_mention_html(target_user)
-    elif command and command.args:
-        arg = command.args.split()[0].strip()
-        if arg.isdigit():
-            target_id = int(arg)
-            target_mention = f"<code>{target_id}</code>"
-        elif arg.startswith("@"):
-            try:
-                chat_info = await bot.get_chat(arg)
-                target_id = chat_info.id
-                target_mention = arg
-            except Exception:
-                target_id = None
+    target_id, target_mention = await extract_vc_target(message, command, bot)
 
     if target_id:
         await remove_from_whitelist(target_id)
