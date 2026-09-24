@@ -3285,8 +3285,8 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text="💰 " + ("Monetización Stars" if lang == "es" else "Stars Monetization"), callback_data=f"menu_infomod_monetization_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
-        elif target.startswith("infomod_"):
-            mod_name = target.replace("infomod_", "")
+        elif target == "infomod":
+            mod_name = data[2] if len(data) > 2 else "groups"
             mod_text_key = f"info_mod_{mod_name}"
             mod_desc = t.get(mod_text_key, t["info_how_main"])
             text = f"📖 <b>{tr(lang, 'Centro de Conocimiento', 'Knowledge Center')}</b>\n\n{mod_desc}"
