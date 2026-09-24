@@ -68,6 +68,13 @@ fallback_router = Router(name="callback_fallback")
 
 @fallback_router.callback_query()
 async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
+    # 🛟 Puente de rescate táctico: si la llamada es de planes de membresía, la despacha de inmediato
+    if callback.data and callback.data.startswith("chplans_"):
+        try:
+            return await user_private.cb_channel_plans_dispatch(callback, bot)
+        except Exception as ex:
+            logging.error(f"❌ [Fallback Rescue chplans] Fallo al despachar plan: {ex}", exc_info=True)
+
     logging.warning(
         f"🧭 [Callback sin handler] bot_id={bot.id} usuario={callback.from_user.id} "
         f"callback_data={callback.data!r}"
