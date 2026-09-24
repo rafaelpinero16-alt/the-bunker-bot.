@@ -10,7 +10,7 @@ from aiogram.types import (
 )
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.filters import CommandStart, CommandObject
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from database.database import (
     get_or_create_user, get_user_groups, get_user_channels,
     get_group_tier, get_user_global_tier, 
@@ -927,6 +927,13 @@ TEXTS = {
     }
 }
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
+    """
+    Lista los grupos donde el usuario es propietario legítimo, verificando en vivo contra
+    Telegram para blindar contra cualquier pérdida de persistencia tras un reinicio (Railway).
+    Solo se descarta un grupo ante una confirmación DEFINITIVA de Telegram (bot expulsado/chat
+    inexistente); cualquier otro fallo (timeout, flood-control, hiccup transitorio del arranque)
+    conserva el registro persistido en base de datos en vez de ocultarlo.
+    """
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
         return []
@@ -934,22 +941,43 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
         return raw_groups
     bot_info = await bot.get_me()
     bot_id = bot_info.id
+
     async def check_ownership(g_id, g_name):
         try:
             bot_member = await bot.get_chat_member(chat_id=g_id, user_id=bot_id)
-            if bot_member.status in ["administrator", "creator"]:
-                user_member = await bot.get_chat_member(chat_id=g_id, user_id=user_id)
-                if user_member.status == "creator":
-                    return (g_id, g_name)
-        except Exception:
+        except TelegramForbiddenError:
+            return None  # Baja definitiva: el bot fue expulsado o bloqueado del chat.
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if "chat not found" in msg or "kicked" in msg or "not a member" in msg:
+                return None  # Baja definitiva confirmada por Telegram.
+            logging.warning(f"⚠️ [Sync Grupos] Respuesta ambigua de Telegram para group={g_id}: {e}. Se conserva por persistencia de DB.")
+            return (g_id, g_name)
+        except Exception as e:
+            logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio (posible arranque en frío) verificando group={g_id}: {e}. Se conserva por persistencia de DB.")
+            return (g_id, g_name)
+
+        if bot_member.status not in ("administrator", "creator"):
             return None
-        return None
+
+        try:
+            user_member = await bot.get_chat_member(chat_id=g_id, user_id=user_id)
+        except Exception as e:
+            logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio verificando propietario user={user_id} group={g_id}: {e}. Se conserva por persistencia de DB.")
+            return (g_id, g_name)
+
+        return (g_id, g_name) if user_member.status == "creator" else None
+
     results = await asyncio.gather(*(check_ownership(g_id, g_name) for g_id, g_name in raw_groups))
     return [res for res in results if res is not None]
 
 
 async def get_active_user_channels(bot: Bot, user_id: int) -> list:
-    """Verifica y lista los canales donde el bot es administrador y el usuario es propietario."""
+    """
+    Verifica y lista los canales donde el bot es administrador y el usuario es propietario,
+    con el mismo blindaje anti-pérdida de persistencia que get_active_user_groups: solo se
+    descarta un canal ante una confirmación DEFINITIVA de Telegram, nunca por un fallo transitorio.
+    """
     raw_channels = await get_user_channels(user_id)
     if not raw_channels:
         return []
@@ -957,16 +985,33 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
         return raw_channels
     bot_info = await bot.get_me()
     bot_id = bot_info.id
+
     async def check_ch_ownership(c_id, c_name):
         try:
             bot_member = await bot.get_chat_member(chat_id=c_id, user_id=bot_id)
-            if bot_member.status in ["administrator", "creator"]:
-                user_member = await bot.get_chat_member(chat_id=c_id, user_id=user_id)
-                if user_member.status == "creator":
-                    return (c_id, c_name)
-        except Exception:
+        except TelegramForbiddenError:
+            return None  # Baja definitiva: el bot fue expulsado o bloqueado del canal.
+        except TelegramBadRequest as e:
+            msg = str(e).lower()
+            if "chat not found" in msg or "kicked" in msg or "not a member" in msg:
+                return None  # Baja definitiva confirmada por Telegram.
+            logging.warning(f"⚠️ [Sync Canales] Respuesta ambigua de Telegram para channel={c_id}: {e}. Se conserva por persistencia de DB.")
+            return (c_id, c_name)
+        except Exception as e:
+            logging.warning(f"⚠️ [Sync Canales] Fallo transitorio (posible arranque en frío) verificando channel={c_id}: {e}. Se conserva por persistencia de DB.")
+            return (c_id, c_name)
+
+        if bot_member.status not in ("administrator", "creator"):
             return None
-        return None
+
+        try:
+            user_member = await bot.get_chat_member(chat_id=c_id, user_id=user_id)
+        except Exception as e:
+            logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando propietario user={user_id} channel={c_id}: {e}. Se conserva por persistencia de DB.")
+            return (c_id, c_name)
+
+        return (c_id, c_name) if user_member.status == "creator" else None
+
     results = await asyncio.gather(*(check_ch_ownership(c_id, c_name) for c_id, c_name in raw_channels))
     return [res for res in results if res is not None]
 
@@ -1678,9 +1723,16 @@ def get_eco_keyboard(group_id: int, lang: str):
     ])
 
 
-async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
+async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     tier = await get_effective_group_tier(group_id, user_id)
+    # 🧭 Blindaje contextual: el Clon & Centinela es compartido por Grupos y Canales;
+    # el regreso debe respetar siempre el origen real (cpanel para canal, gpanel para grupo).
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")
+    )
     if tier == "ultra_pro":
         clone_info = await get_bot_clone(user_id, group_id)
         has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
@@ -1699,12 +1751,12 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str):
         if has_sentinel:
             kb.append([InlineKeyboardButton(text="🛑 Desconectar Centinela", callback_data=f"clone_discsentinel_{group_id}_{lang}")])
 
-        kb.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
+        kb.append([back_btn])
         return InlineKeyboardMarkup(inline_keyboard=kb)
     else:
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Unlock with ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
-            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
+            [back_btn]
         ])
     # ==========================================
 # 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO
@@ -1775,7 +1827,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         group_id = state_data["group_id"]
         token = text_input
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+            [InlineKeyboardButton(text=(t["btn_back_channel"] if await resolve_chat_kind(bot, group_id) == "c" else t["btn_back_group"]), callback_data=f"gset_clone_{group_id}_{lang}")]
         ])
 
         if ":" in token and len(token) > 30:
@@ -1851,7 +1903,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         else:
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
-                [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                [InlineKeyboardButton(text=(t["btn_back_channel"] if await resolve_chat_kind(bot, group_id) == "c" else t["btn_back_group"]), callback_data=f"gset_clone_{group_id}_{lang}")]
             ])
             error_reason = "Número no válido." if res.get("message") == "invalid_phone" else f"Telegram: {res.get('message')}"
             resp = await message.answer(t["phone_error"].format(reason=error_reason), reply_markup=cancel_kb, parse_mode="HTML")
@@ -1873,7 +1925,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             session_str = res["session_string"]
             connected = await register_or_update_sentinel(user_id, group_id, session_str)
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                [InlineKeyboardButton(text=(t["btn_back_channel"] if await resolve_chat_kind(bot, group_id) == "c" else t["btn_back_group"]), callback_data=f"gset_clone_{group_id}_{lang}")]
             ])
             if connected:
                 await save_owner_session(user_id, group_id, session_str)
@@ -1891,7 +1943,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         else:
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
-                [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                [InlineKeyboardButton(text=(t["btn_back_channel"] if await resolve_chat_kind(bot, group_id) == "c" else t["btn_back_group"]), callback_data=f"gset_clone_{group_id}_{lang}")]
             ])
             resp = await message.answer(t["code_invalid"], reply_markup=cancel_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
@@ -1912,7 +1964,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             session_str = res["session_string"]
             connected = await register_or_update_sentinel(user_id, group_id, session_str)
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                [InlineKeyboardButton(text=(t["btn_back_channel"] if await resolve_chat_kind(bot, group_id) == "c" else t["btn_back_group"]), callback_data=f"gset_clone_{group_id}_{lang}")]
             ])
             if connected:
                 await save_owner_session(user_id, group_id, session_str)
@@ -1922,7 +1974,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         else:
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
-                [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                [InlineKeyboardButton(text=(t["btn_back_channel"] if await resolve_chat_kind(bot, group_id) == "c" else t["btn_back_group"]), callback_data=f"gset_clone_{group_id}_{lang}")]
             ])
             resp = await message.answer(t["twofa_invalid"], reply_markup=cancel_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
@@ -2541,13 +2593,16 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if not await verify_admin_privileges(callback, bot, group_id):
             return
 
+        chat_kind = await resolve_chat_kind(bot, group_id)
+        back_label = t["btn_back_channel"] if chat_kind == "c" else t["btn_back_group"]
+
         if sub in ("token", "phone"):
             tier = await get_effective_group_tier(group_id, callback.from_user.id)
             if tier != "ultra_pro":
                 clone_lock_text = "🧬 <b>Clonación & Centinela (ULTRA PRO)</b>\n\n🔒 <i>Exclusivo del nivel ULTRA PRO.</i>\n\n🛡️ <i>Cloud Media Management</i>"
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="💎 Desbloquear con ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
-                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_clone_{group_id}_{lang}")]
+                    [InlineKeyboardButton(text=back_label, callback_data=f"gset_clone_{group_id}_{lang}")]
                 ])
                 try:
                     await callback.message.edit_text(clone_lock_text, reply_markup=keyboard, parse_mode="HTML")
@@ -2588,7 +2643,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
-            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
+            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
         elif sub == "discbot":
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             if clone_info and clone_info[0]:
@@ -2606,7 +2661,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status="Desconectado 🔴", sentinel_status=sentinel_status)
-            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
+            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
         elif sub == "discsentinel":
             await disconnect_sentinel(group_id)
             await revoke_owner_session(callback.from_user.id, group_id)
@@ -2620,7 +2675,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
             status = "Operativo 🟢" if has_clone else "No Configurado 🔴"
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status="Desconectado 🔴")
-            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang)
+            keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
 
     elif action == "cmd":
         sub_cmd = data[1]
@@ -2938,12 +2993,14 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             status = f"Operativo 🟢" if has_clone else "No Configurado 🔴"
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
-            
+            chat_kind = await resolve_chat_kind(bot, group_id)
+
             await callback.message.edit_text(
                 t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status),
-                reply_markup=await get_clone_keyboard(group_id, callback.from_user.id, lang),
+                reply_markup=await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind),
                 parse_mode="HTML"
             )
+
 
     elif action == "astog":
         filter_str = data[1]

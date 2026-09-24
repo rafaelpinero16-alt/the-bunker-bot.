@@ -37,7 +37,8 @@ from database.database import (
     mark_subscription_warned,
     update_subscription_status,
     activate_universal_night_mode,
-    deactivate_universal_night_mode
+    deactivate_universal_night_mode,
+    flag_userbot, is_userbot_flagged
 )
 
 try:
@@ -127,6 +128,13 @@ NOISE_SHIELD_ALERT_TEXT = (
     "repetidos en la transmisión.\n\n"
     "🇺🇸 <i><b>{user_name}</b> was auto-muted after repeated anomalous noise spikes were detected "
     "in the live stream.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
+USERBOT_HUNTER_ALERT_TEXT = (
+    "🕵️‍♂️ <b>The Bunker Bot: Radar Userbot Hunter Activado</b>\n\n"
+    "Se ha detectado y fichado un comportamiento automatizado sospechoso en la cuenta de <b>{user_name}</b>. "
+    "El protocolo preventivo ha interceptado la señal para salvaguardar la integridad de la comunidad.\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
 
@@ -647,6 +655,21 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                     u_id = peer_user.user_id
                     active_users.add(u_id)
+
+                    # 🕵️‍♂️ Userbot Hunter: Verificar si el usuario ya está fichado como userbot malicioso
+                    if await is_userbot_flagged(u_id, chat_id):
+                        try:
+                            await client.invoke(
+                                EditGroupCallParticipant(
+                                    call=current_call, 
+                                    participant=await client.resolve_peer(u_id), 
+                                    muted=True, 
+                                    volume=0
+                                )
+                            )
+                        except Exception:
+                            pass
+                        continue
 
                     is_authorized = (
                         u_id == bot_client_id or u_id in cache_info['admins']

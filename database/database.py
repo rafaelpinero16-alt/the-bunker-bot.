@@ -270,6 +270,18 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
 
+        # 🕵️‍♂️ NUEVA TABLA: Rastreo y Baneo Preventivo de Userbots Maliciosos
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS flagged_userbots (
+                user_id INTEGER,
+                group_id INTEGER,
+                reason TEXT,
+                flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, group_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_flagged_userbots ON flagged_userbots (group_id, user_id)")
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS channel_settings (
                 channel_id INTEGER PRIMARY KEY,
@@ -297,7 +309,6 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_channel ON channel_plans (channel_id, status)")
 
-        # Migraciones dinámicas para tablas channel_plans existentes
         channel_plan_cols = [
             ("promo_text", "TEXT"),
             ("media_id", "TEXT"),
@@ -1590,6 +1601,39 @@ def clear_speaker_queue(group_id: int):
 
 
 # ==========================================
+# 🕵️‍♂️ MÉTODOS SQL DE ÉLITE: USERBOT HUNTER & GHOST PURGE
+# ==========================================
+def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso de Userbot"):
+    """Registra o actualiza una cuenta marcada como Userbot malicioso."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO flagged_userbots (user_id, group_id, reason, flagged_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, group_id) DO UPDATE SET
+                reason = excluded.reason,
+                flagged_at = CURRENT_TIMESTAMP
+        """, (user_id, group_id, reason))
+        conn.commit()
+
+
+def is_userbot_flagged(user_id: int, group_id: int) -> bool:
+    """Verifica si un usuario ya fue detectado y fichado como userbot en la comunidad."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+        return cursor.fetchone() is not None
+
+
+def purge_flagged_userbot_record(user_id: int, group_id: int):
+    """Elimina el registro de penalización del userbot si fuera necesario."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+        conn.commit()
+
+
+# ==========================================
 # 📡 TELEMETRÍA EN VIVO Y ESTADÍSTICAS TÁCTICAS
 # ==========================================
 def get_community_live_telemetry(group_id: int) -> dict:
@@ -2006,6 +2050,9 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "mark_subscription_warned",
     "update_subscription_status",
     "get_active_subscribers_count",
+    "flag_userbot",
+    "is_userbot_flagged",
+    "purge_flagged_userbot_record"
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
