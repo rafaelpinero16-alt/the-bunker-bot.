@@ -293,12 +293,19 @@ TEXTS = {
             "🎙️ <b>VIP Microphone Pass (/micvip):</b> Sells temporary 24-hour speaking privileges in a "
             "voice chat. The buyer pays in Stars and automatically receives microphone access for the full "
             "duration, after which the privilege expires on its own — no manual revocation needed.\n\n"
-            "🧬 <b>Bot Clone Architecture:</b> Owners can link their own BotFather token to run a fully "
-            "independent clone of the system. 100% of the Stars generated through that clone are credited "
-            "directly to the owner's own balance, with zero platform commission.\n\n"
             "💎 <b>Recurring Channel Plans:</b> Lets channel owners configure commercial subscription plans "
             "(e.g. Monthly VIP Pass) with a fixed duration and Stars price. Each plan generates its own "
             "deep-link for subscribers, and active subscriber counts are tracked automatically per plan.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_clones": (
+            "🧬 <b>Clone Bots & Dedicated Sentinel — Operations Guide</b>\n\n"
+            "🔑 <b>Bot Clone Architecture:</b> Connect your custom @BotFather token to deploy an independent "
+            "replica of The Bunker OS. All custom commands, member customs, and channel access pass through your own "
+            "bot instance, channeling 100% of Telegram Stars proceeds straight to your own balance without cuts.\n\n"
+            "🎙️ <b>Dedicated Voice Sentinel:</b> Link a secondary account via phone auth to moderate live stages "
+            "24/7 autonomously. The dedicated sentinel manages participant microphones in real time, applies dynamic "
+            "ducking, and cuts unauthorized screen-shares without risking your primary admin account.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
@@ -666,14 +673,20 @@ TEXTS = {
             "hablar en una llamada de voz. El comprador paga en Stars y recibe automáticamente acceso al "
             "micrófono durante toda la duración, tras lo cual el privilegio expira por sí solo — sin "
             "revocación manual necesaria.\n\n"
-            "🧬 <b>Arquitectura de Bots Clones:</b> Los dueños pueden conectar su propio token de "
-            "BotFather para operar un clon totalmente independiente del sistema. El 100% de las Stars "
-            "generadas a través de ese clon se acreditan directamente al balance del propio dueño, sin "
-            "comisión alguna de la plataforma.\n\n"
             "💎 <b>Planes Comerciales de Canales Recurrentes:</b> Permite a los dueños de canales "
             "configurar planes de suscripción comercial (ej. Pase Mensual VIP) con duración fija y precio "
             "en Stars. Cada plan genera su propio deep-link para suscriptores, y el conteo de suscriptores "
             "activos se rastrea automáticamente por plan.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "info_mod_clones": (
+            "🧬 <b>Bot Clon & Centinela Dedicado — Guía Operativa</b>\n\n"
+            "🔑 <b>Arquitectura de Bot Clon:</b> Conecta tu propio token de @BotFather para operar una réplica "
+            "independiente de The Bunker OS. Todos los comandos, la aduana de seguridad y el cobro de membresías corren "
+            "bajo la identidad de tu propio bot, canalizando el 100% de las ganancias en Telegram Stars directo a tu balance.\n\n"
+            "🎙️ <b>Centinela Dedicado:</b> Asocia una línea secundaria mediante autenticación oficial por teléfono "
+            "para moderar llamadas de voz y videochats 24/7 de forma autónoma. El Centinela modula los micrófonos en tiempo real, "
+            "aplica audio ducking dinámico y corta pantallas no autorizadas de forma automática.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
@@ -2108,7 +2121,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             GROUP_VIP_TAG[group_id] = text_input
             resp = await message.answer(t["tag_updated"].format(group_id=group_id, text_input=text_input), reply_markup=back_kb, parse_mode="HTML")
         else:
-            resp = await message.answer(t["tag_err"], reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(t["tag_err"], reply_kb=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -2230,7 +2243,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 13. CREACIÓN DE PLANES DE MEMBRESÍA DE CANAL (FASE 6)
+    # 13. CREACIÓN DE PLANES DE MEMBRESÍA DE CANAL (FASE 6 CON ENLACE DESTINO)
     if (bot.id, user_id) in CHAN_PLAN_STATES:
         st_data = CHAN_PLAN_STATES[(bot.id, user_id)]
         channel_id = st_data["channel_id"]
@@ -2241,6 +2254,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
         if step == "name":
             plan_name = text_input[:30].strip()
+            if not plan_name:
+                resp = await message.answer("⚠️ El nombre del plan no puede estar vacío.", reply_markup=back_kb)
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
             CHAN_PLAN_STATES[(bot.id, user_id)]["name"] = plan_name
             CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "days"
             prompt_days = "⏳ <b>Duración del plan en días:</b>\n\nEnvía un número entero (ejemplo: <code>30</code> para un mes):" if lang == "es" else "⏳ <b>Plan duration in days:</b>\n\nSend an integer (e.g. <code>30</code>):"
@@ -2267,7 +2284,38 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 return
 
             CHAN_PLAN_STATES[(bot.id, user_id)]["price"] = int(text_input)
+            CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "target_link"
+            prompt_link = (
+                "🔗 <b>Enlace de Destino o Canal/Grupo VIP (Opcional):</b>\n\n"
+                "Envía el enlace público o privado al que se le dará acceso o que se promocionará con este plan "
+                "(ejemplo: <code>https://t.me/+AbCdEf...</code> o <code>@MiCanalVIP</code>).\n\n"
+                "<i>Escribe <code>omitir</code> si no deseas adjuntar un enlace.</i>"
+            ) if lang == "es" else (
+                "🔗 <b>Target Link or VIP Channel/Group (Optional):</b>\n\n"
+                "Send the public or private link to be promoted or granted access with this plan "
+                "(e.g. <code>https://t.me/+AbCdEf...</code> or <code>@MyVIPChannel</code>).\n\n"
+                "<i>Send <code>skip</code> if you don't wish to attach a target link.</i>"
+            )
+            resp = await message.answer(prompt_link, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "target_link":
+            raw_link = text_input.strip()
+            if raw_link.lower() in ("omitir", "skip", "ninguno", "none", "-"):
+                target_link = None
+            else:
+                if raw_link.startswith("@"):
+                    target_link = f"https://t.me/{raw_link.lstrip('@')}"
+                elif not raw_link.startswith("http://") and not raw_link.startswith("https://"):
+                    target_link = f"https://{raw_link}"
+                else:
+                    target_link = raw_link
+                target_link = target_link[:255]
+
+            CHAN_PLAN_STATES[(bot.id, user_id)]["target_link"] = target_link
             CHAN_PLAN_STATES[(bot.id, user_id)]["step"] = "promo"
+
             prompt_promo = (
                 "📝 <b>Mensaje promocional (Copy):</b>\n\n"
                 "Envía el texto que verán tus suscriptores antes de pagar. Soporta formato HTML "
@@ -2341,6 +2389,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             duration_days = st_data["days"]
             price_stars = st_data["price"]
             promo_text = st_data.get("promo", "")
+            target_link = st_data.get("target_link")
             CHAN_PLAN_STATES.pop((bot.id, user_id), None)
 
             await _finalize_and_preview_channel_plan(
@@ -2353,7 +2402,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 price=price_stars,
                 promo_text=promo_text,
                 media_id=media_id,
-                media_type=media_type
+                media_type=media_type,
+                target_link=target_link
             )
             return
 @router.callback_query(
@@ -2452,15 +2502,16 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             text, keyboard = t["support_main"], get_support_keyboard(lang)
         elif target == "info":
             text, keyboard = t["info_main"], get_info_keyboard(lang)
-        elif target == "infohow":
+        elif target in ["infohow", "info_how"]:
             text, keyboard = t["info_how_main"], InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🛡️ " + ("Grupos y Perímetro" if lang == "es" else "Groups & Perimeter"), callback_data=f"menu_infomod_groups_{lang}")],
                 [InlineKeyboardButton(text="📡 " + ("Canales y Lives" if lang == "es" else "Channels & Lives"), callback_data=f"menu_infomod_channels_{lang}")],
                 [InlineKeyboardButton(text="💰 " + ("Monetización Stars" if lang == "es" else "Stars Monetization"), callback_data=f"menu_infomod_monetization_{lang}")],
+                [InlineKeyboardButton(text="🧬 " + ("Clon & Centinela" if lang == "es" else "Clone & Sentinel"), callback_data=f"menu_infomod_clones_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
-        elif target.startswith("infomod_"):
-            mod_name = target.replace("infomod_", "")
+        elif target == "infomod":
+            mod_name = data[2]
             mod_text_key = f"info_mod_{mod_name}"
             mod_desc = t.get(mod_text_key, t["info_how_main"])
             text = f"📖 <b>Centro de Conocimiento</b>\n\n{mod_desc}"
@@ -3509,30 +3560,45 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
 async def _finalize_and_preview_channel_plan(
     bot: Bot, chat_id: int, channel_id: int, lang: str,
     name: str, days: int, price: int, promo_text: str,
-    media_id: str = None, media_type: str = None
+    media_id: str = None, media_type: str = None,
+    target_link: str = None
 ):
     """
     Registra el plan en base de datos, genera el deep-link de pago (chanplan_{plan_id}_{channel_id})
-    y despacha en el chat privado del dueño la Vista Previa exacta del mensaje promocional.
+    y despacha en el chat privado del dueño la Vista Previa exacta del mensaje promocional con soporte para enlace publicitario o destino VIP.
     """
     t = TEXTS.get(lang, TEXTS["es"])
 
     plan_id = await create_channel_plan(
-        channel_id, name, days, price,
-        promo_text=promo_text, media_id=media_id, media_type=media_type
+        channel_id=channel_id, 
+        plan_name=name, 
+        duration_days=days, 
+        stars_price=price,
+        promo_text=promo_text, 
+        media_id=media_id, 
+        media_type=media_type,
+        target_link=target_link
     )
 
     bot_info = await bot.get_me()
     deep_link = f"https://t.me/{bot_info.username}?start=chanplan_{plan_id}_{channel_id}"
 
     buy_label = f"💳 Suscribirme — {price} ⭐" if lang == "es" else f"💳 Subscribe — {price} ⭐"
-    preview_kb = InlineKeyboardMarkup(inline_keyboard=[
+    preview_kb_rows = [
         [InlineKeyboardButton(text=buy_label, url=deep_link)]
-    ])
+    ]
+    if target_link:
+        link_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
+        preview_kb_rows.append([
+            InlineKeyboardButton(text="🔗 Ver Destino / Canal VIP" if lang == "es" else "🔗 View Target / VIP", url=link_url)
+        ])
+    preview_kb = InlineKeyboardMarkup(inline_keyboard=preview_kb_rows)
 
     caption_text = promo_text.strip() if promo_text and promo_text.strip() else (
         f"💎 <b>{name}</b>\n\n{days} días — {price} ⭐" if lang == "es" else f"💎 <b>{name}</b>\n\n{days} days — {price} ⭐"
     )
+    if target_link:
+        caption_text += f"\n\n🔗 <b>Acceso / Destino:</b> <code>{target_link}</code>" if lang == "es" else f"\n\n🔗 <b>Target / Access:</b> <code>{target_link}</code>"
 
     try:
         if media_id and media_type == "photo":
@@ -3549,18 +3615,20 @@ async def _finalize_and_preview_channel_plan(
     back_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{channel_id}_{lang}")]
     ])
+    
+    target_info = f"\n• <b>Enlace / Destino:</b> <code>{target_link}</code>" if target_link else ""
     done_text = (
         f"✅ <b>¡Plan de Membresía Creado con Éxito!</b>\n\n"
         f"• <b>Plan:</b> {name}\n"
         f"• <b>Duración:</b> {days} días\n"
-        f"• <b>Precio:</b> {price} Stars (XTR)\n\n"
+        f"• <b>Precio:</b> {price} Stars (XTR){target_info}\n\n"
         f"👆 <i>La vista previa de arriba es el mensaje exacto que verán tus suscriptores. Puedes pinearlo o reenviarlo a tu canal.</i>\n\n"
         f"🔗 <b>Enlace directo:</b>\n<code>{deep_link}</code>"
     ) if lang == "es" else (
         f"✅ <b>Membership Plan Created Successfully!</b>\n\n"
         f"• <b>Plan:</b> {name}\n"
         f"• <b>Duration:</b> {days} days\n"
-        f"• <b>Price:</b> {price} Stars (XTR)\n\n"
+        f"• <b>Price:</b> {price} Stars (XTR){target_info}\n\n"
         f"👆 <i>The preview above is the exact message your subscribers will see. Pin or forward it to your channel.</i>\n\n"
         f"🔗 <b>Direct link:</b>\n<code>{deep_link}</code>"
     )
@@ -3600,8 +3668,10 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         if plans:
             for p in plans:
                 p_id, p_name, p_days, p_stars = p[0], p[1], p[2], p[3]
+                p_target = p[10] if len(p) > 10 and p[10] else (p[9] if len(p) > 9 and isinstance(p[9], str) and p[9].startswith("http") else "")
+                target_str = f" | 🔗 <code>{p_target}</code>" if p_target else ""
                 link = f"https://t.me/{bot_info.username}?start=chanplan_{p_id}_{channel_id}"
-                plans_list_text += f"\n• <b>{p_name}:</b> {p_days}d — {p_stars} ⭐\n  └ <code>{link}</code>\n"
+                plans_list_text += f"\n• <b>{p_name}:</b> {p_days}d — {p_stars} ⭐{target_str}\n  └ <code>{link}</code>\n"
                 del_label = f"🗑️ Borrar {p_name[:12]}" if lang == "es" else f"🗑️ Delete {p_name[:12]}"
                 kb_rows.append([InlineKeyboardButton(text=del_label, callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}")])
         else:
@@ -3700,7 +3770,8 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             price=st_data["price"],
             promo_text=st_data.get("promo", ""),
             media_id=None,
-            media_type=None
+            media_type=None,
+            target_link=st_data.get("target_link")
         )
 
     elif sub == "del":
@@ -3719,8 +3790,10 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         if plans:
             for p in plans:
                 p_id, p_name, p_days, p_stars = p[0], p[1], p[2], p[3]
+                p_target = p[10] if len(p) > 10 and p[10] else (p[9] if len(p) > 9 and isinstance(p[9], str) and p[9].startswith("http") else "")
+                target_str = f" | 🔗 <code>{p_target}</code>" if p_target else ""
                 link = f"https://t.me/{bot_info.username}?start=chanplan_{p_id}_{channel_id}"
-                plans_list_text += f"\n• <b>{p_name}:</b> {p_days}d — {p_stars} ⭐\n  └ <code>{link}</code>\n"
+                plans_list_text += f"\n• <b>{p_name}:</b> {p_days}d — {p_stars} ⭐{target_str}\n  └ <code>{link}</code>\n"
                 del_label = f"🗑️ Borrar {p_name[:12]}" if lang == "es" else f"🗑️ Delete {p_name[:12]}"
                 kb_rows.append([InlineKeyboardButton(text=del_label, callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}")])
         else:

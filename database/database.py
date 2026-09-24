@@ -271,7 +271,7 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
 
-        # 🕵️‍♂️ NUEVA TABLA: Rastreo y Baneo Preventivo de Userbots Maliciosos
+        # 🕵️‍♂️ RASTREO Y BANEO PREVENTIVO DE USERBOTS MALICIOSOS
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS flagged_userbots (
                 user_id INTEGER,
@@ -305,6 +305,7 @@ def init_db():
                 promo_text TEXT,
                 media_id TEXT,
                 media_type TEXT,
+                target_link TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -313,7 +314,8 @@ def init_db():
         channel_plan_cols = [
             ("promo_text", "TEXT"),
             ("media_id", "TEXT"),
-            ("media_type", "TEXT")
+            ("media_type", "TEXT"),
+            ("target_link", "TEXT")  # 💎 Migración dinámica para enlace de destino/anuncio
         ]
         for col_name, col_def in channel_plan_cols:
             try:
@@ -398,6 +400,14 @@ def add_warning(user_id: int):
         conn.commit()
         cursor.execute("SELECT warnings FROM users WHERE user_id = ?", (user_id,))
         return cursor.fetchone()[0]
+
+
+def reset_warnings(user_id: int):
+    """Restablece a cero las advertencias del usuario en la tabla users."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET warnings = 0 WHERE user_id = ?", (user_id,))
+        conn.commit()
 
 
 def ban_user(user_id: int):
@@ -1068,7 +1078,7 @@ def set_tips_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
@@ -1768,18 +1778,19 @@ def create_channel_plan(
     stars_price: int,
     promo_text: str = None,
     media_id: str = None,
-    media_type: str = None
+    media_type: str = None,
+    target_link: str = None
 ) -> int:
-    """Registra un nuevo plan comercial de membresía para canales con soporte de copy y multimedia."""
+    """Registra un nuevo plan comercial de membresía para canales con soporte de copy, multimedia y enlace de destino."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO channel_plans (
                 channel_id, plan_name, duration_days, stars_price, status,
-                promo_text, media_id, media_type
+                promo_text, media_id, media_type, target_link
             )
-            VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
-        """, (channel_id, plan_name.strip(), duration_days, stars_price, promo_text, media_id, media_type))
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        """, (channel_id, plan_name.strip(), duration_days, stars_price, promo_text, media_id, media_type, target_link))
         conn.commit()
         return cursor.lastrowid
 
@@ -1790,7 +1801,7 @@ def get_channel_plan(plan_id: int) -> dict:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT plan_id, channel_id, plan_name, duration_days, stars_price, status,
-                   promo_text, media_id, media_type, created_at
+                   promo_text, media_id, media_type, created_at, target_link
             FROM channel_plans WHERE plan_id = ?
         """, (plan_id,))
         row = cursor.fetchone()
@@ -1805,7 +1816,8 @@ def get_channel_plan(plan_id: int) -> dict:
                 "promo_text": row[6],
                 "media_id": row[7],
                 "media_type": row[8],
-                "created_at": row[9]
+                "created_at": row[9],
+                "target_link": row[10]
             }
         return None
 
@@ -1816,14 +1828,14 @@ def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
         if only_active:
             cursor.execute("""
                 SELECT plan_id, plan_name, duration_days, stars_price, status, created_at,
-                       promo_text, media_id, media_type
+                       promo_text, media_id, media_type, target_link
                 FROM channel_plans WHERE channel_id = ? AND status = 'active'
                 ORDER BY duration_days ASC
             """, (channel_id,))
         else:
             cursor.execute("""
                 SELECT plan_id, plan_name, duration_days, stars_price, status, created_at,
-                       promo_text, media_id, media_type
+                       promo_text, media_id, media_type, target_link
                 FROM channel_plans WHERE channel_id = ?
                 ORDER BY status ASC, duration_days ASC
             """, (channel_id,))
@@ -1969,6 +1981,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "update_user_topic",
     "get_user_by_topic",
     "add_warning",
+    "reset_warnings",
     "ban_user",
     "get_blacklist",
     "add_to_blacklist",
@@ -1997,8 +2010,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_free_badge_config",
     "get_vip_badge_title",
     "set_vip_badge_title",
-    "get_vc_monitor_status",  # 💎 Agregado al wrapper asíncrono
-    "set_vc_monitor_status",  # 💎 Agregado al wrapper asíncrono
+    "get_vc_monitor_status",
+    "set_vc_monitor_status",
     "get_radar_config",
     "set_radar_config",
     "get_sentinel_payload_config",
@@ -2070,8 +2083,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "create_channel_plan",
     "get_channel_plan",
     "get_channel_plans",
-    * [  # Mapeo dinámico adicional de seguridad
-    ],
     "set_channel_plan_status",
     "delete_channel_plan",
     "record_channel_subscription",
