@@ -37,7 +37,7 @@ from database.database import (
     # 💎 Módulos de Canales & Membresías
     get_channel_settings, set_channel_settings,
     get_channel_plans, get_active_subscribers_count,
-    create_channel_plan, delete_channel_plan,  # <--- Añadir aquí
+    create_channel_plan, delete_channel_plan,
     get_night_mode_config,
     set_night_mode_config
 )
@@ -172,8 +172,6 @@ GROUP_SPEAKER_PRICE = {}
 TIPS_AMOUNT_STATES = {}
 TIPS_TARGET_STATES = {}
 SENTINEL_PAYLOAD_TEXT_STATES = {}
-SENTINEL_PAYLOAD_MEDIA_STATES = {}
-SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 CHAN_PLAN_STATES = {}
@@ -544,7 +542,6 @@ TEXTS = {
         "sentinel_payload_prompt_del": "⏱️ <b>Auto-Delete Timeout in seconds (0 to keep):</b>",
         "sentinel_payload_saved": "✅ <b>Payload asset updated successfully!</b>",
         "sentinel_payload_err": "⚠️ Invalid input for payload asset.",
-        
         "btn_night_mode": "🌙 Autonomous Night Mode",
         "night_main": (
             "🏴‍☠️ <b>Autonomous Night Mode (Phase 4)</b>\n\n"
@@ -553,14 +550,14 @@ TEXTS = {
             "• <b>Schedule:</b> <code>{start} - {end}</code>\n"
             "• <b>Action:</b> <code>{action}</code>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
-        ),  # <--- ¡Esta coma es la clave que faltaba!
+        ),
         "night_prompt": "⏰ <b>Night Mode Schedule</b>\n\nSend the start and end interval in 24h format (example: <code>22:00-06:00</code>):\n\n🛡️ <i>Cloud Media Management</i>",
         "night_updated": "✅ <b>Night Mode schedule updated successfully!</b>\n\n🛡️ <i>Cloud Media Management</i>",
         "night_err": "⚠️ Invalid format. Use HH:MM-HH:MM (Example: <code>22:00-06:00</code>).\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_night_on": "🟢 Enable Night Mode",
         "btn_night_off": "🔴 Disable Night Mode",
         "btn_night_mod": "⏰ Modify Schedule (HH:MM-HH:MM)"
-    },  # <--- Aquí cierra el bloque "en"
+    },
     "es": {
         "owner_only_alert": "⛔ Acceso Denegado: Esta consola táctica está reservada única y exclusivamente para el Dueño de la comunidad o canal.",
         "welcome": (
@@ -908,7 +905,7 @@ TEXTS = {
         "sentinel_payload_prompt_media": "🖼️ <b>Carga de Multimedia del Payload (Foto, GIF o Video):</b>",
         "sentinel_payload_prompt_del": "⏱️ <b>Tiempo de Auto-Borrado en segundos (0 para mantener):</b>",
         "sentinel_payload_saved": "✅ <b>¡Activo de payload guardado correctamente!</b>",
-       "sentinel_payload_err": "⚠️ Entrada no válida para el activo multimedia del payload.",
+        "sentinel_payload_err": "⚠️ Entrada no válida para el activo multimedia del payload.",
         "btn_night_mode": "🌙 Modo Nocturno Autónomo",
         "night_main": (
             "🌙 <b>Modo Nocturno Autónomo (Fase 4)</b>\n\n"
@@ -1264,6 +1261,8 @@ def get_panic_keyboard(group_id: int, lang: str, status: int, chat_type: str = "
         [action_btn],
         [back_btn]
     ])
+
+
 def get_night_keyboard(group_id: int, lang: str, status: int):
     t = TEXTS.get(lang, TEXTS["es"])
     toggle_btn = (
@@ -1378,7 +1377,6 @@ def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g")
     amt_label = f"💰 {amount} Stars"
     target_label = f"📢 {target[:15]}"
 
-    # 🧭 Blindaje contextual: un canal jamás debe caer en el panel general de grupos (menu_eco).
     back_btn = (
         InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
         if chat_type == "c" else
@@ -1410,8 +1408,6 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat
         btn_text = "🧬 Configurar Clon & Centinela Propio" if lang == "es" else "🧬 Setup Own Clone & Sentinel"
         keyboard_rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"gset_clone_{group_id}_{lang}")])
 
-    # 🧭 Blindaje contextual: si la compra se originó desde un Canal, el regreso es al cpanel,
-    # nunca al gpanel general de grupos.
     back_btn = (
         InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
         if chat_type == "c" else
@@ -1568,7 +1564,6 @@ async def get_warns_keyboard(group_id: int, lang: str):
     limit = cfg["limit"]
     action = cfg["action"].upper()
 
-    # Interruptores por categoría — por defecto ACTIVADOS (🟢) si la config aún no los define.
     links_on = cfg.get("warn_links", 1) == 1
     blacklist_on = cfg.get("warn_blacklist", 1) == 1
     flood_on = cfg.get("warn_flood", 1) == 1
@@ -1717,7 +1712,7 @@ def get_eco_keyboard(group_id: int, lang: str):
         ],
         [
             InlineKeyboardButton(text=t["btn_tips"], callback_data=f"tips_menu_{group_id}_{lang}"),
-            InlineKeyboardButton(text=t["btn_night_mode"], callback_data=f"night_menu_{group_id}_{lang}") # <--- ¡Añadido aquí!
+            InlineKeyboardButton(text=t["btn_night_mode"], callback_data=f"night_menu_{group_id}_{lang}")
         ],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
@@ -1726,8 +1721,6 @@ def get_eco_keyboard(group_id: int, lang: str):
 async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     tier = await get_effective_group_tier(group_id, user_id)
-    # 🧭 Blindaje contextual: el Clon & Centinela es compartido por Grupos y Canales;
-    # el regreso debe respetar siempre el origen real (cpanel para canal, gpanel para grupo).
     back_btn = (
         InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
         if chat_type == "c" else
@@ -1758,7 +1751,9 @@ async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: 
             [InlineKeyboardButton(text="💎 Desbloquear con ULTRA" if lang == "es" else "💎 Unlock with ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
             [back_btn]
         ])
-    # ==========================================
+
+
+# ==========================================
 # 🚀 ENRUTAMIENTO Y MANEJADORES EN PRIVADO
 # ==========================================
 @router.message(CommandStart(), F.chat.type == "private")
@@ -2361,7 +2356,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 media_type=media_type
             )
             return
-
 @router.callback_query(
     F.data.startswith("menu_") | F.data.startswith("lang_") | F.data.startswith("langpanel_") | 
     F.data.startswith("langcpanel_") | F.data.startswith("gpanel_") | F.data.startswith("cpanel_") | 
@@ -2458,7 +2452,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             text, keyboard = t["support_main"], get_support_keyboard(lang)
         elif target == "info":
             text, keyboard = t["info_main"], get_info_keyboard(lang)
-        elif target == "info" or target == "infohow":
+        elif target == "infohow":
             text, keyboard = t["info_how_main"], InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🛡️ " + ("Grupos y Perímetro" if lang == "es" else "Groups & Perimeter"), callback_data=f"menu_infomod_groups_{lang}")],
                 [InlineKeyboardButton(text="📡 " + ("Canales y Lives" if lang == "es" else "Channels & Lives"), callback_data=f"menu_infomod_channels_{lang}")],
@@ -2639,7 +2633,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
-            status = f"Operativo 🟢" if has_clone else "No Configurado 🔴"
+            status = "Operativo 🟢" if has_clone else "No Configurado 🔴"
             session_info = await get_owner_session(callback.from_user.id, group_id)
             sentinel_status = "Conectado 🟢" if session_info else "No Configurado 🔴"
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
@@ -3000,7 +2994,6 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 reply_markup=await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind),
                 parse_mode="HTML"
             )
-
 
     elif action == "astog":
         filter_str = data[1]
@@ -3508,7 +3501,8 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             except Exception:
                 pass
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-            
+
+
 # ==========================================
 # 📢 FASE 6: DISPATCHER DE PLANES DE CANAL
 # ==========================================
@@ -3519,15 +3513,10 @@ async def _finalize_and_preview_channel_plan(
 ):
     """
     Registra el plan en base de datos, genera el deep-link de pago (chanplan_{plan_id}_{channel_id})
-    y despacha en el chat privado del dueño la Vista Previa exacta del mensaje promocional —
-    con Foto/Video/Animación si se cargó, y su botón de pago interactivo — lista para pinear
-    o reenviar al canal. Justo después, envía un resumen de confirmación con botón de regreso
-    al panel exclusivo del canal (cpanel_{channel_id}_{lang}).
+    y despacha en el chat privado del dueño la Vista Previa exacta del mensaje promocional.
     """
     t = TEXTS.get(lang, TEXTS["es"])
 
-    # NOTA DE INTEGRACIÓN: create_channel_plan debe aceptar y persistir promo_text/media_id/
-    # media_type (columnas nuevas en channel_plans) además de los 4 argumentos originales.
     plan_id = await create_channel_plan(
         channel_id, name, days, price,
         promo_text=promo_text, media_id=media_id, media_type=media_type
@@ -3584,7 +3573,6 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
     sub = data[1]
     
-    # 💡 Resolución blindada del channel_id:
     if sub == "del":
         plan_id = int(data[2])
         channel_id = int(data[3])
@@ -3641,7 +3629,6 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             pass
 
     elif sub == "add":
-        # 🎚️ Restricción de Planes por Nivel de Licencia (Free=1 / PRO=3 / ULTRA PRO=10)
         tier = await get_effective_group_tier(channel_id, callback.from_user.id)
         limit = CHAN_PLAN_TIER_LIMITS.get(tier, CHAN_PLAN_TIER_LIMITS["free"])
         active_plans = await get_channel_plans(channel_id, only_active=True)
@@ -3686,7 +3673,6 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         fire_and_forget_auto_delete([prompt], delay=60)
 
     elif sub == "skip":
-        # ⏭️ Paso 5 (multimedia) omitido: el plan se finaliza solo con el copy de texto.
         st_data = CHAN_PLAN_STATES.pop((bot.id, callback.from_user.id), None)
         if not st_data or st_data.get("channel_id") != channel_id or st_data.get("step") != "media":
             info_text = "ℹ️ No hay una creación de plan en curso para omitir." if lang == "es" else "ℹ️ There's no plan creation in progress to skip."

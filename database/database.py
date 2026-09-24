@@ -129,7 +129,8 @@ def init_db():
             ("night_mode_status", "INTEGER DEFAULT 0"),
             ("night_mode_start", "TEXT DEFAULT '22:00'"),
             ("night_mode_end", "TEXT DEFAULT '06:00'"),
-            ("night_action", "TEXT DEFAULT 'lock_universal'")
+            ("night_action", "TEXT DEFAULT 'lock_universal'"),
+            ("vc_enabled", "INTEGER DEFAULT 1")  # 💎 Persistencia para el estado del monitor de voz
         ]
 
         for col_name, col_def in settings_columns:
@@ -717,6 +718,32 @@ def set_vip_badge_title(group_id: int, title: str):
             INSERT INTO group_settings (group_id, vip_mic_badge_title) VALUES (?, ?) 
             ON CONFLICT(group_id) DO UPDATE SET vip_mic_badge_title = excluded.vip_mic_badge_title
         """, (group_id, clean_title))
+        conn.commit()
+
+
+# ==========================================
+# 💎 MÉTODOS DE PERSISTENCIA: MONITOR DE VOZ (VC_MANAGER)
+# ==========================================
+def get_vc_monitor_status(group_id: int) -> int:
+    """Recupera el estado de monitoreo de voz persistido en base de datos."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT vc_enabled FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 1
+        except sqlite3.OperationalError:
+            return 1
+
+
+def set_vc_monitor_status(group_id: int, status: int):
+    """Actualiza y persiste el estado de monitoreo de voz en la base de datos."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, vc_enabled) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET vc_enabled = excluded.vc_enabled
+        """, (group_id, status))
         conn.commit()
 
 
@@ -1970,6 +1997,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_free_badge_config",
     "get_vip_badge_title",
     "set_vip_badge_title",
+    "get_vc_monitor_status",  # 💎 Agregado al wrapper asíncrono
+    "set_vc_monitor_status",  # 💎 Agregado al wrapper asíncrono
     "get_radar_config",
     "set_radar_config",
     "get_sentinel_payload_config",
@@ -2041,6 +2070,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "create_channel_plan",
     "get_channel_plan",
     "get_channel_plans",
+    * [  # Mapeo dinámico adicional de seguridad
+    ],
     "set_channel_plan_status",
     "delete_channel_plan",
     "record_channel_subscription",

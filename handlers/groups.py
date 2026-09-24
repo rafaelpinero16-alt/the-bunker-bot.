@@ -1,16 +1,36 @@
+"""
+groups.py — The Bunker OS (Aiogram 3.x)
+
+Núcleo de seguridad perimetral para grupos y supergrupos.
+
+Variables de entorno opcionales:
+  ADMIN_IDS                     IDs de Arquitectos Supremos extra (separados por coma).
+  ADMIN_GROUP_ID                Grupo interno donde se notifican nuevos entornos.
+  USERBOT_ACTION                ban | mute | delete  (defecto: ban) — castigo a userbots fichados.
+  WARN_PROGRESSIVE_ATTENUATION  1 | 0 (defecto: 1) — atenuación acústica gradual por cada warn.
+  RESET_WARNS_AFTER_SANCTION    1 | 0 (defecto: 1) — reinicia los warns tras aplicar la sanción.
+  MEMBER_REGISTRY_DB            Ruta del padrón local de miembros (defecto: data/member_registry.db).
+"""
 import time
 import string
 import random
 import asyncio
 import os
 import json
+import sqlite3
+import inspect
 import logging
+import contextlib
+from typing import Optional
+
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, ChatMemberUpdated, ChatJoinRequest, LabeledPrice, PreCheckoutQuery
 )
+import database.database as _db_module
 from database.database import (
     get_antispam_filter, get_antispam_delete,
     get_antiflood_config, is_whitelisted, get_captcha_config,
@@ -24,10 +44,50 @@ from database.database import (
     get_speaker_queue, pop_next_speaker, remove_from_speaker_queue, clear_speaker_queue,
     flag_userbot, is_userbot_flagged
 )
+import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic
 
 logger = logging.getLogger("groups_handler")
 router = Router()
+
+# Reinicio de warns tras sanción: sólo se usa si tu database.database expone `reset_warnings(user_id)`.
+_db_reset_warnings = getattr(_db_module, "reset_warnings", None)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on", "si", "sí")
+
+
+# ==========================================
+# ⚙️ CONFIGURACIÓN GLOBAL
+# ==========================================
+FULL_VOLUME = 10000  # 100% en la escala del AutoLower (coherente con /duckvolume: pct * 100)
+
+# Cuentas de servicio de Telegram: nunca se sancionan ni se registran como miembros.
+#   777000 = Telegram (reenvíos de canal vinculado) | 1087968824 = GroupAnonymousBot | 136817688 = Channel_Bot
+SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
+
+USERBOT_ACTION = os.getenv("USERBOT_ACTION", "ban").strip().lower()
+if USERBOT_ACTION not in ("ban", "mute", "delete"):
+    USERBOT_ACTION = "ban"
+
+WARN_PROGRESSIVE_ATTENUATION = _env_flag("WARN_PROGRESSIVE_ATTENUATION", True)
+RESET_WARNS_AFTER_SANCTION = _env_flag("RESET_WARNS_AFTER_SANCTION", True)
+MEMBER_REGISTRY_DB = os.getenv("MEMBER_REGISTRY_DB", "database/bot_data.db")
+
+# Referencias fuertes a tareas en segundo plano (evita que el GC las cancele a mitad de ejecución)
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
 
 # Inmunidad total para los Arquitectos Supremos
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
@@ -38,57 +98,116 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 
-async def _is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Valida si el usuario es Dueño/Administrador de la comunidad o canal (o Arquitecto Supremo)[cite: 9]."""
-    if is_super_admin(user_id):
-        return True
+# ==========================================
+# 🧠 CACHÉ DE ESTADO DE MIEMBROS
+# ==========================================
+_MEMBER_STATUS_CACHE: dict = {}
+_MEMBER_STATUS_TTL = 60
+
+
+async def _get_member_status(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> Optional[str]:
+    """
+    Devuelve el estado del usuario en la comunidad ('creator', 'administrator', 'member', ...)
+    o None si Telegram no pudo verificarlo. Con fresh=True ignora la caché (usar en comandos
+    administrativos); con fresh=False reutiliza el último resultado durante 60s para no saturar la API.
+    """
+    key = (chat_id, user_id)
+    now = time.time()
+
+    if not fresh:
+        cached = _MEMBER_STATUS_CACHE.get(key)
+        if cached and now - cached[1] < _MEMBER_STATUS_TTL:
+            return cached[0]
+
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        return member.status in ("creator", "administrator")
     except Exception:
+        return None
+
+    status = member.status
+    _MEMBER_STATUS_CACHE[key] = (status, now)
+
+    if len(_MEMBER_STATUS_CACHE) > 3000:
+        expired = [k for k, (_, ts) in _MEMBER_STATUS_CACHE.items() if now - ts > _MEMBER_STATUS_TTL]
+        for k in expired:
+            _MEMBER_STATUS_CACHE.pop(k, None)
+
+    return status
+
+
+async def _is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Valida si el usuario es Dueño/Administrador de la comunidad o canal (o Arquitecto Supremo)."""
+    if is_super_admin(user_id):
+        return True
+    status = await _get_member_status(bot, chat_id, user_id, fresh=True)
+    return status in ("creator", "administrator")
+
+
+async def _message_author_is_admin(bot: Bot, message: Message) -> bool:
+    """
+    Igual que _is_group_admin, pero además reconoce a los administradores anónimos
+    (mensajes enviados 'como el grupo', donde sender_chat es la propia comunidad).
+    """
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return True
+    if not message.from_user:
         return False
+    return await _is_group_admin(bot, message.chat.id, message.from_user.id)
+
 
 # ==========================================
 # 🎚️ MATRIZ DE RANGOS — AUTOLOWER SELECTIVO & INMUNIDAD DE ARQUITECTOS
 # ==========================================
+IMMUNE_TIERS = frozenset({"architect", "service", "sentinel", "owner", "admin", "whitelisted", "unknown"})
+
+
 async def get_privilege_tier(bot: Bot, group_id: int, user_id: int, username: str = "") -> str:
     """
     Resuelve el rango de privilegio de una cuenta dentro de la comunidad, en orden
-    estricto de jerarquía[cite: 9]. Este rango es la fuente única de verdad que usan tanto
-    el AutoLower (atenuación acústica) como el núcleo de sanciones para decidir
-    quién queda protegido[cite: 9].
+    estricto de jerarquía. Este rango es la fuente única de verdad que usan tanto
+    el AutoLower (atenuación acústica), el Userbot Hunter y el núcleo de sanciones
+    para decidir quién queda protegido.
 
-      - "architect"   -> Arquitecto Supremo (SUPER_ADMIN_IDS). Inmunidad absoluta[cite: 9].
-      - "sentinel"     -> Centinela Maestro/Dedicado ligado a la sesión de voz activa[cite: 9].
-      - "owner"        -> Dueño/Creador de la comunidad o canal[cite: 9].
-      - "admin"        -> Administrador designado por el Dueño[cite: 9].
-      - "whitelisted"  -> Aliado autorizado explícitamente en la Whitelist[cite: 9].
-      - "standard"     -> Miembro común, sujeto a todas las cerraduras y sanciones[cite: 9].
+      - "architect"   -> Arquitecto Supremo (SUPER_ADMIN_IDS). Inmunidad absoluta.
+      - "service"     -> Cuentas de servicio de Telegram (canal vinculado, admin anónimo).
+      - "sentinel"    -> Centinela Maestro/Dedicado ligado a la sesión de voz activa.
+      - "owner"       -> Dueño/Creador de la comunidad o canal.
+      - "admin"       -> Administrador designado por el Dueño.
+      - "whitelisted" -> Aliado autorizado explícitamente en la Whitelist.
+      - "unknown"     -> Telegram no pudo verificar el rango (fallo de API). Se trata como
+                         protegido: ante la duda jamás se sanciona a un posible administrador.
+      - "standard"    -> Miembro común, sujeto a todas las cerraduras y sanciones.
     """
     if is_super_admin(user_id):
         return "architect"
 
+    if user_id in SERVICE_ACCOUNT_IDS:
+        return "service"
+
     if await is_sentinel_account(group_id, user_id, username):
         return "sentinel"
 
-    try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
-        if member.status == "creator":
-            return "owner"
-        if member.status == "administrator":
-            return "admin"
-    except Exception:
-        pass
+    status = await _get_member_status(bot, group_id, user_id)
+    if status == "creator":
+        return "owner"
+    if status == "administrator":
+        return "admin"
 
-    if await is_whitelisted(user_id):
-        return "whitelisted"
+    try:
+        if await is_whitelisted(user_id):
+            return "whitelisted"
+    except Exception as e:
+        logger.warning(f"No se pudo consultar la whitelist para {user_id}: {e}")
+
+    if status is None:
+        return "unknown"
 
     return "standard"
 
 
 def _tier_is_privileged(tier: str) -> bool:
-    """Cualquier rango distinto de 'standard' queda excluido de sanciones automáticas[cite: 9]."""
-    return tier in ("architect", "sentinel", "owner", "admin", "whitelisted")
+    """Cualquier rango distinto de 'standard' queda excluido de sanciones automáticas."""
+    return tier in IMMUNE_TIERS
 
 
 async def _autolower_can_mute(bot: Bot, group_id: int, user_id: int, username: str = "") -> bool:
@@ -102,7 +221,7 @@ RECENTLY_VERIFIED = {}
 
 
 async def auto_delete_msg(message: Message, delay: int = 15):
-    """Elimina automáticamente mensajes temporales de alerta para evitar saturación visual[cite: 9]."""
+    """Elimina automáticamente mensajes temporales de alerta para evitar saturación visual."""
     await asyncio.sleep(delay)
     try:
         await message.delete()
@@ -119,7 +238,12 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
     if sentinel_info and sentinel_info.get("user_id") == user_id:
         return True
 
-    session_row = await get_session_by_group(group_id)
+    try:
+        session_row = await get_session_by_group(group_id)
+    except Exception as e:
+        logger.warning(f"No se pudo consultar la sesión de Centinela de {group_id}: {e}")
+        return False
+
     if session_row and session_row[0] == user_id:
         return True
 
@@ -131,7 +255,7 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 # ==========================================
 @router.my_chat_member()
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
-    """Detecta automáticamente cuando el bot o clon es promovido en un Grupo o Canal[cite: 9]."""
+    """Detecta automáticamente cuando el bot o clon es promovido en un Grupo o Canal."""
     if event.new_chat_member.status not in ["administrator", "creator"]:
         return
     if event.old_chat_member.status in ["administrator", "creator"]:
@@ -164,7 +288,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
                 f"• 🎙️ <b>Moderación de Lives:</b> Desmuteo inteligente tras 'Levantar Mano' (*Raise Hand*).\n"
                 f"• 💎 <b>Membresías VIP:</b> Enlaces efímeros de 1 solo uso y expulsión automática de morosos.\n"
                 f"• ⭐ <b>Propinas Stars:</b> Monetización directa en tus transmisiones.\n\n"
-                f"Pulsa el botón inferior para abrir la consola de gestión de este canal en privado[cite: 9].\n\n"
+                f"Pulsa el botón inferior para abrir la consola de gestión de este canal en privado.\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             try:
@@ -181,10 +305,10 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
 
         group_welcome_text = (
             f"🛡️ <b>¡SISTEMA DE SEGURIDAD DESPLEGADO! / SECURITY BOT DEPLOYED!</b>\n\n"
-            f"Hola a todos. He sido activado como administrador para blindar el perímetro de <b>{group_name}</b> con aduana alfanumérica, anti-spam y protección de transmisiones[cite: 9].\n\n"
+            f"Hola a todos. He sido activado como administrador para blindar el perímetro de <b>{group_name}</b> con aduana alfanumérica, anti-spam y protección de transmisiones.\n\n"
             f"🇺🇸 <i>Greetings! I have been activated as an administrator to protect <b>{group_name}</b> with automated captcha customs, anti-spam shields, and stream monitoring.</i>\n\n"
             f"👑 <b>Panel de Control / Management:</b>\n"
-            f"El Propietario del grupo puede pulsar los botones inferiores para configurar la matriz en privado[cite: 9].\n\n"
+            f"El Propietario del grupo puede pulsar los botones inferiores para configurar la matriz en privado.\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
 
@@ -225,7 +349,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
                     f"• <b>Chat ID:</b> <code>{group_id}</code>\n"
                     f"• <b>Enlace / Ref:</b> {invite_link}\n"
                     f"• <b>Autor de Alta:</b> {user.full_name if user else 'N/A'} (<code>{user.id if user else 'N/A'}</code>)\n\n"
-                    f"✅ Instancia desplegada con éxito[cite: 9].\n\n"
+                    f"✅ Instancia desplegada con éxito.\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 reply_markup=kb_admin,
@@ -426,6 +550,15 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
 async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     group_id = event.chat.id
     user_id = event.from_user.id
+
+    # 🕵️‍♂️ Userbot Hunter: una cuenta fichada no llega ni a la aduana
+    if await enforce_userbot_flag(bot, group_id, user_id, event.from_user.username or "", source="solicitud de ingreso"):
+        try:
+            await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
+        except Exception:
+            pass
+        return
+
     cfg = await get_captcha_config(group_id)
 
     if cfg["status"] != 1:
@@ -449,9 +582,6 @@ async def handle_new_members(message: Message, bot: Bot):
         except Exception: 
             pass
 
-    if cfg["status"] != 1:
-        return
-
     bot_me = await bot.get_me()
     now = time.time()
 
@@ -459,10 +589,46 @@ async def handle_new_members(message: Message, bot: Bot):
         if new_user.id == bot_me.id:
             continue
 
+        if not new_user.is_bot:
+            await registry_track(group_id, new_user.id, force=True)
+
+            # 🕵️‍♂️ Userbot Hunter: expulsión inmediata de cuentas fichadas que ingresan al grupo
+            if await enforce_userbot_flag(bot, group_id, new_user.id, new_user.username or "", source="ingreso"):
+                continue
+
+        if cfg["status"] != 1:
+            continue
+
         if (group_id, new_user.id) in CAPTCHA_SESSIONS or (now - RECENTLY_VERIFIED.get((group_id, new_user.id), 0) < 120):
             continue
 
         await process_user_captcha(bot, group_id, new_user.id, new_user.full_name, new_user.username or "", is_join_req=False)
+
+
+@router.chat_member(F.chat.type.in_({"group", "supergroup"}))
+async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
+    """
+    Mantiene sincronizados el padrón local y la caché de rangos ante cualquier cambio de estado
+    (ingresos, salidas, expulsiones, ascensos y degradaciones). Requiere que 'chat_member' esté
+    incluido en allowed_updates (dp.resolve_used_update_types() lo hace automáticamente).
+    """
+    user = event.new_chat_member.user
+    if user.is_bot:
+        return
+
+    group_id = event.chat.id
+    _MEMBER_STATUS_CACHE.pop((group_id, user.id), None)
+
+    new_status = event.new_chat_member.status
+    if new_status in ("left", "kicked"):
+        await registry_forget(group_id, user.id)
+        return
+    if new_status == "restricted" and getattr(event.new_chat_member, "is_member", True) is False:
+        await registry_forget(group_id, user.id)
+        return
+
+    await registry_track(group_id, user.id, force=True)
+    await enforce_userbot_flag(bot, group_id, user.id, user.username or "", source="cambio de membresía")
 
 
 @router.callback_query(F.data.startswith("cap_ver_") | F.data.startswith("cap_simple_"))
@@ -606,6 +772,10 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
 # ==========================================
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.left_chat_member)
 async def purge_left_member(message: Message):
+    left_user = message.left_chat_member
+    if left_user and not left_user.is_bot:
+        await registry_forget(message.chat.id, left_user.id)
+
     cfg = await get_captcha_config(message.chat.id)
     if cfg.get("service_del") == 1:
         try: 
@@ -627,48 +797,276 @@ async def purge_general_service_messages(message: Message):
 # ==========================================
 # 🧹 COMANDO DE ÉLITE: GHOST PURGE (CUENTAS FANTASMAS Y ELIMINADAS)
 # ==========================================
-@router.message(Command("purgeghosts"), F.chat.type.in_({"group", "supergroup"}))
-async def purge_ghosts_command(message: Message, bot: Bot):
-    """Comando administrativo para barrer y expulsar cuentas eliminadas o fantasmas del grupo."""
-    group_id = message.chat.id
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
+GHOST_DISPLAY_NAMES = {"deleted account", "cuenta eliminada"}
+GHOST_SCAN_CONCURRENCY = 6
+GHOST_SCAN_CHUNK = 60
+GHOST_SCAN_MAX_MEMBERS = 30000
+_INVALID_USER_HINTS = ("user not found", "participant_id_invalid", "user_id_invalid", "invalid user_id")
+_NO_RIGHTS_HINTS = ("not enough rights", "need to be administrator", "have no rights", "can't remove chat owner", "not enough permissions")
 
-    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
-        warn = await message.answer("⛔ El comando /purgeghosts es exclusivo para administradores.", parse_mode="HTML")
-        asyncio.create_task(auto_delete_msg(warn, 8))
-        return
+_GHOST_PURGE_RUNNING: set = set()
 
-    status_msg = await message.answer(
-        "🧹 <b>Ghost Purge:</b> Escaneando el padrón de la comunidad en busca de cuentas eliminadas o inactivas...\n\n"
-        "🛡️ <i>Cloud Media Management</i>",
-        parse_mode="HTML"
-    )
 
-    purged_count = 0
+async def _call_with_retry(func, *args, attempts: int = 3, **kwargs):
+    """Ejecuta una llamada a la API respetando el flood-control (RetryAfter) de Telegram."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return await func(*args, **kwargs)
+        except TelegramRetryAfter as e:
+            if attempt == attempts:
+                raise
+            await asyncio.sleep(min(float(e.retry_after), 60.0) + 0.5)
+
+
+def _is_ghost_user(user) -> bool:
+    """Telegram sustituye el perfil de una cuenta eliminada por el nombre 'Deleted Account'."""
+    first_name = (getattr(user, "first_name", "") or "").strip().lower()
+    return first_name in GHOST_DISPLAY_NAMES
+
+
+async def _inspect_member(bot: Bot, group_id: int, user_id: int) -> str:
+    """
+    Clasifica a un miembro del padrón:
+      'ghost'      cuenta eliminada ('Deleted Account') aún dentro del grupo.
+      'invalid'    Telegram ya no reconoce el ID (cuenta purgada/inexistente).
+      'protected'  Arquitecto, Dueño, Admin o Whitelist: inmune, jamás se toca.
+      'gone'       ya no es miembro (salió o fue expulsado): se retira del padrón.
+      'active'     cuenta normal y viva.
+      'unverified' Telegram no pudo verificarlo (error transitorio): se omite.
+    """
+    if is_super_admin(user_id):
+        return "protected"
+
     try:
-        # Nota: La API de Telegram permite inspeccionar administradores o miembros recientes. 
-        # Aquí ejecutamos un barrido perimetral sobre los registros accesibles y de servicio.
-        admins = await bot.get_chat_administrators(group_id)
-        admin_ids = {a.user.id for a in admins}
+        member = await _call_with_retry(bot.get_chat_member, chat_id=group_id, user_id=user_id)
+    except TelegramBadRequest as e:
+        err = str(e).lower()
+        if any(hint in err for hint in _INVALID_USER_HINTS):
+            return "invalid"
+        return "unverified"
+    except Exception:
+        return "unverified"
 
-        # Ejecutamos la purga sobre miembros detectados sin actividad o cuentas cerradas
-        # (El bot procede a aplicar expulsión preventiva limpia sobre perfiles huérfanos).
-        pass
-    except Exception as e:
-        logger.error(f"Error ejecutando Ghost Purge en {group_id}: {e}")
+    status = member.status
+    if status in ("creator", "administrator"):
+        return "protected"
+    if status in ("left", "kicked"):
+        return "gone"
+    if status == "restricted" and getattr(member, "is_member", True) is False:
+        return "gone"
+    if not _is_ghost_user(member.user):
+        return "active"
 
     try:
-        await status_msg.edit_text(
-            f"🧹 <b>Ghost Purge Completado</b>\n\n"
-            f"• Cuentas eliminadas o fantasmas purgadas: <b>{purged_count}</b>\n"
-            f"• Perímetro optimizado y base de datos saneada.\n\n"
-            f"🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
-        asyncio.create_task(auto_delete_msg(status_msg, 20))
+        if await is_whitelisted(user_id):
+            return "protected"
     except Exception:
         pass
+
+    return "ghost"
+
+
+async def _expel_ghost(bot: Bot, group_id: int, user_id: int) -> str:
+    """
+    Expulsión preventiva limpia: ban temporal (45 s) + unban inmediato, sin borrar su historial.
+    Si el unban fallara, el ban temporal expira solo. Devuelve:
+      'purged' | 'stale' (ID inexistente) | 'no_rights' (el bot no puede banear) | 'failed'
+    """
+    try:
+        await _call_with_retry(
+            bot.ban_chat_member,
+            chat_id=group_id, user_id=user_id,
+            until_date=int(time.time() + 45), revoke_messages=False
+        )
+    except TelegramBadRequest as e:
+        err = str(e).lower()
+        if any(hint in err for hint in _INVALID_USER_HINTS):
+            return "stale"
+        if any(hint in err for hint in _NO_RIGHTS_HINTS):
+            return "no_rights"
+        logger.warning(f"Ghost Purge: no se pudo expulsar a {user_id} en {group_id}: {e}")
+        return "failed"
+    except TelegramAPIError as e:
+        logger.warning(f"Ghost Purge: error de API expulsando a {user_id} en {group_id}: {e}")
+        return "failed"
+
+    for attempt in range(3):
+        try:
+            await _call_with_retry(bot.unban_chat_member, chat_id=group_id, user_id=user_id, only_if_banned=True)
+            break
+        except TelegramAPIError as e:
+            if attempt == 2:
+                logger.warning(f"Ghost Purge: unban de {user_id} en {group_id} falló ({e}); el ban temporal expirará solo.")
+            else:
+                await asyncio.sleep(1.5)
+
+    return "purged"
+
+
+async def _edit_status(status_msg: Message, text: str) -> None:
+    try:
+        await status_msg.edit_text(text, parse_mode="HTML")
+    except TelegramAPIError:
+        pass
+
+
+@router.message(Command("purgeghosts"), F.chat.type.in_({"group", "supergroup"}))
+async def purge_ghosts_command(message: Message, bot: Bot):
+    """
+    Comando administrativo para barrer y expulsar cuentas eliminadas ('Deleted Account') del grupo.
+
+      /purgeghosts         -> escanea el padrón y expulsa (ban temporal + unban) a los fantasmas.
+      /purgeghosts scan    -> simulación: sólo reporta cuántos fantasmas hay, sin expulsar a nadie.
+    """
+    group_id = message.chat.id
+    username = message.from_user.username if message.from_user else ""
+    user_id = message.from_user.id if message.from_user else 0
+
+    is_authorized = await _message_author_is_admin(bot, message)
+    if not is_authorized and user_id:
+        is_authorized = await is_sentinel_account(group_id, user_id, username or "")
+
+    if not is_authorized:
+        warn = await message.answer("⛔ El comando /purgeghosts es exclusivo para administradores.", parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, 8))
+        return
+
+    args = (message.text or "").split()[1:]
+    dry_run = bool(args) and args[0].strip().lower() in ("scan", "dry", "simular", "preview")
+
+    if group_id in _GHOST_PURGE_RUNNING:
+        busy = await message.answer("⏳ Ya hay un Ghost Purge en curso en esta comunidad. Espera a que termine.", parse_mode="HTML")
+        _spawn(auto_delete_msg(busy, 8))
+        return
+
+    _GHOST_PURGE_RUNNING.add(group_id)
+    try:
+        status_msg = await message.answer(
+            f"🧹 <b>Ghost Purge{' (simulación)' if dry_run else ''}:</b> Escaneando el padrón de la comunidad en busca de cuentas eliminadas...\n\n"
+            "🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+
+        added_by_sentinel = await _bootstrap_registry_from_sentinel(group_id)
+        registered = await registry_members(group_id)
+        candidates = registered[:GHOST_SCAN_MAX_MEMBERS]
+
+        try:
+            total_members = await bot.get_chat_member_count(group_id)
+        except Exception:
+            total_members = None
+
+        stats = {
+            "ghost": 0, "invalid": 0, "protected": 0, "gone": 0, "active": 0, "unverified": 0,
+            "purged": 0, "stale": 0, "failed": 0
+        }
+        processed = 0
+        abort = asyncio.Event()
+        semaphore = asyncio.Semaphore(GHOST_SCAN_CONCURRENCY)
+
+        async def process(uid: int):
+            nonlocal processed
+            if abort.is_set():
+                return
+            async with semaphore:
+                if abort.is_set():
+                    return
+                try:
+                    verdict = await _inspect_member(bot, group_id, uid)
+                    stats[verdict] += 1
+                    processed += 1
+
+                    if verdict == "gone":
+                        await registry_forget(group_id, uid)
+                        return
+
+                    if verdict in ("ghost", "invalid") and not dry_run:
+                        outcome = await _expel_ghost(bot, group_id, uid)
+                        if outcome == "no_rights":
+                            abort.set()
+                            return
+                        stats[outcome] += 1
+                        if outcome in ("purged", "stale"):
+                            await registry_forget(group_id, uid)
+                except Exception as e:
+                    stats["unverified"] += 1
+                    logger.warning(f"Ghost Purge: error procesando a {uid} en {group_id}: {e}")
+
+        last_edit = time.time()
+        for start in range(0, len(candidates), GHOST_SCAN_CHUNK):
+            if abort.is_set():
+                break
+            chunk = candidates[start:start + GHOST_SCAN_CHUNK]
+            await asyncio.gather(*(process(uid) for uid in chunk))
+
+            if time.time() - last_edit > 8:
+                last_edit = time.time()
+                await _edit_status(
+                    status_msg,
+                    f"🧹 <b>Ghost Purge{' (simulación)' if dry_run else ''} en curso...</b>\n\n"
+                    f"• Verificados: <b>{processed}/{len(candidates)}</b>\n"
+                    f"• Fantasmas encontrados: <b>{stats['ghost'] + stats['invalid']}</b>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+            await asyncio.sleep(0.2)
+
+        ghosts_found = stats["ghost"] + stats["invalid"]
+
+        lines = [f"🧹 <b>Ghost Purge {'(Simulación) ' if dry_run else ''}Completado</b>", ""]
+        scanned_line = f"• Perfiles del padrón verificados: <b>{processed}</b>"
+        if total_members:
+            scanned_line += f" (comunidad: ~{total_members} miembros)"
+        lines.append(scanned_line)
+
+        if dry_run:
+            lines.append(f"• 👻 Fantasmas detectados (sin expulsar): <b>{ghosts_found}</b>")
+        else:
+            lines.append(f"• 👻 Fantasmas depurados: <b>{stats['purged']}</b>")
+            if stats["stale"]:
+                lines.append(f"• IDs inválidos retirados del padrón: {stats['stale']}")
+            if stats["failed"]:
+                lines.append(f"• Expulsiones fallidas: {stats['failed']}")
+
+        if stats["protected"]:
+            lines.append(f"• Perfiles protegidos (admins/whitelist): {stats['protected']}")
+        if stats["unverified"]:
+            lines.append(f"• Sin verificar por límites de la API: {stats['unverified']}")
+        if added_by_sentinel:
+            lines.append(f"• Padrón ampliado vía Centinela: +{added_by_sentinel}")
+
+        if abort.is_set():
+            lines.append("")
+            lines.append(
+                "⚠️ <b>Purga interrumpida:</b> el bot no tiene el permiso de administrador "
+                "<i>«Bloquear usuarios»</i>. Actívalo y vuelve a ejecutar el comando."
+            )
+
+        if total_members and len(registered) < total_members * 0.9:
+            coverage = min(100, round(len(registered) * 100 / total_members))
+            lines.append("")
+            lines.append(
+                f"ℹ️ Cobertura del padrón: ~{coverage}%. Telegram no permite a los bots listar a todos los "
+                f"miembros: el padrón se completa con cada mensaje, ingreso o salida que el bot observa."
+            )
+
+        lines.append("")
+        lines.append("🛡️ <i>Cloud Media Management</i>")
+
+        await _edit_status(status_msg, "\n".join(lines))
+        _spawn(auto_delete_msg(status_msg, 60))
+
+        logger.info(
+            f"Ghost Purge {'(simulación) ' if dry_run else ''}en {group_id}: verificados={processed}, "
+            f"fantasmas={ghosts_found}, depurados={stats['purged']}, inválidos={stats['stale']}, fallidos={stats['failed']}"
+        )
+    except Exception as e:
+        logger.error(f"Error ejecutando Ghost Purge en {group_id}: {e}")
+        try:
+            await message.answer("⚠️ El Ghost Purge se interrumpió por un error inesperado. Revisa los logs.", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        _GHOST_PURGE_RUNNING.discard(group_id)
 
 
 # ==========================================
@@ -723,7 +1121,7 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
                     f"Comunidad: <b>{chat.title or 'Sin título'}</b> (<code>{group_id}</code>)\n"
                     f"Activado por: <code>{activated_by}</code>\n\n"
                     f"Se elevaron todas las cerraduras, el Captcha entró en modo estricto, el Anti-Spam "
-                    f"subió su sensibilidad y el chat general quedó restringido sólo a administradores[cite: 9].\n\n"
+                    f"subió su sensibilidad y el chat general quedó restringido sólo a administradores.\n\n"
                     f"🇺🇸 <i>Raid Lockdown engaged: locks maxed, strict captcha, tighter anti-spam and general chat restricted.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
@@ -744,7 +1142,7 @@ async def panic_command(message: Message, bot: Bot):
 
     if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
         warn = await message.answer(
-            "⛔ El Botón de Pánico es exclusivo para administradores de la comunidad[cite: 9].\n"
+            "⛔ El Botón de Pánico es exclusivo para administradores de la comunidad.\n"
             "🇺🇸 <i>The Panic Button is restricted to community administrators.</i>",
             parse_mode="HTML"
         )
@@ -769,7 +1167,7 @@ async def panic_command(message: Message, bot: Bot):
         ])
         await message.answer(
             "🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\n"
-            "Cerraduras al máximo, Captcha estricto, Anti-Spam elevado y chat general restringido sólo a administradores[cite: 9].\n\n"
+            "Cerraduras al máximo, Captcha estricto, Anti-Spam elevado y chat general restringido sólo a administradores.\n\n"
             "🇺🇸 <i>Raid Lockdown engaged. Perimeter secured.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>",
             reply_markup=kb, parse_mode="HTML"
@@ -786,7 +1184,7 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
         return
 
     result = await deactivate_panic(group_id)
-    perms_json = result.get("chat_permissions_json")
+    perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
     if perms_json:
         try:
             perms_dict = json.loads(perms_json)
@@ -804,6 +1202,8 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
     except Exception:
         pass
     await callback.answer("Perímetro restaurado ✅")
+
+
 
 
 async def execute_raid_lockdown(bot: Bot, group_id: int) -> bool:
@@ -967,7 +1367,7 @@ async def speakers_command(message: Message, bot: Bot):
     ])
     await message.answer(
         f"🎙️ <b>Cola de Preguntas (AMA) — {message.chat.title}</b>\n\n{queue_text}\n\n"
-        f"💰 Paga <b>{price} Telegram Stars</b> y asegura tu prioridad en la próxima ronda de preguntas[cite: 9].\n\n"
+        f"💰 Paga <b>{price} Telegram Stars</b> y asegura tu prioridad en la próxima ronda de preguntas.\n\n"
         f"🇺🇸 <i>Pay {price} Telegram Stars to lock in priority in the next round.</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>",
         reply_markup=kb, parse_mode="HTML"
@@ -1042,84 +1442,459 @@ async def speakers_successful_payment(message: Message, bot: Bot):
 
 
 # ==========================================
+# 🗂️ PADRÓN LOCAL DE MIEMBROS (BASE OPERATIVA DEL GHOST PURGE)
+# ==========================================
+# La Bot API de Telegram NO permite listar todos los miembros de un grupo: sólo administradores
+# y consultas individuales por ID. Por eso el bot mantiene su propio padrón (SQLite), alimentado
+# en tiempo real por mensajes, ingresos y salidas. El Ghost Purge audita ese padrón.
+_REGISTRY_TOUCH: dict = {}
+_REGISTRY_TOUCH_TTL = 600
+
+
+def _registry_connect() -> sqlite3.Connection:
+    directory = os.path.dirname(MEMBER_REGISTRY_DB)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    conn = sqlite3.connect(MEMBER_REGISTRY_DB, timeout=15)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS group_members ("
+        "group_id INTEGER NOT NULL, "
+        "user_id INTEGER NOT NULL, "
+        "first_seen INTEGER NOT NULL, "
+        "last_seen INTEGER NOT NULL, "
+        "PRIMARY KEY (group_id, user_id))"
+    )
+    return conn
+
+
+def _registry_upsert_sync(group_id: int, user_ids: list) -> None:
+    now = int(time.time())
+    with contextlib.closing(_registry_connect()) as conn:
+        with conn:
+            conn.executemany(
+                "INSERT INTO group_members (group_id, user_id, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(group_id, user_id) DO UPDATE SET last_seen = excluded.last_seen",
+                [(group_id, uid, now, now) for uid in user_ids]
+            )
+
+
+def _registry_forget_sync(group_id: int, user_id: int) -> None:
+    with contextlib.closing(_registry_connect()) as conn:
+        with conn:
+            conn.execute(
+                "DELETE FROM group_members WHERE group_id = ? AND user_id = ?",
+                (group_id, user_id)
+            )
+
+
+def _registry_list_sync(group_id: int) -> list:
+    with contextlib.closing(_registry_connect()) as conn:
+        rows = conn.execute(
+            "SELECT user_id FROM group_members WHERE group_id = ? ORDER BY user_id",
+            (group_id,)
+        ).fetchall()
+    return [row[0] for row in rows]
+
+
+async def registry_track(group_id: int, user_id: int, force: bool = False) -> None:
+    """Registra o refresca a un miembro humano en el padrón (con throttle de 10 min por miembro)."""
+    if user_id <= 0 or user_id in SERVICE_ACCOUNT_IDS:
+        return
+
+    key = (group_id, user_id)
+    now = time.time()
+    if not force and now - _REGISTRY_TOUCH.get(key, 0) < _REGISTRY_TOUCH_TTL:
+        return
+
+    _REGISTRY_TOUCH[key] = now
+    if len(_REGISTRY_TOUCH) > 20000:
+        stale = [k for k, ts in _REGISTRY_TOUCH.items() if now - ts > _REGISTRY_TOUCH_TTL]
+        for k in stale:
+            _REGISTRY_TOUCH.pop(k, None)
+
+    try:
+        await asyncio.to_thread(_registry_upsert_sync, group_id, [user_id])
+    except Exception as e:
+        logger.warning(f"No se pudo registrar a {user_id} en el padrón de {group_id}: {e}")
+
+
+async def registry_forget(group_id: int, user_id: int) -> None:
+    """Retira a un miembro del padrón (salió, fue expulsado o es un registro inválido)."""
+    _REGISTRY_TOUCH.pop((group_id, user_id), None)
+    try:
+        await asyncio.to_thread(_registry_forget_sync, group_id, user_id)
+    except Exception as e:
+        logger.warning(f"No se pudo retirar a {user_id} del padrón de {group_id}: {e}")
+
+
+async def registry_members(group_id: int) -> list:
+    try:
+        return await asyncio.to_thread(_registry_list_sync, group_id)
+    except Exception as e:
+        logger.error(f"No se pudo leer el padrón de {group_id}: {e}")
+        return []
+
+
+async def _bootstrap_registry_from_sentinel(group_id: int) -> int:
+    try:
+        def _get_existing():
+            with _db_module.get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT user_id FROM user_groups WHERE group_id = ? UNION SELECT user_id FROM users", (group_id,))
+                return [r[0] for r in cursor.fetchall() if r[0] not in SERVICE_ACCOUNT_IDS]
+        ids = await asyncio.to_thread(_get_existing)
+        if ids:
+            before = len(await registry_members(group_id))
+            await asyncio.to_thread(_registry_upsert_sync, group_id, ids)
+            after = len(await registry_members(group_id))
+            return max(0, after - before)
+    except Exception as e:
+        logger.warning(f"Bootstrap del padrón falló: {e}")
+    return 0
+
+    try:
+        result = fetcher(group_id)
+        if inspect.isawaitable(result):
+            result = await result
+        ids = [int(x) for x in (result or []) if int(x) > 0 and int(x) not in SERVICE_ACCOUNT_IDS]
+    except Exception as e:
+        logger.warning(f"Bootstrap del padrón vía Centinela falló en {group_id}: {e}")
+        return 0
+
+    if not ids:
+        return 0
+
+    try:
+        before = len(await registry_members(group_id))
+        await asyncio.to_thread(_registry_upsert_sync, group_id, ids)
+        after = len(await registry_members(group_id))
+        return max(0, after - before)
+    except Exception as e:
+        logger.warning(f"No se pudo volcar el roster del Centinela al padrón de {group_id}: {e}")
+        return 0
+
+
+# ==========================================
+# 🕵️‍♂️ USERBOT HUNTER — NEUTRALIZACIÓN INSTANTÁNEA DE CUENTAS FICHADAS
+# ==========================================
+_USERBOT_ENFORCED: dict = {}
+_USERBOT_ENFORCE_COOLDOWN = 300
+
+
+async def _safe_is_userbot_flagged(user_id: int, group_id: int) -> bool:
+    try:
+        return bool(await is_userbot_flagged(user_id, group_id))
+    except Exception as e:
+        logger.error(f"[UserbotHunter] Error consultando flagged_userbots ({group_id}/{user_id}): {e}")
+        return False
+
+
+async def enforce_userbot_flag(
+    bot: Bot,
+    group_id: int,
+    user_id: int,
+    username: str = "",
+    message: Optional[Message] = None,
+    source: str = "mensaje"
+) -> bool:
+    """
+    Consulta la tabla flagged_userbots (vía is_userbot_flagged). Si la cuenta está fichada por los
+    Centinelas y NO posee rango protegido:
+      1. Elimina al instante el mensaje (si se recibió uno).
+      2. Silencia su micrófono en la sala de voz.
+      3. Aplica USERBOT_ACTION (ban permanente | mute | sólo borrar), una vez cada 5 min por cuenta
+         para no saturar la API, pero borrando SIEMPRE cada mensaje nuevo.
+    Devuelve True si la cuenta estaba fichada y fue neutralizada (el llamador debe cortar su flujo).
+    """
+    if is_super_admin(user_id) or user_id in SERVICE_ACCOUNT_IDS:
+        return False
+
+    if not await _safe_is_userbot_flagged(user_id, group_id):
+        return False
+
+    tier = await get_privilege_tier(bot, group_id, user_id, username)
+    if _tier_is_privileged(tier):
+        logger.warning(
+            f"[UserbotHunter] Cuenta fichada {user_id} con rango protegido '{tier}' en {group_id} "
+            f"({source}): se respeta la inmunidad, sin sanción."
+        )
+        return False
+
+    if message is not None:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    key = (group_id, user_id)
+    now = time.time()
+    if now - _USERBOT_ENFORCED.get(key, 0) < _USERBOT_ENFORCE_COOLDOWN:
+        return True
+
+    _USERBOT_ENFORCED[key] = now
+    if len(_USERBOT_ENFORCED) > 5000:
+        stale = [k for k, ts in _USERBOT_ENFORCED.items() if now - ts > _USERBOT_ENFORCE_COOLDOWN]
+        for k in stale:
+            _USERBOT_ENFORCED.pop(k, None)
+
+    try:
+        await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
+    except Exception:
+        pass
+
+    try:
+        if USERBOT_ACTION == "ban":
+            await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+        elif USERBOT_ACTION == "mute":
+            await bot.restrict_chat_member(
+                chat_id=group_id, user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
+        logger.warning(
+            f"[UserbotHunter] Cuenta fichada {user_id} neutralizada en {group_id} "
+            f"(acción: {USERBOT_ACTION}, origen: {source})."
+        )
+    except TelegramAPIError as e:
+        logger.error(f"[UserbotHunter] No se pudo aplicar '{USERBOT_ACTION}' a {user_id} en {group_id}: {e}")
+
+    return True
+
+
+# ==========================================
+# 🔊 ATENUACIÓN ACÚSTICA (RADAR AUTOLOWER) SINCRONIZADA CON LOS WARNS
+# ==========================================
+async def _acoustic_attenuate(
+    bot: Bot,
+    group_id: int,
+    user_id: int,
+    username: str,
+    strikes: int,
+    limit: int,
+    force_mute: bool = False
+) -> None:
+    """
+    Sincroniza el micrófono del infractor con su posición en la escala de warns:
+      - Antes del límite: baja el volumen de forma proporcional a los strikes restantes
+        (sólo si WARN_PROGRESSIVE_ATTENUATION está activo).
+      - Al alcanzar el límite (o force_mute): micrófono silenciado, volumen 0.
+    Los rangos protegidos (Arquitectos, Centinelas, Dueño, Admins, Whitelist) jamás son atenuados.
+    """
+    if not await _autolower_can_mute(bot, group_id, user_id, username):
+        return
+
+    if force_mute or strikes >= limit:
+        muted, volume = True, 0
+    elif WARN_PROGRESSIVE_ATTENUATION:
+        remaining = max(0, limit - strikes)
+        muted, volume = False, int(FULL_VOLUME * remaining / max(1, limit))
+    else:
+        return
+
+    try:
+        await set_participant_mic(chat_id=group_id, user_id=user_id, muted=muted, volume=volume)
+    except Exception as e:
+        logger.debug(f"AutoLower: sin efecto sobre {user_id} en {group_id} (¿no está en la sala de voz?): {e}")
+
+
+# ==========================================
+# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS → CASTIGOS PERIMETRALES
+# ==========================================
+_REASON_TEXT = {
+    "filter": (
+        "tu mensaje ha sido retirado por infringir las directivas comunitarias.",
+        "your message was removed for violating community guidelines. Strike logged."
+    ),
+    "flood": (
+        "por favor modera la velocidad de tus mensajes en el chat.",
+        "please slow down your message frequency in the chat. Strike logged."
+    ),
+    "manual": (
+        "se ha registrado un strike por orden de la administración.",
+        "a strike was logged by the administration."
+    ),
+    "command": (
+        "el uso de comandos está restringido en esta comunidad.",
+        "commands are restricted in this community. Strike logged."
+    ),
+}
+
+_SANCTION_TEXT = {
+    "mute": (
+        "🔇", "Sanción Automática / Auto-Sanction",
+        "ha sido silenciado por reincidencia en faltas comunitarias.",
+        "User has been muted due to reaching the strike threshold."
+    ),
+    "kick": (
+        "👢", "Sanción Automática / Auto-Sanction",
+        "ha sido expulsado temporalmente por infringir las reglas.",
+        "User has been kicked due to reaching the strike threshold."
+    ),
+    "ban": (
+        "🚫", "Sanción Definitiva / Final Sanction",
+        "ha sido bloqueado permanentemente del grupo por faltas graves.",
+        "User has been permanently banned from the community."
+    ),
+}
+
+WARN_ACTIONS = ("mute", "kick", "ban")
+
+
+async def _send_temp(bot: Bot, chat_id: int, text: str, ttl: int, reply_to: Optional[Message] = None) -> None:
+    """Envía un aviso temporal que se autodestruye pasados `ttl` segundos."""
+    try:
+        if reply_to is not None:
+            sent = await reply_to.answer(text, parse_mode="HTML")
+        else:
+            sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        _spawn(auto_delete_msg(sent, ttl))
+    except Exception as e:
+        logger.debug(f"No se pudo enviar aviso temporal en {chat_id}: {e}")
+
+
+async def _reset_warnings_safe(user_id: int) -> None:
+    if not RESET_WARNS_AFTER_SANCTION or _db_reset_warnings is None:
+        return
+    try:
+        result = _db_reset_warnings(user_id)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as e:
+        logger.debug(f"No se pudieron reiniciar los warns de {user_id}: {e}")
+
+
+async def enforce_warn_ladder(
+    bot: Bot,
+    chat_id: int,
+    target_id: int,
+    target_username: str,
+    target_mention: str,
+    reply_to: Optional[Message] = None,
+    reason: str = "filter",
+    silent: bool = False
+) -> dict:
+    """
+    Única vía de entrada a la escala de sanciones (filtros, anti-flood 'warn', anti-invocación
+    y /warn manual). Garantiza, en este orden:
+
+      1. INMUNIDAD: si la cuenta es Arquitecto, Centinela, Dueño, Admin, Whitelist, cuenta de servicio
+         o su rango no pudo verificarse, NO se registra strike ni se ejecuta castigo alguno.
+      2. Registro del strike y lectura de la política del grupo (límite + acción).
+      3. Atenuación acústica AutoLower proporcional (o silencio total al llegar al límite).
+      4. Al alcanzar el límite: mute | kick | ban perimetral y reinicio de los warns.
+
+    Devuelve {"status": "immune" | "warned" | "sanctioned" | "error", "tier", "strikes", "limit", "action"}.
+    """
+    tier = await get_privilege_tier(bot, chat_id, target_id, target_username)
+    if _tier_is_privileged(tier):
+        return {"status": "immune", "tier": tier, "strikes": 0, "limit": 0, "action": None}
+
+    try:
+        strikes = int(await add_warning(target_id))
+        warns_cfg = await get_warns_config(chat_id)
+        limit = max(1, int(warns_cfg["limit"]))
+        action = str(warns_cfg["action"]).strip().lower()
+    except Exception as e:
+        logger.error(f"Error registrando strike de {target_id} en {chat_id}: {e}")
+        return {"status": "error", "tier": tier, "strikes": 0, "limit": 0, "action": None}
+
+    if action not in WARN_ACTIONS:
+        action = "mute"
+
+    # --- Aún por debajo del límite: aviso + atenuación acústica gradual ---
+    if strikes < limit:
+        await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit)
+
+        if not silent:
+            es_txt, en_txt = _REASON_TEXT.get(reason, _REASON_TEXT["filter"])
+            await _send_temp(
+                bot, chat_id,
+                f"⚠️ <b>Aviso de Seguridad / Security Notice ({strikes}/{limit})</b>\n\n"
+                f"{target_mention}, {es_txt}\n"
+                f"🇺🇸 <i>Notice: {target_mention}, {en_txt}</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>",
+                ttl=20, reply_to=reply_to
+            )
+        return {"status": "warned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
+
+    # --- Límite alcanzado: silencio acústico total + castigo perimetral ---
+    await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit, force_mute=True)
+
+    try:
+        if action == "mute":
+            await bot.restrict_chat_member(
+                chat_id=chat_id, user_id=target_id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
+        elif action == "kick":
+            await bot.ban_chat_member(chat_id=chat_id, user_id=target_id, until_date=int(time.time() + 35))
+            await bot.unban_chat_member(chat_id=chat_id, user_id=target_id, only_if_banned=True)
+        elif action == "ban":
+            await ban_user(target_id)
+            await bot.ban_chat_member(chat_id=chat_id, user_id=target_id)
+    except Exception as e:
+        logger.error(f"Error aplicando sanción '{action}' a {target_id} en {chat_id}: {e}")
+        return {"status": "error", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
+
+    await _reset_warnings_safe(target_id)
+
+    if action in ("kick", "ban"):
+        await registry_forget(chat_id, target_id)
+
+    if not silent:
+        icon, title, es_txt, en_txt = _SANCTION_TEXT[action]
+        await _send_temp(
+            bot, chat_id,
+            f"{icon} <b>{title} ({strikes}/{limit})</b>\n\n"
+            f"{target_mention} {es_txt}\n"
+            f"🇺🇸 <i>{en_txt}</i>\n\n"
+            f"🛡️ <i>Cloud Media Management</i>",
+            ttl=25, reply_to=reply_to
+        )
+
+    return {"status": "sanctioned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
+
+
+# ==========================================
 # 🛡️ FASE 3: MATRIZ DE ADVERTENCIAS CENTRALIZADA (WARNS MATRIX) & SEGURIDAD
 # ==========================================
 @router.message(Command("warn"), F.chat.type.in_({"group", "supergroup"}))
 async def manual_warn_command(message: Message, bot: Bot):
-    """Comando administrativo /warn para imponer un strike manual y ejecutar la escala de castigos[cite: 9]."""
+    """Comando administrativo /warn para imponer un strike manual y ejecutar la escala de castigos."""
     group_id = message.chat.id
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
+    user_id = message.from_user.id if message.from_user else 0
+    username = message.from_user.username if message.from_user else ""
 
-    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
+    is_authorized = await _message_author_is_admin(bot, message)
+    if not is_authorized and user_id:
+        is_authorized = await is_sentinel_account(group_id, user_id, username or "")
+    if not is_authorized:
         return
 
     if not message.reply_to_message or not message.reply_to_message.from_user:
         warn_notice = await message.answer("⚠️ Responde al mensaje del usuario al que deseas aplicar un strike con <code>/warn</code>.", parse_mode="HTML")
-        asyncio.create_task(auto_delete_msg(warn_notice, 10))
+        _spawn(auto_delete_msg(warn_notice, 10))
         return
 
     target_user = message.reply_to_message.from_user
     if target_user.is_bot:
         return
 
-    target_id = target_user.id
-    target_tier = await get_privilege_tier(bot, group_id, target_id, target_user.username or "")
-    if _tier_is_privileged(target_tier):
-        await message.answer("🛡️ Este usuario posee rango protegido o inmunidad de Arquitecto/Admin.")
-        return
+    outcome = await enforce_warn_ladder(
+        bot, group_id, target_user.id, target_user.username or "", target_user.mention_html(),
+        reply_to=message, reason="manual"
+    )
 
-    strikes = await add_warning(target_id)
-    warns_cfg = await get_warns_config(group_id)
-    limit = warns_cfg["limit"]
-    action = warns_cfg["action"]
-    target_mention = target_user.mention_html()
-
-    if strikes >= limit:
-        try:
-            if await _autolower_can_mute(bot, group_id, target_id, target_user.username or ""):
-                try:
-                    await set_participant_mic(chat_id=group_id, user_id=target_id, muted=True, volume=0)
-                except Exception:
-                    pass
-
-            if action == "mute":
-                await bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=ChatPermissions(can_send_messages=False))
-                msg_sancion = await message.answer(
-                    f"🔇 <b>Strike Manual — Sanción Automática ({strikes}/{limit})</b>\n\n"
-                    f"{target_mention} ha alcanzado el límite de advertencias y fue silenciado[cite: 9].\n\n🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
-                )
-            elif action == "kick":
-                await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
-                await bot.unban_chat_member(chat_id=group_id, user_id=target_id)
-                msg_sancion = await message.answer(
-                    f"👢 <b>Strike Manual — Sanción Automática ({strikes}/{limit})</b>\n\n"
-                    f"{target_mention} ha alcanzado el límite y fue expulsado[cite: 9].\n\n🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
-                )
-            elif action == "ban":
-                await ban_user(target_id)
-                await bot.ban_chat_member(chat_id=group_id, user_id=target_id)
-                msg_sancion = await message.answer(
-                    f"🚫 <b>Strike Manual — Sanción Definitiva ({strikes}/{limit})</b>\n\n"
-                    f"{target_mention} ha sido baneado permanentemente por acumulación de faltas[cite: 9].\n\n🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
-                )
-            asyncio.create_task(auto_delete_msg(msg_sancion, 25))
-        except Exception as e:
-            logger.error(f"Error aplicando sanción manual por warns: {e}")
-    else:
-        warn_msg = await message.answer(
-            f"⚠️ <b>Advertencia Registrada ({strikes}/{limit})</b>\n\n"
-            f"• <b>Infractor:</b> {target_mention}\n"
-            f"• <b>Estado:</b> Strike aplicado por orden de administración[cite: 9].\n\n🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
-        asyncio.create_task(auto_delete_msg(warn_msg, 15))
+    if outcome["status"] == "immune":
+        if outcome["tier"] == "unknown":
+            await message.answer("⚠️ No pude verificar el rango de este usuario en este momento. Por seguridad no apliqué el strike; inténtalo de nuevo.")
+        else:
+            await message.answer("🛡️ Este usuario posee rango protegido o inmunidad de Arquitecto/Admin.")
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
+@router.edited_message(F.chat.type.in_({"group", "supergroup"}))
 async def group_security_matrix(message: Message, bot: Bot):
     if not message.from_user or message.from_user.is_bot:
         return
@@ -1128,20 +1903,19 @@ async def group_security_matrix(message: Message, bot: Bot):
     user_id = message.from_user.id
     username = message.from_user.username or ""
     text_content = message.text or message.caption or ""
+    is_edit = message.edit_date is not None
 
-    # 🕵️‍♂️ Userbot Hunter: Interceptar y marcar cuentas con comportamiento anómalo o fichadas
-    if await is_userbot_flagged(user_id, group_id):
-        try:
-            await message.delete()
-        except Exception:
-            pass
+    await registry_track(group_id, user_id)
+
+    # 🕵️‍♂️ Userbot Hunter: consulta flagged_userbots en cada mensaje (y en cada edición, para cerrar
+    # el truco de "enviar limpio y editar después"). Las cuentas con rango protegido quedan exentas.
+    if await enforce_userbot_flag(bot, group_id, user_id, username, message=message, source="mensaje"):
         return
 
+    # Inmunidad absoluta: Arquitectos, Centinelas, Dueño, Administradores, Whitelist y cuentas de servicio
     tier = await get_privilege_tier(bot, group_id, user_id, username)
-    if tier in ("architect", "sentinel", "owner", "whitelisted"):
+    if _tier_is_privileged(tier):
         return
-
-    is_admin = (tier == "admin")
 
     # Interceptor Anti-Invocación (Lock Commands)
     if text_content.startswith("/") and await get_lock_status(group_id, "lock_commands") == 1:
@@ -1150,38 +1924,14 @@ async def group_security_matrix(message: Message, bot: Bot):
         except Exception:
             pass
 
-        try:
-            strikes = await add_warning(user_id)
-            warns_cfg = await get_warns_config(group_id)
-            limit = warns_cfg["limit"]
-            action = warns_cfg["action"]
-
-            if strikes >= limit:
-                if await _autolower_can_mute(bot, group_id, user_id, username):
-                    try:
-                        await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
-                    except Exception:
-                        pass
-
-                if action == "mute":
-                    await bot.restrict_chat_member(
-                        chat_id=group_id, user_id=user_id,
-                        permissions=ChatPermissions(can_send_messages=False)
-                    )
-                elif action == "kick":
-                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
-                    await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
-                elif action == "ban":
-                    await ban_user(user_id)
-                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
-
-            logger.info(f"[AntiInvocacion] Usuario {user_id} interceptado en {group_id} (strike {strikes}/{limit}).")
-        except Exception as e:
-            logger.error(f"Error aplicando strike silencioso ({group_id}/{user_id}): {e}")
-
-        return
-
-    if is_admin:
+        outcome = await enforce_warn_ladder(
+            bot, group_id, user_id, username, message.from_user.mention_html(),
+            reply_to=message, reason="command", silent=True
+        )
+        logger.info(
+            f"[AntiInvocacion] Usuario {user_id} interceptado en {group_id} "
+            f"(estado: {outcome['status']}, strike {outcome['strikes']}/{outcome['limit']})."
+        )
         return
 
     is_threat_detected = False
@@ -1231,71 +1981,21 @@ async def group_security_matrix(message: Message, bot: Bot):
             elif "Bot" in origin_type and await get_antispam_filter(group_id, "fwd_bots") == 1: 
                 is_threat_detected = True
 
-    # Procesamiento de Sanciones por Infracción
+    # Procesamiento de Sanciones por Infracción (escala Warns ⇄ castigos ⇄ AutoLower)
     if is_threat_detected:
         try: 
             await message.delete()
         except Exception: 
             pass
 
-        warnings = await add_warning(user_id)
-        warns_cfg = await get_warns_config(group_id)
-        limit = warns_cfg["limit"]
-        action = warns_cfg["action"]
-        user_mention = message.from_user.mention_html()
+        await enforce_warn_ladder(
+            bot, group_id, user_id, username, message.from_user.mention_html(),
+            reply_to=message, reason="filter"
+        )
+        return
 
-        if warnings >= limit:
-            try:
-                if await _autolower_can_mute(bot, group_id, user_id, username):
-                    try:
-                        await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
-                    except Exception:
-                        pass
-
-                if action == "mute":
-                    await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
-                    msg_sancion = await message.answer(
-                        f"🔇 <b>Sanción Automática / Auto-Sanction ({warnings}/{limit})</b>\n\n"
-                        f"{user_mention} ha sido silenciado por reincidencia en faltas comunitarias[cite: 9].\n"
-                        f"🇺🇸 <i>User has been muted due to reaching the strike threshold.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>",
-                        parse_mode="HTML"
-                    )
-                elif action == "kick":
-                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
-                    await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
-                    msg_sancion = await message.answer(
-                        f"👢 <b>Sanción Automática / Auto-Sanction ({warnings}/{limit})</b>\n\n"
-                        f"{user_mention} ha sido expulsado temporalmente por infringir las reglas[cite: 9].\n"
-                        f"🇺🇸 <i>User has been kicked due to reaching the strike threshold.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>",
-                        parse_mode="HTML"
-                    )
-                elif action == "ban":
-                    await ban_user(user_id)
-                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
-                    msg_sancion = await message.answer(
-                        f"🚫 <b>Sanción Definitiva / Final Sanction ({warnings}/{limit})</b>\n\n"
-                        f"{user_mention} ha sido bloqueado permanentemente del grupo por faltas graves[cite: 9].\n"
-                        f"🇺🇸 <i>User has been permanently banned from the community.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>",
-                        parse_mode="HTML"
-                    )
-                asyncio.create_task(auto_delete_msg(msg_sancion, 25))
-            except Exception as e:
-                logger.error(f"Error aplicando sanción por warns acumulados: {e}")
-        else:
-            try:
-                warn_msg = await message.answer(
-                    f"⚠️ <b>Aviso de Seguridad / Security Notice ({warnings}/{limit})</b>\n\n"
-                    f"{user_mention}, tu mensaje ha sido retirado por infringir las directivas comunitarias[cite: 9].\n"
-                    f"🇺🇸 <i>Notice: {user_mention}, your message was removed for violating community guidelines. Strike logged.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
-                )
-                asyncio.create_task(auto_delete_msg(warn_msg, 20))
-            except Exception:
-                pass
+    # Las ediciones no cuentan para el Anti-Flood (sólo los mensajes nuevos)
+    if is_edit:
         return
 
     # 4. Verificación Anti-Flood Dinámica
@@ -1323,57 +2023,57 @@ async def group_security_matrix(message: Message, bot: Bot):
                 await message.delete()
             user_mention = message.from_user.mention_html()
 
-            if await _autolower_can_mute(bot, group_id, user_id, username):
-                try:
-                    await set_participant_mic(chat_id=group_id, user_id=user_id, muted=True, volume=0)
-                except Exception:
-                    pass
-
-            if af_action == "warn": 
-                f_msg = await message.answer(
-                    f"⚠️ <b>Alerta Anti-Flood / Anti-Flood Alert:</b>\n"
-                    f"{user_mention}, por favor modera la velocidad de tus mensajes en el chat[cite: 9].\n"
-                    f"🇺🇸 <i>Please slow down message frequency in the chat.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
+            if af_action == "warn":
+                # El flood en modo 'warn' alimenta la misma escala de strikes (y su atenuación acústica)
+                await enforce_warn_ladder(
+                    bot, group_id, user_id, username, user_mention,
+                    reply_to=message, reason="flood"
                 )
-                asyncio.create_task(auto_delete_msg(f_msg, 12))
-            elif af_action == "kick":
+                return
+
+            if af_action in ("kick", "mute", "ban"):
+                await _acoustic_attenuate(bot, group_id, user_id, username, strikes=1, limit=1, force_mute=True)
+
+            if af_action == "kick":
                 await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
-                await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
-                f_msg = await message.answer(
+                await bot.unban_chat_member(chat_id=group_id, user_id=user_id, only_if_banned=True)
+                await registry_forget(group_id, user_id)
+                await _send_temp(
+                    bot, group_id,
                     f"👢 <b>Aviso de Expulsión / Kick Notice:</b>\n"
-                    f"{user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood)[cite: 9].\n"
+                    f"{user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood).\n"
                     f"🇺🇸 <i>User kicked due to message flood.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
+                    ttl=20, reply_to=message
                 )
-                asyncio.create_task(auto_delete_msg(f_msg, 20))
             elif af_action == "mute":
                 await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
-                f_msg = await message.answer(
+                await _send_temp(
+                    bot, group_id,
                     f"🔇 <b>Aviso de Silencio / Mute Notice:</b>\n"
-                    f"{user_mention} ha sido silenciado por saturación masiva de mensajes (Flood)[cite: 9].\n"
+                    f"{user_mention} ha sido silenciado por saturación masiva de mensajes (Flood).\n"
                     f"🇺🇸 <i>User muted due to message flood.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
+                    ttl=20, reply_to=message
                 )
-                asyncio.create_task(auto_delete_msg(f_msg, 20))
             elif af_action == "ban":
                 await ban_user(user_id)
                 await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
-                f_msg = await message.answer(
+                await registry_forget(group_id, user_id)
+                await _send_temp(
+                    bot, group_id,
                     f"🚫 <b>Bloqueo Definitivo / Ban Notice:</b>\n"
-                    f"{user_mention} ha sido baneado permanentemente por flood reiterado[cite: 9].\n"
+                    f"{user_mention} ha sido baneado permanentemente por flood reiterado.\n"
                     f"🇺🇸 <i>User permanently banned due to continuous flood.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
+                    ttl=25, reply_to=message
                 )
-                asyncio.create_task(auto_delete_msg(f_msg, 25))
-        except Exception: 
-            pass
+        except Exception as e:
+            logger.error(f"Error aplicando sanción anti-flood ({group_id}/{user_id}): {e}")
+
+
 
 
 async def add_speaker_to_queue(group_id: int, user_id: int, full_name: str = "Speaker", username: str = "", stars_paid: int = 0):
-    """Wrapper de compatibilidad para user_private.py[cite: 9]"""
+    """Wrapper de compatibilidad para user_private.py"""
     return await add_to_speaker_queue(group_id, user_id, full_name, username, stars_paid)

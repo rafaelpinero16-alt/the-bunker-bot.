@@ -19,6 +19,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, ErrorEvent, Update
+from aiogram.exceptions import TelegramUnauthorizedError  # 💎 Nueva importación para capturar tokens revocados
 
 from database.database import (
     init_db, 
@@ -38,7 +39,8 @@ from handlers import (
 from handlers.user_private import (
     send_official_welcome,
     set_master_bot_id,
-    set_master_bot_username
+    set_master_bot_username,
+    revoke_bot_clone_db  # 💎 Para autodesactivar el token en la base de datos
 )
 from assistant import (
     start_voice_radar, 
@@ -144,6 +146,25 @@ async def _clone_worker(clone_bot: Bot, token: str):
         bot_info = await clone_bot.get_me()
         bot_username = bot_info.username or "BotClon"
         logging.info(f"🧬 [Bot Clon Activo]: Poller iniciado para @{bot_username} (ID: {bot_info.id}).")
+    except TelegramUnauthorizedError as auth_err:
+        logging.error(f"❌ [Error Fatal] El token del clon {token[:10]} fue revocado o es inválido: {auth_err}")
+        try:
+            # 💎 Identificamos al usuario y grupo para revocarlo en BD y evitar el bucle infinito
+            from database.database import get_db_connection
+            import sqlite3
+            
+            def _revoke_sync():
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE bot_clones SET status = 'revoked', bot_token = '' WHERE bot_token = ?", (token,))
+                    conn.commit()
+            await asyncio.to_thread(_revoke_sync)
+            logging.info(f"🛑 [Auto-Revocación] El token de clon {token[:10]} ha sido desactivado en la base de datos.")
+        except Exception as revoke_err:
+            logging.error(f"⚠️ Fallo al auto-revocar el token inválido {token[:10]}: {revoke_err}")
+        finally:
+            active_clone_tasks.pop(token, None)
+            return
     except Exception as e:
         logging.error(f"❌ [Error Handshake Clon {token[:10]}]: {e}")
         return
@@ -159,6 +180,20 @@ async def _clone_worker(clone_bot: Bot, token: str):
             for update in updates:
                 offset = update.update_id + 1
                 await _dispatch_clone_update(clone_bot, bot_username, update)
+        except TelegramUnauthorizedError as auth_err:
+            logging.error(f"❌ [Error Fatal en Bucle] El token del clon {token[:10]} fue revocado en caliente: {auth_err}")
+            try:
+                from database.database import get_db_connection
+                def _revoke_sync_hot():
+                    with get_db_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE bot_clones SET status = 'revoked', bot_token = '' WHERE bot_token = ?", (token,))
+                        conn.commit()
+                await asyncio.to_thread(_revoke_sync_hot)
+                logging.info(f"🛑 [Auto-Revocación en Caliente] Token desactivado.")
+            except Exception:
+                pass
+            break
         except asyncio.CancelledError:
             break
         except Exception as e:

@@ -9,14 +9,16 @@ from database.database import (
     is_vip_mic_active, get_autolower_status, set_autolower_status,
     get_mic_vip_price, get_session_by_group,
     get_night_mode_config, get_podcast_status, get_screen_shield_status,
-    get_community_live_telemetry, get_speaker_queue, get_panic_status
+    get_community_live_telemetry, get_speaker_queue, get_panic_status,
+    get_vc_monitor_status, set_vc_monitor_status
 )
 from assistant import set_participant_mic
 
 logger = logging.getLogger("vc_manager_gateway")
 router = Router()
 
-vc_states = {}
+# 🧠 Nota de Arquitectura: Eliminado el diccionario volátil en RAM (vc_states).
+# Ahora el estado de monitoreo se persiste de forma segura en la base de datos SQLite con WAL.
 
 
 def get_lang(lang_code: str) -> str:
@@ -313,7 +315,7 @@ async def cmd_enable_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    vc_states[chat_id] = True
+    await set_vc_monitor_status(chat_id, 1)  # 💎 Persistido en base de datos
     lang = get_lang(message.from_user.language_code)
     await send_private_response(message, TEXTS[lang]["vc_enabled"])
 
@@ -323,7 +325,7 @@ async def cmd_disable_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    vc_states[chat_id] = False
+    await set_vc_monitor_status(chat_id, 0)  # 💎 Persistido en base de datos
     lang = get_lang(message.from_user.language_code)
     await send_private_response(message, TEXTS[lang]["vc_disabled"])
 
@@ -396,7 +398,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    is_active = vc_states.get(chat_id, True)
+    is_active = (await get_vc_monitor_status(chat_id)) == 1  # 💎 Consulta a base de datos
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
@@ -447,7 +449,7 @@ async def process_vc_callback(callback: CallbackQuery):
             return
 
         elif action == "vc_status":
-            is_active = vc_states.get(chat_id, True)
+            is_active = (await get_vc_monitor_status(chat_id)) == 1  # 💎 Consulta a base de datos
             ctx = await get_telemetry_context(chat_id, lang)
             mic_price = await get_mic_vip_price(chat_id)
 
