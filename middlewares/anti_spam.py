@@ -2,6 +2,7 @@ import asyncio
 import time
 import re
 import logging
+import aiohttp
 from aiogram import BaseMiddleware
 from aiogram.types import Message, ChatPermissions
 from database.database import (
@@ -16,6 +17,43 @@ from database.database import (
 from assistant import set_participant_mic, active_sentinels
 
 logger = logging.getLogger("anti_spam_middleware")
+
+# ==========================================
+# 🌐 NÚCLEO ANTISPAM GLOBAL (CAS - Combot Anti-Spam)
+# ==========================================
+CAS_API_URL = "https://api.cas.chat/check"
+_CAS_CACHE = {}      # user_id -> (is_spammer: bool, timestamp)
+_CACHE_TTL = 3600    # 1 hora de caché en memoria para evitar saturar la API
+
+
+async def check_global_cas_spam(user_id: int) -> bool:
+    """
+    Consulta la API global de Combot Anti-Spam (CAS) de forma asíncrona y no bloqueante.
+    Retorna True si el usuario tiene antecedentes globales de spam o estafa, False en caso contrario.
+    """
+    if user_id <= 0:
+        return False
+
+    now = time.time()
+    cached = _CAS_CACHE.get(user_id)
+    if cached and now - cached[1] < _CACHE_TTL:
+        return cached[0]
+
+    params = {"user_id": user_id}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CAS_API_URL, params=params, timeout=3.0) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("ok") and data.get("result", {}).get("offense"):
+                        _CAS_CACHE[user_id] = (True, now)
+                        logger.warning(f"🚨 [CAS Global] ¡Spammer detectado por base de datos global! User ID: {user_id}")
+                        return True
+    except Exception as e:
+        logger.debug(f"⚠️ [CAS Global] Fallo temporal consultando user={user_id}: {e}")
+
+    _CAS_CACHE[user_id] = (False, now)
+    return False
 
 
 async def is_immune(event: Message) -> bool:
@@ -81,7 +119,17 @@ class AntiSpamMiddleware(BaseMiddleware):
 
         user_id = event.from_user.id
 
-        # 🔍 Verificación preventiva de bloqueo global en base de datos
+        # 3. 🌐 Verificación Proactiva contra Base de Datos Global Anti-Spam (CAS)
+        if await check_global_cas_spam(user_id):
+            try:
+                await event.delete()
+                await event.bot.ban_chat_member(chat_id=event.chat.id, user_id=user_id)
+                logger.warning(f"🛡️ [Anti-Spam Global] Spammer global {user_id} expulsado automáticamente en el grupo {event.chat.id}.")
+            except Exception as cas_err:
+                logger.error(f"❌ Error al expulsar spammer global CAS ({event.chat.id}/{user_id}): {cas_err}")
+            return
+
+        # 🔍 Verificación preventiva de bloqueo global en base de datos local
         try:
             user_data = await get_or_create_user(
                 user_id=user_id, 
@@ -99,7 +147,7 @@ class AntiSpamMiddleware(BaseMiddleware):
         except Exception as db_err:
             logger.debug(f"Aviso middleware al verificar estado del usuario {user_id}: {db_err}")
 
-        # 🚨 Inspección y purga de términos prohibidos de la Blacklist
+        # 🚨 Inspección y purga de términos prohibidos de la Blacklist local
         text_content = (event.text or event.caption or "").lower()
         if text_content:
             try:

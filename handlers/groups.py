@@ -46,6 +46,7 @@ from database.database import (
 )
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic
+from middlewares.anti_spam import check_global_cas_spam  # 🌐 Inyección del filtro global Anti-Spam (CAS)
 
 logger = logging.getLogger("groups_handler")
 router = Router()
@@ -517,6 +518,15 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     group_id = event.chat.id
     user_id = event.from_user.id
 
+    # 🌐 Verificación Global Anti-Spam (CAS) en solicitudes de unión
+    if await check_global_cas_spam(user_id):
+        try:
+            await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
+            logger.warning(f"🚨 [Anti-Spam Global CAS] Solicitud de unión de spammer global {user_id} rechazada en {group_id}.")
+        except Exception:
+            pass
+        return
+
     if await enforce_userbot_flag(bot, group_id, user_id, event.from_user.username or "", source="solicitud de ingreso"):
         try:
             await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
@@ -555,6 +565,15 @@ async def handle_new_members(message: Message, bot: Bot):
             continue
 
         if not new_user.is_bot:
+            # 🌐 Verificación Global Anti-Spam (CAS) para nuevos miembros
+            if await check_global_cas_spam(new_user.id):
+                try:
+                    await bot.ban_chat_member(chat_id=group_id, user_id=new_user.id)
+                    logger.warning(f"🚨 [Anti-Spam Global CAS] Nuevo miembro spammer global {new_user.id} expulsado automáticamente en {group_id}.")
+                except Exception as e:
+                    logger.error(f"Error expulsando nuevo miembro spammer global {new_user.id}: {e}")
+                continue
+
             await registry_track(group_id, new_user.id, force=True)
 
             if await enforce_userbot_flag(bot, group_id, new_user.id, new_user.username or "", source="ingreso"):
