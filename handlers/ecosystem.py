@@ -9,7 +9,9 @@ from database.database import (
     get_group_tier, 
     get_autolower_status, 
     get_session_by_group,
-    is_group_approved
+    is_group_approved,
+    get_due_channel_plan_broadcasts,
+    mark_channel_plan_broadcasted
 )
 
 logger = logging.getLogger("ecosystem_handler")
@@ -275,3 +277,67 @@ async def cb_close_panel(callback: CallbackQuery):
         await callback.message.delete()
     except Exception:
         pass
+
+
+# ==========================================
+# 📡 BACKGROUND WORKER: DIFUSIÓN RECURRENTE DE PLANES
+# ==========================================
+async def start_channel_broadcast_worker(bot: Bot):
+    """
+    Worker perimetral en segundo plano: evalúa continuamente los planes de membresía 
+    con difusión recurrente activa y publica los anuncios de pago con Telegram Stars.
+    """
+    logging.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
+    while True:
+        try:
+            due_plans = await get_due_channel_plan_broadcasts()
+            if due_plans:
+                bot_info = await bot.get_me()
+                bot_username = bot_info.username or "BunkerBot"
+
+                for plan in due_plans:
+                    plan_id = plan["plan_id"]
+                    chat_id = plan["broadcast_chat_id"]
+                    plan_name = plan["plan_name"]
+                    duration_days = plan["duration_days"]
+                    stars_price = plan["stars_price"]
+                    promo_text = plan["promo_text"] or ""
+                    media_id = plan["media_id"]
+                    media_type = plan["media_type"]
+                    target_link = plan["target_link"]
+                    channel_id = plan["channel_id"]
+
+                    # Enlace profundo (deep link) directo a la factura del plan
+                    pay_link = f"https://t.me/{bot_username}?start=chanplan_{plan_id}_{channel_id}"
+
+                    # Construcción del copy publicitario
+                    caption = promo_text.strip() if promo_text else f"💎 <b>{plan_name}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR"
+                    if target_link:
+                        caption += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>"
+
+                    # Botón inline para iniciar el pago instantáneo con Stars
+                    markup = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=f"⭐ Adquirir por {stars_price} Stars", url=pay_link)]
+                    ])
+
+                    try:
+                        if media_id and media_type == "photo":
+                            await bot.send_photo(chat_id=chat_id, photo=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
+                        elif media_id and media_type == "video":
+                            await bot.send_video(chat_id=chat_id, video=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
+                        elif media_id and media_type == "animation":
+                            await bot.send_animation(chat_id=chat_id, animation=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
+                        else:
+                            await bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup, parse_mode="HTML")
+                        
+                        # Actualiza la marca temporal para programar el próximo envío según el intervalo
+                        await mark_channel_plan_broadcasted(plan_id)
+                        logging.info(f"✅ [Broadcast Worker] Plan {plan_id} difundido exitosamente en chat {chat_id}.")
+                    except Exception as send_err:
+                        logging.error(f"❌ [Broadcast Worker] Error publicando plan {plan_id} en chat {chat_id}: {send_err}")
+
+        except Exception as ex:
+            logging.error(f"❌ [Broadcast Worker Error]: {ex}")
+        
+        # Intervalo de revisión del cron (cada 60 segundos)
+        await asyncio.sleep(60)

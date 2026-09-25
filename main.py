@@ -282,6 +282,9 @@ async def main():
     except Exception as e:
         print(f"⚠️ [Radar MTProto Aviso]: No se pudo iniciar el gestor de centinelas: {e}")
 
+    # 📡 Desplegar worker automático de difusión recurrente de planes
+    asyncio.create_task(ecosystem.start_channel_broadcast_worker(master_bot))
+
     print("🧬 [Gestor de Clones]: Sincronizando bots clones...")
     try:
         stored_clones = await get_all_active_clone_tokens()

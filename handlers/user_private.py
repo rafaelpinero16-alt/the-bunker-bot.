@@ -50,6 +50,7 @@ from database.database import (
     # 💎 Módulos de Canales & Membresías
     get_channel_plans, get_active_subscribers_count,
     create_channel_plan, delete_channel_plan,  # <--- Añadir aquí
+    set_channel_plan_broadcast_config,
     get_night_mode_config,
     set_night_mode_config,
     get_ai_sentinel_config, 
@@ -1589,14 +1590,16 @@ async def _reply_plan_state_lost(message: Message, lang: str, channel_id=None) -
 async def _finalize_and_preview_channel_plan(
     bot: Bot, chat_id: int, channel_id: int, lang: str, name: str,
     days: int, price: int, promo_text: str, media_id: str = None,
-    media_type: str = None
+    media_type: str = None, target_link: str = None, recurrence_hours: int = 0
 ) -> None:
-    """Save a channel plan and send its administrator a preview."""
+    """Guarda el plan del canal, configura la difusión recurrente si está activa y envía una vista previa al administrador."""
     t = TEXTS.get(lang, TEXTS["es"])
     try:
-        await create_channel_plan(
-            channel_id, name, days, price, promo_text, media_id, media_type
+        plan_id = await create_channel_plan(
+            channel_id, name, days, price, promo_text, media_id, media_type, target_link
         )
+        if recurrence_hours and recurrence_hours > 0:
+            await set_channel_plan_broadcast_config(plan_id, channel_id, recurrence_hours)
     except Exception as ex:
         logging.error(f"❌ [Channel Plans] No se pudo crear el plan en {channel_id}: {ex}")
         await bot.send_message(chat_id, t["plan_create_error"], parse_mode="HTML")
@@ -1607,6 +1610,11 @@ async def _finalize_and_preview_channel_plan(
         f"⏳ {days} {'días' if lang == 'es' else 'days'}\n"
         f"⭐ {price} XTR\n\n{promo_text}"
     )
+    if target_link:
+        preview += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>" if lang == "es" else f"\n\n🔗 <b>VIP Target:</b> <code>{target_link}</code>"
+    if recurrence_hours and recurrence_hours > 0:
+        preview += f"\n\n⏰ <b>Recurrencia:</b> Cada {recurrence_hours}h"
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=t["btn_back_channel"],
@@ -3077,7 +3085,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 13. CREACIÓN DE PLANES DE MEMBRESÍA DE CANAL — resiliente a reinicios de RAM
+   # 13. CREACIÓN DE PLANES DE MEMBRESÍA DE CANAL — resiliente a reinicios de RAM (Con Link VIP y Recurrencia)
     plan_key = (bot.id, user_id)
     if plan_key not in CHAN_PLAN_STATES:
         await restore_plan_state(plan_key)   # ♻️ tras un reinicio en frío se retoma el asistente donde quedó
@@ -3087,9 +3095,16 @@ async def handle_private_inputs(message: Message, bot: Bot):
         step = st_data.get("step")
         expired = (time.time() - st_data.get("ts", 0)) > STATE_TTL_SECONDS
 
-        # Estado corrupto, con paso desconocido o caducado → se libera y se guía al usuario (jamás se bloquea).
-        required_by_step = {"name": (), "days": ("name",), "price": ("name", "days"),
-                            "promo": ("name", "days", "price"), "media": ("name", "days", "price")}
+        # Estado corrupto, con paso desconocido o caducado → se libera y se guía al usuario.
+        required_by_step = {
+            "name": (), 
+            "days": ("name",), 
+            "price": ("name", "days"),
+            "promo": ("name", "days", "price"), 
+            "media": ("name", "days", "price", "promo"),
+            "link": ("name", "days", "price", "promo"),
+            "recurrence": ("name", "days", "price", "promo", "link")
+        }
         incomplete = step in required_by_step and any(st_data.get(k) in (None, "") for k in required_by_step[step])
         if channel_id is None or step not in required_by_step or expired or incomplete:
             forget_plan_state(*plan_key)
@@ -3230,10 +3245,64 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 fire_and_forget_auto_delete([message, resp], delay=60)
                 return
 
+            st_data["media_id"] = media_id
+            st_data["media_type"] = media_type
+            st_data["step"] = "link"
+            await persist_plan_state(plan_key)
+
+            prompt_link = (
+                "🔗 <b>Enlace de Destino VIP (Entrega Automática):</b>\n\n"
+                "Envía el enlace de invitación o recurso exclusivo que el bot entregará de forma automática al usuario tras confirmar su pago con Stars:"
+            ) if lang == "es" else (
+                "🔗 <b>VIP Target Link (Automatic Delivery):</b>\n\n"
+                "Send the invite link or exclusive resource the bot will automatically deliver upon confirming payment:"
+            )
+            resp = await message.answer(prompt_link + PERIMETER_SIGNATURE, reply_markup=plan_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "link":
+            target_link = text_input[:255].strip()
+            if not target_link:
+                resp = await message.answer(
+                    tr(lang, "⚠️ Envía un enlace de destino válido.", "⚠️ Send a valid destination link.") + PERIMETER_SIGNATURE,
+                    reply_markup=plan_kb, parse_mode="HTML"
+                )
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
+            st_data["link"] = target_link
+            st_data["step"] = "recurrence"
+            await persist_plan_state(plan_key)
+
+            prompt_recurrence = (
+                "⏰ <b>Difusión Recurrente Automática:</b>\n\n"
+                "Envía el intervalo en <b>horas</b> para republicar este anuncio automáticamente (ejemplo: <code>24</code> para cada día, o <code>0</code> para desactivar recurrencia):"
+            ) if lang == "es" else (
+                "⏰ <b>Automatic Recurring Broadcast:</b>\n\n"
+                "Send the interval in <b>hours</b> to automatically repost this announcement (e.g. <code>24</code> for daily, or <code>0</code> to disable):"
+            )
+            resp = await message.answer(prompt_recurrence + PERIMETER_SIGNATURE, reply_markup=plan_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        elif step == "recurrence":
+            if not text_input.isdigit():
+                resp = await message.answer(
+                    tr(lang, "⚠️ Ingresa un número entero de horas válido (ej. 24 o 0).", "⚠️ Enter a valid integer hours value (e.g. 24 or 0).") + PERIMETER_SIGNATURE,
+                    reply_markup=plan_kb, parse_mode="HTML"
+                )
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
+            recurrence_hours = int(text_input)
             plan_name = st_data["name"]
             duration_days = st_data["days"]
             price_stars = st_data["price"]
             promo_text = st_data.get("promo", "")
+            media_id = st_data.get("media_id")
+            media_type = st_data.get("media_type")
+            target_link = st_data.get("link")
             forget_plan_state(*plan_key)
 
             await _finalize_and_preview_channel_plan(
@@ -3246,7 +3315,9 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 price=price_stars,
                 promo_text=promo_text,
                 media_id=media_id,
-                media_type=media_type
+                media_type=media_type,
+                target_link=target_link,
+                recurrence_hours=recurrence_hours
             )
             return
 
@@ -4612,9 +4683,9 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         if restore_state is not None:
             await restore_state(skip_key)
         st_data = CHAN_PLAN_STATES.get(skip_key)
-        forget_plan_state(*skip_key)
         if (not st_data or st_data.get("channel_id") != channel_id or st_data.get("step") != "media"
-                or any(st_data.get(k) in (None, "") for k in ("name", "days", "price"))):
+                or any(st_data.get(k) in (None, "") for k in ("name", "days", "price", "promo"))):
+            forget_plan_state(*skip_key)
             info_text = (
                 "ℹ️ No hay una creación de plan en curso para omitir (el servidor pudo haberse reiniciado)."
                 if lang == "es" else
@@ -4626,6 +4697,34 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             ])
             await safe_edit_text(callback, info_text, reply_markup=info_kb, parse_mode="HTML")
             return
+
+        st_data["media_id"] = None
+        st_data["media_type"] = None
+        st_data["step"] = "link"
+        await persist_plan_state(skip_key)
+
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        t_dict = TEXTS.get(lang, TEXTS["es"])
+        prompt_link = (
+            "🔗 <b>Enlace de Destino VIP (Entrega Automática):</b>\n\n"
+            "Envía el enlace de invitación o recurso exclusivo que el bot entregará de forma automática al usuario tras confirmar su pago con Stars:"
+        ) if lang == "es" else (
+            "🔗 <b>VIP Target Link (Automatic Delivery):</b>\n\n"
+            "Send the invite link or exclusive resource the bot will automatically deliver upon confirming payment:"
+        )
+        plan_kb = _plan_step_keyboard(t_dict, channel_id, lang)
+        resp = await bot.send_message(
+            chat_id=callback.from_user.id,
+            text=prompt_link + PERIMETER_SIGNATURE,
+            reply_markup=plan_kb,
+            parse_mode="HTML"
+        )
+        fire_and_forget_auto_delete([resp], delay=60)
+        return
 
         try:
             await callback.message.delete()

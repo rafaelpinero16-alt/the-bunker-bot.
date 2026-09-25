@@ -323,13 +323,23 @@ def init_db():
             ("promo_text", "TEXT"),
             ("media_id", "TEXT"),
             ("media_type", "TEXT"),
-            ("target_link", "TEXT")
+            ("target_link", "TEXT"),
+            # 📡 Difusión Recurrente Automática de Planes de Membresía
+            ("broadcast_chat_id", "INTEGER"),
+            ("broadcast_interval_hours", "INTEGER"),
+            ("next_broadcast_at", "TIMESTAMP"),
+            ("broadcast_enabled", "INTEGER DEFAULT 0")
         ]
         for col_name, col_def in channel_plan_cols:
             try:
                 cursor.execute(f"ALTER TABLE channel_plans ADD COLUMN {col_name} {col_def}")
             except sqlite3.OperationalError:
                 pass
+
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_channel_plans_broadcast "
+            "ON channel_plans (broadcast_enabled, next_broadcast_at)"
+        )
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS channel_subscriptions (
@@ -1895,6 +1905,18 @@ def set_channel_settings(channel_id: int, field: str, value):
         conn.commit()
 
 
+def _sanitize_target_link(target_link: str = None) -> str:
+    """
+    Blindaje del enlace de destino VIP: normaliza espacios y descarta cadenas vacías,
+    garantizando que el bot nunca intente entregar un enlace en blanco tras un pago
+    exitoso con Telegram Stars. Devuelve None si no hay un enlace válido que conservar.
+    """
+    if target_link is None:
+        return None
+    clean = target_link.strip()
+    return clean if clean else None
+
+
 def create_channel_plan(
     channel_id: int, 
     plan_name: str, 
@@ -1913,7 +1935,10 @@ def create_channel_plan(
                 promo_text, media_id, media_type, target_link
             )
             VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
-        """, (channel_id, plan_name.strip(), duration_days, stars_price, promo_text, media_id, media_type, target_link))
+        """, (
+            channel_id, plan_name.strip(), duration_days, stars_price,
+            promo_text, media_id, media_type, _sanitize_target_link(target_link)
+        ))
         conn.commit()
         return cursor.lastrowid
 
@@ -1923,7 +1948,8 @@ def get_channel_plan(plan_id: int) -> dict:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT plan_id, channel_id, plan_name, duration_days, stars_price, status,
-                   promo_text, media_id, media_type, created_at, target_link
+                   promo_text, media_id, media_type, created_at, target_link,
+                   broadcast_chat_id, broadcast_interval_hours, next_broadcast_at, broadcast_enabled
             FROM channel_plans WHERE plan_id = ?
         """, (plan_id,))
         row = cursor.fetchone()
@@ -1939,25 +1965,36 @@ def get_channel_plan(plan_id: int) -> dict:
                 "media_id": row[7],
                 "media_type": row[8],
                 "created_at": row[9],
-                "target_link": row[10]
+                "target_link": row[10],
+                "broadcast_chat_id": row[11],
+                "broadcast_interval_hours": row[12],
+                "next_broadcast_at": row[13],
+                "broadcast_enabled": row[14] or 0
             }
         return None
 
 
 def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
+    """
+    Devuelve los planes de un canal como tuplas posicionales (compatibilidad retro con
+    los consumidores existentes): las columnas nuevas de difusión recurrente se añaden
+    al final para no alterar los índices ya usados en otros módulos.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if only_active:
             cursor.execute("""
                 SELECT plan_id, plan_name, duration_days, stars_price, status, created_at,
-                       promo_text, media_id, media_type, target_link
+                       promo_text, media_id, media_type, target_link,
+                       broadcast_chat_id, broadcast_interval_hours, next_broadcast_at, broadcast_enabled
                 FROM channel_plans WHERE channel_id = ? AND status = 'active'
                 ORDER BY duration_days ASC
             """, (channel_id,))
         else:
             cursor.execute("""
                 SELECT plan_id, plan_name, duration_days, stars_price, status, created_at,
-                       promo_text, media_id, media_type, target_link
+                       promo_text, media_id, media_type, target_link,
+                       broadcast_chat_id, broadcast_interval_hours, next_broadcast_at, broadcast_enabled
                 FROM channel_plans WHERE channel_id = ?
                 ORDER BY status ASC, duration_days ASC
             """, (channel_id,))
@@ -1978,6 +2015,119 @@ def delete_channel_plan(plan_id: int):
         cursor = conn.cursor()
         cursor.execute("DELETE FROM channel_plans WHERE plan_id = ?", (plan_id,))
         conn.commit()
+
+
+# ==========================================
+# 📡 DIFUSIÓN RECURRENTE AUTOMÁTICA DE PLANES DE MEMBRESÍA
+# ==========================================
+def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int) -> bool:
+    """
+    Configura (o reconfigura) la recurrencia de difusión de un plan: en qué chat/canal se
+    publicará el anuncio y cada cuántas horas se repetirá. Activa la difusión y programa el
+    próximo envío a partir de AHORA + interval_hours. Devuelve False si el intervalo no es
+    un entero positivo (blindaje contra configuraciones inválidas que jamás dispararían el
+    worker o lo saturarían con un intervalo de 0/negativo).
+    """
+    if not isinstance(interval_hours, int) or interval_hours <= 0:
+        return False
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            UPDATE channel_plans
+            SET broadcast_chat_id = ?,
+                broadcast_interval_hours = ?,
+                broadcast_enabled = 1,
+                next_broadcast_at = datetime('now', '+{interval_hours} hours')
+            WHERE plan_id = ?
+        """, (chat_id, interval_hours, plan_id))
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def disable_channel_plan_broadcast(plan_id: int):
+    """
+    Pausa la difusión recurrente sin perder la configuración (chat destino e intervalo),
+    de modo que pueda reanudarse más adelante sin tener que reconfigurarla desde cero.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?",
+            (plan_id,)
+        )
+        conn.commit()
+
+
+def mark_channel_plan_broadcasted(plan_id: int):
+    """
+    El background worker invoca esto justo después de publicar el anuncio recurrente:
+    reprograma next_broadcast_at sumando el intervalo configurado. Si el plan fue
+    archivado o su intervalo se perdió entretanto, la difusión se desactiva sola en
+    lugar de quedar reintentando indefinidamente sin rumbo.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT broadcast_interval_hours, status FROM channel_plans WHERE plan_id = ?",
+            (plan_id,)
+        )
+        row = cursor.fetchone()
+        if not row or not row[0] or row[1] != "active":
+            cursor.execute(
+                "UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?",
+                (plan_id,)
+            )
+            conn.commit()
+            return
+
+        interval_hours = row[0]
+        cursor.execute(f"""
+            UPDATE channel_plans
+            SET next_broadcast_at = datetime('now', '+{interval_hours} hours')
+            WHERE plan_id = ?
+        """, (plan_id,))
+        conn.commit()
+
+
+def get_due_channel_plan_broadcasts() -> list:
+    """
+    Consulta de élite para el background worker: devuelve, como lista de diccionarios
+    listos para publicar, todos los planes activos con difusión activada cuyo
+    next_broadcast_at ya se cumplió. Excluye automáticamente planes archivados o
+    sin chat de destino configurado.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT plan_id, channel_id, plan_name, duration_days, stars_price,
+                   promo_text, media_id, media_type, target_link,
+                   broadcast_chat_id, broadcast_interval_hours, next_broadcast_at
+            FROM channel_plans
+            WHERE broadcast_enabled = 1
+              AND status = 'active'
+              AND broadcast_chat_id IS NOT NULL
+              AND next_broadcast_at IS NOT NULL
+              AND next_broadcast_at <= datetime('now')
+            ORDER BY next_broadcast_at ASC
+        """)
+        rows = cursor.fetchall()
+        return [
+            {
+                "plan_id": r[0],
+                "channel_id": r[1],
+                "plan_name": r[2],
+                "duration_days": r[3],
+                "stars_price": r[4],
+                "promo_text": r[5],
+                "media_id": r[6],
+                "media_type": r[7],
+                "target_link": r[8],
+                "broadcast_chat_id": r[9],
+                "broadcast_interval_hours": r[10],
+                "next_broadcast_at": r[11]
+            }
+            for r in rows
+        ]
 
 
 def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, stars_paid: int, duration_days: int, invite_link: str = None):
@@ -2214,6 +2364,10 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_channel_plans",
     "set_channel_plan_status",
     "delete_channel_plan",
+    "set_channel_plan_broadcast_config",
+    "disable_channel_plan_broadcast",
+    "mark_channel_plan_broadcasted",
+    "get_due_channel_plan_broadcasts",
     "record_channel_subscription",
     "get_channel_subscription",
     "get_expiring_channel_subscriptions",
@@ -2230,7 +2384,6 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
     if _fn_name in globals():
         globals()[_fn_name] = _make_async(globals()[_fn_name])
 
-dl = getattr(globals(), "dl", None)
 if "_fn_name" in globals():
     del _fn_name
 
