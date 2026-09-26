@@ -129,7 +129,9 @@ const translations = {
         select_your_community: "Selecciona tu comunidad...",
         admin_stats_title: "Rendimiento de Administradores",
         top_users_title: "Top 10 Usuarios Activos (30 días)",
-        active_modules_label: "Módulos Activos"
+        active_modules_label: "Módulos Activos",
+        btn_connect_channel: "➕ Conectar Canal",
+        btn_connect_group: "➕ Conectar Comunidad"
     },
     en: {
         plans_title: "Community Memberships",
@@ -244,7 +246,9 @@ const translations = {
         select_your_community: "Select your community...",
         admin_stats_title: "Admin Performance",
         top_users_title: "Top 10 Active Users (30 days)",
-        active_modules_label: "Active Modules"
+        active_modules_label: "Active Modules",
+        btn_connect_channel: "➕ Connect Channel",
+        btn_connect_group: "➕ Connect Group"
     }
 };
 
@@ -745,6 +749,43 @@ const app = {
         }
     },
 
+    // ==========================================
+    // 📡 SINCRONIZACIÓN FORZADA EN VIVO (FASE 1)
+    // ==========================================
+    async syncChats() {
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('medium');
+        }
+
+        const res = await this.apiPost('/sync-chats', {});
+        await Promise.all([
+            this.loadStats(),
+            this.loadChannels(),
+            this.loadGroups()
+        ]);
+
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+        }
+
+        if (res && res.status === 'success') {
+            alert(this.currentLang === 'es'
+                ? `✅ Sincronización Exitosa con The Bunker Bot:\n\n• Canales detectados: ${res.total_channels}\n• Comunidades detectadas: ${res.total_groups}`
+                : `✅ Synchronization Successful with The Bunker Bot:\n\n• Detected Channels: ${res.total_channels}\n• Detected Groups: ${res.total_groups}`);
+        } else {
+            alert(this.currentLang === 'es' ? '✅ Canales y grupos sincronizados.' : '✅ Channels and groups synced.');
+        }
+    },
+
+    openAddBot(type) {
+        const url = `https://t.me/${CONFIG.BOT_USERNAME}?start${type === 'channel' ? 'channel' : 'group'}=admin&admin=change_info+post_messages+edit_messages+delete_messages+restrict_members+invite_users+pin_messages+promote_members+manage_video_chats`;
+        if (window.Telegram?.WebApp) {
+            window.Telegram.WebApp.openTelegramLink(url);
+        } else {
+            window.open(url, '_blank');
+        }
+    },
+
     async loadChannels() {
         const data = await this.apiGet('/channels');
         this.state.channels = (data && data.channels) || [];
@@ -765,14 +806,19 @@ const app = {
         this.renderSubscriberList(this.state.subscribers);
     },
 
+    // Resuelve instancias duales de selectores en ambas pestañas
     populateSelect(id, list, emptyLabel) {
-        const sel = document.getElementById(id);
-        if (!sel) return;
-        if (!list || list.length === 0) {
-            sel.innerHTML = `<option value="">${emptyLabel}</option>`;
-            return;
-        }
-        sel.innerHTML = list.map(c => `<option value="${c.id}">${c.type === 'channel' ? '📢' : '🛡️'} ${c.title} (ID: ${c.id})</option>`).join('');
+        const elements = document.querySelectorAll(`#${id}`);
+        if (!elements.length) return;
+
+        elements.forEach(sel => {
+            if (!list || list.length === 0) {
+                sel.innerHTML = `<option value="">${emptyLabel}</option>`;
+                return;
+            }
+            sel.innerHTML = list.map(c => `<option value="${c.id}">${c.type === 'channel' ? '📢' : '🛡️'} ${c.title} (ID: ${c.id})</option>`).join('');
+            if (this.selectedChatId) sel.value = this.selectedChatId;
+        });
     },
 
     generateSparkline(data, color) {
@@ -836,8 +882,18 @@ const app = {
     renderChatList(containerId, list, emptyMsg) {
         const el = document.getElementById(containerId);
         if (!el) return;
+        const isChannel = containerId.includes('channel');
+        const addBtnLabel = isChannel ? this.t('btn_connect_channel') : this.t('btn_connect_group');
+        const targetType = isChannel ? 'channel' : 'group';
+
         if (!list || list.length === 0) {
-            el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono">${emptyMsg}</div>`;
+            el.innerHTML = `
+            <div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono space-y-3">
+                <p>${emptyMsg}</p>
+                <button onclick="app.openAddBot('${targetType}')" class="bg-[#00f3ff]/20 hover:bg-[#00f3ff]/30 text-[#00f3ff] border border-[#00f3ff]/40 px-4 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 inline-flex items-center gap-2">
+                    <i class="fa-solid fa-plus"></i> ${addBtnLabel}
+                </button>
+            </div>`;
             return;
         }
         el.innerHTML = list.map(c => this.chatCardTemplate(c)).join('');
@@ -874,21 +930,46 @@ const app = {
     },
 
     async configureChat(chatId) {
+        if (!chatId) return;
         this.selectedChatId = chatId;
-        await this.loadChatDashboard(chatId);
-        await this.loadChatStats(chatId);
-        await this.loadChatAdminStats(chatId);
-        await this.loadChatTopUsers(chatId);
-        this.switchTab('groups');
+
+        // Sincronizar todos los selectores del DOM
+        document.querySelectorAll('#group-owner-select').forEach(sel => {
+            sel.value = chatId;
+        });
+
+        await Promise.all([
+            this.loadChatDashboard(chatId),
+            this.loadChatStats(chatId),
+            this.loadChatAdminStats(chatId),
+            this.loadChatTopUsers(chatId)
+        ]);
+
+        this.switchTab('bot-settings');
     },
 
-    // --- MÉTODOS GRANULARES CHATKEEPER ---
     async loadChatDashboard(chatId) {
         const data = await this.apiGet(`/chat/${chatId}/dashboard`);
         if (data) {
             this.state.currentChatDashboard = data;
             const logEl = document.getElementById('chat-log-channel');
             if (logEl) logEl.innerText = data.log_channel?.enabled ? `Enabled (${data.log_channel.channel_id})` : 'Disabled';
+
+            const planStatusEl = document.getElementById('chat-plan-status');
+            if (planStatusEl) {
+                planStatusEl.innerText = data.plan?.status === 'active' ? `Plan ${data.plan.name} 🟢` : 'Tariff empty';
+                planStatusEl.className = data.plan?.status === 'active' ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
+            }
+
+            const modsEl = document.getElementById('chat-active-modules');
+            if (modsEl && data.modules) {
+                modsEl.innerHTML = `${data.modules.active} <span class="text-sm font-normal text-blue-300">/ ${data.modules.total}</span>`;
+            }
+
+            const spamModeEl = document.getElementById('chat-spam-mode');
+            if (spamModeEl && data.protection?.spam_mode) {
+                spamModeEl.value = data.protection.spam_mode;
+            }
         }
     },
 
@@ -901,15 +982,50 @@ const app = {
 
     async loadChatAdminStats(chatId) {
         const data = await this.apiGet(`/chat/${chatId}/admin-stats`);
-        if (data && data.admins) {
+        const listEl = document.getElementById('chat-admin-stats-list');
+        if (!listEl) return;
+
+        if (data && data.admins && data.admins.length > 0) {
             this.state.currentChatAdmins = data.admins;
+            listEl.innerHTML = data.admins.map(adm => `
+                <div class="bg-black/40 p-2.5 rounded-xl border border-neutral-800 flex items-center justify-between font-mono">
+                    <div>
+                        <p class="text-white font-bold">${adm.name}</p>
+                        <span class="text-[9px] text-neutral-400">${adm.role}</span>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-[#00f3ff] font-bold">${adm.messages} msgs</p>
+                        <span class="text-[9px] text-neutral-500">${adm.replies} replies</span>
+                    </div>
+                </div>
+            `).join('');
+        } else {
+            listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin estadísticas de administradores</div>`;
         }
     },
 
     async loadChatTopUsers(chatId) {
         const data = await this.apiGet(`/chat/${chatId}/top-users`);
-        if (data && data.top_users) {
+        const listEl = document.getElementById('chat-top-users-list');
+        if (!listEl) return;
+
+        if (data && data.top_users && data.top_users.length > 0) {
             this.state.currentChatTopUsers = data.top_users;
+            const medals = ['🥇', '🥈', '🥉'];
+            listEl.innerHTML = data.top_users.map(u => `
+                <div class="bg-black/40 p-2.5 rounded-xl border border-neutral-800 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="font-bold text-xs">${medals[u.rank - 1] || `#${u.rank}`}</span>
+                        <div>
+                            <p class="text-white font-bold text-xs">${u.name}</p>
+                            <span class="text-[9px] text-neutral-400 font-mono">${u.badge || ''}</span>
+                        </div>
+                    </div>
+                    <span class="text-[#00f3ff] font-bold text-xs font-mono">${u.messages} msgs</span>
+                </div>
+            `).join('');
+        } else {
+            listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin registros de actividad reciente</div>`;
         }
     },
 
@@ -935,6 +1051,96 @@ const app = {
         alert(this.currentLang === 'es'
             ? `📡 Sincronización del Estudio Exitosa:\n\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink || 'Guardado'}`
             : `📡 Studio Sync Successful:\n\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink || 'Saved'}`);
+    },
+
+    // ==========================================
+    // 🧬 CONTROLADORES FASE 2: CLONES, CENTINELAS Y GHOST PURGE
+    // ==========================================
+    async deployClone() {
+        const tokenInput = document.getElementById('clone-bot-token');
+        const token = tokenInput?.value?.trim();
+        const selectedGroup = document.getElementById('group-owner-select')?.value || this.selectedChatId;
+
+        if (!token) {
+            alert(this.currentLang === 'es' ? '⚠️ Ingresa el Bot Token generado en @BotFather.' : '⚠️ Enter the Bot Token from @BotFather.');
+            return;
+        }
+
+        if (!selectedGroup) {
+            alert(this.currentLang === 'es' ? '⚠️ Selecciona primero la comunidad administrada.' : '⚠️ Select the managed community first.');
+            return;
+        }
+
+        const res = await this.apiPost(`/chat/${selectedGroup}/settings`, {
+            action: 'deploy_clone',
+            bot_token: token
+        });
+
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+        }
+
+        alert(this.currentLang === 'es'
+            ? '🚀 Bot Clon sincronizado y puesto en marcha en memoria exitosamente.'
+            : '🚀 Bot Clone synchronized and running in memory successfully.');
+
+        if (tokenInput) tokenInput.value = '';
+    },
+
+    async connectSentinel() {
+        const sessionInput = document.getElementById('sentinel-session-string');
+        const sessionString = sessionInput?.value?.trim();
+        const selectedGroup = document.getElementById('group-owner-select')?.value || this.selectedChatId;
+
+        if (!sessionString) {
+            alert(this.currentLang === 'es' ? '⚠️ Pega la String Session generada para tu Centinela MTProto.' : '⚠️ Paste the String Session for your MTProto Sentinel.');
+            return;
+        }
+
+        if (!selectedGroup) {
+            alert(this.currentLang === 'es' ? '⚠️ Selecciona primero la comunidad administrada.' : '⚠️ Select the managed community first.');
+            return;
+        }
+
+        await this.apiPost(`/chat/${selectedGroup}/settings`, {
+            action: 'connect_sentinel',
+            session_string: sessionString
+        });
+
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+        }
+
+        alert(this.currentLang === 'es'
+            ? '📡 Centinela Acústico MTProto conectado al clúster de The Bunker.'
+            : '📡 MTProto Acoustic Sentinel connected to The Bunker cluster.');
+
+        if (sessionInput) sessionInput.value = '';
+    },
+
+    async runGhostPurge() {
+        const selectedGroup = document.getElementById('group-owner-select')?.value || this.selectedChatId;
+
+        if (!selectedGroup) {
+            alert(this.currentLang === 'es' ? '⚠️ Selecciona primero la comunidad a purgar.' : '⚠️ Select the community to purge first.');
+            return;
+        }
+
+        if (!confirm(this.currentLang === 'es' ? '💀 ¿Deseas iniciar la purga de cuentas fantasma y perfiles eliminados?' : '💀 Start purging ghost accounts and deleted profiles?')) {
+            return;
+        }
+
+        await this.apiPost(`/chat/${selectedGroup}/settings`, {
+            action: 'run_ghost_purge'
+        });
+
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('heavy');
+        }
+
+        alert(this.currentLang === 'es'
+            ? '⚡ Orden de Ghost Purge enviada al Búnker Bot. La purga se ejecutará en segundo plano.'
+            : '⚡ Ghost Purge command sent. Purge is running in background.');
     },
 
     async fetchTonBalance(address) {
