@@ -6,6 +6,7 @@
 
 const CONFIG = {
     BOT_USERNAME: 'thebunkerapp_bot',
+    WEBAPP_URL: 'https://thebunkerapp2.netlify.app/',
     API_BASE: 'https://alpha-bunker-backend-production.up.railway.app/api',
     TON_MANIFEST: 'https://alpha-bunker-backend-production.up.railway.app/tonconnect-manifest.json',
     TON_WALLET: 'UQAAnX4bGBzI0ujk35-XChap_wZ7x67NeJ85C_M1YIvLbYUF',
