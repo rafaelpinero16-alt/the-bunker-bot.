@@ -138,7 +138,15 @@ const translations = {
         tariff_active: "Plan Activo 🟢",
         log_channel_label: "Canal de Registro:",
         status_enabled: "Habilitado",
-        status_disabled: "Deshabilitado"
+        status_disabled: "Deshabilitado",
+        login_title: "Acceso a The Bunker OS",
+        login_subtitle: "Autentica tu identidad operativa para desbloquear el panel de comando.",
+        login_or: "o",
+        login_via_bot: "Iniciar sesión vía Bot",
+        login_hint: "Se abrirá una ventana segura de Telegram para verificar tu identidad. No se solicitan contraseñas.",
+        login_verifying: "🔐 Verificando identidad...",
+        login_error: "⚠️ No se pudo verificar la sesión. Intenta de nuevo.",
+        login_expired: "⚠️ Tu sesión expiró. Vuelve a iniciar sesión."
     },
     en: {
         plans_title: "Community Memberships",
@@ -261,7 +269,15 @@ const translations = {
         tariff_active: "Plan Active 🟢",
         log_channel_label: "Log Channel:",
         status_enabled: "Enabled",
-        status_disabled: "Disabled"
+        status_disabled: "Disabled",
+        login_title: "Access The Bunker OS",
+        login_subtitle: "Authenticate your operator identity to unlock the command panel.",
+        login_or: "or",
+        login_via_bot: "Login via Bot",
+        login_hint: "A secure Telegram window will open to verify your identity. No passwords required.",
+        login_verifying: "🔐 Verifying identity...",
+        login_error: "⚠️ Could not verify the session. Please try again.",
+        login_expired: "⚠️ Your session expired. Please log in again."
     }
 };
 
@@ -274,6 +290,8 @@ const app = {
     activeContext: 'global',
     selectedChatId: null,
     isSyncing: false,
+    isAuthenticated: false,
+    webUser: null,
     securitySwitches: {
         captcha: true,
         autolower: true,
@@ -297,17 +315,11 @@ const app = {
             tg.ready();
         }
         this.initTheme();
-        this.loadTelegramUser();
         this.initTonConnect();
         this.updateTranslations();
-        this.loadAffiliateLink();
         this.initDraggableButton();
         this.initCharCounter();
-
-        this.loadStats();
-        this.loadChannels();
-        this.loadGroups();
-        this.loadSubscribers();
+        this.initAuth();
     },
 
     t(key) {
@@ -619,7 +631,16 @@ const app = {
     },
 
     loadTelegramUser() {
-        const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
+        const tgUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+        const webUser = this.webUser;
+        const user = tgUser || (webUser ? {
+            id: webUser.id,
+            first_name: webUser.first_name || 'Operador',
+            last_name: '',
+            username: webUser.username || '',
+            photo_url: webUser.photo_url || null
+        } : null);
+
         const nameEl = document.getElementById('user-name');
         const handleEl = document.getElementById('user-handle');
         const idEl = document.getElementById('user-id-display');
@@ -690,7 +711,7 @@ const app = {
 
     loadAffiliateLink() {
         const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const userId = user ? user.id : '8269470905';
+        const userId = user ? user.id : (this.webUser?.id || '8269470905');
         const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
         const el = document.getElementById('affiliate-link-text');
         if (el) el.innerText = link;
@@ -698,38 +719,206 @@ const app = {
 
     copyAffiliateLink() {
         const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const userId = user ? user.id : '8269470905';
+        const userId = user ? user.id : (this.webUser?.id || '8269470905');
         const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
         this.copyText(link);
     },
 
     logout() {
         if (confirm(this.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) {
+            localStorage.removeItem('bunker_session_token');
+            localStorage.removeItem('bunker_init_data');
             if (window.Telegram?.WebApp) {
                 window.Telegram.WebApp.close();
             } else {
-                alert(this.currentLang === 'es' ? "Sesión finalizada." : "Session terminated.");
-                location.reload();
+                this.isAuthenticated = false;
+                this.webUser = null;
+                this.toggleDrawer(false);
+                this.showLoginGate();
             }
         }
     },
 
-    getAuthHeader() {
+    /* ---------------------------------------------------------------- */
+    /* AUTENTICACIÓN DUAL: initData nativo de Telegram O Sesión Web      */
+    /* ---------------------------------------------------------------- */
+    getAuthHeaders() {
+        const headers = {};
         const tgInit = window.Telegram?.WebApp?.initData;
         if (tgInit && tgInit.trim() !== '') {
             localStorage.setItem('bunker_init_data', tgInit);
-            return tgInit;
+            headers['X-Telegram-Init-Data'] = tgInit;
+            return headers;
         }
-        const cached = localStorage.getItem('bunker_init_data');
-        if (cached) return cached;
-        return 'id=8269470905';
+        const cachedInit = localStorage.getItem('bunker_init_data');
+        if (cachedInit) {
+            headers['X-Telegram-Init-Data'] = cachedInit;
+        }
+        const sessionToken = localStorage.getItem('bunker_session_token');
+        if (sessionToken) {
+            headers['Authorization'] = `Bearer ${sessionToken}`;
+        }
+        if (!headers['X-Telegram-Init-Data'] && !headers['Authorization']) {
+            headers['X-Telegram-Init-Data'] = 'id=8269470905';
+        }
+        return headers;
+    },
+
+    initAuth() {
+        const tgInitData = window.Telegram?.WebApp?.initData;
+        if (tgInitData && tgInitData.trim() !== '') {
+            this.isAuthenticated = true;
+            this.showAppShell();
+            this.bootstrapDashboard();
+            return;
+        }
+
+        // Capturar token temporal generado por el comando /login en Telegram
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlToken = urlParams.get('token');
+        if (urlToken) {
+            this.exchangeWebToken(urlToken);
+            return;
+        }
+
+        const savedToken = localStorage.getItem('bunker_session_token');
+        if (savedToken) {
+            this.verifyWebSession(savedToken);
+        } else {
+            this.showLoginGate();
+        }
+    },
+
+    showLoginGate() {
+        document.getElementById('login-gate')?.classList.remove('hidden');
+        document.getElementById('app-shell')?.classList.add('hidden');
+        this.renderTelegramWidget();
+    },
+
+    showAppShell() {
+        document.getElementById('login-gate')?.classList.add('hidden');
+        document.getElementById('app-shell')?.classList.remove('hidden');
+    },
+
+    bootstrapDashboard() {
+        this.loadTelegramUser();
+        this.loadAffiliateLink();
+        this.loadStats();
+        this.loadChannels();
+        this.loadGroups();
+        this.loadSubscribers();
+    },
+
+    renderTelegramWidget() {
+        const container = document.getElementById('telegram-login-widget-container');
+        if (!container || container.dataset.rendered === '1') return;
+        container.innerHTML = '';
+        const script = document.createElement('script');
+        script.src = 'https://telegram.org/js/telegram-widget.js?22';
+        script.setAttribute('data-telegram-login', CONFIG.BOT_USERNAME);
+        script.setAttribute('data-size', 'large');
+        script.setAttribute('data-radius', '12');
+        script.setAttribute('data-onauth', 'app.handleTelegramWidgetAuth(user)');
+        script.setAttribute('data-request-access', 'write');
+        container.appendChild(script);
+        container.dataset.rendered = '1';
+    },
+
+    async handleTelegramWidgetAuth(user) {
+        const statusEl = document.getElementById('login-status-msg');
+        if (statusEl) statusEl.innerText = this.t('login_verifying');
+        try {
+            const res = await fetch(`${CONFIG.API_BASE}/auth/telegram-widget`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(user)
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (data?.status === 'success' && data.session_token) {
+                localStorage.setItem('bunker_session_token', data.session_token);
+                this.webUser = data.user;
+                this.isAuthenticated = true;
+                this.showAppShell();
+                this.bootstrapDashboard();
+                if (window.Telegram?.WebApp?.HapticFeedback) {
+                    window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
+                }
+            } else {
+                throw new Error('Respuesta inválida');
+            }
+        } catch (err) {
+            console.error('[Auth Widget]', err);
+            if (statusEl) statusEl.innerText = this.t('login_error');
+        }
+    },
+
+    async exchangeWebToken(tempToken) {
+        const statusEl = document.getElementById('login-status-msg');
+        if (statusEl) statusEl.innerText = this.t('login_verifying');
+        try {
+            const res = await fetch(`${CONFIG.API_BASE}/auth/exchange-token`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: tempToken })
+            });
+            if (!res.ok) throw new Error('Token temporal inválido o expirado');
+            const data = await res.json();
+            if (data?.status === 'success' && data.session_token) {
+                localStorage.setItem('bunker_session_token', data.session_token);
+                window.history.replaceState({}, document.title, window.location.pathname);
+                this.webUser = data.user;
+                this.isAuthenticated = true;
+                this.showAppShell();
+                this.bootstrapDashboard();
+            } else {
+                throw new Error('Error al canjear token');
+            }
+        } catch (err) {
+            console.error('[Token Exchange Error]:', err);
+            if (statusEl) statusEl.innerText = this.t('login_expired');
+            this.showLoginGate();
+        }
+    },
+
+    async verifyWebSession(token) {
+        try {
+            const res = await fetch(`${CONFIG.API_BASE}/auth/session-check`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (data?.status === 'success') {
+                this.webUser = { id: data.user_id, first_name: data.first_name, username: data.username };
+                this.isAuthenticated = true;
+                this.showAppShell();
+                this.bootstrapDashboard();
+                return;
+            }
+            throw new Error('Sesión inválida');
+        } catch (err) {
+            localStorage.removeItem('bunker_session_token');
+            this.showLoginGate();
+        }
+    },
+
+    loginViaBot() {
+        const url = `https://t.me/${CONFIG.BOT_USERNAME}?start=weblogin`;
+        window.open(url, '_blank', 'noopener,noreferrer');
+        const statusEl = document.getElementById('login-status-msg');
+        if (statusEl) {
+            statusEl.innerText = this.currentLang === 'es'
+                ? '📲 Continúa el proceso en Telegram y vuelve a esta pestaña.'
+                : '📲 Continue in Telegram, then return to this tab.';
+        }
     },
 
     async apiGet(path) {
         try {
             const res = await fetch(`${CONFIG.API_BASE}${path}`, {
-                headers: { 'X-Telegram-Init-Data': this.getAuthHeader() }
+                headers: this.getAuthHeaders()
             });
+            if (res.status === 401) { this.handleSessionExpired(); return null; }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
@@ -744,16 +933,26 @@ const app = {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'X-Telegram-Init-Data': this.getAuthHeader()
+                    ...this.getAuthHeaders()
                 },
                 body: JSON.stringify(body)
             });
+            if (res.status === 401) { this.handleSessionExpired(); return null; }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
             console.error(`[API POST ERROR] ${path}:`, err);
             return null;
         }
+    },
+
+    handleSessionExpired() {
+        if (window.Telegram?.WebApp?.initData) return;
+        localStorage.removeItem('bunker_session_token');
+        this.isAuthenticated = false;
+        const statusEl = document.getElementById('login-status-msg');
+        if (statusEl) statusEl.innerText = this.t('login_expired');
+        this.showLoginGate();
     },
 
     setStat(id, value) {

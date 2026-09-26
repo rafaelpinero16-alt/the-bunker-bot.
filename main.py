@@ -4,6 +4,10 @@ import sys
 import os
 import urllib.parse
 import json
+import hmac
+import hashlib
+import base64
+import time
 from importlib import import_module
 from dotenv import load_dotenv
 
@@ -43,7 +47,8 @@ from database.database import (
     get_chat_timeseries_stats,
     get_chat_top_users,
     get_chat_admin_stats,
-    update_chat_operational_settings
+    update_chat_operational_settings,
+    get_user_by_web_session
 )
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
@@ -121,10 +126,148 @@ def parse_telegram_user_id(init_data: str) -> int:
             pass
     return 0
 
+# ==========================================
+# 🔐 AUTENTICACIÓN DUAL: Telegram initData nativo O Sesión Web (Widget/Bot)
+# ==========================================
+SESSION_SECRET = hashlib.sha256(f"bunker-web-session::{BOT_TOKEN}".encode()).digest()
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días de validez de sesión web
+
+def issue_session_token(user_id: int, first_name: str = "", username: str = "", photo_url: str = "") -> str:
+    """Emite un token de sesión web firmado (HMAC-SHA256)."""
+    payload = {
+        "uid": int(user_id),
+        "fn": first_name or "",
+        "un": username or "",
+        "ph": photo_url or "",
+        "iat": int(time.time())
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    raw_b64 = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
+    signature = hmac.new(SESSION_SECRET, raw_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{raw_b64}.{signature}"
+
+def verify_session_token(token: str):
+    """Valida un token de sesión web: firma HMAC + expiración."""
+    try:
+        if not token or "." not in token:
+            return None
+        raw_b64, signature = token.rsplit(".", 1)
+        expected_signature = hmac.new(SESSION_SECRET, raw_b64.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            return None
+        padded = raw_b64 + "=" * (-len(raw_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")))
+        if int(time.time()) - int(payload.get("iat", 0)) > SESSION_TTL_SECONDS:
+            return None
+        return payload
+    except Exception:
+        return None
+
+def verify_telegram_widget_login(data: dict) -> bool:
+    """Verifica la autenticidad de los datos entregados por el Telegram Login Widget."""
+    if not isinstance(data, dict):
+        return False
+    received_hash = data.get("hash")
+    if not received_hash:
+        return False
+
+    check_fields = {k: v for k, v in data.items() if k != "hash" and v is not None}
+    data_check_string = "\n".join(f"{k}={check_fields[k]}" for k in sorted(check_fields.keys()))
+
+    secret_key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(computed_hash, str(received_hash)):
+        return False
+
+    try:
+        auth_date = int(data.get("auth_date", 0))
+    except (TypeError, ValueError):
+        return False
+    if time.time() - auth_date > 86400:
+        return False
+
+    return True
+
+def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
+    """Resuelve el user_id operador desde initData o Token Bearer."""
+    uid = parse_telegram_user_id(x_telegram_init_data)
+    if uid:
+        return uid
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+        payload = verify_session_token(token)
+        if payload and payload.get("uid"):
+            return int(payload["uid"])
+    return 0
+
+# --- 0. AUTENTICACIÓN WEB DUAL (WIDGET Y CANJE DE TOKEN TEMPORAL /LOGIN) ---
+@app.post("/api/auth/telegram-widget")
+async def api_auth_telegram_widget(payload: dict = Body(...)):
+    if not verify_telegram_widget_login(payload):
+        raise HTTPException(status_code=401, detail="Firma de autenticación de Telegram inválida.")
+
+    try:
+        user_id = int(payload.get("id", 0))
+    except (TypeError, ValueError):
+        user_id = 0
+    if not user_id:
+        raise HTTPException(status_code=400, detail="ID de usuario ausente en el payload del widget.")
+
+    first_name = payload.get("first_name", "") or ""
+    username = payload.get("username", "") or ""
+    photo_url = payload.get("photo_url", "") or ""
+
+    try:
+        await get_or_create_user(user_id, username or "Sin username", first_name or "Operador")
+    except Exception as e:
+        logging.warning(f"⚠️ [Auth Widget] No se pudo registrar/actualizar el usuario en BD: {e}")
+
+    token = issue_session_token(user_id, first_name, username, photo_url)
+    return {
+        "status": "success",
+        "session_token": token,
+        "user": {"id": user_id, "first_name": first_name, "username": username, "photo_url": photo_url}
+    }
+
+@app.post("/api/auth/exchange-token")
+async def api_exchange_web_token(payload: dict = Body(...)):
+    """Canjea el token temporal de 5 minutos generado por el comando /login en privado."""
+    temp_token = payload.get("token")
+    if not temp_token:
+        raise HTTPException(status_code=400, detail="Token no proporcionado.")
+    
+    user_id = await get_user_by_web_session(temp_token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token temporal inválido o expirado.")
+    
+    session_token = issue_session_token(user_id, first_name="Operador", username="", photo_url="")
+    return {
+        "status": "success",
+        "session_token": session_token,
+        "user": {"id": user_id, "first_name": "Operador", "username": "", "photo_url": ""}
+    }
+
+@app.get("/api/auth/session-check")
+async def api_auth_session_check(authorization: str = Header(None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Falta el encabezado Authorization Bearer.")
+    token = authorization.split(" ", 1)[1].strip()
+    payload = verify_session_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Sesión inválida o expirada.")
+    return {
+        "status": "success",
+        "user_id": payload.get("uid"),
+        "first_name": payload.get("fn", ""),
+        "username": payload.get("un", ""),
+        "photo_url": payload.get("ph", "")
+    }
+
 # --- 1. TELEMETRÍA GLOBAL Y FILTRADA ---
 @app.get("/api/stats")
-async def api_stats(context: str = "global", x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
+async def api_stats(context: str = "global", x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
+    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
     try:
         stats = await get_user_global_stats(user_id)
         return stats
@@ -146,8 +289,8 @@ async def api_stats(context: str = "global", x_telegram_init_data: str = Header(
 
 # --- 2. CANALES VINCULADOS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/channels")
-async def api_channels(x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
+async def api_channels(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
+    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
     try:
         channels = []
         if master_bot_instance:
@@ -194,8 +337,8 @@ async def api_channels(x_telegram_init_data: str = Header(None)):
 
 # --- 3. COMUNIDADES BLINDADAS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/groups")
-async def api_groups(x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
+async def api_groups(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
+    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
     try:
         groups_list = []
         if master_bot_instance:
@@ -255,9 +398,9 @@ async def api_groups(x_telegram_init_data: str = Header(None)):
 
 # --- 4. ENDPOINT TÁCTICO: SINCRONIZACIÓN FORZADA EN VIVO (CHATKEEPER STYLE) ---
 @app.post("/api/sync-chats")
-async def api_sync_chats(x_telegram_init_data: str = Header(None)):
+async def api_sync_chats(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     """Fuerza la inspección activa en vivo de canales y grupos del usuario operador."""
-    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
+    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
     synced_channels = 0
     synced_groups = 0
     
@@ -287,8 +430,8 @@ async def api_sync_chats(x_telegram_init_data: str = Header(None)):
 
 # --- 5. AUDITOR DE SUSCRIPTORES ---
 @app.get("/api/subscribers")
-async def api_subscribers(x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
+async def api_subscribers(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
+    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
     try:
         subs = await get_user_subscribers_audit(user_id)
         return {"subscribers": subs}
@@ -298,7 +441,7 @@ async def api_subscribers(x_telegram_init_data: str = Header(None)):
 
 # --- 6. DASHBOARD GRANULAR POR CHAT ---
 @app.get("/api/chat/{chat_id}/dashboard")
-async def api_chat_dashboard(chat_id: str, x_telegram_init_data: str = Header(None)):
+async def api_chat_dashboard(chat_id: str, x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     try:
         numeric_id = int(chat_id)
         data = await get_chat_dashboard_data(numeric_id)
@@ -319,7 +462,7 @@ async def api_chat_dashboard(chat_id: str, x_telegram_init_data: str = Header(No
 
 # --- 7. ESTADÍSTICAS TEMPORALES EN VIVO ---
 @app.get("/api/chat/{chat_id}/stats")
-async def api_chat_stats(chat_id: str, x_telegram_init_data: str = Header(None)):
+async def api_chat_stats(chat_id: str, x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     try:
         numeric_id = int(chat_id)
         return await get_chat_timeseries_stats(numeric_id)
@@ -331,7 +474,7 @@ async def api_chat_stats(chat_id: str, x_telegram_init_data: str = Header(None))
 
 # --- 8. RENDIMIENTO DE ADMINISTRADORES ---
 @app.get("/api/chat/{chat_id}/admin-stats")
-async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(None)):
+async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     try:
         numeric_id = int(chat_id)
         admins = await get_chat_admin_stats(numeric_id)
@@ -344,7 +487,7 @@ async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(
 
 # --- 9. TOP 10 USUARIOS MÁS ACTIVOS ---
 @app.get("/api/chat/{chat_id}/top-users")
-async def api_chat_top_users(chat_id: str, x_telegram_init_data: str = Header(None)):
+async def api_chat_top_users(chat_id: str, x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     try:
         numeric_id = int(chat_id)
         top_users = await get_chat_top_users(numeric_id, limit=10)
@@ -357,7 +500,7 @@ async def api_chat_top_users(chat_id: str, x_telegram_init_data: str = Header(No
 
 # --- 10. GUARDAR CONFIGURACIONES EN VIVO ---
 @app.post("/api/chat/{chat_id}/settings")
-async def api_update_chat_settings(chat_id: str, payload: dict = Body(...), x_telegram_init_data: str = Header(None)):
+async def api_update_chat_settings(chat_id: str, payload: dict = Body(...), x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     try:
         numeric_id = int(chat_id)
         await update_chat_operational_settings(numeric_id, payload)
@@ -370,7 +513,7 @@ async def api_update_chat_settings(chat_id: str, payload: dict = Body(...), x_te
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/affiliates/me")
-async def api_affiliates(x_telegram_init_data: str = Header(None)):
+async def api_affiliates(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
     return {"invited_communities": 0, "earned_stars": 0, "balance": 0}
 
 async def run_fastapi_server():
