@@ -220,6 +220,33 @@ select option {
     isolation: isolate;
 }
 
+/* ==========================================================================
+   LOGIN GATE — Acceso Dual (Telegram Widget / Login vía Bot)
+   ========================================================================== */
+#login-gate {
+    animation: tabFadeIn 0.3s ease-out forwards;
+}
+
+#login-gate .glass-panel {
+    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.35), 0 0 30px rgba(0, 243, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* El widget oficial de Telegram inyecta un iframe; se centra y no debe
+   heredar fondo blanco propio que rompa el contraste en modo oscuro. */
+#telegram-login-widget-container iframe {
+    border-radius: 12px !important;
+    margin: 0 auto !important;
+}
+
+[data-theme="light"] #login-gate .glass-panel {
+    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.08), 0 0 25px rgba(0, 168, 179, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* Transición suave entre el gate de acceso y el panel principal */
+#app-shell {
+    animation: tabFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
 /* Scrollbar Minimalista */
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
