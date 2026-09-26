@@ -1432,7 +1432,8 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
             logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio verificando propietario user={user_id} group={g_id}: {e}. Se conserva por persistencia de DB.")
             return (g_id, g_name)
 
-        return (g_id, g_name) if user_member.status == "creator" else None
+        # Permitir tanto creador como administrador
+        return (g_id, g_name) if user_member.status in ("creator", "administrator") else None
 
     results = await asyncio.gather(*(check_ownership(g_id, g_name) for g_id, g_name in raw_groups))
     return [res for res in results if res is not None]
@@ -1509,7 +1510,8 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
         except Exception as e:
             logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando propietario user={user_id} channel={c_id}: {e}. Se conserva.")
             return (c_id, title, False)
-        return (c_id, title, True) if user_member.status == "creator" else None
+        # Permitir tanto creador como administrador en el canal
+        return (c_id, title, True) if user_member.status in ("creator", "administrator") else None
 
     results = await asyncio.gather(*(check_channel(c_id, c_name) for c_id, c_name in candidates.items()))
     kept = [res for res in results if res is not None]
