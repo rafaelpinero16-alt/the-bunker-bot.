@@ -108,7 +108,25 @@ const translations = {
         btn_cancel: "Cancel",
         btn_send: "Send message",
         instruction_title: "Instrucciones & Manual Oficial",
-        btn_close: "Cerrar"
+        btn_close: "Cerrar",
+        footer_copyright: "The Bunker Command OS © 2026 — Cloud Media Management",
+        instruction_body: "The Bunker Command OS gestiona comunidades en Telegram con una automatización de nivel industrial. Conecta tus chats, administra permisos en tiempo real y audita licencias con pagos nativos en Telegram Stars.",
+        instruction_steps_title: "🚀 Pasos iniciales:",
+        instruction_step1: "1. Añade el bot como administrador en tu canal o grupo.",
+        instruction_step2: "2. Sincroniza el ID desde el Estudio de Canales.",
+        instruction_step3: "3. Configura tarifas en XTR y pasarelas tácticas.",
+        company_reg_title: "Registro de Compañía",
+        company_reg_body: "Bienvenido a la página de registro de organización del servicio The Bunker OS. El registro consta de varios pasos: especifica los datos de la organización y verifica tus credenciales.",
+        company_reg_start: "Iniciar registro",
+        regex_title: "Verificador de Expresión Regular",
+        regex_pattern_label: "Expresión regular:",
+        regex_string_label: "Texto a evaluar:",
+        regex_lowercase_label: "Convertir a minúsculas",
+        btn_reset: "Reiniciar",
+        btn_test: "Probar",
+        report_placeholder: "Describe el error o tu reseña...",
+        select_your_channel: "Selecciona tu canal...",
+        select_your_community: "Selecciona tu comunidad..."
     },
     en: {
         plans_title: "Community Memberships",
@@ -202,7 +220,25 @@ const translations = {
         btn_cancel: "Cancel",
         btn_send: "Send message",
         instruction_title: "Instructions & Official Manual",
-        btn_close: "Close"
+        btn_close: "Close",
+        footer_copyright: "The Bunker Command OS © 2026 — Cloud Media Management",
+        instruction_body: "The Bunker Command OS manages Telegram communities with industrial-grade automation. Connect your chats, manage permissions in real time, and audit licenses with native Telegram Stars payments.",
+        instruction_steps_title: "🚀 Initial steps:",
+        instruction_step1: "1. Add the bot as admin in your channel or group.",
+        instruction_step2: "2. Sync the ID from the Channel Studio.",
+        instruction_step3: "3. Configure XTR rates and tactical gateways.",
+        company_reg_title: "Company Registration",
+        company_reg_body: "Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.",
+        company_reg_start: "Start registration",
+        regex_title: "Regular Expression Check",
+        regex_pattern_label: "Regular expression:",
+        regex_string_label: "String to test:",
+        regex_lowercase_label: "Cast to lowercase",
+        btn_reset: "Reset",
+        btn_test: "Test",
+        report_placeholder: "Describe the error or review...",
+        select_your_channel: "Select your channel...",
+        select_your_community: "Select your community..."
     }
 };
 
@@ -237,6 +273,7 @@ const app = {
         this.updateTranslations();
         this.loadAffiliateLink();
         this.initDraggableButton();
+        this.initCharCounter();
 
         this.loadStats();
         this.loadChannels();
@@ -248,9 +285,6 @@ const app = {
         return (translations[this.currentLang] && translations[this.currentLang][key]) || key;
     },
 
-    /* ---------------------------------------------------------------- */
-    /* MOTOR DE TEMAS (LIGHT / DARK)                                    */
-    /* ---------------------------------------------------------------- */
     initTheme() {
         const savedTheme = localStorage.getItem('bunker_theme') || 'dark';
         this.setTheme(savedTheme);
@@ -282,9 +316,6 @@ const app = {
         }
     },
 
-    /* ---------------------------------------------------------------- */
-    /* CONTROLADOR MATEMÁTICO DRAGGABLE PARA EL BOTÓN DE IDIOMA        */
-    /* ---------------------------------------------------------------- */
     initDraggableButton() {
         const btn = document.getElementById('floating-lang-btn');
         if (!btn) return;
@@ -292,8 +323,16 @@ const app = {
         let isDragging = false;
         let startX = 0, startY = 0;
         let btnStartX = 0, btnStartY = 0;
+        let lastTouchTime = 0;
 
         const onStart = (e) => {
+            if (e.type === 'touchstart') {
+                lastTouchTime = Date.now();
+            } else if (e.type === 'mousedown') {
+                // Suprime clic sintético en teléfonos móviles
+                if (Date.now() - lastTouchTime < 600) return;
+            }
+
             isDragging = false;
             const evt = e.touches ? e.touches[0] : e;
             startX = evt.clientX;
@@ -421,37 +460,20 @@ const app = {
             const key = el.getAttribute('data-i18n');
             if (dict[key]) el.innerText = dict[key];
         });
+        document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+            const key = el.getAttribute('data-i18n-placeholder');
+            if (dict[key]) el.placeholder = dict[key];
+        });
     },
 
-    /* ---------------------------------------------------------------- */
-    /* CONTROLADORES DE MODALES NUEVOS (ChatKeeper Style)               */
-    /* ---------------------------------------------------------------- */
-    openHelpModal() {
-        document.getElementById('modal-help')?.classList.remove('hidden');
-    },
-    closeHelpModal() {
-        document.getElementById('modal-help')?.classList.add('hidden');
-    },
-    openInstructionModal() {
-        this.closeHelpModal();
-        document.getElementById('modal-instruction')?.classList.remove('hidden');
-    },
-    closeInstructionModal() {
-        document.getElementById('modal-instruction')?.classList.add('hidden');
-    },
-    openRegexModal() {
-        this.closeHelpModal();
-        document.getElementById('modal-regex')?.classList.remove('hidden');
-    },
-    closeRegexModal() {
-        document.getElementById('modal-regex')?.classList.add('hidden');
-    },
-    openCompanyRegModal() {
-        document.getElementById('modal-company-reg')?.classList.remove('hidden');
-    },
-    closeCompanyRegModal() {
-        document.getElementById('modal-company-reg')?.classList.add('hidden');
-    },
+    openHelpModal() { document.getElementById('modal-help')?.classList.remove('hidden'); },
+    closeHelpModal() { document.getElementById('modal-help')?.classList.add('hidden'); },
+    openInstructionModal() { this.closeHelpModal(); document.getElementById('modal-instruction')?.classList.remove('hidden'); },
+    closeInstructionModal() { document.getElementById('modal-instruction')?.classList.add('hidden'); },
+    openRegexModal() { this.closeHelpModal(); document.getElementById('modal-regex')?.classList.remove('hidden'); },
+    closeRegexModal() { document.getElementById('modal-regex')?.classList.add('hidden'); },
+    openCompanyRegModal() { document.getElementById('modal-company-reg')?.classList.remove('hidden'); },
+    closeCompanyRegModal() { document.getElementById('modal-company-reg')?.classList.add('hidden'); },
 
     switchHelpTab(tab) {
         const tabErr = document.getElementById('help-tab-error');
@@ -478,6 +500,72 @@ const app = {
                 icon.className = "fa-regular fa-star cursor-pointer text-neutral-500";
             }
         });
+        this.selectedRating = stars;
+    },
+
+    handleFileAttach(input) {
+        const file = input.files && input.files[0];
+        const label = document.getElementById('help-file-label');
+        if (file && label) {
+            label.innerText = `📎 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+            label.classList.add('text-[#00f3ff]');
+        }
+    },
+
+    initCharCounter() {
+        const textarea = document.getElementById('help-textarea');
+        const counter = document.getElementById('help-char-counter');
+        if (!textarea || !counter) return;
+        const max = textarea.getAttribute('maxlength') || 4096;
+        textarea.addEventListener('input', () => {
+            counter.innerText = `${textarea.value.length} / ${max}`;
+        });
+    },
+
+    sendHelpReport() {
+        const textarea = document.getElementById('help-textarea');
+        const text = textarea?.value.trim() || '';
+        if (!text) {
+            alert(this.currentLang === 'es' ? '⚠️ Escribe un mensaje antes de enviar.' : '⚠️ Write a message before sending.');
+            return;
+        }
+        alert(this.currentLang === 'es' ? '✅ Enviado con éxito al equipo técnico.' : '✅ Sent successfully to technical team.');
+        if (textarea) textarea.value = '';
+        const counter = document.getElementById('help-char-counter');
+        if (counter) counter.innerText = `0 / ${textarea?.getAttribute('maxlength') || 4096}`;
+        const label = document.getElementById('help-file-label');
+        if (label) {
+            label.innerText = this.t('click_attach');
+            label.classList.remove('text-[#00f3ff]');
+        }
+        this.closeHelpModal();
+    },
+
+    testRegex() {
+        const patternStr = document.getElementById('regex-pattern')?.value || '';
+        let testStr = document.getElementById('regex-string')?.value || '';
+        const lowercase = document.getElementById('regex-lowercase')?.checked;
+
+        if (!patternStr) {
+            alert(this.currentLang === 'es' ? '⚠️ Ingresa una expresión regular.' : '⚠️ Enter a regular expression.');
+            return;
+        }
+        if (lowercase) testStr = testStr.toLowerCase();
+
+        try {
+            const re = new RegExp(patternStr);
+            const isMatch = re.test(testStr);
+            alert(isMatch
+                ? (this.currentLang === 'es' ? '✅ Coincidencia exitosa (Match Successful)' : '✅ Match Successful')
+                : (this.currentLang === 'es' ? '❌ Sin coincidencia (No Match)' : '❌ No Match'));
+        } catch (err) {
+            alert(this.currentLang === 'es' ? `⚠️ Expresión inválida: ${err.message}` : `⚠️ Invalid expression: ${err.message}`);
+        }
+    },
+
+    startCompanyReg() {
+        alert(this.currentLang === 'es' ? 'Iniciando proceso corporativo...' : 'Starting corporate process...');
+        this.closeCompanyRegModal();
     },
 
     loadTelegramUser() {

@@ -1,1003 +1,630 @@
-/* ==========================================================================
-   THE BUNKER — COMMAND OS
-   app.js — Lógica central, Draggable Button, Theme Engine, i18n y Telemetría
-   The Bunker Command OS © 2026 — Cloud Media Management
-   ========================================================================== */
-
-const CONFIG = {
-    BOT_USERNAME: 'thebunkerapp_bot',
-    API_BASE: 'https://alpha-bunker-backend-production.up.railway.app/api',
-    TON_MANIFEST: 'https://alpha-bunker-backend-production.up.railway.app/tonconnect-manifest.json',
-    TON_WALLET: 'UQAAnX4bGBzI0ujk35-XChap_wZ7x67NeJ85C_M1YIvLbYUF',
-    PRICES: {
-        pro:   { stars: 500, usd: 5, ton: '1000000000' },
-        ultra: { stars: 800, usd: 8, ton: '1600000000' }
-    }
-};
-
-const translations = {
-    es: {
-        plans_title: "Membresías de Comunidad",
-        basic_badge: "ACCESO GRATUITO",
-        basic_title: "Plan BÁSICO",
-        basic_desc: "Comandos de moderación limitados. Sin automatización de radar ni soporte prioritario.",
-        btn_free_active: "Activo por defecto",
-        pro_badge: "PLAN MENSUAL",
-        pro_title: "Plan PRO",
-        pro_desc: "Automatización total, moderación de voz y comandos ilimitados para tu comunidad.",
-        ultra_badge: "ACCESO ILIMITADO",
-        ultra_title: "ULTRA PRO",
-        ultra_desc: "Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.",
-        tactical_gateways: "PASARELAS TÁCTICAS",
-        active_context: "Entorno Activo:",
-        stat_subs: "Suscriptores VIP",
-        stat_revenue: "Ingresos Stars",
-        live_sync: "Sincronización en vivo",
-        stat_source: "Datos reales del bot",
-        dash_telemetry: "Telemetría del Búnker",
-        online_tag: "En Línea 🟢",
-        stat_verified: "Verificados",
-        stat_expelled: "Expulsados",
-        stat_purges: "Purgas",
-        perimeter_title: "Perímetro Operativo",
-        perimeter_sub: "Supervisión 24/7",
-        captcha_label: "Aduana Captcha:",
-        autolower_label: "Radar AutoLower:",
-        shield_label: "Escudo Antinota:",
-        broadcast_label: "Difusión Recurrente:",
-        linked_channels: "Canales Conectados",
-        linked_groups: "Comunidades Conectadas",
-        sync: "Sincronizar",
-        configure: "Configurar",
-        license_active: "Activa 🟢",
-        license_renew: "Renovar",
-        btn_logout: "Cerrar Sesión",
-        no_channels: "Sin canales vinculados aún",
-        no_groups: "Sin comunidades vinculadas aún",
-        no_subs: "Sin suscriptores registrados",
-        aff_title: "Red de Afiliados & Comisiones",
-        aff_desc: "Comparte tu enlace único de promotor. Cada vez que una comunidad adquiera un plan PRO o ULTRA a través de tu recomendación, recibes comisiones instantáneas en Telegram Stars directo a tu balance.",
-        nav_dash: "Telemetría & Stats",
-        nav_channels: "Estudio de Canales",
-        nav_groups: "Matriz de Grupos",
-        nav_watchdog: "Auditor Suscripciones",
-        nav_plans: "Membresías & Pasarelas",
-        nav_aff: "Red de Afiliados",
-        studio_badge: "ESTUDIO DE BROADCAST",
-        studio_title: "Ajustes del Canal",
-        btn_open_studio: "Abrir Estudio",
-        channel_owner_label: "Canal Bajo tu ID de Creador:",
-        vip_delivery_title: "Enlace VIP & Entrega Automática",
-        vip_target_label: "Destino VIP (Canal Privado / Recurso):",
-        stars_rate_label: "Tarifa en Stars (XTR):",
-        duration_days_label: "Duración (Días):",
-        perimeter_badge: "PERÍMETRO COMUNITARIO",
-        groups_title: "Control de Grupos",
-        shielded_mode: "Modo Blindado 🟢",
-        group_owner_label: "Comunidad Administrada:",
-        captcha_pro: "Aduana Captcha Pro",
-        captcha_desc: "Desafío privado antes de ingresar",
-        autolower_title: "AutoLower de Micrófonos (2%)",
-        autolower_desc: "Atenuación acústica de fondo",
-        shield_title: "Escudo Antinota",
-        shield_desc: "Corte de pantalla compartida",
-        linklock_title: "Cerradura de Enlaces Web",
-        linklock_desc: "Purga inmediata de URLs no permitidas",
-        watchdog_badge: "MONITOR DE MIEMBROS",
-        watchdog_title: "Aviso de Suscripciones",
-        live_badge: "En Vivo",
-        watchdog_desc: "Supervisa en tiempo real el tiempo restante de cada miembro suscrito y las alertas de renovación antes del Auto-Kick automático.",
-        profile_balance_stars: "Balance Stars:",
-        profile_discount: "Descuento Activo:",
-        profile_rank: "Rango Operativo:",
-        profile_reg_date: "Fecha de Registro:",
-        profile_account_status: "Estado de Cuenta:",
-        btn_terminate_sessions: "Cerrar Todas las Sesiones Activas",
-        bank_transfer_title: "PAGO MANUAL BANCARIO",
-        theme_light: "Claro",
-        theme_dark: "Oscuro",
-        menu_my_profile: "My profile",
-        menu_help: "Help & Support",
-        menu_company_reg: "Company registration",
-        help_support_chat: "Technical support chat",
-        help_instruction: "Instruction & Manuals",
-        help_test_regex: "Test Regex / Pattern Checker",
-        tab_report_error: "Report an error",
-        tab_leave_review: "Leave a review",
-        click_attach: "Click to attach file",
-        btn_cancel: "Cancel",
-        btn_send: "Send message",
-        instruction_title: "Instrucciones & Manual Oficial",
-        btn_close: "Cerrar",
-        footer_copyright: "The Bunker Command OS © 2026 — Cloud Media Management",
-        instruction_body: "The Bunker Command OS gestiona comunidades en Telegram con una automatización de nivel industrial. Conecta tus chats, administra permisos en tiempo real y audita licencias con pagos nativos en Telegram Stars.",
-        instruction_steps_title: "🚀 Pasos iniciales:",
-        instruction_step1: "1. Añade el bot como administrador en tu canal o grupo.",
-        instruction_step2: "2. Sincroniza el ID desde el Estudio de Canales.",
-        instruction_step3: "3. Configura tarifas en XTR y pasarelas tácticas.",
-        company_reg_title: "Registro de Compañía",
-        company_reg_body: "Bienvenido a la página de registro de organización del servicio The Bunker OS. El registro consta de varios pasos: especifica los datos de la organización y verifica tus credenciales.",
-        company_reg_start: "Iniciar registro",
-        regex_title: "Verificador de Expresión Regular",
-        regex_pattern_label: "Expresión regular:",
-        regex_string_label: "Texto a evaluar:",
-        regex_lowercase_label: "Convertir a minúsculas",
-        btn_reset: "Reiniciar",
-        btn_test: "Probar",
-        report_placeholder: "Describe el error o tu reseña...",
-        select_your_channel: "Selecciona tu canal...",
-        select_your_community: "Selecciona tu comunidad..."
-    },
-    en: {
-        plans_title: "Community Memberships",
-        basic_badge: "FREE TIER",
-        basic_title: "BASIC Plan",
-        basic_desc: "Limited moderation commands. No radar automation or priority support.",
-        btn_free_active: "Active by Default",
-        pro_badge: "MONTHLY PLAN",
-        pro_title: "PRO Plan",
-        pro_desc: "Total automation, voice moderation, and unlimited commands for your community.",
-        ultra_badge: "UNLIMITED ACCESS",
-        ultra_title: "ULTRA PRO",
-        ultra_desc: "Advanced anti-ghost radar, max server priority, and direct support.",
-        tactical_gateways: "TACTICAL GATEWAYS",
-        active_context: "Active Context:",
-        stat_subs: "VIP Subscribers",
-        stat_revenue: "Stars Revenue",
-        live_sync: "Live sync",
-        stat_source: "Real bot data",
-        dash_telemetry: "Bunker Telemetry",
-        online_tag: "Online 🟢",
-        stat_verified: "Verified",
-        stat_expelled: "Expelled",
-        stat_purges: "Purges",
-        perimeter_title: "Operational Perimeter",
-        perimeter_sub: "24/7 Monitoring",
-        captcha_label: "Captcha Customs:",
-        autolower_label: "AutoLower Radar:",
-        shield_label: "Screenshot Shield:",
-        broadcast_label: "Recurring Broadcast:",
-        linked_channels: "Connected Channels",
-        linked_groups: "Connected Communities",
-        sync: "Sync",
-        configure: "Configure",
-        license_active: "Active 🟢",
-        license_renew: "Renew",
-        btn_logout: "Logout",
-        no_channels: "No channels linked yet",
-        no_groups: "No communities linked yet",
-        no_subs: "No subscribers registered",
-        aff_title: "Affiliate & Commission Network",
-        aff_desc: "Share your promoter link. Whenever a community unlocks a PRO or ULTRA plan through your recommendation, receive direct Telegram Stars commissions.",
-        nav_dash: "Telemetry & Stats",
-        nav_channels: "Channel Studio",
-        nav_groups: "Group Matrix",
-        nav_watchdog: "Sub Watchdog",
-        nav_plans: "Plans & Gateways",
-        nav_aff: "Affiliate Network",
-        studio_badge: "BROADCAST STUDIO",
-        studio_title: "Channel Settings",
-        btn_open_studio: "Open Studio",
-        channel_owner_label: "Channel under your Creator ID:",
-        vip_delivery_title: "VIP Link & Automatic Delivery",
-        vip_target_label: "VIP Target (Private Channel / Resource):",
-        stars_rate_label: "Rate in Stars (XTR):",
-        duration_days_label: "Duration (Days):",
-        perimeter_badge: "COMMUNITY PERIMETER",
-        groups_title: "Group Control",
-        shielded_mode: "Shielded Mode 🟢",
-        group_owner_label: "Managed Community:",
-        captcha_pro: "Captcha Customs Pro",
-        captcha_desc: "Private checkpoint upon entry",
-        autolower_title: "Microphone AutoLower (2%)",
-        autolower_desc: "Background acoustic attenuation",
-        shield_title: "Screen-Sharing Shield",
-        shield_desc: "Blocks unauthorized screen share",
-        linklock_title: "Web Links Lock",
-        linklock_desc: "Instant purge of unapproved URLs",
-        watchdog_badge: "MEMBER MONITOR",
-        watchdog_title: "Subscription Watchdog",
-        live_badge: "Live",
-        watchdog_desc: "Real-time tracking of active members and renewal warnings before automated expulsion.",
-        profile_balance_stars: "Stars Balance:",
-        profile_discount: "Active Discount:",
-        profile_rank: "Operational Rank:",
-        profile_reg_date: "Registration Date:",
-        profile_account_status: "Account Status:",
-        btn_terminate_sessions: "Terminate All Active Sessions",
-        bank_transfer_title: "MANUAL BANK WIRE",
-        theme_light: "Light",
-        theme_dark: "Dark",
-        menu_my_profile: "My profile",
-        menu_help: "Help & Support",
-        menu_company_reg: "Company registration",
-        help_support_chat: "Technical support chat",
-        help_instruction: "Instruction & Manuals",
-        help_test_regex: "Test Regex / Pattern Checker",
-        tab_report_error: "Report an error",
-        tab_leave_review: "Leave a review",
-        click_attach: "Click to attach file",
-        btn_cancel: "Cancel",
-        btn_send: "Send message",
-        instruction_title: "Instructions & Official Manual",
-        btn_close: "Close",
-        footer_copyright: "The Bunker Command OS © 2026 — Cloud Media Management",
-        instruction_body: "The Bunker Command OS manages Telegram communities with industrial-grade automation. Connect your chats, manage permissions in real time, and audit licenses with native Telegram Stars payments.",
-        instruction_steps_title: "🚀 Initial steps:",
-        instruction_step1: "1. Add the bot as admin in your channel or group.",
-        instruction_step2: "2. Sync the ID from the Channel Studio.",
-        instruction_step3: "3. Configure XTR rates and tactical gateways.",
-        company_reg_title: "Company Registration",
-        company_reg_body: "Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.",
-        company_reg_start: "Start registration",
-        regex_title: "Regular Expression Check",
-        regex_pattern_label: "Regular expression:",
-        regex_string_label: "String to test:",
-        regex_lowercase_label: "Cast to lowercase",
-        btn_reset: "Reset",
-        btn_test: "Test",
-        report_placeholder: "Describe the error or review...",
-        select_your_channel: "Select your channel...",
-        select_your_community: "Select your community..."
-    }
-};
-
-const app = {
-    tonConnectUI: null,
-    currentLang: 'es',
-    currentTheme: 'dark',
-    selectedPlan: 'pro',
-    currentTab: 'dashboard',
-    activeContext: 'global',
-    securitySwitches: {
-        captcha: true,
-        autolower: true,
-        shield: true,
-        linklock: false
-    },
-    state: {
-        channels: [],
-        groups: [],
-        subscribers: []
-    },
-
-    init() {
-        const tg = window.Telegram?.WebApp;
-        if (tg) {
-            tg.expand();
-            tg.ready();
-        }
-        this.initTheme();
-        this.loadTelegramUser();
-        this.initTonConnect();
-        this.updateTranslations();
-        this.loadAffiliateLink();
-        this.initDraggableButton();
-        this.initCharCounter();
-
-        this.loadStats();
-        this.loadChannels();
-        this.loadGroups();
-        this.loadSubscribers();
-    },
-
-    t(key) {
-        return (translations[this.currentLang] && translations[this.currentLang][key]) || key;
-    },
-
-    /* ---------------------------------------------------------------- */
-    /* MOTOR DE TEMAS (LIGHT / DARK)                                    */
-    /* ---------------------------------------------------------------- */
-    initTheme() {
-        const savedTheme = localStorage.getItem('bunker_theme') || 'dark';
-        this.setTheme(savedTheme);
-    },
-
-    setTheme(theme) {
-        this.currentTheme = theme;
-        document.documentElement.setAttribute('data-theme', theme);
-        localStorage.setItem('bunker_theme', theme);
-
-        const btnLight = document.getElementById('theme-btn-light');
-        const btnDark = document.getElementById('theme-btn-dark');
-
-        if (btnLight && btnDark) {
-            if (theme === 'light') {
-                btnLight.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00a8b3] border border-[#00a8b3]/40 transition";
-                btnDark.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold text-neutral-400 transition";
-            } else {
-                btnDark.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 transition";
-                btnLight.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold text-neutral-400 transition";
-            }
-        }
-
-        const tg = window.Telegram?.WebApp;
-        if (tg) {
-            const color = theme === 'light' ? '#f1f5f9' : '#030407';
-            if (tg.setHeaderColor) { try { tg.setHeaderColor(color); } catch (e) {} }
-            if (tg.setBackgroundColor) { try { tg.setBackgroundColor(color); } catch (e) {} }
-        }
-    },
-
-    /* ---------------------------------------------------------------- */
-    /* CONTROLADOR MATEMÁTICO DRAGGABLE PARA EL BOTÓN DE IDIOMA        */
-    /* ---------------------------------------------------------------- */
-    initDraggableButton() {
-        const btn = document.getElementById('floating-lang-btn');
-        if (!btn) return;
-
-        let isDragging = false;
-        let startX = 0, startY = 0;
-        let btnStartX = 0, btnStartY = 0;
-
-        const onStart = (e) => {
-            isDragging = false;
-            const evt = e.touches ? e.touches[0] : e;
-            startX = evt.clientX;
-            startY = evt.clientY;
-
-            const rect = btn.getBoundingClientRect();
-            btnStartX = rect.left;
-            btnStartY = rect.top;
-
-            if (e.touches) {
-                document.addEventListener('touchmove', onMove, { passive: false });
-                document.addEventListener('touchend', onEnd);
-            } else {
-                document.addEventListener('mousemove', onMove);
-                document.addEventListener('mouseup', onEnd);
-            }
-        };
-
-        const onMove = (e) => {
-            const evt = e.touches ? e.touches[0] : e;
-            const dx = evt.clientX - startX;
-            const dy = evt.clientY - startY;
-
-            if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-                isDragging = true;
-            }
-
-            if (isDragging) {
-                if (e.cancelable) e.preventDefault();
-                let newX = btnStartX + dx;
-                let newY = btnStartY + dy;
-
-                const maxX = window.innerWidth - btn.offsetWidth - 8;
-                const maxY = window.innerHeight - btn.offsetHeight - 8;
-
-                newX = Math.max(8, Math.min(newX, maxX));
-                newY = Math.max(8, Math.min(newY, maxY));
-
-                btn.style.left = `${newX}px`;
-                btn.style.top = `${newY}px`;
-                btn.style.right = 'auto';
-                btn.style.bottom = 'auto';
-            }
-        };
-
-        const onEnd = () => {
-            document.removeEventListener('touchmove', onMove);
-            document.removeEventListener('touchend', onEnd);
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup', onEnd);
-
-            if (!isDragging) {
-                this.toggleLanguage();
-            }
-        };
-
-        btn.addEventListener('touchstart', onStart, { passive: true });
-        btn.addEventListener('mousedown', onStart);
-    },
-
-    toggleDrawer(show) {
-        const drawer = document.getElementById('cyber-drawer');
-        if (!drawer) return;
-        drawer.classList.toggle('hidden', !show);
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
-        }
-    },
-
-    switchTab(tabId) {
-        this.currentTab = tabId;
-        document.querySelectorAll('.tab-view').forEach(el => el.classList.add('hidden'));
-
-        const targetView = document.getElementById(`view-${tabId}`);
-        if (targetView) targetView.classList.remove('hidden');
-
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
-        }
-    },
-
-    switchContext(val) {
-        this.activeContext = val;
-        this.loadStats();
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.selectionChanged();
-        }
-    },
-
-    toggleSecuritySwitch(key) {
-        this.securitySwitches[key] = !this.securitySwitches[key];
-        const el = document.getElementById(`switch-${key}`);
-        if (el) {
-            const active = this.securitySwitches[key];
-            if (active) {
-                el.className = "text-emerald-400 font-bold";
-                el.innerText = this.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢";
-            } else {
-                el.className = "text-rose-400 font-bold";
-                el.innerText = this.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴";
-            }
-        }
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.impactOccurred('medium');
-        }
-    },
-
-    toggleLanguage() {
-        this.currentLang = this.currentLang === 'es' ? 'en' : 'es';
-        const indicator = document.getElementById('lang-indicator');
-        if (indicator) indicator.innerText = this.currentLang.toUpperCase();
-
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
-        }
-        this.updateTranslations();
-        this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
-        this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
-        this.renderSubscriberList(this.state.subscribers);
-    },
-
-    updateTranslations() {
-        const dict = translations[this.currentLang];
-        document.querySelectorAll('[data-i18n]').forEach(el => {
-            const key = el.getAttribute('data-i18n');
-            if (dict[key]) el.innerText = dict[key];
-        });
-        document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-            const key = el.getAttribute('data-i18n-placeholder');
-            if (dict[key]) el.placeholder = dict[key];
-        });
-    },
-
-    /* ---------------------------------------------------------------- */
-    /* CONTROLADORES DE MODALES NUEVOS (ChatKeeper Style)               */
-    /* ---------------------------------------------------------------- */
-    openHelpModal() {
-        document.getElementById('modal-help')?.classList.remove('hidden');
-    },
-    closeHelpModal() {
-        document.getElementById('modal-help')?.classList.add('hidden');
-    },
-    openInstructionModal() {
-        this.closeHelpModal();
-        document.getElementById('modal-instruction')?.classList.remove('hidden');
-    },
-    closeInstructionModal() {
-        document.getElementById('modal-instruction')?.classList.add('hidden');
-    },
-    openRegexModal() {
-        this.closeHelpModal();
-        document.getElementById('modal-regex')?.classList.remove('hidden');
-    },
-    closeRegexModal() {
-        document.getElementById('modal-regex')?.classList.add('hidden');
-    },
-    openCompanyRegModal() {
-        document.getElementById('modal-company-reg')?.classList.remove('hidden');
-    },
-    closeCompanyRegModal() {
-        document.getElementById('modal-company-reg')?.classList.add('hidden');
-    },
-
-    switchHelpTab(tab) {
-        const tabErr = document.getElementById('help-tab-error');
-        const tabRev = document.getElementById('help-tab-review');
-        const starContainer = document.getElementById('star-rating-container');
-
-        if (tab === 'error') {
-            tabErr.className = "text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]";
-            tabRev.className = "text-neutral-400 pb-1";
-            starContainer.classList.add('hidden');
-        } else {
-            tabRev.className = "text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]";
-            tabErr.className = "text-neutral-400 pb-1";
-            starContainer.classList.remove('hidden');
-        }
-    },
-
-    setRating(stars) {
-        const starIcons = document.querySelectorAll('#star-rating-container i');
-        starIcons.forEach((icon, idx) => {
-            if (idx < stars) {
-                icon.className = "fa-solid fa-star cursor-pointer text-amber-400";
-            } else {
-                icon.className = "fa-regular fa-star cursor-pointer text-neutral-500";
-            }
-        });
-        this.selectedRating = stars;
-    },
-
-    /* ---------------------------------------------------------------- */
-    /* CONTADOR DE CARACTERES REAL (Reporte / Reseña)                   */
-    /* ---------------------------------------------------------------- */
-    initCharCounter() {
-        const textarea = document.getElementById('help-textarea');
-        const counter = document.getElementById('help-char-counter');
-        if (!textarea || !counter) return;
-        const max = textarea.getAttribute('maxlength') || 4096;
-        textarea.addEventListener('input', () => {
-            counter.innerText = `${textarea.value.length} / ${max}`;
-        });
-    },
-
-    sendHelpReport() {
-        const textarea = document.getElementById('help-textarea');
-        const text = textarea?.value.trim() || '';
-        if (!text) {
-            alert(this.currentLang === 'es' ? '⚠️ Escribe un mensaje antes de enviar.' : '⚠️ Write a message before sending.');
-            return;
-        }
-        alert(this.currentLang === 'es' ? '✅ Enviado con éxito' : '✅ Sent successfully');
-        if (textarea) textarea.value = '';
-        const counter = document.getElementById('help-char-counter');
-        if (counter) counter.innerText = `0 / ${textarea?.getAttribute('maxlength') || 4096}`;
-        this.closeHelpModal();
-    },
-
-    /* ---------------------------------------------------------------- */
-    /* VERIFICADOR DE EXPRESIÓN REGULAR — VALIDACIÓN JS REAL             */
-    /* ---------------------------------------------------------------- */
-    testRegex() {
-        const patternStr = document.getElementById('regex-pattern')?.value || '';
-        let testStr = document.getElementById('regex-string')?.value || '';
-        const lowercase = document.getElementById('regex-lowercase')?.checked;
-
-        if (!patternStr) {
-            alert(this.currentLang === 'es' ? '⚠️ Ingresa una expresión regular.' : '⚠️ Enter a regular expression.');
-            return;
-        }
-        if (lowercase) testStr = testStr.toLowerCase();
-
-        try {
-            const re = new RegExp(patternStr);
-            const isMatch = re.test(testStr);
-            alert(isMatch
-                ? (this.currentLang === 'es' ? '✅ Coincidencia exitosa' : '✅ Match Successful')
-                : (this.currentLang === 'es' ? '❌ Sin coincidencia' : '❌ No Match'));
-        } catch (err) {
-            alert(this.currentLang === 'es' ? `⚠️ Expresión inválida: ${err.message}` : `⚠️ Invalid expression: ${err.message}`);
-        }
-    },
-
-    startCompanyReg() {
-        alert(this.currentLang === 'es' ? 'Iniciando proceso corporativo...' : 'Starting corporate process...');
-        this.closeCompanyRegModal();
-    },
-
-    loadTelegramUser() {
-        const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const nameEl = document.getElementById('user-name');
-        const handleEl = document.getElementById('user-handle');
-        const idEl = document.getElementById('user-id-display');
-        const imgEl = document.getElementById('avatar-img');
-        const initialsEl = document.getElementById('avatar-initials');
-
-        const dName = document.getElementById('drawer-user-name');
-        const dHandle = document.getElementById('drawer-user-handle');
-        const dImg = document.getElementById('drawer-avatar-img');
-        const dInitials = document.getElementById('drawer-avatar-initials');
-
-        const pName = document.getElementById('profile-name');
-        const pHandle = document.getElementById('profile-handle');
-        const pId = document.getElementById('profile-id');
-        const pImg = document.getElementById('profile-img');
-        const pInitials = document.getElementById('profile-initials');
-
-        if (user) {
-            const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Comandante';
-            const handle = user.username ? `@${user.username}` : `ID: ${user.id}`;
-            const idText = `ID: ${user.id}`;
-            const initials = ((user.first_name || 'U').charAt(0) + (user.last_name ? user.last_name.charAt(0) : '')).toUpperCase();
-
-            if (nameEl) nameEl.innerText = fullName;
-            if (handleEl) handleEl.innerText = handle;
-            if (idEl) idEl.innerText = idText;
-
-            if (dName) dName.innerText = fullName;
-            if (dHandle) dHandle.innerText = handle;
-
-            if (pName) pName.innerText = `${fullName} 👑`;
-            if (pHandle) pHandle.innerText = handle;
-            if (pId) pId.innerText = idText;
-
-            if (user.photo_url) {
-                [imgEl, dImg, pImg].forEach(img => {
-                    if (img) { img.src = user.photo_url; img.classList.remove('hidden'); }
-                });
-                [initialsEl, dInitials, pInitials].forEach(init => {
-                    if (init) init.classList.add('hidden');
-                });
-            } else {
-                [initialsEl, dInitials, pInitials].forEach(init => {
-                    if (init) init.innerText = initials;
-                });
-            }
-        } else {
-            const mockName = "Tom Mastercloud";
-            const mockHandle = "@Heytomhadir2310";
-            const mockId = "ID: 8269470905";
-
-            if (nameEl) nameEl.innerText = mockName;
-            if (handleEl) handleEl.innerText = mockHandle;
-            if (idEl) idEl.innerText = mockId;
-
-            if (dName) dName.innerText = `${mockName} 👑`;
-            if (dHandle) dHandle.innerText = mockHandle;
-
-            if (pName) pName.innerText = `${mockName} 👑`;
-            if (pHandle) pHandle.innerText = mockHandle;
-            if (pId) pId.innerText = mockId;
-
-            [initialsEl, dInitials, pInitials].forEach(init => {
-                if (init) init.innerText = "TM";
-            });
-        }
-    },
-
-    loadAffiliateLink() {
-        const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const userId = user ? user.id : '8269470905';
-        const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
-        const el = document.getElementById('affiliate-link-text');
-        if (el) el.innerText = link;
-    },
-
-    copyAffiliateLink() {
-        const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const userId = user ? user.id : '8269470905';
-        const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
-        this.copyText(link);
-    },
-
-    logout() {
-        if (confirm(this.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) {
-            if (window.Telegram?.WebApp) {
-                window.Telegram.WebApp.close();
-            } else {
-                alert(this.currentLang === 'es' ? "Sesión finalizada." : "Session terminated.");
-                location.reload();
-            }
-        }
-    },
-
-    async apiGet(path) {
-        const initData = window.Telegram?.WebApp?.initData || '';
-        try {
-            const res = await fetch(`${CONFIG.API_BASE}${path}`, {
-                headers: { 'X-Telegram-Init-Data': initData }
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            return await res.json();
-        } catch (err) {
-            return null;
-        }
-    },
-
-    setStat(id, value) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        el.innerText = (value === null || value === undefined || value === '') ? '0' : value;
-    },
-
-    async loadStats() {
-        // FIX FASE 1.2: sin datos reales del backend, se muestra "0" / "—".
-        // Nunca se rellenan métricas con cifras ficticias (antes: 24 / 7,200 / 142 / 19 / 58).
-        const data = await this.apiGet(`/stats?context=${this.activeContext}`);
-        this.setStat('stat-subs-count', data?.subscribers ?? 0);
-        this.setStat('stat-revenue-count', data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐');
-        this.setStat('stat-verified', data?.verified ?? '—');
-        this.setStat('stat-expelled', data?.expelled ?? '—');
-        this.setStat('stat-purges', data?.purges ?? '—');
-
-        const profileBal = document.getElementById('profile-balance-stars');
-        if (profileBal) {
-            profileBal.innerText = data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐';
-        }
-    },
-
-    async loadChannels() {
-        // FIX FASE 1.2: sin conexión real al backend se muestra la lista vacía,
-        // nunca canales de ejemplo inventados.
-        const data = await this.apiGet('/channels');
-        this.state.channels = (data && data.channels) || [];
-        this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
-        this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels'));
-    },
-
-    async loadGroups() {
-        // FIX FASE 1.2: lista vacía real cuando no hay backend disponible.
-        const data = await this.apiGet('/groups');
-        this.state.groups = (data && data.groups) || [];
-        this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
-        this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups'));
-    },
-
-    async loadSubscribers() {
-        // FIX FASE 1.2: lista vacía real cuando no hay backend disponible.
-        const data = await this.apiGet('/subscribers');
-        this.state.subscribers = (data && data.subscribers) || [];
-        this.renderSubscriberList(this.state.subscribers);
-    },
-
-    populateSelect(id, list, emptyLabel) {
-        const sel = document.getElementById(id);
-        if (!sel) return;
-        if (!list || list.length === 0) {
-            sel.innerHTML = `<option value="">${emptyLabel}</option>`;
-            return;
-        }
-        sel.innerHTML = list.map(c => `<option value="${c.id}">${c.type === 'channel' ? '📢' : '🛡️'} ${c.title} (ID: ${c.id})</option>`).join('');
-    },
-
-    generateSparkline(data, color) {
-        const width = 300, height = 75;
-        if (!data || data.length < 2) return '';
-        const c = color || '#00f3ff';
-        const max = Math.max(...data), min = Math.min(...data);
-        const range = (max - min) || 1;
-        const stepX = width / (data.length - 1);
-        const pts = data.map((v, i) => [i * stepX, height - ((v - min) / range) * (height - 12) - 6]);
-        const line = pts.map((p, i) => (i === 0 ? `M${p[0].toFixed(1)},${p[1].toFixed(1)}` : `L${p[0].toFixed(1)},${p[1].toFixed(1)}`)).join(' ');
-        const area = `${line} L${width},${height} L0,${height} Z`;
-        const gid = `spark-${Math.random().toString(36).slice(2, 9)}`;
-        return `<svg viewBox="0 0 ${width} ${height}" class="w-full h-full overflow-visible" preserveAspectRatio="none">
-            <defs>
-                <linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="${c}" stop-opacity="0.4"/>
-                    <stop offset="100%" stop-color="${c}" stop-opacity="0"/>
-                </linearGradient>
-            </defs>
-            <path d="${area}" fill="url(#${gid})"/>
-            <path d="${line}" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>`;
-    },
-
-    chatCardTemplate(chat) {
-        const isChannel = chat.type === 'channel';
-        const licenseActive = chat.license_status === 'active';
-        const statusHtml = licenseActive
-            ? `<span class="text-emerald-400 font-bold text-[10px] shrink-0">${this.t('license_active')}</span>`
-            : `<button onclick="app.renewLicense('${chat.id}')" class="bg-rose-500/20 text-rose-400 border border-rose-500/50 px-2.5 py-1 rounded-lg text-[10px] font-bold hover:bg-rose-500/30 active:scale-95 transition shrink-0">${this.t('license_renew')}</button>`;
-
-        const deltaHtml = (chat.joined != null)
-            ? `<span class="text-emerald-400">+${chat.joined}</span> <span class="text-rose-400 ml-1.5">-${chat.left}</span>`
-            : `<span class="text-neutral-500">—</span>`;
-
-        return `
-        <div class="glass-panel p-3.5 space-y-2.5" data-chat-id="${chat.id}">
-            <div class="flex items-center justify-between gap-2">
-                <div class="flex items-center gap-2 min-w-0">
-                    <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff]/25 to-[#ff00ff]/25 flex items-center justify-center shrink-0 overflow-hidden border border-white/10">
-                        <i class="fa-solid ${isChannel ? 'fa-tower-broadcast' : 'fa-shield-halved'} text-[#00f3ff] text-xs"></i>
+<!DOCTYPE html>
+<!-- THE BUNKER — COMMAND OS v7.0 — Edición Profesional Completa -->
+<html lang="es" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>The Bunker - Command OS</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="min-h-screen flex flex-col justify-between p-4 max-w-md mx-auto selection:bg-[#00f3ff] selection:text-black relative pb-16">
+    <div class="tron-grid"></div>
+    <div class="grid-fade"></div>
+
+    <!-- Menú Deslizante Lateral (Cyber-Drawer OS con Opciones ChatKeeper Style) -->
+    <div id="cyber-drawer" class="fixed inset-0 z-[150] bg-black/80 backdrop-blur-md hidden transition-opacity duration-300">
+        <div class="drawer-content fixed top-0 left-0 bottom-0 w-72 p-5 flex flex-col justify-between shadow-[15px_0_30px_rgba(0,243,255,0.15)] z-[160]">
+            <div class="space-y-5">
+                <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                    <div class="flex items-center space-x-2.5">
+                        <img src="logo.png" onerror="this.onerror=null; this.classList.add('hidden'); document.getElementById('bunker-drawer-fallback-logo').classList.remove('hidden');" class="w-8 h-8 object-contain drop-shadow-[0_0_8px_rgba(0,243,255,0.6)]" alt="Bunker Logo">
+                        <div id="bunker-drawer-fallback-logo" class="hidden w-8 h-8 rounded-lg bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-0.5 shadow-[0_0_10px_rgba(0,243,255,0.5)]">
+                            <div class="w-full h-full bg-black rounded-[6px] flex items-center justify-center font-black text-sm text-[#00f3ff]">B</div>
+                        </div>
+                        <div>
+                            <span class="font-extrabold text-sm text-theme-main tracking-wider uppercase font-sans">BUNKER OS</span>
+                            <p class="text-[8px] text-theme-muted tracking-widest uppercase">Command Suite</p>
+                        </div>
                     </div>
-                    <div class="min-w-0">
-                        <p class="text-xs font-bold text-theme-main truncate max-w-[130px]">${chat.title}</p>
-                        <p class="text-[9px] text-theme-muted font-mono flex items-center gap-1"><i class="fa-solid fa-user text-[8px]"></i> ${chat.members ?? '0'}</p>
-                    </div>
+                    <button onclick="app.toggleDrawer(false)" class="text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
                 </div>
-                ${statusHtml}
+
+                <!-- Enlaces del Menú Lateral -->
+                <nav class="space-y-1.5 font-medium">
+                    <button onclick="app.switchTab('dashboard'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                        <i class="fa-solid fa-chart-line text-[#00f3ff] w-5"></i>
+                        <span data-i18n="nav_dash">Telemetría & Stats</span>
+                    </button>
+                    <button onclick="app.switchTab('channels'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                        <i class="fa-solid fa-tower-broadcast text-[#00f3ff] w-5"></i>
+                        <span data-i18n="nav_channels">Estudio de Canales</span>
+                    </button>
+                    <button onclick="app.switchTab('groups'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                        <i class="fa-solid fa-shield-halved text-[#00f3ff] w-5"></i>
+                        <span data-i18n="nav_groups">Matriz de Grupos</span>
+                    </button>
+                    <button onclick="app.switchTab('watchdog'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                        <i class="fa-solid fa-user-clock text-[#ff00ff] w-5"></i>
+                        <span data-i18n="nav_watchdog">Auditor Suscripciones</span>
+                    </button>
+                    <button onclick="app.switchTab('plans'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                        <i class="fa-solid fa-gem text-amber-400 w-5"></i>
+                        <span data-i18n="nav_plans">Membresías & Pasarelas</span>
+                    </button>
+                    <button onclick="app.switchTab('affiliates'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                        <i class="fa-solid fa-network-wired text-[#ff00ff] w-5"></i>
+                        <span data-i18n="nav_aff">Red de Afiliados</span>
+                    </button>
+                </nav>
+
+                <!-- Menú Auxiliar de Asistencia y Registro (Estilo ChatKeeper) -->
+                <div class="border-t border-neutral-800 pt-3 space-y-1.5 text-xs text-neutral-300">
+                    <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
+                        <i class="fa-regular fa-user text-[#00f3ff] w-5"></i> <span data-i18n="menu_my_profile">My profile</span>
+                    </button>
+                    <button onclick="app.openHelpModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
+                        <i class="fa-regular fa-circle-question text-[#00f3ff] w-5"></i> <span data-i18n="menu_help">Help & Support</span>
+                    </button>
+                    <button onclick="app.openCompanyRegModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
+                        <i class="fa-regular fa-building text-[#00f3ff] w-5"></i> <span data-i18n="menu_company_reg">Company registration</span>
+                    </button>
+                </div>
             </div>
-            <div class="h-16 w-full">${this.generateSparkline(chat.activity || [5, 15, 10, 25, 20, 30], isChannel ? '#00f3ff' : '#39ff88')}</div>
-            <div class="flex items-center justify-between border-t border-neutral-800 pt-2 font-mono">
-                <span class="text-[9px]">${deltaHtml}</span>
-                <button onclick="app.configureChat('${chat.id}')" class="text-[9px] text-[#00f3ff] font-bold uppercase flex items-center gap-1 hover:text-white transition">
-                    <i class="fa-solid fa-gear"></i> ${this.t('configure')}
+
+            <!-- GABINETE DE USUARIO AL PIE -->
+            <div class="border-t border-neutral-800 pt-3 space-y-2.5">
+                <!-- Selector Light / Dark Mode -->
+                <div class="theme-switch-container flex items-center justify-between p-1 bg-black/60 rounded-xl border border-neutral-800 text-xs">
+                    <button onclick="app.setTheme('light')" id="theme-btn-light" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition">
+                        <i class="fa-regular fa-sun text-amber-400"></i> <span data-i18n="theme_light">Light</span>
+                    </button>
+                    <button onclick="app.setTheme('dark')" id="theme-btn-dark" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 transition">
+                        <i class="fa-regular fa-moon text-[#00f3ff]"></i> <span data-i18n="theme_dark">Dark</span>
+                    </button>
+                </div>
+
+                <div class="glass-panel p-2.5 rounded-2xl flex items-center justify-between">
+                    <div class="flex items-center space-x-2.5 min-w-0">
+                        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] flex items-center justify-center font-bold text-xs text-black shrink-0 overflow-hidden relative">
+                            <span id="drawer-avatar-initials">TM</span>
+                            <img id="drawer-avatar-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
+                        </div>
+                        <div class="min-w-0">
+                            <p id="drawer-user-name" class="text-xs font-bold text-theme-main truncate">Tom Mastercloud 👑</p>
+                            <p id="drawer-user-handle" class="text-[10px] text-[#00f3ff] truncate">@Heytomhadir2310</p>
+                        </div>
+                    </div>
+                    <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-8 h-8 rounded-xl bg-neutral-800 hover:bg-[#00f3ff]/20 text-[#00f3ff] flex items-center justify-center transition active:scale-95 shrink-0 border border-neutral-700">
+                        <i class="fa-solid fa-gear text-xs"></i>
+                    </button>
+                </div>
+                <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition active:scale-95">
+                    <i class="fa-solid fa-arrow-right-from-bracket"></i>
+                    <span data-i18n="btn_logout">Cerrar Sesión</span>
                 </button>
             </div>
-        </div>`;
-    },
+        </div>
+    </div>
 
-    renderChatList(containerId, list, emptyMsg) {
-        const el = document.getElementById(containerId);
-        if (!el) return;
-        if (!list || list.length === 0) {
-            el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono">${emptyMsg}</div>`;
-            return;
-        }
-        el.innerHTML = list.map(c => this.chatCardTemplate(c)).join('');
-    },
+    <!-- Header Táctico y Conectividad con Logo Oficial -->
+    <div class="space-y-4 relative z-10">
+        <header class="glass-panel p-4 shadow-2xl relative overflow-hidden flex items-center justify-between">
+            <div class="absolute -right-10 -top-10 w-32 h-32 bg-[#00f3ff]/10 rounded-full blur-2xl pointer-events-none"></div>
 
-    subscriberTemplate(s) {
-        const daysLeft = s.days_left ?? 0;
-        const statusColor = daysLeft > 5 ? 'emerald-400' : (daysLeft > 0 ? 'amber-400' : 'rose-400');
-        const daysLabel = daysLeft > 0 ? `${daysLeft} ${this.currentLang === 'es' ? 'días restantes' : 'days left'}` : 'Período de Gracia 🔴';
-        return `
-        <div class="bg-black/60 p-3.5 rounded-xl border border-neutral-800 flex items-center justify-between font-mono">
-            <div>
-                <p class="text-white font-bold">@${s.username}</p>
-                <p class="text-[10px] text-neutral-400">${s.plan_name} (${s.price} ⭐)</p>
+            <div class="flex items-center space-x-3 relative z-10">
+                <button onclick="app.toggleDrawer(true)" class="w-9 h-9 rounded-xl bg-black/60 border border-neutral-700 text-[#00f3ff] flex items-center justify-center hover:bg-[#00f3ff]/20 active:scale-95 transition-all shadow-[0_0_10px_rgba(0,243,255,0.2)]">
+                    <i class="fa-solid fa-bars text-sm"></i>
+                </button>
+                <div class="relative">
+                    <img src="logo.png" onerror="this.onerror=null; this.classList.add('hidden'); document.getElementById('bunker-header-fallback-logo').classList.remove('hidden');" class="w-10 h-10 object-contain drop-shadow-[0_0_10px_rgba(0,243,255,0.7)]" alt="Bunker Logo">
+                    <div id="bunker-header-fallback-logo" class="hidden w-10 h-10 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-0.5 shadow-lg">
+                        <div class="w-full h-full bg-black rounded-[10px] flex items-center justify-center font-extrabold text-sm text-[#00f3ff]">B</div>
+                    </div>
+                </div>
+                <div>
+                    <div class="flex items-center gap-1.5">
+                        <h1 id="user-name" class="font-extrabold text-xs tracking-wide text-theme-main uppercase">Tom Mastercloud</h1>
+                        <i class="fa-solid fa-circle-check text-[10px] text-[#00f3ff]"></i>
+                    </div>
+                    <p id="user-handle" class="text-[11px] text-[#00f3ff]">@Heytomhadir2310</p>
+                    <p id="user-id-display" class="text-[9px] text-theme-muted font-mono">ID: 8269470905</p>
+                </div>
             </div>
-            <div class="text-right">
-                <span class="text-${statusColor} font-bold text-xs">${daysLabel}</span>
+
+            <button id="btn-connect-wallet" onclick="app.connectWallet()" class="bg-black/60 border border-[#00f3ff] text-[#00f3ff] px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center shadow-[0_0_10px_rgba(0,243,255,0.3)] active:scale-95 hover:bg-[#00f3ff]/20 relative z-10">
+                <span id="wallet-status-dot" class="w-2 h-2 rounded-full bg-amber-500 mr-1.5 animate-pulse"></span>
+                <span id="wallet-btn-text">TON Wallet</span>
+            </button>
+        </header>
+
+        <!-- Selector de Contexto Rápido -->
+        <div class="glass-panel p-3 flex items-center justify-between">
+            <div class="flex items-center space-x-2">
+                <i class="fa-solid fa-network-wired text-[#00f3ff] animate-pulse"></i>
+                <span class="text-xs text-theme-muted uppercase font-semibold" data-i18n="active_context">Entorno Activo:</span>
             </div>
-        </div>`;
-    },
+            <select id="target-context-select" onchange="app.switchContext(this.value)" class="bg-black/80 border border-neutral-700 text-[#00f3ff] text-xs font-bold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-[#00f3ff]">
+                <option value="global">🌐 Búnker OS (Global)</option>
+                <option value="channels">📢 Canales Vinculados</option>
+                <option value="groups">🛡️ Comunidades Blindadas</option>
+            </select>
+        </div>
 
-    renderSubscriberList(list) {
-        const el = document.getElementById('watchdog-list');
-        if (!el) return;
-        if (!list || list.length === 0) {
-            el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono">${this.t('no_subs')}</div>`;
-            return;
-        }
-        el.innerHTML = list.map(s => this.subscriberTemplate(s)).join('');
-    },
+        <!-- ============================================================== -->
+        <!-- CONTENEDOR MULTI-VISTA (COMMAND OS) -->
+        <!-- ============================================================== -->
+        <main id="tab-container">
 
-    renewLicense(chatId) {
-        this.switchTab('plans');
-    },
+            <!-- VISTA 1: TELEMETRÍA & STATS REALES -->
+            <section id="view-dashboard" class="space-y-4 tab-view">
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="glass-panel p-4 text-center border-t-2 border-t-[#00f3ff]">
+                        <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="stat_subs">Suscriptores VIP</p>
+                        <h3 id="stat-subs-count" class="font-extrabold text-2xl text-theme-main mt-1">24</h3>
+                        <span class="text-[9px] text-neutral-500" data-i18n="live_sync">Sincronización en vivo</span>
+                    </div>
+                    <div class="glass-panel p-4 text-center border-t-2 border-t-[#ff00ff]">
+                        <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="stat_revenue">Ingresos Stars</p>
+                        <h3 id="stat-revenue-count" class="font-extrabold text-2xl text-amber-300 mt-1">7,200 ⭐</h3>
+                        <span class="text-[9px] text-[#00f3ff]" data-i18n="stat_source">Datos reales del bot</span>
+                    </div>
+                </div>
 
-    configureChat(chatId) {
-        this.switchTab('channels');
-    },
+                <!-- Métricas Avanzadas -->
+                <div class="glass-panel p-5 space-y-3">
+                    <h3 class="text-xs font-extrabold text-[#00f3ff] uppercase tracking-wider flex items-center justify-between">
+                        <span><i class="fa-solid fa-chart-pie mr-2"></i><span data-i18n="dash_telemetry">Telemetría del Búnker</span></span>
+                        <span class="text-[9px] text-emerald-400 font-semibold" data-i18n="online_tag">En Línea 🟢</span>
+                    </h3>
+                    <div class="grid grid-cols-3 gap-2 text-center pt-1 font-mono">
+                        <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                            <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_verified">Verificados</span>
+                            <p id="stat-verified" class="text-xs font-bold text-theme-main mt-0.5">142</p>
+                        </div>
+                        <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                            <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_expelled">Expulsados</span>
+                            <p id="stat-expelled" class="text-xs font-bold text-rose-400 mt-0.5">19</p>
+                        </div>
+                        <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                            <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_purges">Purgas</span>
+                            <p id="stat-purges" class="text-xs font-bold text-cyan-300 mt-0.5">58</p>
+                        </div>
+                    </div>
+                </div>
 
-    openChannelStudio() {
-        const targetLink = document.getElementById('studio-target-link')?.value || '';
-        const price = document.getElementById('studio-stars-price')?.value || '150';
-        const days = document.getElementById('studio-duration-days')?.value || '30';
+                <!-- Perímetro Operativo -->
+                <div class="glass-panel p-5 space-y-2.5 text-xs text-theme-main">
+                    <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider pb-1 border-b border-neutral-800 flex items-center justify-between">
+                        <span><i class="fa-solid fa-shield-halved text-[#00f3ff] mr-2"></i><span data-i18n="perimeter_title">Perímetro Operativo</span></span>
+                        <span class="text-[10px] text-neutral-500 font-normal" data-i18n="perimeter_sub">Supervisión 24/7</span>
+                    </h3>
+                    <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="captcha_label">Aduana Captcha:</span> <strong id="telemetry-captcha" class="text-emerald-400">Activa 🟢</strong></p>
+                    <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="autolower_label">Radar AutoLower:</span> <strong id="telemetry-autolower" class="text-emerald-400">2% Atenuado 🟢</strong></p>
+                    <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="shield_label">Escudo Antinota:</span> <strong id="telemetry-shield" class="text-emerald-400">Blindado 🟢</strong></p>
+                    <p class="flex justify-between pb-1"><span data-i18n="broadcast_label">Difusión Recurrente:</span> <strong id="telemetry-broadcast" class="text-emerald-400">Worker Activo 🟢</strong></p>
+                </div>
 
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
-        }
+                <p class="text-center text-[8px] text-theme-muted tracking-widest uppercase pt-1 font-semibold" data-i18n="footer_copyright">The Bunker Command OS © 2026 — Cloud Media Management</p>
+            </section>
 
-        alert(this.currentLang === 'es'
-            ? `📡 Sincronización del Estudio:\n\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink}`
-            : `📡 Studio Synchronized:\n\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink}`);
-    },
+            <!-- VISTA 2: ESTUDIO DE CANALES (STUDIO OS) -->
+            <section id="view-channels" class="space-y-4 tab-view hidden">
+                <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_channels">Canales Conectados</h3>
+                        <button onclick="app.loadChannels()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition">
+                            <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
+                        </button>
+                    </div>
+                    <div id="channels-list" class="space-y-3"></div>
+                </div>
 
-    async fetchTonBalance(address) {
-        try {
-            const res = await fetch(`https://toncenter.com/api/v2/getAddressBalance?address=${address}`);
-            const data = await res.json();
-            if (data.ok) return (parseInt(data.result) / 1e9).toFixed(2);
-        } catch (e) { console.error('Error TON:', e); }
-        return '0.00';
-    },
+                <div class="glass-panel p-5 space-y-4">
+                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                        <div>
+                            <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="studio_badge">ESTUDIO DE BROADCAST</span>
+                            <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="studio_title">Ajustes del Canal</h2>
+                        </div>
+                        <button onclick="app.openChannelStudio()" class="bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/50 px-3 py-1.5 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center gap-1.5">
+                            <i class="fa-solid fa-satellite"></i> <span data-i18n="btn_open_studio">Abrir Estudio</span>
+                        </button>
+                    </div>
 
-    async updateWalletUI(account) {
-        const btnText = document.getElementById('wallet-btn-text');
-        const statusDot = document.getElementById('wallet-status-dot');
-        if (!btnText || !statusDot) return;
+                    <div class="space-y-1.5">
+                        <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="channel_owner_label">Canal Bajo tu ID de Creador:</label>
+                        <select id="channel-owner-select" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
+                            <option value="" data-i18n="select_your_channel">Selecciona tu canal...</option>
+                        </select>
+                    </div>
 
-        if (account) {
-            const addr = account.address;
-            btnText.innerText = this.currentLang === 'es' ? 'Cargando...' : 'Loading...';
-            statusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 mr-1.5 shadow-[0_0_8px_rgba(52,211,153,0.8)] animate-pulse';
+                    <div class="bg-black/50 p-4 rounded-2xl border border-neutral-800 space-y-3">
+                        <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-2">
+                            <i class="fa-solid fa-link"></i> <span data-i18n="vip_delivery_title">Enlace VIP & Entrega Automática</span>
+                        </h4>
+                        <div class="space-y-2 text-xs">
+                            <div>
+                                <span class="text-[10px] text-theme-muted" data-i18n="vip_target_label">Destino VIP (Canal Privado / Recurso):</span>
+                                <input type="text" id="studio-target-link" placeholder="https://t.me/+..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <span class="text-[10px] text-theme-muted" data-i18n="stars_rate_label">Tarifa en Stars (XTR):</span>
+                                    <input type="number" id="studio-stars-price" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                </div>
+                                <div>
+                                    <span class="text-[10px] text-theme-muted" data-i18n="duration_days_label">Duración (Días):</span>
+                                    <input type="number" id="studio-duration-days" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-            const balance = await this.fetchTonBalance(addr);
-            const shortAddr = addr.slice(0, 4) + '...' + addr.slice(-4);
-            btnText.innerText = `${shortAddr} | ${balance} TON`;
-            statusDot.classList.remove('animate-pulse');
-        } else {
-            btnText.innerText = 'TON Wallet';
-            statusDot.className = 'w-2 h-2 rounded-full bg-amber-500 mr-1.5 animate-pulse';
-        }
-    },
+            <!-- VISTA 3: MATRIZ DE GRUPOS (PERIMETER CONSOLE) -->
+            <section id="view-groups" class="space-y-4 tab-view hidden">
+                <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_groups">Comunidades Conectadas</h3>
+                        <button onclick="app.loadGroups()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition">
+                            <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
+                        </button>
+                    </div>
+                    <div id="groups-list" class="space-y-3"></div>
+                </div>
 
-    async initTonConnect() {
-        const TonConnectClass = window.TON_CONNECT_UI?.TonConnectUI || window.TonConnectUI;
-        if (!this.tonConnectUI && TonConnectClass) {
-            try {
-                this.tonConnectUI = new TonConnectClass({
-                    manifestUrl: CONFIG.TON_MANIFEST,
-                    uiPreferences: { theme: 'DARK' }
-                });
+                <div class="glass-panel p-5 space-y-4">
+                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                        <div>
+                            <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="perimeter_badge">PERÍMETRO COMUNITARIO</span>
+                            <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="groups_title">Control de Grupos</h2>
+                        </div>
+                        <span class="text-xs text-emerald-400 font-semibold" data-i18n="shielded_mode">Modo Blindado 🟢</span>
+                    </div>
 
-                await this.tonConnectUI.connectionRestored;
-                this.updateWalletUI(this.tonConnectUI.connected ? this.tonConnectUI.account : null);
-                this.tonConnectUI.onStatusChange(async (wallet) => this.updateWalletUI(wallet?.account));
-            } catch (err) {
-                console.warn('[TON Connect]', err);
-            }
-        }
-    },
+                    <div class="space-y-1.5">
+                        <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="group_owner_label">Comunidad Administrada:</label>
+                        <select id="group-owner-select" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
+                            <option value="" data-i18n="select_your_community">Selecciona tu comunidad...</option>
+                        </select>
+                    </div>
 
-    async connectWallet() {
-        try {
-            if (!this.tonConnectUI) await this.initTonConnect();
-            if (!this.tonConnectUI) return;
+                    <!-- Switches de Seguridad Perimetral Interactivos -->
+                    <div class="space-y-2.5 text-xs">
+                        <div onclick="app.toggleSecuritySwitch('captcha')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                            <div>
+                                <p class="text-theme-main font-bold" data-i18n="captcha_pro">Aduana Captcha Pro</p>
+                                <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
+                            </div>
+                            <span id="switch-captcha" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
+                        </div>
+                        <div onclick="app.toggleSecuritySwitch('autolower')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                            <div>
+                                <p class="text-theme-main font-bold" data-i18n="autolower_title">AutoLower de Micrófonos (2%)</p>
+                                <p class="text-[10px] text-theme-muted" data-i18n="autolower_desc">Atenuación acústica de fondo</p>
+                            </div>
+                            <span id="switch-autolower" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
+                        </div>
+                        <div onclick="app.toggleSecuritySwitch('shield')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                            <div>
+                                <p class="text-theme-main font-bold" data-i18n="shield_title">Escudo Antinota</p>
+                                <p class="text-[10px] text-theme-muted" data-i18n="shield_desc">Corte de pantalla compartida</p>
+                            </div>
+                            <span id="switch-shield" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
+                        </div>
+                        <div onclick="app.toggleSecuritySwitch('linklock')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                            <div>
+                                <p class="text-theme-main font-bold" data-i18n="linklock_title">Cerradura de Enlaces Web</p>
+                                <p class="text-[10px] text-theme-muted" data-i18n="linklock_desc">Purga inmediata de URLs no permitidas</p>
+                            </div>
+                            <span id="switch-linklock" class="text-rose-400 font-bold">BLOQUEADO 🔴</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-            if (this.tonConnectUI.connected) {
-                if (confirm(this.currentLang === 'es' ? "¿Desconectar TON Wallet?" : "Disconnect TON Wallet?")) {
-                    await this.tonConnectUI.disconnect();
-                    this.updateWalletUI(null);
-                }
-            } else {
-                await this.tonConnectUI.openModal();
-            }
-        } catch (e) {
-            console.error('Wallet error:', e);
-        }
-    },
+            <!-- VISTA 4: AUDITOR DE SUSCRIPCIONES (SUB WATCHDOG) -->
+            <section id="view-watchdog" class="space-y-4 tab-view hidden">
+                <div class="glass-panel p-5 space-y-4">
+                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                        <div>
+                            <span class="text-[10px] text-[#ff00ff] uppercase tracking-wider font-bold" data-i18n="watchdog_badge">MONITOR DE MIEMBROS</span>
+                            <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="watchdog_title">Aviso de Suscripciones</h2>
+                        </div>
+                        <span class="text-xs text-[#00f3ff] font-semibold"><i class="fa-solid fa-clock-rotate-left mr-1"></i><span data-i18n="live_badge">En Vivo</span></span>
+                    </div>
 
-    async executeTonPayment(plan) {
-        const nanoAmount = CONFIG.PRICES[plan]?.ton || '1000000000';
-        const tx = {
-            validUntil: Math.floor(Date.now() / 1000) + 300,
-            messages: [{ address: CONFIG.TON_WALLET, amount: nanoAmount }]
-        };
-        try {
-            const result = await this.tonConnectUI.sendTransaction(tx);
-            if (result) {
-                alert(this.currentLang === 'es' ? "✅ Transacción exitosa. ¡Activación procesada!" : "✅ Transaction successful.");
-                this.closeCheckout();
-            }
-        } catch (err) {
-            console.warn('Tx cancelada:', err);
-        }
-    },
+                    <p class="text-xs text-theme-muted leading-relaxed" data-i18n="watchdog_desc">
+                        Supervisa en tiempo real el tiempo restante de cada miembro suscrito y las alertas de renovación antes del Auto-Kick automático.
+                    </p>
 
-    pagarPlan(plan, method) {
-        this.selectedPlan = plan;
-        const priceInfo = CONFIG.PRICES[plan];
-        if (!priceInfo) return;
+                    <div id="watchdog-list" class="space-y-2.5 text-xs"></div>
+                </div>
+            </section>
 
-        if (method === 'stars') {
-            const param = plan === 'pro' ? 'sub_pro' : 'sub_ultra';
-            if (window.Telegram?.WebApp) {
-                window.Telegram.WebApp.openTelegramLink(`https://t.me/${CONFIG.BOT_USERNAME}?start=${param}`);
-                setTimeout(() => window.Telegram.WebApp.close(), 300);
-            }
-        } else if (method === 'paypal') {
-            window.open(`https://paypal.me/Felipecosmic/${priceInfo.usd}`, '_blank');
-        } else if (method === 'ton') {
-            if (!this.tonConnectUI || !this.tonConnectUI.connected) {
-                alert(this.currentLang === 'es' ? "⚠️ Conecta tu TON Wallet primero." : "⚠️ Connect your TON Wallet first.");
-                this.connectWallet();
-                return;
-            }
-            this.executeTonPayment(plan);
-        } else if (method === 'external') {
-            const label = plan === 'pro' ? `PRO ($${priceInfo.usd}.00)` : `ULTRA PRO ($${priceInfo.usd}.00)`;
-            const planEl = document.getElementById('checkout-plan-name');
-            if (planEl) planEl.innerText = label;
-            document.getElementById('modal-external-checkout')?.classList.remove('hidden');
-        }
-    },
+            <!-- VISTA 5: MEMBRESÍAS & PASARELAS DE PAGO -->
+            <section id="view-plans" class="space-y-4 tab-view hidden">
+                <div class="text-center mt-1">
+                    <h2 class="text-xs font-bold tracking-widest text-theme-muted uppercase" data-i18n="plans_title">Membresías de Comunidad</h2>
+                    <div class="w-16 h-1 bg-gradient-to-r from-transparent via-[#00f3ff] to-transparent mx-auto mt-2 opacity-50"></div>
+                </div>
 
-    processOneClickPay(gateway) {
-        const priceUsd = `${CONFIG.PRICES[this.selectedPlan]?.usd || 5}.00`;
-        const links = {
-            skrill: `https://skrill.me/rq/Felipe%20Rafael/${priceUsd}/USD?key=7AR7OlqodIdbV_WU4hSXJ435Na1`,
-            binance: 'https://app.binance.com/uni-qr/request-to-pay?billOrderId=452405181270605824&billType=request_a_payment'
-        };
-        if (links[gateway]) {
-            window.open(links[gateway], '_blank', 'noopener,noreferrer');
-            this.closeCheckout();
-        }
-    },
+                <!-- PLAN BÁSICO -->
+                <div class="glass-panel p-5 border-t-2 border-t-neutral-500 shadow-[0_10px_30px_rgba(0,0,0,0.5)] relative overflow-hidden opacity-90">
+                    <div class="mb-3 text-center">
+                        <span class="text-[10px] text-theme-muted font-bold tracking-wider" data-i18n="basic_badge">ACCESO GRATUITO</span>
+                        <h3 class="font-extrabold text-theme-main text-lg uppercase mt-1" data-i18n="basic_title">Plan BÁSICO</h3>
+                        <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="basic_desc">Comandos de moderación limitados. Sin automatización de radar ni soporte prioritario.</p>
+                    </div>
+                    <div class="relative z-10 mt-2">
+                        <button class="w-full bg-neutral-800/80 text-neutral-400 border border-neutral-700 font-bold text-xs py-3 rounded-xl cursor-default flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-check-circle text-emerald-500"></i> <span data-i18n="btn_free_active">Activo por defecto</span>
+                        </button>
+                    </div>
+                </div>
 
-    openManualPayment() {
-        document.getElementById('modal-external-checkout')?.classList.add('hidden');
-        document.getElementById('modal-manual-payment')?.classList.remove('hidden');
-    },
+                <!-- PLAN PRO — 500 Stars (XTR) -->
+                <div class="glass-panel p-5 border-t-2 border-t-[#00f3ff] shadow-[0_10px_30px_rgba(0,243,255,0.05)] relative overflow-hidden">
+                    <div class="mb-4 text-center">
+                        <span class="text-[10px] text-[#00f3ff] font-bold tracking-wider" data-i18n="pro_badge">PLAN MENSUAL</span>
+                        <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-cyan" data-i18n="pro_title">Plan PRO</h3>
+                        <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="pro_desc">Automatización total, moderación de voz y comandos ilimitados para tu comunidad.</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2.5 relative z-10">
+                        <button onclick="app.pagarPlan('pro', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-star text-amber-300"></i> 500 XTR
+                        </button>
+                        <button onclick="app.pagarPlan('pro', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-gem text-white"></i> TON Crypto
+                        </button>
+                        <button onclick="app.pagarPlan('pro', 'paypal')" class="bg-indigo-600/90 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-brands fa-paypal"></i> PayPal
+                        </button>
+                        <button onclick="app.pagarPlan('pro', 'external')" class="bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-600 font-bold text-xs py-3 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-globe"></i> Skrill / Bin
+                        </button>
+                    </div>
+                </div>
 
-    closeCheckout() {
-        document.getElementById('modal-external-checkout')?.classList.add('hidden');
-        document.getElementById('modal-manual-payment')?.classList.add('hidden');
-    },
+                <!-- PLAN ULTRA PRO — 800 Stars (XTR) -->
+                <div class="glass-panel p-5 border-t-2 border-t-[#ff00ff] shadow-[0_10px_30px_rgba(255,0,255,0.05)] relative overflow-hidden">
+                    <div class="mb-4 text-center">
+                        <span class="text-[10px] text-[#ff00ff] font-bold tracking-wider" data-i18n="ultra_badge">ACCESO ILIMITADO</span>
+                        <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-magenta" data-i18n="ultra_title">ULTRA PRO</h3>
+                        <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="ultra_desc">Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.</p>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2.5 relative z-10">
+                        <button onclick="app.pagarPlan('ultra', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-star text-amber-300"></i> 800 XTR
+                        </button>
+                        <button onclick="app.pagarPlan('ultra', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-gem text-white"></i> TON Crypto
+                        </button>
+                        <button onclick="app.pagarPlan('ultra', 'paypal')" class="bg-indigo-600/90 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-brands fa-paypal"></i> PayPal
+                        </button>
+                        <button onclick="app.pagarPlan('ultra', 'external')" class="bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-600 font-bold text-xs py-3 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-globe"></i> Skrill / Bin
+                        </button>
+                    </div>
+                </div>
+            </section>
 
-    copyText(text) {
-        navigator.clipboard.writeText(text).then(() => {
-            alert(this.currentLang === 'es' ? "¡Copiado al portapapeles! 📋" : "Copied to clipboard! 📋");
-        });
-    }
-};
+            <!-- VISTA 6: AFILIADOS & REFERIDOS -->
+            <section id="view-affiliates" class="space-y-4 tab-view hidden">
+                <div class="glass-panel p-5 space-y-4">
+                    <h3 class="text-xs font-extrabold text-[#ff00ff] uppercase tracking-wider flex items-center gap-2">
+                        <i class="fa-solid fa-network-wired text-base"></i> <span data-i18n="aff_title">Red de Afiliados & Comisiones</span>
+                    </h3>
+                    <p class="text-xs text-theme-muted leading-relaxed" data-i18n="aff_desc">
+                        Comparte tu enlace único de promotor. Cada vez que una comunidad adquiera un plan PRO o ULTRA a través de tu recomendación, recibes comisiones instantáneas en Telegram Stars directo a tu balance.
+                    </p>
+                    <div class="bg-black/60 p-3 rounded-xl border border-neutral-800 flex items-center justify-between">
+                        <span id="affiliate-link-text" class="text-[11px] font-mono text-[#00f3ff] truncate mr-2">https://t.me/thebunkerapp_bot?start=ref_8269470905</span>
+                        <button onclick="app.copyAffiliateLink()" class="bg-[#ff00ff]/20 text-[#ff00ff] hover:bg-[#ff00ff]/30 border border-[#ff00ff]/50 px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition active:scale-90">
+                            <i class="fa-regular fa-copy"></i>
+                        </button>
+                    </div>
+                </div>
+            </section>
 
-window.app = app;
-document.addEventListener('DOMContentLoaded', () => app.init());
+            <!-- VISTA 7: GABINETE DE PERFIL & BALANCE (ESTILO CHATKEEPER CABINET) -->
+            <section id="view-profile" class="space-y-4 tab-view hidden">
+                <div class="glass-panel p-6 text-center space-y-4 relative overflow-hidden">
+                    <div class="w-20 h-20 rounded-full mx-auto bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-1 shadow-[0_0_25px_rgba(0,243,255,0.4)]">
+                        <div class="w-full h-full rounded-full bg-black flex items-center justify-center font-extrabold text-2xl text-white uppercase overflow-hidden relative">
+                            <span id="profile-initials">TM</span>
+                            <img id="profile-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
+                        </div>
+                    </div>
+                    <div>
+                        <h2 id="profile-name" class="font-extrabold text-lg text-theme-main">Tom Mastercloud 👑</h2>
+                        <p id="profile-handle" class="text-xs text-[#00f3ff]">@Heytomhadir2310</p>
+                        <p id="profile-id" class="text-[10px] text-theme-muted font-mono mt-0.5">ID: 8269470905</p>
+                    </div>
+
+                    <!-- Tarjetas de Balance y Descuentos -->
+                    <div class="grid grid-cols-2 gap-2 text-left pt-2">
+                        <div class="bg-black/50 p-3 rounded-xl border border-neutral-800">
+                            <span class="text-[10px] text-theme-muted font-medium" data-i18n="profile_balance_stars">Balance Stars:</span>
+                            <p id="profile-balance-stars" class="text-sm font-extrabold text-amber-300 mt-0.5">7,200 ⭐</p>
+                        </div>
+                        <div class="bg-black/50 p-3 rounded-xl border border-neutral-800">
+                            <span class="text-[10px] text-theme-muted font-medium" data-i18n="profile_discount">Descuento Activo:</span>
+                            <p class="text-sm font-extrabold text-emerald-400 mt-0.5">15% VIP</p>
+                        </div>
+                    </div>
+
+                    <div class="bg-black/50 p-3.5 rounded-xl border border-neutral-800 text-left space-y-2 text-xs">
+                        <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_rank">Rango Operativo:</span><strong class="text-theme-main">Arquitecto Maestro</strong></p>
+                        <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_reg_date">Fecha de Registro:</span><strong class="text-neutral-300 font-mono">2026-01-03</strong></p>
+                        <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_account_status">Estado de Cuenta:</span><strong class="text-emerald-400">Verificado 🟢</strong></p>
+                    </div>
+
+                    <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
+                        <i class="fa-solid fa-power-off"></i> <span data-i18n="btn_terminate_sessions">Cerrar Todas las Sesiones Activas</span>
+                    </button>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- MODAL 1: AYUDA Y SOPORTE TÉCNICO -->
+    <div id="modal-help" class="hidden fixed inset-0 z-[220] bg-black/85 backdrop-blur-md flex justify-center items-center p-4">
+        <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
+            <button onclick="app.closeHelpModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+            <div class="space-y-2 pt-2">
+                <a href="https://t.me/TheBunkerSupportChat" target="_blank" class="flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
+                    <i class="fa-solid fa-headset text-base w-5 text-center"></i> <span data-i18n="help_support_chat">Technical support chat</span>
+                </a>
+                <button onclick="app.openInstructionModal()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
+                    <i class="fa-solid fa-book-open text-base w-5 text-center"></i> <span data-i18n="help_instruction">Instruction & Manuals</span>
+                </button>
+                <button onclick="app.openRegexModal()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
+                    <i class="fa-solid fa-code text-base w-5 text-center"></i> <span data-i18n="help_test_regex">Test Regex / Pattern Checker</span>
+                </button>
+            </div>
+            <div class="border-t border-neutral-800 pt-3 space-y-3">
+                <div class="flex gap-4 border-b border-neutral-800 pb-2 text-xs font-bold">
+                    <button onclick="app.switchHelpTab('error')" id="help-tab-error" class="text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]" data-i18n="tab_report_error">Report an error</button>
+                    <button onclick="app.switchHelpTab('review')" id="help-tab-review" class="text-neutral-400 pb-1" data-i18n="tab_leave_review">Leave a review</button>
+                </div>
+                <!-- Contenido de Reporte / Reseña -->
+                <div id="help-content-error" class="space-y-3 text-xs">
+                    <div id="star-rating-container" class="hidden flex justify-center gap-1 text-amber-400 text-lg py-1">
+                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(1)"></i>
+                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(2)"></i>
+                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(3)"></i>
+                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(4)"></i>
+                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(5)"></i>
+                    </div>
+                    <div onclick="document.getElementById('help-file-input').click()" class="border border-dashed border-neutral-700 rounded-xl p-4 text-center cursor-pointer hover:border-[#00f3ff] transition bg-black/30">
+                        <i class="fa-solid fa-hand-pointer text-neutral-400 mb-1"></i>
+                        <p id="help-file-label" class="text-[11px] text-neutral-300 font-bold" data-i18n="click_attach">Click to attach file</p>
+                        <input type="file" id="help-file-input" class="hidden" onchange="app.handleFileAttach(this)">
+                    </div>
+                    <div class="bg-black/50 border border-neutral-800 rounded-xl p-2.5 space-y-1">
+                        <div class="flex gap-3 text-neutral-400 text-xs pb-1 border-b border-neutral-800">
+                            <button class="hover:text-white font-bold">B</button>
+                            <button class="hover:text-white italic">I</button>
+                            <button class="hover:text-white line-through">S</button>
+                            <button class="hover:text-white underline">U</button>
+                            <button class="hover:text-white">😎</button>
+                        </div>
+                        <textarea id="help-textarea" maxlength="4096" class="w-full bg-transparent text-white text-xs focus:outline-none resize-none h-16" placeholder="Describe the error or review..." data-i18n-placeholder="report_placeholder"></textarea>
+                        <div id="help-char-counter" class="text-right text-[9px] text-neutral-500 font-mono">0 / 4096</div>
+                    </div>
+                    <div class="flex gap-2 pt-2">
+                        <button onclick="app.closeHelpModal()" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase" data-i18n="btn_cancel">Cancel</button>
+                        <button onclick="app.sendHelpReport()" class="flex-1 bg-[#00f3ff] text-black py-2.5 rounded-xl font-extrabold uppercase" data-i18n="btn_send">Send message</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 2: INSTRUCCIONES Y MANUAL -->
+    <div id="modal-instruction" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+        <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-md text-white relative space-y-4 max-h-[85vh] overflow-y-auto">
+            <button onclick="app.closeInstructionModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+            <h2 class="text-base font-extrabold text-[#00f3ff] uppercase tracking-wider" data-i18n="instruction_title">Instrucciones & Manual Oficial</h2>
+            <div class="space-y-3 text-xs text-neutral-300 leading-relaxed font-sans">
+                <p data-i18n="instruction_body">The Bunker Command OS gestiona comunidades en Telegram con una automatización de nivel industrial. Conecta tus chats, administra permisos en tiempo real y audita licencias con pagos nativos en Telegram Stars.</p>
+                <div class="bg-black/40 p-3 rounded-xl border border-neutral-800 space-y-1.5">
+                    <p class="font-bold text-white" data-i18n="instruction_steps_title">🚀 Pasos iniciales:</p>
+                    <p data-i18n="instruction_step1">1. Añade el bot como administrador en tu canal o grupo.</p>
+                    <p data-i18n="instruction_step2">2. Sincroniza el ID desde el Estudio de Canales.</p>
+                    <p data-i18n="instruction_step3">3. Configura tarifas en XTR y pasarelas tácticas.</p>
+                </div>
+            </div>
+            <button onclick="app.closeInstructionModal()" class="w-full bg-neutral-800 text-white py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_close">Cerrar</button>
+        </div>
+    </div>
+
+    <!-- MODAL 3: PRUEBA DE REGEX -->
+    <div id="modal-regex" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+        <div class="glass-panel border-t-2 border-t-[#ff00ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
+            <button onclick="app.closeRegexModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+            <h2 class="text-base font-extrabold text-[#ff00ff] uppercase tracking-wider" data-i18n="regex_title">Regular Expression Check</h2>
+            <div class="space-y-3 text-xs">
+                <div>
+                    <label class="text-[10px] text-neutral-400 uppercase" data-i18n="regex_pattern_label">Regular expression:</label>
+                    <input type="text" id="regex-pattern" placeholder="^/match.*" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1">
+                </div>
+                <div>
+                    <label class="text-[10px] text-neutral-400 uppercase" data-i18n="regex_string_label">String to test:</label>
+                    <input type="text" id="regex-string" placeholder="Text to evaluate..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1">
+                </div>
+                <div class="flex items-center gap-2 pt-1">
+                    <input type="checkbox" id="regex-lowercase" class="rounded bg-black border-neutral-700">
+                    <label for="regex-lowercase" class="text-neutral-300" data-i18n="regex_lowercase_label">Cast to lowercase</label>
+                </div>
+            </div>
+            <div class="flex gap-2 pt-2">
+                <button onclick="document.getElementById('regex-pattern').value=''; document.getElementById('regex-string').value='';" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_reset">Reset</button>
+                <button onclick="app.testRegex()" class="flex-1 bg-[#ff00ff] text-black py-2.5 rounded-xl font-extrabold uppercase text-xs" data-i18n="btn_test">Test</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 4: REGISTRO DE COMPAÑÍA / ORGANIZACIÓN -->
+    <div id="modal-company-reg" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+        <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4 text-center">
+            <button onclick="app.closeCompanyRegModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+            <div class="w-16 h-16 rounded-2xl bg-[#00f3ff]/20 border border-[#00f3ff]/40 mx-auto flex items-center justify-center text-[#00f3ff] text-2xl">
+                <i class="fa-regular fa-building"></i>
+            </div>
+            <h3 class="font-extrabold text-base text-white" data-i18n="company_reg_title">Company Registration</h3>
+            <p class="text-xs text-neutral-400 leading-relaxed" data-i18n="company_reg_body">Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.</p>
+            <button onclick="app.startCompanyReg()" class="w-full bg-[#00f3ff] text-black py-3 rounded-xl font-extrabold text-xs uppercase shadow-[0_0_15px_rgba(0,243,255,0.4)] transition active:scale-95" data-i18n="company_reg_start">Start registration</button>
+        </div>
+    </div>
+
+    <!-- MODAL 5: PASARELAS DE PAGO EXTERNAS -->
+    <div id="modal-external-checkout" class="hidden fixed inset-0 z-[200] bg-black/95 backdrop-blur-md flex justify-center items-center p-4 transition-all">
+        <div class="glass-panel border-t-2 border-t-[#00f3ff] shadow-[0_0_35px_rgba(0,243,255,0.15)] rounded-3xl p-6 w-full max-w-md text-white relative">
+            <button onclick="app.closeCheckout()" class="absolute top-4 right-4 bg-neutral-800 text-neutral-400 hover:text-white hover:bg-red-600 rounded-full w-8 h-8 flex items-center justify-center font-bold transition-all"><i class="fa-solid fa-times"></i></button>
+            <h2 class="text-xl font-extrabold text-center mb-1 text-[#00f3ff] uppercase tracking-wider" data-i18n="tactical_gateways">PASARELAS TÁCTICAS</h2>
+            <p class="text-center text-[10px] text-theme-muted mb-5">Procesando Plan: <span id="checkout-plan-name" class="text-white font-bold">...</span></p>
+
+            <div class="space-y-3 mt-2">
+                <button onclick="app.processOneClickPay('skrill')" class="w-full bg-black border border-[#ff00ff] text-[#ff00ff] font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(255,0,255,0.1)] hover:bg-[#ff00ff]/10 active:scale-95 transition-all"><i class="fa-solid fa-wallet text-xl"></i> Skrill</button>
+                <button onclick="app.processOneClickPay('binance')" class="w-full bg-black border border-[#f3ba2f] text-[#f3ba2f] font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(243,186,47,0.1)] hover:bg-[#f3ba2f]/10 active:scale-95 transition-all"><i class="fa-brands fa-bitcoin text-xl"></i> Binance Pay</button>
+                <button onclick="app.openManualPayment()" class="w-full bg-black border border-emerald-500 text-emerald-400 font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.1)] hover:bg-emerald-500/10 active:scale-95 transition-all mt-2"><i class="fa-solid fa-building-columns text-xl"></i> <span data-i18n="bank_transfer_title">Pago Manual Bancario</span></button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODAL 6: PAGO MANUAL BANCARIO -->
+    <div id="modal-manual-payment" class="hidden fixed inset-0 z-[210] bg-black/95 backdrop-blur-md flex justify-center items-center p-4">
+        <div class="glass-panel border-t-2 border-t-emerald-500 shadow-[0_0_35px_rgba(16,185,129,0.15)] rounded-3xl p-6 w-full max-w-md text-white relative">
+            <button onclick="app.closeCheckout()" class="absolute top-4 right-4 bg-neutral-800 text-neutral-400 hover:text-white rounded-full w-8 h-8 flex items-center justify-center font-bold transition-all"><i class="fa-solid fa-times"></i></button>
+            <h2 class="text-lg font-extrabold text-emerald-400 mb-4 uppercase tracking-wider text-center" data-i18n="bank_transfer_title">TRANSFERENCIA BANCARIA</h2>
+            <div class="bg-black/50 border border-neutral-800 rounded-xl p-4 space-y-3 text-xs">
+                <p class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-theme-muted">Banco:</span><strong class="text-white">Lead Bank (DollarApp)</strong></p>
+                <p class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-theme-muted">Titular:</span><strong class="text-white">FELIPE R. SANCHEZ P.</strong></p>
+                <div class="flex justify-between items-center pb-1">
+                    <span class="text-theme-muted">Nro Cuenta:</span>
+                    <div class="flex items-center gap-3">
+                        <strong class="text-emerald-400 text-sm tracking-wider">215069784455</strong>
+                        <button onclick="app.copyText('215069784455')" class="text-white hover:text-emerald-400 text-lg transition active:scale-90"><i class="fa-regular fa-copy"></i></button>
+                    </div>
+                </div>
+            </div>
+            <div class="mt-6"><button onclick="app.closeCheckout()" class="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3.5 rounded-xl uppercase transition shadow-md">CERRAR</button></div>
+        </div>
+    </div>
+
+    <!-- BOTÓN FLOTANTE 100% ARRASTRABLE (DRAGGABLE UX) -->
+    <div id="floating-lang-btn" class="w-10 h-10 rounded-full bg-[#05070c] border border-[#00f3ff] shadow-[0_0_20px_rgba(0,243,255,0.6)] flex flex-col items-center justify-center cursor-pointer select-none active:scale-95">
+        <span id="lang-indicator" class="text-[10px] font-black text-[#00f3ff] uppercase pointer-events-none">ES</span>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

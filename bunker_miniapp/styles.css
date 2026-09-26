@@ -25,6 +25,9 @@ html, body {
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
     transition: background-color 0.3s ease, color 0.3s ease;
+    transform: none;
+    filter: none;
+    perspective: none;
 }
 
 body {
@@ -35,12 +38,26 @@ body {
     box-shadow: 0 0 50px rgba(0, 243, 255, 0.05);
 }
 
-.text-theme-main {
-    color: var(--text-primary);
+.text-theme-main { color: var(--text-primary); }
+.text-theme-muted { color: var(--text-secondary); }
+
+/* Adaptación universal de inputs al tema activo */
+input[type="text"], input[type="number"], select, textarea {
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    background-color: var(--card-bg) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--panel-border) !important;
+    transition: all 0.2s ease-in-out;
 }
 
-.text-theme-muted {
-    color: var(--text-secondary);
+input:focus, select:focus, textarea:focus {
+    box-shadow: 0 0 15px rgba(0, 243, 255, 0.25);
+    border-color: #00f3ff !important;
+}
+
+select option {
+    background-color: #0a0c12;
+    color: #00f3ff;
 }
 
 /* Efecto Glassmorphism Refinado */
@@ -54,13 +71,12 @@ body {
     transition: background 0.3s ease, border-color 0.3s ease;
 }
 
-/* Drawer background adaptativo */
 .drawer-content {
     background: var(--bg-deep);
     border-right: 1px solid var(--panel-border);
 }
 
-/* Títulos 3D Limpios */
+/* Títulos Neón 3D */
 .text-3d-cyan {
     text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(0, 243, 255, 0.4);
 }
@@ -96,7 +112,7 @@ body {
     z-index: -1;
 }
 
-/* Transiciones Suaves para Pestañas */
+/* Transiciones Suaves para Vistas */
 .tab-view {
     animation: tabFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
@@ -121,27 +137,7 @@ body {
     to { transform: translateX(0); }
 }
 
-/* Inputs y Selectores */
-input[type="text"], input[type="number"], select {
-    font-family: 'Plus Jakarta Sans', sans-serif;
-    transition: all 0.2s ease-in-out;
-}
-
-input:focus, select:focus {
-    box-shadow: 0 0 15px rgba(0, 243, 255, 0.25);
-    border-color: #00f3ff !important;
-}
-
-select option {
-    background-color: #0a0c12;
-    color: #00f3ff;
-}
-
-/* Botón Flotante Arrastrable (Draggable Puro en Viewport)
-   FIX CRÍTICO: el botón desaparecía al tocarlo por un conflicto de compositing
-   entre `position: fixed` y `backdrop-filter` en WebViews móviles (Telegram Android/iOS).
-   Se le da su propia capa de composición estable con translateZ(0) + will-change,
-   y se evita el recálculo de backdrop-filter durante el arrastre (ver HTML: fondo sólido). */
+/* Botón Flotante Arrastrable (Draggable Puro en Viewport) */
 #floating-lang-btn {
     user-select: none;
     -webkit-user-select: none;
@@ -156,16 +152,6 @@ select option {
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
     isolation: isolate;
-}
-
-/* Ningún ancestro de elementos fixed debe crear un stacking context propio
-   (transform / filter / perspective / will-change en body o contenedores raíz
-   invalida `position: fixed` respecto al viewport). Se deja explícito aquí
-   como regla de guardia para futuras ediciones de este archivo. */
-html, body {
-    transform: none;
-    filter: none;
-    perspective: none;
 }
 
 /* Scrollbar Minimalista */
