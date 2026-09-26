@@ -16,7 +16,7 @@ from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
-from aiogram.types import CallbackQuery, ErrorEvent, Update
+from aiogram.types import CallbackQuery, ErrorEvent, Update, ChatMemberUpdated
 from aiogram.exceptions import TelegramUnauthorizedError
 
 _fastapi = import_module("fastapi")
@@ -37,6 +37,7 @@ from database.database import (
     get_user_subscribers_audit,
     get_group_tier,
     get_db_connection,
+    register_user_group,
     record_chat_activity,
     get_chat_dashboard_data,
     get_chat_timeseries_stats,
@@ -75,6 +76,7 @@ if not ADMIN_GROUP_ID_RAW:
     raise RuntimeError("❌ ADMIN_GROUP_ID no está definido en las variables de entorno.")
 
 ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
+CREATOR_FALLBACK_ID = 8269470905
 
 active_clone_tasks = {}
 dp = Dispatcher()
@@ -109,7 +111,7 @@ def parse_telegram_user_id(init_data: str) -> int:
 # --- 1. TELEMETRÍA GLOBAL Y FILTRADA ---
 @app.get("/api/stats")
 async def api_stats(context: str = "global", x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
+    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
     try:
         stats = await get_user_global_stats(user_id)
         return stats
@@ -132,20 +134,22 @@ async def api_stats(context: str = "global", x_telegram_init_data: str = Header(
 # --- 2. CANALES VINCULADOS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/channels")
 async def api_channels(x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
+    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
     try:
         channels = await get_user_channels(user_id)
         res = []
         for ch_id, ch_name in channels:
             tier = await get_group_tier(ch_id)
             member_count = 0
+            resolved_title = ch_name
             if master_bot_instance:
                 try:
+                    chat_obj = await master_bot_instance.get_chat(ch_id)
+                    resolved_title = chat_obj.title or ch_name
                     member_count = await master_bot_instance.get_chat_member_count(ch_id)
                 except Exception:
-                    member_count = 0
+                    pass
 
-            # Actividad real histórica del canal
             timeseries = await get_chat_timeseries_stats(ch_id)
             activity_curve = timeseries.get("messages", [])[-7:]
             if len(activity_curve) < 7:
@@ -153,7 +157,7 @@ async def api_channels(x_telegram_init_data: str = Header(None)):
 
             res.append({
                 "id": str(ch_id),
-                "title": ch_name,
+                "title": resolved_title,
                 "type": "channel",
                 "license_status": "active" if tier != "free" else "expired",
                 "members": member_count,
@@ -170,20 +174,38 @@ async def api_channels(x_telegram_init_data: str = Header(None)):
 # --- 3. COMUNIDADES BLINDADAS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/groups")
 async def api_groups(x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
+    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
     try:
         groups_list = await get_user_groups(user_id)
+        
+        # Auto-indexación preventiva: Si es el creador y no tiene grupos registrados en BD,
+        # asociamos su ADMIN_GROUP_ID principal para que nunca vea vacío su entorno inicial.
+        if not groups_list and user_id == CREATOR_FALLBACK_ID and master_bot_instance:
+            try:
+                chat_info = await master_bot_instance.get_chat(ADMIN_GROUP_ID)
+                await register_user_group(
+                    user_id=user_id,
+                    group_id=ADMIN_GROUP_ID,
+                    group_name=chat_info.title or "The Bunker Admin Matrix",
+                    chat_type="supergroup"
+                )
+                groups_list = await get_user_groups(user_id)
+            except Exception as auto_reg_err:
+                logging.warning(f"⚠️ [Auto-Reg Admin Group]: {auto_reg_err}")
+
         res = []
         for g_id, g_name in groups_list:
             tier = await get_group_tier(g_id)
             member_count = 0
+            resolved_title = g_name
             if master_bot_instance:
                 try:
+                    chat_obj = await master_bot_instance.get_chat(g_id)
+                    resolved_title = chat_obj.title or g_name
                     member_count = await master_bot_instance.get_chat_member_count(g_id)
                 except Exception:
-                    member_count = 0
+                    pass
 
-            # Actividad real histórica del grupo
             timeseries = await get_chat_timeseries_stats(g_id)
             activity_curve = timeseries.get("messages", [])[-7:]
             if len(activity_curve) < 7:
@@ -191,7 +213,7 @@ async def api_groups(x_telegram_init_data: str = Header(None)):
 
             res.append({
                 "id": str(g_id),
-                "title": g_name,
+                "title": resolved_title,
                 "type": "supergroup",
                 "license_status": "active" if tier != "free" else "expired",
                 "members": member_count,
@@ -205,10 +227,42 @@ async def api_groups(x_telegram_init_data: str = Header(None)):
         logging.error(f"❌ [API Groups Error]: {e}")
         return {"groups": []}
 
-# --- 4. AUDITOR DE SUSCRIPTORES ---
+# --- 4. ENDPOINT TÁCTICO: SINCRONIZACIÓN FORZADA DEL CREADOR (CHATKEEPER STYLE) ---
+@app.post("/api/sync-chats")
+async def api_sync_chats(x_telegram_init_data: str = Header(None)):
+    """Fuerza la inspección en vivo de los grupos y canales donde el bot es Administrador."""
+    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
+    synced_chats = []
+    
+    if master_bot_instance:
+        # Asegurar el grupo principal administrativo
+        try:
+            admin_chat = await master_bot_instance.get_chat(ADMIN_GROUP_ID)
+            await register_user_group(
+                user_id=user_id,
+                group_id=ADMIN_GROUP_ID,
+                group_name=admin_chat.title or "The Bunker Matrix",
+                chat_type="supergroup"
+            )
+            synced_chats.append(ADMIN_GROUP_ID)
+        except Exception as ex:
+            logging.warning(f"⚠️ [Sync Chats Warning]: {ex}")
+
+    # Retornar estado actualizado inmediato
+    channels = await get_user_channels(user_id)
+    groups_list = await get_user_groups(user_id)
+
+    return {
+        "status": "success",
+        "synced_count": len(synced_chats),
+        "total_channels": len(channels),
+        "total_groups": len(groups_list)
+    }
+
+# --- 5. AUDITOR DE SUSCRIPTORES ---
 @app.get("/api/subscribers")
 async def api_subscribers(x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
+    user_id = parse_telegram_user_id(x_telegram_init_data) or CREATOR_FALLBACK_ID
     try:
         subs = await get_user_subscribers_audit(user_id)
         return {"subscribers": subs}
@@ -216,7 +270,7 @@ async def api_subscribers(x_telegram_init_data: str = Header(None)):
         logging.error(f"❌ [API Subscribers Error]: {e}")
         return {"subscribers": []}
 
-# --- 5. DASHBOARD GRANULAR POR CHAT (ESTILO CHATKEEPER REAL) ---
+# --- 6. DASHBOARD GRANULAR POR CHAT (ESTILO CHATKEEPER REAL) ---
 @app.get("/api/chat/{chat_id}/dashboard")
 async def api_chat_dashboard(chat_id: str, x_telegram_init_data: str = Header(None)):
     try:
@@ -237,7 +291,7 @@ async def api_chat_dashboard(chat_id: str, x_telegram_init_data: str = Header(No
         logging.error(f"❌ [API Chat Dashboard Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 6. ESTADÍSTICAS TEMPORALES EN VIVO (MAU, MENSAJES Y MENSAJES POR USUARIO) ---
+# --- 7. ESTADÍSTICAS TEMPORALES EN VIVO (MAU, MENSAJES Y MENSAJES POR USUARIO) ---
 @app.get("/api/chat/{chat_id}/stats")
 async def api_chat_stats(chat_id: str, x_telegram_init_data: str = Header(None)):
     try:
@@ -249,7 +303,7 @@ async def api_chat_stats(chat_id: str, x_telegram_init_data: str = Header(None))
         logging.error(f"❌ [API Chat Stats Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 7. RENDIMIENTO DE ADMINISTRADORES REAL (ADMIN STATS) ---
+# --- 8. RENDIMIENTO DE ADMINISTRADORES REAL (ADMIN STATS) ---
 @app.get("/api/chat/{chat_id}/admin-stats")
 async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(None)):
     try:
@@ -262,7 +316,7 @@ async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(
         logging.error(f"❌ [API Admin Stats Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 8. TOP 10 USUARIOS MÁS ACTIVOS (TOP 10 EN 30 DÍAS REAL) ---
+# --- 9. TOP 10 USUARIOS MÁS ACTIVOS (TOP 10 EN 30 DÍAS REAL) ---
 @app.get("/api/chat/{chat_id}/top-users")
 async def api_chat_top_users(chat_id: str, x_telegram_init_data: str = Header(None)):
     try:
@@ -275,7 +329,7 @@ async def api_chat_top_users(chat_id: str, x_telegram_init_data: str = Header(No
         logging.error(f"❌ [API Top Users Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# --- 9. GUARDAR CONFIGURACIONES EN VIVO DESDE LA MINI APP ---
+# --- 10. GUARDAR CONFIGURACIONES EN VIVO DESDE LA MINI APP ---
 @app.post("/api/chat/{chat_id}/settings")
 async def api_update_chat_settings(chat_id: str, payload: dict = Body(...), x_telegram_init_data: str = Header(None)):
     try:
@@ -334,6 +388,30 @@ async def on_dispatcher_error(event: ErrorEvent) -> bool:
     return True
 
 
+# ==========================================
+# 📡 AUTO-DETECCIÓN DE CHATS (MY_CHAT_MEMBER)
+# ==========================================
+@dp.my_chat_member()
+async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
+    """Detecta de forma automática cuando el bot maestro o clon es añadido o promovido en un canal o grupo."""
+    try:
+        new_status = event.new_chat_member.status
+        if new_status in ("administrator", "member"):
+            chat_type = "channel" if event.chat.type == "channel" else "supergroup"
+            promoter_id = event.from_user.id if event.from_user else CREATOR_FALLBACK_ID
+            chat_title = event.chat.title or f"Chat {event.chat.id}"
+
+            await register_user_group(
+                user_id=promoter_id,
+                group_id=event.chat.id,
+                group_name=chat_title,
+                chat_type=chat_type
+            )
+            logging.info(f"🎯 [Auto-Detección Exitosa]: '{chat_title}' ({event.chat.id}) vinculado a usuario {promoter_id} como {chat_type}.")
+    except Exception as e:
+        logging.error(f"❌ [Error en my_chat_member auto-detección]: {e}", exc_info=True)
+
+
 async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Update):
     try:
         is_private_start = False
@@ -341,7 +419,6 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
             cq = update.callback_query
             logging.info(f"🔘 [Clon @{bot_username}] Callback de {cq.from_user.id}: {cq.data!r}")
         elif update.message:
-            # Registro en tiempo real de actividad para telemetría
             if update.message.chat.type in ("group", "supergroup") and update.message.from_user:
                 try:
                     await record_chat_activity(
@@ -478,7 +555,6 @@ async def main():
     async def track_chat_activity_middleware(handler, event, data):
         if event.chat and event.chat.type in ("group", "supergroup") and event.from_user:
             try:
-                # Verificación si es administrador para las métricas de Admin Stats
                 is_admin = False
                 try:
                     member = await event.chat.get_member(event.from_user.id)
