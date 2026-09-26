@@ -7,3 +7,5 @@ __pycache__/
 *.db-wal
 *.db-shm
 sesion_fresca.py
+# Local Netlify folder
+.netlify
