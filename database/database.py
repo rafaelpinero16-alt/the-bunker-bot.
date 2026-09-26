@@ -41,6 +41,30 @@ def init_db():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
+        # 🛡️ Tablas principales que faltaban y causaban el error
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                full_name TEXT,
+                topic_id INTEGER,
+                warnings INTEGER DEFAULT 0,
+                is_banned INTEGER DEFAULT 0
+            )
+        """)
+        
+        cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (word TEXT UNIQUE)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS approved_groups (
+                group_id INTEGER PRIMARY KEY,
+                tier TEXT DEFAULT 'free',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            )
+        """)
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS group_settings (
                 group_id INTEGER PRIMARY KEY,
