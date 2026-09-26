@@ -65,7 +65,7 @@ const translations = {
         nav_aff: "Red de Afiliados",
         studio_badge: "ESTUDIO DE BROADCAST",
         studio_title: "Ajustes del Canal",
-        btn_open_studio: "Abrir Estudio",
+        btn_open_studio: "Guardar Ajustes",
         channel_owner_label: "Canal Bajo tu ID de Creador:",
         vip_delivery_title: "Enlace VIP & Entrega Automática",
         vip_target_label: "Destino VIP (Canal Privado / Recurso):",
@@ -126,7 +126,10 @@ const translations = {
         btn_test: "Probar",
         report_placeholder: "Describe el error o tu reseña...",
         select_your_channel: "Selecciona tu canal...",
-        select_your_community: "Selecciona tu comunidad..."
+        select_your_community: "Selecciona tu comunidad...",
+        admin_stats_title: "Rendimiento de Administradores",
+        top_users_title: "Top 10 Usuarios Activos (30 días)",
+        active_modules_label: "Módulos Activos"
     },
     en: {
         plans_title: "Community Memberships",
@@ -177,7 +180,7 @@ const translations = {
         nav_aff: "Affiliate Network",
         studio_badge: "BROADCAST STUDIO",
         studio_title: "Channel Settings",
-        btn_open_studio: "Open Studio",
+        btn_open_studio: "Save Settings",
         channel_owner_label: "Channel under your Creator ID:",
         vip_delivery_title: "VIP Link & Automatic Delivery",
         vip_target_label: "VIP Target (Private Channel / Resource):",
@@ -238,7 +241,10 @@ const translations = {
         btn_test: "Test",
         report_placeholder: "Describe the error or review...",
         select_your_channel: "Select your channel...",
-        select_your_community: "Select your community..."
+        select_your_community: "Select your community...",
+        admin_stats_title: "Admin Performance",
+        top_users_title: "Top 10 Active Users (30 days)",
+        active_modules_label: "Active Modules"
     }
 };
 
@@ -249,6 +255,7 @@ const app = {
     selectedPlan: 'pro',
     currentTab: 'dashboard',
     activeContext: 'global',
+    selectedChatId: null,
     securitySwitches: {
         captcha: true,
         autolower: true,
@@ -258,7 +265,11 @@ const app = {
     state: {
         channels: [],
         groups: [],
-        subscribers: []
+        subscribers: [],
+        currentChatDashboard: null,
+        currentChatStats: null,
+        currentChatAdmins: [],
+        currentChatTopUsers: []
     },
 
     init() {
@@ -329,7 +340,6 @@ const app = {
             if (e.type === 'touchstart') {
                 lastTouchTime = Date.now();
             } else if (e.type === 'mousedown') {
-                // Suprime clic sintético en teléfonos móviles
                 if (Date.now() - lastTouchTime < 600) return;
             }
 
@@ -417,16 +427,26 @@ const app = {
     switchContext(val) {
         this.activeContext = val;
         this.loadStats();
+
+        if (val === 'channels') {
+            this.switchTab('channels');
+        } else if (val === 'groups') {
+            this.switchTab('groups');
+        } else {
+            this.switchTab('dashboard');
+        }
+
         if (window.Telegram?.WebApp?.HapticFeedback) {
             window.Telegram.WebApp.HapticFeedback.selectionChanged();
         }
     },
 
-    toggleSecuritySwitch(key) {
+    async toggleSecuritySwitch(key) {
         this.securitySwitches[key] = !this.securitySwitches[key];
         const el = document.getElementById(`switch-${key}`);
+        const active = this.securitySwitches[key];
+
         if (el) {
-            const active = this.securitySwitches[key];
             if (active) {
                 el.className = "text-emerald-400 font-bold";
                 el.innerText = this.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢";
@@ -435,6 +455,14 @@ const app = {
                 el.innerText = this.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴";
             }
         }
+
+        const selectedGroup = document.getElementById('group-owner-select')?.value || this.selectedChatId;
+        if (selectedGroup) {
+            const payload = {};
+            payload[key] = active;
+            await this.apiPost(`/chat/${selectedGroup}/settings`, payload);
+        }
+
         if (window.Telegram?.WebApp?.HapticFeedback) {
             window.Telegram.WebApp.HapticFeedback.impactOccurred('medium');
         }
@@ -483,11 +511,11 @@ const app = {
         if (tab === 'error') {
             tabErr.className = "text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]";
             tabRev.className = "text-neutral-400 pb-1";
-            starContainer.classList.add('hidden');
+            starContainer?.classList.add('hidden');
         } else {
             tabRev.className = "text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]";
             tabErr.className = "text-neutral-400 pb-1";
-            starContainer.classList.remove('hidden');
+            starContainer?.classList.remove('hidden');
         }
     },
 
@@ -673,6 +701,26 @@ const app = {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
+            console.error(`[API GET ERROR] ${path}:`, err);
+            return null;
+        }
+    },
+
+    async apiPost(path, body) {
+        const initData = window.Telegram?.WebApp?.initData || '';
+        try {
+            const res = await fetch(`${CONFIG.API_BASE}${path}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Telegram-Init-Data': initData
+                },
+                body: JSON.stringify(body)
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return await res.json();
+        } catch (err) {
+            console.error(`[API POST ERROR] ${path}:`, err);
             return null;
         }
     },
@@ -685,70 +733,35 @@ const app = {
 
     async loadStats() {
         const data = await this.apiGet(`/stats?context=${this.activeContext}`);
-        this.setStat('stat-subs-count', data?.subscribers ?? 24);
-        this.setStat('stat-revenue-count', data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '7,200 ⭐');
-        this.setStat('stat-verified', data?.verified ?? 142);
-        this.setStat('stat-expelled', data?.expelled ?? 19);
-        this.setStat('stat-purges', data?.purges ?? 58);
+        this.setStat('stat-subs-count', data?.subscribers ?? 0);
+        this.setStat('stat-revenue-count', data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐');
+        this.setStat('stat-verified', data?.verified ?? 0);
+        this.setStat('stat-expelled', data?.expelled ?? 0);
+        this.setStat('stat-purges', data?.purges ?? 0);
 
         const profileBal = document.getElementById('profile-balance-stars');
         if (profileBal) {
-            profileBal.innerText = data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '7,200 ⭐';
+            profileBal.innerText = data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐';
         }
     },
 
     async loadChannels() {
         const data = await this.apiGet('/channels');
-        this.state.channels = (data && data.channels) || [
-            {
-                id: "-1002345678901",
-                title: "The Bunker Live Studio",
-                type: "channel",
-                license_status: "active",
-                members: "4,945",
-                activity: [10, 35, 60, 40, 85, 70, 95],
-                joined: 338,
-                left: 119
-            },
-            {
-                id: "-1009876543210",
-                title: "THE RED VAULT CHAT",
-                type: "channel",
-                license_status: "expired",
-                members: "792",
-                activity: [5, 12, 18, 10, 25, 45, 90],
-                joined: 33,
-                left: 58
-            }
-        ];
+        this.state.channels = (data && data.channels) || [];
         this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
         this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels'));
     },
 
     async loadGroups() {
         const data = await this.apiGet('/groups');
-        this.state.groups = (data && data.groups) || [
-            {
-                id: "-1005544332211",
-                title: "The Bunker Community",
-                type: "supergroup",
-                license_status: "active",
-                members: "1,425",
-                activity: [20, 40, 30, 70, 50, 65, 80],
-                joined: 24,
-                left: 6
-            }
-        ];
+        this.state.groups = (data && data.groups) || [];
         this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
         this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups'));
     },
 
     async loadSubscribers() {
         const data = await this.apiGet('/subscribers');
-        this.state.subscribers = (data && data.subscribers) || [
-            { username: "alex_trader", plan_name: "Pase Mensual VIP", price: 150, days_left: 28 },
-            { username: "crypto_sam", plan_name: "Pase Trimestral VIP", price: 400, days_left: 2 }
-        ];
+        this.state.subscribers = (data && data.subscribers) || [];
         this.renderSubscriberList(this.state.subscribers);
     },
 
@@ -810,7 +823,7 @@ const app = {
                 </div>
                 ${statusHtml}
             </div>
-            <div class="h-16 w-full">${this.generateSparkline(chat.activity || [5, 15, 10, 25, 20, 30], isChannel ? '#00f3ff' : '#39ff88')}</div>
+            <div class="h-16 w-full">${this.generateSparkline(chat.activity && chat.activity.length >= 2 ? chat.activity : [0, 0, 0, 0, 0], isChannel ? '#00f3ff' : '#39ff88')}</div>
             <div class="flex items-center justify-between border-t border-neutral-800 pt-2 font-mono">
                 <span class="text-[9px]">${deltaHtml}</span>
                 <button onclick="app.configureChat('${chat.id}')" class="text-[9px] text-[#00f3ff] font-bold uppercase flex items-center gap-1 hover:text-white transition">
@@ -860,22 +873,68 @@ const app = {
         this.switchTab('plans');
     },
 
-    configureChat(chatId) {
-        this.switchTab('channels');
+    async configureChat(chatId) {
+        this.selectedChatId = chatId;
+        await this.loadChatDashboard(chatId);
+        await this.loadChatStats(chatId);
+        await this.loadChatAdminStats(chatId);
+        await this.loadChatTopUsers(chatId);
+        this.switchTab('groups');
     },
 
-    openChannelStudio() {
+    // --- MÉTODOS GRANULARES CHATKEEPER ---
+    async loadChatDashboard(chatId) {
+        const data = await this.apiGet(`/chat/${chatId}/dashboard`);
+        if (data) {
+            this.state.currentChatDashboard = data;
+            const logEl = document.getElementById('chat-log-channel');
+            if (logEl) logEl.innerText = data.log_channel?.enabled ? `Enabled (${data.log_channel.channel_id})` : 'Disabled';
+        }
+    },
+
+    async loadChatStats(chatId) {
+        const data = await this.apiGet(`/chat/${chatId}/stats`);
+        if (data) {
+            this.state.currentChatStats = data;
+        }
+    },
+
+    async loadChatAdminStats(chatId) {
+        const data = await this.apiGet(`/chat/${chatId}/admin-stats`);
+        if (data && data.admins) {
+            this.state.currentChatAdmins = data.admins;
+        }
+    },
+
+    async loadChatTopUsers(chatId) {
+        const data = await this.apiGet(`/chat/${chatId}/top-users`);
+        if (data && data.top_users) {
+            this.state.currentChatTopUsers = data.top_users;
+        }
+    },
+
+    async openChannelStudio() {
         const targetLink = document.getElementById('studio-target-link')?.value || '';
-        const price = document.getElementById('studio-stars-price')?.value || '150';
-        const days = document.getElementById('studio-duration-days')?.value || '30';
+        const price = parseInt(document.getElementById('studio-stars-price')?.value || '150');
+        const days = parseInt(document.getElementById('studio-duration-days')?.value || '30');
+        const channelSelect = document.getElementById('channel-owner-select');
+        const selectedChannel = channelSelect?.value;
+
+        if (selectedChannel) {
+            await this.apiPost(`/chat/${selectedChannel}/settings`, {
+                target_link: targetLink,
+                stars_price: price,
+                duration_days: days
+            });
+        }
 
         if (window.Telegram?.WebApp?.HapticFeedback) {
             window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
         }
 
         alert(this.currentLang === 'es'
-            ? `📡 Sincronización del Estudio:\n\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink}`
-            : `📡 Studio Synchronized:\n\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink}`);
+            ? `📡 Sincronización del Estudio Exitosa:\n\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink || 'Guardado'}`
+            : `📡 Studio Sync Successful:\n\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink || 'Saved'}`);
     },
 
     async fetchTonBalance(address) {
