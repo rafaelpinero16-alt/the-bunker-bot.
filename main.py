@@ -19,53 +19,21 @@ load_dotenv()
 try:
     from fastapi import FastAPI, APIRouter, Header, HTTPException, Body  # type: ignore[import-not-found]
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - fallback for local tooling without FastAPI installed
+except ImportError:  # pragma: no cover
     class _FastAPIStub:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_middleware(self, *args, **kwargs):
-            pass
-
-        def include_router(self, *args, **kwargs):
-            pass
-
-        def on_event(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-
-        def get(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-
-        def post(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-
-        def exception_handler(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
+        def __init__(self, *args, **kwargs): pass
+        def add_middleware(self, *args, **kwargs): pass
+        def include_router(self, *args, **kwargs): pass
+        def on_event(self, *args, **kwargs): return lambda f: f
+        def get(self, *args, **kwargs): return lambda f: f
+        def post(self, *args, **kwargs): return lambda f: f
+        def exception_handler(self, *args, **kwargs): return lambda f: f
 
     class _APIRouterStub:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def add_api_route(self, *args, **kwargs):
-            pass
-
-        def get(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
-
-        def post(self, *args, **kwargs):
-            def decorator(func):
-                return func
-            return decorator
+        def __init__(self, *args, **kwargs): pass
+        def add_api_route(self, *args, **kwargs): pass
+        def get(self, *args, **kwargs): return lambda f: f
+        def post(self, *args, **kwargs): return lambda f: f
 
     class _HTTPExceptionStub(Exception):
         def __init__(self, status_code=None, detail=None, *args, **kwargs):
@@ -74,8 +42,7 @@ except ImportError:  # pragma: no cover - fallback for local tooling without Fas
             self.detail = detail
 
     class _CORSMiddlewareStub:
-        def __init__(self, *args, **kwargs):
-            pass
+        def __init__(self, *args, **kwargs): pass
 
     FastAPI = _FastAPIStub
     APIRouter = _APIRouterStub
@@ -86,7 +53,7 @@ except ImportError:  # pragma: no cover - fallback for local tooling without Fas
 
 try:
     import uvicorn  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - allows imports when the optional dependency is absent
+except ImportError:
     uvicorn = None
 
 from aiogram import Bot, Dispatcher, Router
@@ -114,7 +81,10 @@ from database.database import (
     get_chat_admin_stats,
     update_chat_operational_settings,
     get_user_by_web_session,
-    mark_payment_processed
+    mark_payment_processed,
+    register_bot_clone,
+    save_owner_session,
+    update_ghost_purge_scan_time
 )
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
@@ -170,9 +140,6 @@ app.add_middleware(
 
 api_router = APIRouter()
 
-# ----------------------------------------------------
-# 🛡️ RUTAS BASE DE SALUD (HEALTHCHECK PARA RAILWAY)
-# ----------------------------------------------------
 @app.get("/")
 @app.get("/health")
 @app.get("/api/health")
@@ -211,9 +178,6 @@ def parse_telegram_user_id(init_data: str) -> int:
         logging.debug(f"Error parseando initData: {e}")
         return 0
 
-# ==========================================
-# 🔐 AUTENTICACIÓN DUAL: Telegram initData nativo O Sesión Web
-# ==========================================
 SESSION_SECRET = hashlib.sha256(f"bunker-web-session::{BOT_TOKEN}".encode()).digest()
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días
 
@@ -279,7 +243,6 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
-    """Resuelve el user_id del operador con fallback garantizado al Creador."""
     if x_telegram_init_data:
         uid = parse_telegram_user_id(x_telegram_init_data)
         if uid:
@@ -313,7 +276,6 @@ async def assert_chat_ownership(user_id: int, chat_id: int):
     if chat_id not in owned_ids:
         raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
 
-# --- HELPERS DE CONSULTA FUERA DEL EVENT LOOP ---
 def _get_global_channels_sync():
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -600,6 +562,7 @@ async def api_chat_dashboard(
                 "log_channel": {"enabled": False, "channel_id": None},
                 "modules": {"active": 0, "total": 91},
                 "protection": {"enabled": True, "spam_mode": "smart", "timezone": "Bogota (UTC-05)", "language": "ES"},
+                "switches": {"captcha": True, "autolower": True, "shield": True, "linklock": False},
                 "modules_errors": [],
                 "footer_metrics": {}
             }
@@ -689,6 +652,53 @@ async def api_update_chat_settings(
     try:
         numeric_id = int(chat_id)
         await assert_chat_ownership(user_id, numeric_id)
+        action = payload.get("action")
+        
+        # 1. Despliegue de Bot Clon en memoria y base de datos
+        if action == "deploy_clone":
+            bot_token = (payload.get("bot_token") or "").strip()
+            if not bot_token:
+                raise HTTPException(status_code=400, detail="Token de bot no proporcionado.")
+            try:
+                test_bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+                bot_info = await test_bot.get_me()
+                await test_bot.session.close()
+            except Exception as ex:
+                raise HTTPException(status_code=400, detail=f"Token inválido o bot inaccesible: {ex}")
+            
+            await register_bot_clone(user_id, numeric_id, bot_token, bot_info.username or "")
+            await start_clone_polling_task(bot_token)
+            return {
+                "status": "success",
+                "action": "deploy_clone",
+                "clone_username": bot_info.username,
+                "chat_id": chat_id
+            }
+
+        # 2. Conexión de Centinela Acústico MTProto
+        elif action == "connect_sentinel":
+            session_str = (payload.get("session_string") or "").strip()
+            if not session_str:
+                raise HTTPException(status_code=400, detail="String Session no proporcionada.")
+            
+            await save_owner_session(user_id, numeric_id, session_str)
+            return {
+                "status": "success",
+                "action": "connect_sentinel",
+                "chat_id": chat_id
+            }
+
+        # 3. Purga Táctica de Cuentas Fantasma (Ghost Purge)
+        elif action == "run_ghost_purge":
+            asyncio.create_task(run_ghost_purge_task(numeric_id))
+            return {
+                "status": "success",
+                "action": "run_ghost_purge",
+                "chat_id": chat_id,
+                "message": "Ghost Purge iniciada en segundo plano."
+            }
+
+        # 4. Actualización general de Switches, Ajustes de Moderación y Tarifas
         await update_chat_operational_settings(numeric_id, payload or {})
         return {"status": "success", "chat_id": chat_id, "updated": payload}
     except HTTPException:
@@ -696,11 +706,13 @@ async def api_update_chat_settings(
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
+        logging.error(f"❌ [Settings API Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @api_router.get("/affiliates/me")
 async def api_affiliates(
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -712,12 +724,44 @@ app.include_router(api_router)
 
 async def run_fastapi_server():
     if uvicorn is None:
-        logging.warning("uvicorn is not installed; the FastAPI server will not start.")
+        logging.warning("uvicorn no está instalado; el servidor FastAPI no iniciará.")
         return
     port = int(os.getenv("PORT", 8080))
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
     await server.serve()
+
+async def run_ghost_purge_task(chat_id: int):
+    """Ejecuta la purga de cuentas fantasma (perfiles eliminados) de forma asíncrona."""
+    if not master_bot_instance:
+        return
+    try:
+        await update_ghost_purge_scan_time(chat_id)
+        purged_count = 0
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id, full_name, username FROM chat_user_activity WHERE group_id = ?", (chat_id,))
+            tracked_users = cursor.fetchall()
+
+        for uid, fn, un in tracked_users:
+            try:
+                chat_member = await master_bot_instance.get_chat_member(chat_id, uid)
+                user = chat_member.user
+                is_deleted = False
+                if getattr(user, "is_deleted", False) or (user.first_name and "Deleted Account" in user.first_name):
+                    is_deleted = True
+                
+                if is_deleted and chat_member.status not in ("creator", "administrator"):
+                    await master_bot_instance.ban_chat_member(chat_id, uid)
+                    await master_bot_instance.unban_chat_member(chat_id, uid)
+                    purged_count += 1
+                    await asyncio.sleep(0.1)
+            except Exception:
+                continue
+
+        logging.info(f"💀 [Ghost Purge Finalizada]: {purged_count} cuentas fantasma eliminadas en chat {chat_id}.")
+    except Exception as ex:
+        logging.error(f"❌ [Error en Ghost Purge Task chat {chat_id}]: {ex}", exc_info=True)
 
 # ==========================================
 # ⚙️ GESTIÓN DE CALLBACKS Y CLONES DE AIOGRAM

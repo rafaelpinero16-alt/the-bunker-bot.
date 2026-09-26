@@ -52,7 +52,7 @@
     <!-- ============================================================== -->
     <div id="app-shell" class="hidden">
 
-        <!-- Menú Deslizante Lateral (Cyber-Drawer OS con Enlaces a Fases 1 y 2) -->
+        <!-- Menú Deslizante Lateral (Cyber-Drawer OS) -->
         <div id="cyber-drawer" class="fixed inset-0 z-[150] bg-black/80 backdrop-blur-md hidden transition-opacity duration-300">
             <div class="drawer-content fixed top-0 left-0 bottom-0 w-72 p-5 flex flex-col justify-between shadow-[15px_0_30px_rgba(0,243,255,0.15)] z-[160]">
                 <div class="space-y-5">
@@ -86,7 +86,7 @@
                         </button>
                         <button onclick="app.switchTab('bot-settings'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
                             <i class="fa-solid fa-sliders text-[#00f3ff] w-5"></i>
-                            <span>Ajustes del Bot ⚙️</span>
+                            <span data-i18n="groups_title">Ajustes del Bot ⚙️</span>
                         </button>
                         <button onclick="app.switchTab('watchdog'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
                             <i class="fa-solid fa-user-clock text-[#ff00ff] w-5"></i>
@@ -102,7 +102,7 @@
                         </button>
                     </nav>
 
-                    <!-- Menú Auxiliar de Asistencia y Registro (Estilo ChatKeeper) -->
+                    <!-- Menú Auxiliar de Asistencia y Registro -->
                     <div class="border-t border-neutral-800 pt-3 space-y-1.5 text-xs text-neutral-300">
                         <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
                             <i class="fa-regular fa-user text-[#00f3ff] w-5"></i> <span data-i18n="menu_my_profile">My profile</span>
@@ -116,7 +116,7 @@
                     </div>
                 </div>
 
-                <!-- GABINETE DE USUARIO AL PIE -->
+                <!-- Gabinete de Usuario al Pie -->
                 <div class="border-t border-neutral-800 pt-3 space-y-2.5">
                     <div class="theme-switch-container flex items-center justify-between p-1 bg-black/60 rounded-xl border border-neutral-800 text-xs">
                         <button onclick="app.setTheme('light')" id="theme-btn-light" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition">
@@ -256,7 +256,7 @@
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
                             <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_channels">Canales Conectados</h3>
-                            <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
+                            <button onclick="app.syncChats()" class="sync-btn-trigger text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
                                 <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
                             </button>
                         </div>
@@ -310,7 +310,7 @@
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
                             <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_groups">Comunidades Conectadas</h3>
-                            <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
+                            <button onclick="app.syncChats()" class="sync-btn-trigger text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
                                 <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
                             </button>
                         </div>
@@ -330,17 +330,17 @@
                         <div class="grid grid-cols-2 gap-2.5">
                             <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
                                 <div>
-                                    <span class="text-[10px] text-theme-muted uppercase font-bold">A Plan</span>
-                                    <p id="chat-plan-status" class="text-xs font-bold text-rose-400 mt-1">Tariff empty</p>
+                                    <span class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="tariff_plan_label">A Plan</span>
+                                    <p id="chat-plan-status" class="text-xs font-bold text-rose-400 mt-1" data-i18n="tariff_empty">Tariff empty</p>
                                 </div>
-                                <button onclick="app.switchTab('plans')" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-1.5 rounded-xl text-[10px] font-bold transition">Buy</button>
+                                <button onclick="app.switchTab('plans')" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-1.5 rounded-xl text-[10px] font-bold transition" data-i18n="license_renew">Buy</button>
                             </div>
                             <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
                                 <div>
-                                    <span class="text-[10px] text-theme-muted uppercase font-bold">Log Channel</span>
-                                    <p id="chat-log-channel" class="text-xs font-bold text-emerald-400 mt-1 truncate">Disabled</p>
+                                    <span class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="log_channel_label">Log Channel:</span>
+                                    <p id="chat-log-channel" class="text-xs font-bold text-neutral-400 mt-1 truncate" data-i18n="status_disabled">Disabled</p>
                                 </div>
-                                <button onclick="app.switchTab('bot-settings')" class="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 py-1.5 rounded-xl text-[10px] font-bold transition">Configure</button>
+                                <button onclick="app.switchTab('bot-settings')" class="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 py-1.5 rounded-xl text-[10px] font-bold transition" data-i18n="configure">Configure</button>
                             </div>
                         </div>
 
@@ -351,7 +351,7 @@
                                 <h3 id="chat-active-modules" class="text-2xl font-black text-white tracking-wider mt-0.5">11 <span class="text-sm font-normal text-blue-300">/ 91</span></h3>
                             </div>
                             <button onclick="app.switchTab('bot-settings')" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-lg transition active:scale-95 flex items-center gap-1.5">
-                                <i class="fa-solid fa-sliders"></i> Ajustar
+                                <i class="fa-solid fa-sliders"></i> <span data-i18n="configure">Ajustar</span>
                             </button>
                         </div>
 
@@ -370,7 +370,7 @@
                         <div class="glass-panel p-4 space-y-3">
                             <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
                                 <span><i class="fa-solid fa-user-shield text-blue-400 mr-1.5"></i> <span data-i18n="admin_stats_title">Rendimiento de Admins</span></span>
-                                <span class="text-[9px] text-emerald-400 font-semibold">Active</span>
+                                <span class="text-[9px] text-emerald-400 font-semibold" data-i18n="status_enabled">Active</span>
                             </h4>
                             <div id="chat-admin-stats-list" class="space-y-2 text-xs">
                                 <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin estadísticas de administradores</div>
@@ -379,21 +379,21 @@
                     </div>
                 </section>
 
-                <!-- VISTA NUEVA (FASE 2): CONSOLA DE AJUSTES DEL BOT & HERRAMIENTAS ULTRA -->
+                <!-- VISTA 4: CONSOLA DE AJUSTES DEL BOT & HERRAMIENTAS ULTRA -->
                 <section id="view-bot-settings" class="space-y-4 tab-view hidden">
                     <div class="glass-panel p-5 space-y-4">
                         <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
                             <div>
-                                <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold">CONTROL MAESTRO</span>
-                                <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5">Ajustes de Comunidad</h2>
+                                <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="perimeter_badge">CONTROL MAESTRO</span>
+                                <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="groups_title">Ajustes de Comunidad</h2>
                             </div>
-                            <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
-                                <i class="fa-solid fa-rotate"></i> <span>Sincronizar</span>
+                            <button onclick="app.syncChats()" class="sync-btn-trigger text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
+                                <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
                             </button>
                         </div>
 
                         <div class="space-y-1.5">
-                            <label class="text-[11px] text-theme-muted uppercase font-semibold">Comunidad Administrada:</label>
+                            <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="group_owner_label">Comunidad Administrada:</label>
                             <select id="group-owner-select" onchange="app.configureChat(this.value)" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
                                 <option value="" data-i18n="select_your_community">Selecciona tu comunidad...</option>
                             </select>
@@ -402,362 +402,362 @@
                         <!-- BLOQUE 1: MATRIZ DE MODERACIÓN Y CERRADURAS TÁCTICAS -->
                         <div class="space-y-2.5 pt-2">
                             <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-1.5">
-                                <i class="fa-solid fa-shield-halved"></i> Matriz de Moderación & Filtros
+                                <i class="fa-solid fa-shield-halved"></i> <span data-i18n="perimeter_title">Matriz de Moderación & Filtros</span>
                             </h4>
                             <div class="space-y-2 text-xs">
                                 <div onclick="app.toggleSecuritySwitch('captcha')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                <div>
-                                    <p class="text-theme-main font-bold" data-i18n="captcha_pro">Aduana Captcha Pro</p>
-                                    <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
+                                    <div>
+                                        <p class="text-theme-main font-bold" data-i18n="captcha_pro">Aduana Captcha Pro</p>
+                                        <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
+                                    </div>
+                                    <span id="switch-captcha" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
                                 </div>
-                                <span id="switch-captcha" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
-                            </div>
-                            <div onclick="app.toggleSecuritySwitch('autolower')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                <div>
-                                    <p class="text-theme-main font-bold" data-i18n="autolower_title">AutoLower de Micrófonos (2%)</p>
-                                    <p class="text-[10px] text-theme-muted" data-i18n="autolower_desc">Atenuación acústica de fondo</p>
+                                <div onclick="app.toggleSecuritySwitch('autolower')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                    <div>
+                                        <p class="text-theme-main font-bold" data-i18n="autolower_title">AutoLower de Micrófonos (2%)</p>
+                                        <p class="text-[10px] text-theme-muted" data-i18n="autolower_desc">Atenuación acústica de fondo</p>
+                                    </div>
+                                    <span id="switch-autolower" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
                                 </div>
-                                <span id="switch-autolower" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
-                            </div>
-                            <div onclick="app.toggleSecuritySwitch('shield')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                <div>
-                                    <p class="text-theme-main font-bold" data-i18n="shield_title">Escudo Antinota</p>
-                                    <p class="text-[10px] text-theme-muted" data-i18n="shield_desc">Corte de pantalla compartida</p>
+                                <div onclick="app.toggleSecuritySwitch('shield')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                    <div>
+                                        <p class="text-theme-main font-bold" data-i18n="shield_title">Escudo Antinota</p>
+                                        <p class="text-[10px] text-theme-muted" data-i18n="shield_desc">Corte de pantalla compartida</p>
+                                    </div>
+                                    <span id="switch-shield" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
                                 </div>
-                                <span id="switch-shield" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
-                            </div>
-                            <div onclick="app.toggleSecuritySwitch('linklock')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                <div>
-                                    <p class="text-theme-main font-bold" data-i18n="linklock_title">Cerradura de Enlaces Web</p>
-                                    <p class="text-[10px] text-theme-muted" data-i18n="linklock_desc">Purga inmediata de URLs no permitidas</p>
+                                <div onclick="app.toggleSecuritySwitch('linklock')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                    <div>
+                                        <p class="text-theme-main font-bold" data-i18n="linklock_title">Cerradura de Enlaces Web</p>
+                                        <p class="text-[10px] text-theme-muted" data-i18n="linklock_desc">Purga inmediata de URLs no permitidas</p>
+                                    </div>
+                                    <span id="switch-linklock" class="text-rose-400 font-bold">BLOQUEADO 🔴</span>
                                 </div>
-                                <span id="switch-linklock" class="text-rose-400 font-bold">BLOQUEADO 🔴</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->
-                    <div class="space-y-3 pt-3 border-t border-neutral-800">
-                        <h4 class="text-xs font-bold text-[#ff00ff] uppercase tracking-wider flex items-center gap-1.5">
-                            <i class="fa-solid fa-dna"></i> Herramientas Ultra & Clones MTProto
-                        </h4>
-
-                        <!-- Despliegue de Clon -->
-                        <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
-                            <span class="text-[10px] text-theme-muted uppercase font-bold block">Token de Bot Clon (BotFather):</span>
-                            <div class="flex gap-2">
-                                <input type="text" id="clone-bot-token" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" class="flex-1 bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#ff00ff]">
-                                <button onclick="app.deployClone()" class="bg-[#ff00ff]/20 text-[#ff00ff] border border-[#ff00ff]/40 px-3 py-2 rounded-lg text-xs font-bold hover:bg-[#ff00ff]/30 transition active:scale-95">Desplegar</button>
                             </div>
                         </div>
 
-                        <!-- Sesión de Centinela MTProto -->
-                        <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
-                            <span class="text-[10px] text-theme-muted uppercase font-bold block">Centinela Acústico MTProto (String Session):</span>
-                            <input type="text" id="sentinel-session-string" placeholder="1BVtsOHQBu3X..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#00f3ff]">
-                            <button onclick="app.connectSentinel()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95">
-                                <i class="fa-solid fa-plug"></i> Conectar Centinela
+                        <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->
+                        <div class="space-y-3 pt-3 border-t border-neutral-800">
+                            <h4 class="text-xs font-bold text-[#ff00ff] uppercase tracking-wider flex items-center gap-1.5">
+                                <i class="fa-solid fa-dna"></i> <span>Herramientas Ultra & Clones MTProto</span>
+                            </h4>
+
+                            <!-- Despliegue de Clon -->
+                            <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
+                                <span class="text-[10px] text-theme-muted uppercase font-bold block">Token de Bot Clon (BotFather):</span>
+                                <div class="flex gap-2">
+                                    <input type="text" id="clone-bot-token" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" class="flex-1 bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#ff00ff]">
+                                    <button onclick="app.deployClone()" class="bg-[#ff00ff]/20 text-[#ff00ff] border border-[#ff00ff]/40 px-3 py-2 rounded-lg text-xs font-bold hover:bg-[#ff00ff]/30 transition active:scale-95">Desplegar</button>
+                                </div>
+                            </div>
+
+                            <!-- Sesión de Centinela MTProto -->
+                            <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
+                                <span class="text-[10px] text-theme-muted uppercase font-bold block">Centinela Acústico MTProto (String Session):</span>
+                                <input type="text" id="sentinel-session-string" placeholder="1BVtsOHQBu3X..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#00f3ff]">
+                                <button onclick="app.connectSentinel()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95">
+                                    <i class="fa-solid fa-plug"></i> Conectar Centinela
+                                </button>
+                            </div>
+
+                            <!-- Botón Táctico Ghost Purge -->
+                            <button onclick="app.runGhostPurge()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-skull-crossbones"></i> Ejecutar Ghost Purge (Cuentas Fantasma)
                             </button>
                         </div>
-
-                        <!-- Botón Táctico Ghost Purge -->
-                        <button onclick="app.runGhostPurge()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-skull-crossbones"></i> Ejecutar Ghost Purge (Cuentas Fantasma)
-                        </button>
                     </div>
-                </div>
-            </section>
+                </section>
 
-            <!-- VISTA 4: AUDITOR DE SUSCRIPCIONES (SUB WATCHDOG) -->
-            <section id="view-watchdog" class="space-y-4 tab-view hidden">
-                <div class="glass-panel p-5 space-y-4">
-                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                <!-- VISTA 5: AUDITOR DE SUSCRIPCIONES (SUB WATCHDOG) -->
+                <section id="view-watchdog" class="space-y-4 tab-view hidden">
+                    <div class="glass-panel p-5 space-y-4">
+                        <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                            <div>
+                                <span class="text-[10px] text-[#ff00ff] uppercase tracking-wider font-bold" data-i18n="watchdog_badge">MONITOR DE MIEMBROS</span>
+                                <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="watchdog_title">Aviso de Suscripciones</h2>
+                            </div>
+                            <span class="text-xs text-[#00f3ff] font-semibold"><i class="fa-solid fa-clock-rotate-left mr-1"></i><span data-i18n="live_badge">En Vivo</span></span>
+                        </div>
+
+                        <p class="text-xs text-theme-muted leading-relaxed" data-i18n="watchdog_desc">
+                            Supervisa en tiempo real el tiempo restante de cada miembro suscrito y las alertas de renovación antes del Auto-Kick automático.
+                        </p>
+
+                        <div id="watchdog-list" class="space-y-2.5 text-xs"></div>
+                    </div>
+                </section>
+
+                <!-- VISTA 6: MEMBRESÍAS & PASARELAS DE PAGO -->
+                <section id="view-plans" class="space-y-4 tab-view hidden">
+                    <div class="text-center mt-1">
+                        <h2 class="text-xs font-bold tracking-widest text-theme-muted uppercase" data-i18n="plans_title">Membresías de Comunidad</h2>
+                        <div class="w-16 h-1 bg-gradient-to-r from-transparent via-[#00f3ff] to-transparent mx-auto mt-2 opacity-50"></div>
+                    </div>
+
+                    <!-- PLAN BÁSICO -->
+                    <div class="glass-panel p-5 border-t-2 border-t-neutral-500 shadow-[0_10px_30px_rgba(0,0,0,0.5)] relative overflow-hidden opacity-90">
+                        <div class="mb-3 text-center">
+                            <span class="text-[10px] text-theme-muted font-bold tracking-wider" data-i18n="basic_badge">ACCESO GRATUITO</span>
+                            <h3 class="font-extrabold text-theme-main text-lg uppercase mt-1" data-i18n="basic_title">Plan BÁSICO</h3>
+                            <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="basic_desc">Comandos de moderación limitados. Sin automatización de radar ni soporte prioritario.</p>
+                        </div>
+                        <div class="relative z-10 mt-2">
+                            <button class="w-full bg-neutral-800/80 text-neutral-400 border border-neutral-700 font-bold text-xs py-3 rounded-xl cursor-default flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-check-circle text-emerald-500"></i> <span data-i18n="btn_free_active">Activo por defecto</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- PLAN PRO — 500 Stars (XTR) -->
+                    <div class="glass-panel p-5 border-t-2 border-t-[#00f3ff] shadow-[0_10px_30px_rgba(0,243,255,0.05)] relative overflow-hidden">
+                        <div class="mb-4 text-center">
+                            <span class="text-[10px] text-[#00f3ff] font-bold tracking-wider" data-i18n="pro_badge">PLAN MENSUAL</span>
+                            <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-cyan" data-i18n="pro_title">Plan PRO</h3>
+                            <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="pro_desc">Automatización total, moderación de voz y comandos ilimitados para tu comunidad.</p>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2.5 relative z-10">
+                            <button onclick="app.pagarPlan('pro', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-star text-amber-300"></i> 500 XTR
+                            </button>
+                            <button onclick="app.pagarPlan('pro', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-gem text-white"></i> TON Crypto
+                            </button>
+                            <button onclick="app.pagarPlan('pro', 'paypal')" class="bg-indigo-600/90 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-brands fa-paypal"></i> PayPal
+                            </button>
+                            <button onclick="app.pagarPlan('pro', 'external')" class="bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-600 font-bold text-xs py-3 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-globe"></i> Skrill / Bin
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- PLAN ULTRA PRO — 800 Stars (XTR) -->
+                    <div class="glass-panel p-5 border-t-2 border-t-[#ff00ff] shadow-[0_10px_30px_rgba(255,0,255,0.05)] relative overflow-hidden">
+                        <div class="mb-4 text-center">
+                            <span class="text-[10px] text-[#ff00ff] font-bold tracking-wider" data-i18n="ultra_badge">ACCESO ILIMITADO</span>
+                            <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-magenta" data-i18n="ultra_title">ULTRA PRO</h3>
+                            <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="ultra_desc">Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.</p>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2.5 relative z-10">
+                            <button onclick="app.pagarPlan('ultra', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-star text-amber-300"></i> 800 XTR
+                            </button>
+                            <button onclick="app.pagarPlan('ultra', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-gem text-white"></i> TON Crypto
+                            </button>
+                            <button onclick="app.pagarPlan('ultra', 'paypal')" class="bg-indigo-600/90 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-brands fa-paypal"></i> PayPal
+                            </button>
+                            <button onclick="app.pagarPlan('ultra', 'external')" class="bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-600 font-bold text-xs py-3 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2">
+                                <i class="fa-solid fa-globe"></i> Skrill / Bin
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VISTA 7: AFILIADOS & REFERIDOS -->
+                <section id="view-affiliates" class="space-y-4 tab-view hidden">
+                    <div class="glass-panel p-5 space-y-4">
+                        <h3 class="text-xs font-extrabold text-[#ff00ff] uppercase tracking-wider flex items-center gap-2">
+                            <i class="fa-solid fa-network-wired text-base"></i> <span data-i18n="aff_title">Red de Afiliados & Comisiones</span>
+                        </h3>
+                        <p class="text-xs text-theme-muted leading-relaxed" data-i18n="aff_desc">
+                            Comparte tu enlace único de promotor. Cada vez que una comunidad adquiera un plan PRO o ULTRA a través de tu recomendación, recibes comisiones instantáneas en Telegram Stars directo a tu balance.
+                        </p>
+                        <div class="bg-black/60 p-3 rounded-xl border border-neutral-800 flex items-center justify-between">
+                            <span id="affiliate-link-text" class="text-[11px] font-mono text-[#00f3ff] truncate mr-2">https://t.me/thebunkerapp_bot?start=ref_8269470905</span>
+                            <button onclick="app.copyAffiliateLink()" class="bg-[#ff00ff]/20 text-[#ff00ff] hover:bg-[#ff00ff]/30 border border-[#ff00ff]/50 px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition active:scale-90">
+                                <i class="fa-regular fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- VISTA 8: GABINETE DE PERFIL & BALANCE -->
+                <section id="view-profile" class="space-y-4 tab-view hidden">
+                    <div class="glass-panel p-6 text-center space-y-4 relative overflow-hidden">
+                        <div class="w-20 h-20 rounded-full mx-auto bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-1 shadow-[0_0_25px_rgba(0,243,255,0.4)]">
+                            <div class="w-full h-full rounded-full bg-black flex items-center justify-center font-extrabold text-2xl text-white uppercase overflow-hidden relative">
+                                <span id="profile-initials">TM</span>
+                                <img id="profile-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
+                            </div>
+                        </div>
                         <div>
-                            <span class="text-[10px] text-[#ff00ff] uppercase tracking-wider font-bold" data-i18n="watchdog_badge">MONITOR DE MIEMBROS</span>
-                            <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="watchdog_title">Aviso de Suscripciones</h2>
+                            <h2 id="profile-name" class="font-extrabold text-lg text-theme-main">Tom Mastercloud 👑</h2>
+                            <p id="profile-handle" class="text-xs text-[#00f3ff]">@Heytomhadir2310</p>
+                            <p id="profile-id" class="text-[10px] text-theme-muted font-mono mt-0.5">ID: 8269470905</p>
                         </div>
-                        <span class="text-xs text-[#00f3ff] font-semibold"><i class="fa-solid fa-clock-rotate-left mr-1"></i><span data-i18n="live_badge">En Vivo</span></span>
-                    </div>
 
-                    <p class="text-xs text-theme-muted leading-relaxed" data-i18n="watchdog_desc">
-                        Supervisa en tiempo real el tiempo restante de cada miembro suscrito y las alertas de renovación antes del Auto-Kick automático.
-                    </p>
-
-                    <div id="watchdog-list" class="space-y-2.5 text-xs"></div>
-                </div>
-            </section>
-
-            <!-- VISTA 5: MEMBRESÍAS & PASARELAS DE PAGO -->
-            <section id="view-plans" class="space-y-4 tab-view hidden">
-                <div class="text-center mt-1">
-                    <h2 class="text-xs font-bold tracking-widest text-theme-muted uppercase" data-i18n="plans_title">Membresías de Comunidad</h2>
-                    <div class="w-16 h-1 bg-gradient-to-r from-transparent via-[#00f3ff] to-transparent mx-auto mt-2 opacity-50"></div>
-                </div>
-
-                <!-- PLAN BÁSICO -->
-                <div class="glass-panel p-5 border-t-2 border-t-neutral-500 shadow-[0_10px_30px_rgba(0,0,0,0.5)] relative overflow-hidden opacity-90">
-                    <div class="mb-3 text-center">
-                        <span class="text-[10px] text-theme-muted font-bold tracking-wider" data-i18n="basic_badge">ACCESO GRATUITO</span>
-                        <h3 class="font-extrabold text-theme-main text-lg uppercase mt-1" data-i18n="basic_title">Plan BÁSICO</h3>
-                        <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="basic_desc">Comandos de moderación limitados. Sin automatización de radar ni soporte prioritario.</p>
-                    </div>
-                    <div class="relative z-10 mt-2">
-                        <button class="w-full bg-neutral-800/80 text-neutral-400 border border-neutral-700 font-bold text-xs py-3 rounded-xl cursor-default flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-check-circle text-emerald-500"></i> <span data-i18n="btn_free_active">Activo por defecto</span>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- PLAN PRO — 500 Stars (XTR) -->
-                <div class="glass-panel p-5 border-t-2 border-t-[#00f3ff] shadow-[0_10px_30px_rgba(0,243,255,0.05)] relative overflow-hidden">
-                    <div class="mb-4 text-center">
-                        <span class="text-[10px] text-[#00f3ff] font-bold tracking-wider" data-i18n="pro_badge">PLAN MENSUAL</span>
-                        <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-cyan" data-i18n="pro_title">Plan PRO</h3>
-                        <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="pro_desc">Automatización total, moderación de voz y comandos ilimitados para tu comunidad.</p>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2.5 relative z-10">
-                        <button onclick="app.pagarPlan('pro', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-star text-amber-300"></i> 500 XTR
-                        </button>
-                        <button onclick="app.pagarPlan('pro', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-gem text-white"></i> TON Crypto
-                        </button>
-                        <button onclick="app.pagarPlan('pro', 'paypal')" class="bg-indigo-600/90 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-brands fa-paypal"></i> PayPal
-                        </button>
-                        <button onclick="app.pagarPlan('pro', 'external')" class="bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-600 font-bold text-xs py-3 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-globe"></i> Skrill / Bin
-                        </button>
-                    </div>
-                </div>
-
-                <!-- PLAN ULTRA PRO — 800 Stars (XTR) -->
-                <div class="glass-panel p-5 border-t-2 border-t-[#ff00ff] shadow-[0_10px_30px_rgba(255,0,255,0.05)] relative overflow-hidden">
-                    <div class="mb-4 text-center">
-                        <span class="text-[10px] text-[#ff00ff] font-bold tracking-wider" data-i18n="ultra_badge">ACCESO ILIMITADO</span>
-                        <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-magenta" data-i18n="ultra_title">ULTRA PRO</h3>
-                        <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="ultra_desc">Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.</p>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2.5 relative z-10">
-                        <button onclick="app.pagarPlan('ultra', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-star text-amber-300"></i> 800 XTR
-                        </button>
-                        <button onclick="app.pagarPlan('ultra', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-gem text-white"></i> TON Crypto
-                        </button>
-                        <button onclick="app.pagarPlan('ultra', 'paypal')" class="bg-indigo-600/90 hover:bg-indigo-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(99,102,241,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-brands fa-paypal"></i> PayPal
-                        </button>
-                        <button onclick="app.pagarPlan('ultra', 'external')" class="bg-neutral-800 hover:bg-neutral-700 text-white border border-neutral-600 font-bold text-xs py-3 rounded-xl transition-all shadow-md active:scale-95 flex items-center justify-center gap-2">
-                            <i class="fa-solid fa-globe"></i> Skrill / Bin
-                        </button>
-                    </div>
-                </div>
-            </section>
-
-            <!-- VISTA 6: AFILIADOS & REFERIDOS -->
-            <section id="view-affiliates" class="space-y-4 tab-view hidden">
-                <div class="glass-panel p-5 space-y-4">
-                    <h3 class="text-xs font-extrabold text-[#ff00ff] uppercase tracking-wider flex items-center gap-2">
-                        <i class="fa-solid fa-network-wired text-base"></i> <span data-i18n="aff_title">Red de Afiliados & Comisiones</span>
-                    </h3>
-                    <p class="text-xs text-theme-muted leading-relaxed" data-i18n="aff_desc">
-                        Comparte tu enlace único de promotor. Cada vez que una comunidad adquiera un plan PRO o ULTRA a través de tu recomendación, recibes comisiones instantáneas en Telegram Stars directo a tu balance.
-                    </p>
-                    <div class="bg-black/60 p-3 rounded-xl border border-neutral-800 flex items-center justify-between">
-                        <span id="affiliate-link-text" class="text-[11px] font-mono text-[#00f3ff] truncate mr-2">https://t.me/thebunkerapp_bot?start=ref_8269470905</span>
-                        <button onclick="app.copyAffiliateLink()" class="bg-[#ff00ff]/20 text-[#ff00ff] hover:bg-[#ff00ff]/30 border border-[#ff00ff]/50 px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition active:scale-90">
-                            <i class="fa-regular fa-copy"></i>
-                        </button>
-                    </div>
-                </div>
-            </section>
-
-            <!-- VISTA 7: GABINETE DE PERFIL & BALANCE -->
-            <section id="view-profile" class="space-y-4 tab-view hidden">
-                <div class="glass-panel p-6 text-center space-y-4 relative overflow-hidden">
-                    <div class="w-20 h-20 rounded-full mx-auto bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-1 shadow-[0_0_25px_rgba(0,243,255,0.4)]">
-                        <div class="w-full h-full rounded-full bg-black flex items-center justify-center font-extrabold text-2xl text-white uppercase overflow-hidden relative">
-                            <span id="profile-initials">TM</span>
-                            <img id="profile-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
+                        <!-- Tarjetas de Balance y Descuentos -->
+                        <div class="grid grid-cols-2 gap-2 text-left pt-2">
+                            <div class="bg-black/50 p-3 rounded-xl border border-neutral-800">
+                                <span class="text-[10px] text-theme-muted font-medium" data-i18n="profile_balance_stars">Balance Stars:</span>
+                                <p id="profile-balance-stars" class="text-sm font-extrabold text-amber-300 mt-0.5">0 ⭐</p>
+                            </div>
+                            <div class="bg-black/50 p-3 rounded-xl border border-neutral-800">
+                                <span class="text-[10px] text-theme-muted font-medium" data-i18n="profile_discount">Descuento Activo:</span>
+                                <p class="text-sm font-extrabold text-emerald-400 mt-0.5">15% VIP</p>
+                            </div>
                         </div>
-                    </div>
-                    <div>
-                        <h2 id="profile-name" class="font-extrabold text-lg text-theme-main">Tom Mastercloud 👑</h2>
-                        <p id="profile-handle" class="text-xs text-[#00f3ff]">@Heytomhadir2310</p>
-                        <p id="profile-id" class="text-[10px] text-theme-muted font-mono mt-0.5">ID: 8269470905</p>
-                    </div>
 
-                    <!-- Tarjetas de Balance y Descuentos -->
-                    <div class="grid grid-cols-2 gap-2 text-left pt-2">
-                        <div class="bg-black/50 p-3 rounded-xl border border-neutral-800">
-                            <span class="text-[10px] text-theme-muted font-medium" data-i18n="profile_balance_stars">Balance Stars:</span>
-                            <p id="profile-balance-stars" class="text-sm font-extrabold text-amber-300 mt-0.5">0 ⭐</p>
+                        <div class="bg-black/50 p-3.5 rounded-xl border border-neutral-800 text-left space-y-2 text-xs">
+                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_rank">Rango Operativo:</span><strong class="text-theme-main">Arquitecto Maestro</strong></p>
+                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_reg_date">Fecha de Registro:</span><strong class="text-neutral-300 font-mono">2026-01-03</strong></p>
+                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_account_status">Estado de Cuenta:</span><strong class="text-emerald-400">Verificado 🟢</strong></p>
                         </div>
-                        <div class="bg-black/50 p-3 rounded-xl border border-neutral-800">
-                            <span class="text-[10px] text-theme-muted font-medium" data-i18n="profile_discount">Descuento Activo:</span>
-                            <p class="text-sm font-extrabold text-emerald-400 mt-0.5">15% VIP</p>
-                        </div>
-                    </div>
 
-                    <div class="bg-black/50 p-3.5 rounded-xl border border-neutral-800 text-left space-y-2 text-xs">
-                        <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_rank">Rango Operativo:</span><strong class="text-theme-main">Arquitecto Maestro</strong></p>
-                        <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_reg_date">Fecha de Registro:</span><strong class="text-neutral-300 font-mono">2026-01-03</strong></p>
-                        <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_account_status">Estado de Cuenta:</span><strong class="text-emerald-400">Verificado 🟢</strong></p>
+                        <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fa-solid fa-power-off"></i> <span data-i18n="btn_terminate_sessions">Cerrar Todas las Sesiones Activas</span>
+                        </button>
                     </div>
+                </section>
+            </main>
+        </div>
 
-                    <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
-                        <i class="fa-solid fa-power-off"></i> <span data-i18n="btn_terminate_sessions">Cerrar Todas las Sesiones Activas</span>
+        <!-- MODAL 1: AYUDA Y SOPORTE TÉCNICO -->
+        <div id="modal-help" class="hidden fixed inset-0 z-[220] bg-black/85 backdrop-blur-md flex justify-center items-center p-4">
+            <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
+                <button onclick="app.closeHelpModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <div class="space-y-2 pt-2">
+                    <a href="https://t.me/TheBunkerSupportChat" target="_blank" class="flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
+                        <i class="fa-solid fa-headset text-base w-5 text-center"></i> <span data-i18n="help_support_chat">Technical support chat</span>
+                    </a>
+                    <button onclick="app.openInstructionModal()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
+                        <i class="fa-solid fa-book-open text-base w-5 text-center"></i> <span data-i18n="help_instruction">Instruction & Manuals</span>
+                    </button>
+                    <button onclick="app.openRegexModal()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
+                        <i class="fa-solid fa-code text-base w-5 text-center"></i> <span data-i18n="help_test_regex">Test Regex / Pattern Checker</span>
                     </button>
                 </div>
-            </section>
-        </main>
-    </div>
-
-    <!-- MODAL 1: AYUDA Y SOPORTE TÉCNICO -->
-    <div id="modal-help" class="hidden fixed inset-0 z-[220] bg-black/85 backdrop-blur-md flex justify-center items-center p-4">
-        <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
-            <button onclick="app.closeHelpModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
-            <div class="space-y-2 pt-2">
-                <a href="https://t.me/TheBunkerSupportChat" target="_blank" class="flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
-                    <i class="fa-solid fa-headset text-base w-5 text-center"></i> <span data-i18n="help_support_chat">Technical support chat</span>
-                </a>
-                <button onclick="app.openInstructionModal()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
-                    <i class="fa-solid fa-book-open text-base w-5 text-center"></i> <span data-i18n="help_instruction">Instruction & Manuals</span>
-                </button>
-                <button onclick="app.openRegexModal()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
-                    <i class="fa-solid fa-code text-base w-5 text-center"></i> <span data-i18n="help_test_regex">Test Regex / Pattern Checker</span>
-                </button>
-            </div>
-            <div class="border-t border-neutral-800 pt-3 space-y-3">
-                <div class="flex gap-4 border-b border-neutral-800 pb-2 text-xs font-bold">
-                    <button onclick="app.switchHelpTab('error')" id="help-tab-error" class="text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]" data-i18n="tab_report_error">Report an error</button>
-                    <button onclick="app.switchHelpTab('review')" id="help-tab-review" class="text-neutral-400 pb-1" data-i18n="tab_leave_review">Leave a review</button>
-                </div>
-                <div id="help-content-error" class="space-y-3 text-xs">
-                    <div id="star-rating-container" class="hidden flex justify-center gap-1 text-amber-400 text-lg py-1">
-                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(1)"></i>
-                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(2)"></i>
-                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(3)"></i>
-                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(4)"></i>
-                        <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(5)"></i>
+                <div class="border-t border-neutral-800 pt-3 space-y-3">
+                    <div class="flex gap-4 border-b border-neutral-800 pb-2 text-xs font-bold">
+                        <button onclick="app.switchHelpTab('error')" id="help-tab-error" class="text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]" data-i18n="tab_report_error">Report an error</button>
+                        <button onclick="app.switchHelpTab('review')" id="help-tab-review" class="text-neutral-400 pb-1" data-i18n="tab_leave_review">Leave a review</button>
                     </div>
-                    <div onclick="document.getElementById('help-file-input').click()" class="border border-dashed border-neutral-700 rounded-xl p-4 text-center cursor-pointer hover:border-[#00f3ff] transition bg-black/30">
-                        <i class="fa-solid fa-hand-pointer text-neutral-400 mb-1"></i>
-                        <p id="help-file-label" class="text-[11px] text-neutral-300 font-bold" data-i18n="click_attach">Click to attach file</p>
-                        <input type="file" id="help-file-input" class="hidden" onchange="app.handleFileAttach(this)">
-                    </div>
-                    <div class="bg-black/50 border border-neutral-800 rounded-xl p-2.5 space-y-1">
-                        <div class="flex gap-3 text-neutral-400 text-xs pb-1 border-b border-neutral-800">
-                            <button class="hover:text-white font-bold">B</button>
-                            <button class="hover:text-white italic">I</button>
-                            <button class="hover:text-white line-through">S</button>
-                            <button class="hover:text-white underline">U</button>
-                            <button class="hover:text-white">😎</button>
+                    <div id="help-content-error" class="space-y-3 text-xs">
+                        <div id="star-rating-container" class="hidden flex justify-center gap-1 text-amber-400 text-lg py-1">
+                            <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(1)"></i>
+                            <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(2)"></i>
+                            <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(3)"></i>
+                            <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(4)"></i>
+                            <i class="fa-solid fa-star cursor-pointer" onclick="app.setRating(5)"></i>
                         </div>
-                        <textarea id="help-textarea" maxlength="4096" class="w-full bg-transparent text-white text-xs focus:outline-none resize-none h-16" placeholder="Describe the error or review..." data-i18n-placeholder="report_placeholder"></textarea>
-                        <div id="help-char-counter" class="text-right text-[9px] text-neutral-500 font-mono">0 / 4096</div>
-                    </div>
-                    <div class="flex gap-2 pt-2">
-                        <button onclick="app.closeHelpModal()" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase" data-i18n="btn_cancel">Cancel</button>
-                        <button onclick="app.sendHelpReport()" class="flex-1 bg-[#00f3ff] text-black py-2.5 rounded-xl font-extrabold uppercase" data-i18n="btn_send">Send message</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- MODAL 2: INSTRUCCIONES Y MANUAL -->
-    <div id="modal-instruction" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
-        <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-md text-white relative space-y-4 max-h-[85vh] overflow-y-auto">
-            <button onclick="app.closeInstructionModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
-            <h2 class="text-base font-extrabold text-[#00f3ff] uppercase tracking-wider" data-i18n="instruction_title">Instrucciones & Manual Oficial</h2>
-            <div class="space-y-3 text-xs text-neutral-300 leading-relaxed font-sans">
-                <p data-i18n="instruction_body">The Bunker Command OS gestiona comunidades en Telegram con una automatización de nivel industrial. Conecta tus chats, administra permisos en tiempo real y audita licencias con pagos nativos en Telegram Stars.</p>
-                <div class="bg-black/40 p-3 rounded-xl border border-neutral-800 space-y-1.5">
-                    <p class="font-bold text-white" data-i18n="instruction_steps_title">🚀 Pasos iniciales:</p>
-                    <p data-i18n="instruction_step1">1. Añade el bot como administrador en tu canal o grupo.</p>
-                    <p data-i18n="instruction_step2">2. Sincroniza el ID desde el Estudio de Canales.</p>
-                    <p data-i18n="instruction_step3">3. Configura tarifas en XTR y pasarelas tácticas.</p>
-                </div>
-            </div>
-            <button onclick="app.closeInstructionModal()" class="w-full bg-neutral-800 text-white py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_close">Cerrar</button>
-        </div>
-    </div>
-
-    <!-- MODAL 3: PRUEBA DE REGEX -->
-    <div id="modal-regex" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
-        <div class="glass-panel border-t-2 border-t-[#ff00ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
-            <button onclick="app.closeRegexModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
-            <h2 class="text-base font-extrabold text-[#ff00ff] uppercase tracking-wider" data-i18n="regex_title">Regular Expression Check</h2>
-            <div class="space-y-3 text-xs">
-                <div>
-                    <label class="text-[10px] text-neutral-400 uppercase" data-i18n="regex_pattern_label">Regular expression:</label>
-                    <input type="text" id="regex-pattern" placeholder="^/match.*" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1">
-                </div>
-                <div>
-                    <label class="text-[10px] text-neutral-400 uppercase" data-i18n="regex_string_label">String to test:</label>
-                    <input type="text" id="regex-string" placeholder="Text to evaluate..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1">
-                </div>
-                <div class="flex items-center gap-2 pt-1">
-                    <input type="checkbox" id="regex-lowercase" class="rounded bg-black border-neutral-700">
-                    <label for="regex-lowercase" class="text-neutral-300" data-i18n="regex_lowercase_label">Cast to lowercase</label>
-                </div>
-            </div>
-            <div class="flex gap-2 pt-2">
-                <button onclick="document.getElementById('regex-pattern').value=''; document.getElementById('regex-string').value='';" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_reset">Reset</button>
-                <button onclick="app.testRegex()" class="flex-1 bg-[#ff00ff] text-black py-2.5 rounded-xl font-extrabold uppercase text-xs" data-i18n="btn_test">Test</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- MODAL 4: REGISTRO DE COMPAÑÍA / ORGANIZACIÓN -->
-    <div id="modal-company-reg" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
-        <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4 text-center">
-            <button onclick="app.closeCompanyRegModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
-            <div class="w-16 h-16 rounded-2xl bg-[#00f3ff]/20 border border-[#00f3ff]/40 mx-auto flex items-center justify-center text-[#00f3ff] text-2xl">
-                <i class="fa-regular fa-building"></i>
-            </div>
-            <h3 class="font-extrabold text-base text-white" data-i18n="company_reg_title">Company Registration</h3>
-            <p class="text-xs text-neutral-400 leading-relaxed" data-i18n="company_reg_body">Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.</p>
-            <button onclick="app.startCompanyReg()" class="w-full bg-[#00f3ff] text-black py-3 rounded-xl font-extrabold text-xs uppercase shadow-[0_0_15px_rgba(0,243,255,0.4)] transition active:scale-95" data-i18n="company_reg_start">Start registration</button>
-        </div>
-    </div>
-
-    <!-- MODAL 5: PASARELAS DE PAGO EXTERNAS -->
-    <div id="modal-external-checkout" class="hidden fixed inset-0 z-[200] bg-black/95 backdrop-blur-md flex justify-center items-center p-4 transition-all">
-        <div class="glass-panel border-t-2 border-t-[#00f3ff] shadow-[0_0_35px_rgba(0,243,255,0.15)] rounded-3xl p-6 w-full max-w-md text-white relative">
-            <button onclick="app.closeCheckout()" class="absolute top-4 right-4 bg-neutral-800 text-neutral-400 hover:text-white hover:bg-red-600 rounded-full w-8 h-8 flex items-center justify-center font-bold transition-all"><i class="fa-solid fa-times"></i></button>
-            <h2 class="text-xl font-extrabold text-center mb-1 text-[#00f3ff] uppercase tracking-wider" data-i18n="tactical_gateways">PASARELAS TÁCTICAS</h2>
-            <p class="text-center text-[10px] text-theme-muted mb-5">Procesando Plan: <span id="checkout-plan-name" class="text-white font-bold">...</span></p>
-
-            <div class="space-y-3 mt-2">
-                <button onclick="app.processOneClickPay('skrill')" class="w-full bg-black border border-[#ff00ff] text-[#ff00ff] font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(255,0,255,0.1)] hover:bg-[#ff00ff]/10 active:scale-95 transition-all"><i class="fa-solid fa-wallet text-xl"></i> Skrill</button>
-                <button onclick="app.processOneClickPay('binance')" class="w-full bg-black border border-[#f3ba2f] text-[#f3ba2f] font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(243,186,47,0.1)] hover:bg-[#f3ba2f]/10 active:scale-95 transition-all"><i class="fa-brands fa-bitcoin text-xl"></i> Binance Pay</button>
-                <button onclick="app.openManualPayment()" class="w-full bg-black border border-emerald-500 text-emerald-400 font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.1)] hover:bg-emerald-500/10 active:scale-95 transition-all mt-2"><i class="fa-solid fa-building-columns text-xl"></i> <span data-i18n="bank_transfer_title">Pago Manual Bancario</span></button>
-            </div>
-        </div>
-    </div>
-
-    <!-- MODAL 6: PAGO MANUAL BANCARIO -->
-    <div id="modal-manual-payment" class="hidden fixed inset-0 z-[210] bg-black/95 backdrop-blur-md flex justify-center items-center p-4">
-        <div class="glass-panel border-t-2 border-t-emerald-500 shadow-[0_0_35px_rgba(16,185,129,0.15)] rounded-3xl p-6 w-full max-w-md text-white relative">
-            <button onclick="app.closeCheckout()" class="absolute top-4 right-4 bg-neutral-800 text-neutral-400 hover:text-white rounded-full w-8 h-8 flex items-center justify-center font-bold transition-all"><i class="fa-solid fa-times"></i></button>
-            <h2 class="text-lg font-extrabold text-emerald-400 mb-4 uppercase tracking-wider text-center" data-i18n="bank_transfer_title">TRANSFERENCIA BANCARIA</h2>
-            <div class="bg-black/50 border border-neutral-800 rounded-xl p-4 space-y-3 text-xs">
-                <p class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-theme-muted">Banco:</span><strong class="text-white">Lead Bank (DollarApp)</strong></p>
-                <p class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-theme-muted">Titular:</span><strong class="text-white">FELIPE R. SANCHEZ P.</strong></p>
-                <div class="flex justify-between items-center pb-1">
-                    <span class="text-theme-muted">Nro Cuenta:</span>
-                    <div class="flex items-center gap-3">
-                        <strong class="text-emerald-400 text-sm tracking-wider">215069784455</strong>
-                        <button onclick="app.copyText('215069784455')" class="text-white hover:text-emerald-400 text-lg transition active:scale-90"><i class="fa-regular fa-copy"></i></button>
+                        <div onclick="document.getElementById('help-file-input').click()" class="border border-dashed border-neutral-700 rounded-xl p-4 text-center cursor-pointer hover:border-[#00f3ff] transition bg-black/30">
+                            <i class="fa-solid fa-hand-pointer text-neutral-400 mb-1"></i>
+                            <p id="help-file-label" class="text-[11px] text-neutral-300 font-bold" data-i18n="click_attach">Click to attach file</p>
+                            <input type="file" id="help-file-input" class="hidden" onchange="app.handleFileAttach(this)">
+                        </div>
+                        <div class="bg-black/50 border border-neutral-800 rounded-xl p-2.5 space-y-1">
+                            <div class="flex gap-3 text-neutral-400 text-xs pb-1 border-b border-neutral-800">
+                                <button class="hover:text-white font-bold">B</button>
+                                <button class="hover:text-white italic">I</button>
+                                <button class="hover:text-white line-through">S</button>
+                                <button class="hover:text-white underline">U</button>
+                                <button class="hover:text-white">😎</button>
+                            </div>
+                            <textarea id="help-textarea" maxlength="4096" class="w-full bg-transparent text-white text-xs focus:outline-none resize-none h-16" placeholder="Describe the error or review..." data-i18n-placeholder="report_placeholder"></textarea>
+                            <div id="help-char-counter" class="text-right text-[9px] text-neutral-500 font-mono">0 / 4096</div>
+                        </div>
+                        <div class="flex gap-2 pt-2">
+                            <button onclick="app.closeHelpModal()" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase" data-i18n="btn_cancel">Cancel</button>
+                            <button onclick="app.sendHelpReport()" class="flex-1 bg-[#00f3ff] text-black py-2.5 rounded-xl font-extrabold uppercase" data-i18n="btn_send">Send message</button>
+                        </div>
                     </div>
                 </div>
             </div>
-            <div class="mt-6"><button onclick="app.closeCheckout()" class="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3.5 rounded-xl uppercase transition shadow-md">CERRAR</button></div>
         </div>
-    </div>
+
+        <!-- MODAL 2: INSTRUCCIONES Y MANUAL -->
+        <div id="modal-instruction" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+            <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-md text-white relative space-y-4 max-h-[85vh] overflow-y-auto">
+                <button onclick="app.closeInstructionModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <h2 class="text-base font-extrabold text-[#00f3ff] uppercase tracking-wider" data-i18n="instruction_title">Instrucciones & Manual Oficial</h2>
+                <div class="space-y-3 text-xs text-neutral-300 leading-relaxed font-sans">
+                    <p data-i18n="instruction_body">The Bunker Command OS gestiona comunidades en Telegram con una automatización de nivel industrial. Conecta tus chats, administra permisos en tiempo real y audita licencias con pagos nativos en Telegram Stars.</p>
+                    <div class="bg-black/40 p-3 rounded-xl border border-neutral-800 space-y-1.5">
+                        <p class="font-bold text-white" data-i18n="instruction_steps_title">🚀 Pasos iniciales:</p>
+                        <p data-i18n="instruction_step1">1. Añade el bot como administrador en tu canal o grupo.</p>
+                        <p data-i18n="instruction_step2">2. Sincroniza el ID desde el Estudio de Canales.</p>
+                        <p data-i18n="instruction_step3">3. Configura tarifas en XTR y pasarelas tácticas.</p>
+                    </div>
+                </div>
+                <button onclick="app.closeInstructionModal()" class="w-full bg-neutral-800 text-white py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_close">Cerrar</button>
+            </div>
+        </div>
+
+        <!-- MODAL 3: PRUEBA DE REGEX -->
+        <div id="modal-regex" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+            <div class="glass-panel border-t-2 border-t-[#ff00ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
+                <button onclick="app.closeRegexModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <h2 class="text-base font-extrabold text-[#ff00ff] uppercase tracking-wider" data-i18n="regex_title">Regular Expression Check</h2>
+                <div class="space-y-3 text-xs">
+                    <div>
+                        <label class="text-[10px] text-neutral-400 uppercase" data-i18n="regex_pattern_label">Regular expression:</label>
+                        <input type="text" id="regex-pattern" placeholder="^/match.*" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1">
+                    </div>
+                    <div>
+                        <label class="text-[10px] text-neutral-400 uppercase" data-i18n="regex_string_label">String to test:</label>
+                        <input type="text" id="regex-string" placeholder="Text to evaluate..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1">
+                    </div>
+                    <div class="flex items-center gap-2 pt-1">
+                        <input type="checkbox" id="regex-lowercase" class="rounded bg-black border-neutral-700">
+                        <label for="regex-lowercase" class="text-neutral-300" data-i18n="regex_lowercase_label">Cast to lowercase</label>
+                    </div>
+                </div>
+                <div class="flex gap-2 pt-2">
+                    <button onclick="document.getElementById('regex-pattern').value=''; document.getElementById('regex-string').value='';" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_reset">Reset</button>
+                    <button onclick="app.testRegex()" class="flex-1 bg-[#ff00ff] text-black py-2.5 rounded-xl font-extrabold uppercase text-xs" data-i18n="btn_test">Test</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- MODAL 4: REGISTRO DE COMPAÑÍA / ORGANIZACIÓN -->
+        <div id="modal-company-reg" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+            <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4 text-center">
+                <button onclick="app.closeCompanyRegModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <div class="w-16 h-16 rounded-2xl bg-[#00f3ff]/20 border border-[#00f3ff]/40 mx-auto flex items-center justify-center text-[#00f3ff] text-2xl">
+                    <i class="fa-regular fa-building"></i>
+                </div>
+                <h3 class="font-extrabold text-base text-white" data-i18n="company_reg_title">Company Registration</h3>
+                <p class="text-xs text-neutral-400 leading-relaxed" data-i18n="company_reg_body">Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.</p>
+                <button onclick="app.startCompanyReg()" class="w-full bg-[#00f3ff] text-black py-3 rounded-xl font-extrabold text-xs uppercase shadow-[0_0_15px_rgba(0,243,255,0.4)] transition active:scale-95" data-i18n="company_reg_start">Start registration</button>
+            </div>
+        </div>
+
+        <!-- MODAL 5: PASARELAS DE PAGO EXTERNAS -->
+        <div id="modal-external-checkout" class="hidden fixed inset-0 z-[200] bg-black/95 backdrop-blur-md flex justify-center items-center p-4 transition-all">
+            <div class="glass-panel border-t-2 border-t-[#00f3ff] shadow-[0_0_35px_rgba(0,243,255,0.15)] rounded-3xl p-6 w-full max-w-md text-white relative">
+                <button onclick="app.closeCheckout()" class="absolute top-4 right-4 bg-neutral-800 text-neutral-400 hover:text-white hover:bg-red-600 rounded-full w-8 h-8 flex items-center justify-center font-bold transition-all"><i class="fa-solid fa-times"></i></button>
+                <h2 class="text-xl font-extrabold text-center mb-1 text-[#00f3ff] uppercase tracking-wider" data-i18n="tactical_gateways">PASARELAS TÁCTICAS</h2>
+                <p class="text-center text-[10px] text-theme-muted mb-5">Procesando Plan: <span id="checkout-plan-name" class="text-white font-bold">...</span></p>
+
+                <div class="space-y-3 mt-2">
+                    <button onclick="app.processOneClickPay('skrill')" class="w-full bg-black border border-[#ff00ff] text-[#ff00ff] font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(255,0,255,0.1)] hover:bg-[#ff00ff]/10 active:scale-95 transition-all"><i class="fa-solid fa-wallet text-xl"></i> Skrill</button>
+                    <button onclick="app.processOneClickPay('binance')" class="w-full bg-black border border-[#f3ba2f] text-[#f3ba2f] font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(243,186,47,0.1)] hover:bg-[#f3ba2f]/10 active:scale-95 transition-all"><i class="fa-brands fa-bitcoin text-xl"></i> Binance Pay</button>
+                    <button onclick="app.openManualPayment()" class="w-full bg-black border border-emerald-500 text-emerald-400 font-bold py-4 rounded-xl uppercase flex justify-center items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.1)] hover:bg-emerald-500/10 active:scale-95 transition-all mt-2"><i class="fa-solid fa-building-columns text-xl"></i> <span data-i18n="bank_transfer_title">Pago Manual Bancario</span></button>
+                </div>
+            </div>
+        </div>
+
+        <!-- MODAL 6: PAGO MANUAL BANCARIO -->
+        <div id="modal-manual-payment" class="hidden fixed inset-0 z-[210] bg-black/95 backdrop-blur-md flex justify-center items-center p-4">
+            <div class="glass-panel border-t-2 border-t-emerald-500 shadow-[0_0_35px_rgba(16,185,129,0.15)] rounded-3xl p-6 w-full max-w-md text-white relative">
+                <button onclick="app.closeCheckout()" class="absolute top-4 right-4 bg-neutral-800 text-neutral-400 hover:text-white rounded-full w-8 h-8 flex items-center justify-center font-bold transition-all"><i class="fa-solid fa-times"></i></button>
+                <h2 class="text-lg font-extrabold text-emerald-400 mb-4 uppercase tracking-wider text-center" data-i18n="bank_transfer_title">TRANSFERENCIA BANCARIA</h2>
+                <div class="bg-black/50 border border-neutral-800 rounded-xl p-4 space-y-3 text-xs">
+                    <p class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-theme-muted">Banco:</span><strong class="text-white">Lead Bank (DollarApp)</strong></p>
+                    <p class="flex justify-between border-b border-neutral-800 pb-2"><span class="text-theme-muted">Titular:</span><strong class="text-white">FELIPE R. SANCHEZ P.</strong></p>
+                    <div class="flex justify-between items-center pb-1">
+                        <span class="text-theme-muted">Nro Cuenta:</span>
+                        <div class="flex items-center gap-3">
+                            <strong class="text-emerald-400 text-sm tracking-wider">215069784455</strong>
+                            <button onclick="app.copyText('215069784455')" class="text-white hover:text-emerald-400 text-lg transition active:scale-90"><i class="fa-regular fa-copy"></i></button>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-6"><button onclick="app.closeCheckout()" class="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3.5 rounded-xl uppercase transition shadow-md">CERRAR</button></div>
+            </div>
+        </div>
 
     <!-- FIN APP SHELL -->
     </div>

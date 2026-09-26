@@ -41,7 +41,6 @@ def init_db():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # 🛡️ Tablas principales que faltaban y causaban el error
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -72,7 +71,6 @@ def init_db():
             )
         """)
         
-        # 🌐 Tabla de Sesiones Web Temporales (ChatKeeper Style)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS web_sessions (
                 token TEXT PRIMARY KEY,
@@ -83,7 +81,6 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id)")
 
-        # 💳 Control de Idempotencia: evita pagos y suscripciones duplicadas
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS processed_payments (
                 charge_id TEXT PRIMARY KEY,
@@ -839,9 +836,8 @@ def set_vc_monitor_status(group_id: int, status: int):
             ON CONFLICT(group_id) DO UPDATE SET vc_enabled = excluded.vc_enabled
         """, (group_id, status))
         conn.commit()
-        # ==========================================
-# 🌐 GESTIÓN DE SESIONES WEB TEMPORALES (ChatKeeper Style)
-# ==========================================
+
+
 def create_web_session(user_id: int) -> str:
     import secrets
     token = secrets.token_urlsafe(32)
@@ -1518,8 +1514,6 @@ def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None)
                 (reason, user_id)
             )
         conn.commit()
-
-
 def get_vc_schedule(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2278,7 +2272,8 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT log_channel_id, spam_detection_mode, timezone, chat_language, active_modules_count
+            SELECT log_channel_id, spam_detection_mode, timezone, chat_language, 
+                   active_modules_count, captcha_status, autolower, screen_shield_status, lock_links
             FROM group_settings WHERE group_id = ?
         """, (chat_id,))
         row = cursor.fetchone()
@@ -2288,6 +2283,11 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         tz = row[2] if row and row[2] else "Bogota (UTC-05)"
         lang = row[3] if row and row[3] else "ES"
         active_mods = row[4] if row and row[4] is not None else 11
+        
+        captcha_active = bool(row[5]) if row and row[5] is not None else True
+        autolower_active = bool(row[6]) if row and row[6] is not None else True
+        shield_active = bool(row[7]) if row and row[7] is not None else True
+        linklock_active = bool(row[8]) if row and row[8] is not None else False
 
         return {
             "chat_id": str(chat_id),
@@ -2308,6 +2308,12 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
                 "spam_mode": spam_mode,
                 "timezone": tz,
                 "language": lang
+            },
+            "switches": {
+                "captcha": captcha_active,
+                "autolower": autolower_active,
+                "shield": shield_active,
+                "linklock": linklock_active
             },
             "modules_errors": [
                 {
@@ -2413,11 +2419,39 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
             updates.append("log_channel_id = ?")
             params.append(settings["log_channel_id"])
             
+        if "captcha" in settings:
+            updates.append("captcha_status = ?")
+            params.append(1 if settings["captcha"] else 0)
+        if "autolower" in settings:
+            updates.append("autolower = ?")
+            params.append(1 if settings["autolower"] else 0)
+        if "shield" in settings:
+            updates.append("screen_shield_status = ?")
+            params.append(1 if settings["shield"] else 0)
+        if "linklock" in settings:
+            updates.append("lock_links = ?")
+            params.append(1 if settings["linklock"] else 0)
+            
+        cursor.execute("""
+            INSERT INTO group_settings (group_id) VALUES (?)
+            ON CONFLICT(group_id) DO NOTHING
+        """, (chat_id,))
+        
         if updates:
             params.append(chat_id)
             query = f"UPDATE group_settings SET {', '.join(updates)} WHERE group_id = ?"
             cursor.execute(query, tuple(params))
-            conn.commit()
+
+        if "stars_price" in settings or "duration_days" in settings or "target_link" in settings:
+            price = settings.get("stars_price", 150)
+            days = settings.get("duration_days", 30)
+            link = settings.get("target_link", "")
+            cursor.execute("""
+                INSERT INTO channel_plans (channel_id, plan_name, duration_days, stars_price, target_link, status)
+                VALUES (?, 'Acceso VIP', ?, ?, ?, 'active')
+            """, (chat_id, days, price, link))
+
+        conn.commit()
 
 
 def get_user_global_stats(user_id: int) -> dict:
@@ -2646,7 +2680,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_chat_top_users",
     "get_chat_admin_stats",
     "update_chat_operational_settings",
-    # 🌐 Funciones Web Session Añadidas y Asíncronas
     "create_web_session",
     "get_user_by_web_session"
 ]
@@ -2661,4 +2694,4 @@ if "_fn_name" in globals():
 try:
     init_db()
 except Exception:
-    pass
+    pass        
