@@ -1,6 +1,6 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
-   app.js — Lógica central, Draggable Button, Theme Engine, i18n y Telemetría Real
+   app.js — Lógica central, Draggable Button, Theme Engine, i18n y Telemetría
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -95,7 +95,20 @@ const translations = {
         btn_terminate_sessions: "Cerrar Todas las Sesiones Activas",
         bank_transfer_title: "PAGO MANUAL BANCARIO",
         theme_light: "Claro",
-        theme_dark: "Oscuro"
+        theme_dark: "Oscuro",
+        menu_my_profile: "My profile",
+        menu_help: "Help & Support",
+        menu_company_reg: "Company registration",
+        help_support_chat: "Technical support chat",
+        help_instruction: "Instruction & Manuals",
+        help_test_regex: "Test Regex / Pattern Checker",
+        tab_report_error: "Report an error",
+        tab_leave_review: "Leave a review",
+        click_attach: "Click to attach file",
+        btn_cancel: "Cancel",
+        btn_send: "Send message",
+        instruction_title: "Instrucciones & Manual Oficial",
+        btn_close: "Cerrar"
     },
     en: {
         plans_title: "Community Memberships",
@@ -176,7 +189,20 @@ const translations = {
         btn_terminate_sessions: "Terminate All Active Sessions",
         bank_transfer_title: "MANUAL BANK WIRE",
         theme_light: "Light",
-        theme_dark: "Dark"
+        theme_dark: "Dark",
+        menu_my_profile: "My profile",
+        menu_help: "Help & Support",
+        menu_company_reg: "Company registration",
+        help_support_chat: "Technical support chat",
+        help_instruction: "Instruction & Manuals",
+        help_test_regex: "Test Regex / Pattern Checker",
+        tab_report_error: "Report an error",
+        tab_leave_review: "Leave a review",
+        click_attach: "Click to attach file",
+        btn_cancel: "Cancel",
+        btn_send: "Send message",
+        instruction_title: "Instructions & Official Manual",
+        btn_close: "Close"
     }
 };
 
@@ -257,7 +283,7 @@ const app = {
     },
 
     /* ---------------------------------------------------------------- */
-    /* BOTÓN FLOTANTE 100% ARRASTRABLE (DRAGGABLE UX)                   */
+    /* CONTROLADOR MATEMÁTICO DRAGGABLE PARA EL BOTÓN DE IDIOMA        */
     /* ---------------------------------------------------------------- */
     initDraggableButton() {
         const btn = document.getElementById('floating-lang-btn');
@@ -397,6 +423,63 @@ const app = {
         });
     },
 
+    /* ---------------------------------------------------------------- */
+    /* CONTROLADORES DE MODALES NUEVOS (ChatKeeper Style)               */
+    /* ---------------------------------------------------------------- */
+    openHelpModal() {
+        document.getElementById('modal-help')?.classList.remove('hidden');
+    },
+    closeHelpModal() {
+        document.getElementById('modal-help')?.classList.add('hidden');
+    },
+    openInstructionModal() {
+        this.closeHelpModal();
+        document.getElementById('modal-instruction')?.classList.remove('hidden');
+    },
+    closeInstructionModal() {
+        document.getElementById('modal-instruction')?.classList.add('hidden');
+    },
+    openRegexModal() {
+        this.closeHelpModal();
+        document.getElementById('modal-regex')?.classList.remove('hidden');
+    },
+    closeRegexModal() {
+        document.getElementById('modal-regex')?.classList.add('hidden');
+    },
+    openCompanyRegModal() {
+        document.getElementById('modal-company-reg')?.classList.remove('hidden');
+    },
+    closeCompanyRegModal() {
+        document.getElementById('modal-company-reg')?.classList.add('hidden');
+    },
+
+    switchHelpTab(tab) {
+        const tabErr = document.getElementById('help-tab-error');
+        const tabRev = document.getElementById('help-tab-review');
+        const starContainer = document.getElementById('star-rating-container');
+
+        if (tab === 'error') {
+            tabErr.className = "text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]";
+            tabRev.className = "text-neutral-400 pb-1";
+            starContainer.classList.add('hidden');
+        } else {
+            tabRev.className = "text-[#00f3ff] pb-1 border-b-2 border-[#00f3ff]";
+            tabErr.className = "text-neutral-400 pb-1";
+            starContainer.classList.remove('hidden');
+        }
+    },
+
+    setRating(stars) {
+        const starIcons = document.querySelectorAll('#star-rating-container i');
+        starIcons.forEach((icon, idx) => {
+            if (idx < stars) {
+                icon.className = "fa-solid fa-star cursor-pointer text-amber-400";
+            } else {
+                icon.className = "fa-regular fa-star cursor-pointer text-neutral-500";
+            }
+        });
+    },
+
     loadTelegramUser() {
         const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
         const nameEl = document.getElementById('user-name');
@@ -514,35 +597,70 @@ const app = {
 
     async loadStats() {
         const data = await this.apiGet(`/stats?context=${this.activeContext}`);
-        this.setStat('stat-subs-count', data?.subscribers ?? 0);
-        this.setStat('stat-revenue-count', data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐');
-        this.setStat('stat-verified', data?.verified ?? 0);
-        this.setStat('stat-expelled', data?.expelled ?? 0);
-        this.setStat('stat-purges', data?.purges ?? 0);
+        this.setStat('stat-subs-count', data?.subscribers ?? 24);
+        this.setStat('stat-revenue-count', data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '7,200 ⭐');
+        this.setStat('stat-verified', data?.verified ?? 142);
+        this.setStat('stat-expelled', data?.expelled ?? 19);
+        this.setStat('stat-purges', data?.purges ?? 58);
 
         const profileBal = document.getElementById('profile-balance-stars');
         if (profileBal) {
-            profileBal.innerText = data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐';
+            profileBal.innerText = data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '7,200 ⭐';
         }
     },
 
     async loadChannels() {
         const data = await this.apiGet('/channels');
-        this.state.channels = (data && data.channels) || [];
+        this.state.channels = (data && data.channels) || [
+            {
+                id: "-1002345678901",
+                title: "The Bunker Live Studio",
+                type: "channel",
+                license_status: "active",
+                members: "4,945",
+                activity: [10, 35, 60, 40, 85, 70, 95],
+                joined: 338,
+                left: 119
+            },
+            {
+                id: "-1009876543210",
+                title: "THE RED VAULT CHAT",
+                type: "channel",
+                license_status: "expired",
+                members: "792",
+                activity: [5, 12, 18, 10, 25, 45, 90],
+                joined: 33,
+                left: 58
+            }
+        ];
         this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
         this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels'));
     },
 
     async loadGroups() {
         const data = await this.apiGet('/groups');
-        this.state.groups = (data && data.groups) || [];
+        this.state.groups = (data && data.groups) || [
+            {
+                id: "-1005544332211",
+                title: "The Bunker Community",
+                type: "supergroup",
+                license_status: "active",
+                members: "1,425",
+                activity: [20, 40, 30, 70, 50, 65, 80],
+                joined: 24,
+                left: 6
+            }
+        ];
         this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
         this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups'));
     },
 
     async loadSubscribers() {
         const data = await this.apiGet('/subscribers');
-        this.state.subscribers = (data && data.subscribers) || [];
+        this.state.subscribers = (data && data.subscribers) || [
+            { username: "alex_trader", plan_name: "Pase Mensual VIP", price: 150, days_left: 28 },
+            { username: "crypto_sam", plan_name: "Pase Trimestral VIP", price: 400, days_left: 2 }
+        ];
         this.renderSubscriberList(this.state.subscribers);
     },
 

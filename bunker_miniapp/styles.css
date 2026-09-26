@@ -137,7 +137,11 @@ select option {
     color: #00f3ff;
 }
 
-/* Botón Flotante Arrastrable (Draggable Puro en Viewport) */
+/* Botón Flotante Arrastrable (Draggable Puro en Viewport)
+   FIX CRÍTICO: el botón desaparecía al tocarlo por un conflicto de compositing
+   entre `position: fixed` y `backdrop-filter` en WebViews móviles (Telegram Android/iOS).
+   Se le da su propia capa de composición estable con translateZ(0) + will-change,
+   y se evita el recálculo de backdrop-filter durante el arrastre (ver HTML: fondo sólido). */
 #floating-lang-btn {
     user-select: none;
     -webkit-user-select: none;
@@ -146,6 +150,22 @@ select option {
     bottom: 24px;
     right: 16px;
     z-index: 999;
+    will-change: transform, left, top;
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+    isolation: isolate;
+}
+
+/* Ningún ancestro de elementos fixed debe crear un stacking context propio
+   (transform / filter / perspective / will-change en body o contenedores raíz
+   invalida `position: fixed` respecto al viewport). Se deja explícito aquí
+   como regla de guardia para futuras ediciones de este archivo. */
+html, body {
+    transform: none;
+    filter: none;
+    perspective: none;
 }
 
 /* Scrollbar Minimalista */
