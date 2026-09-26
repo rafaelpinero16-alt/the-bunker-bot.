@@ -146,7 +146,9 @@ const translations = {
         login_hint: "Se abrirá una ventana segura de Telegram para verificar tu identidad. No se solicitan contraseñas.",
         login_verifying: "🔐 Verificando identidad...",
         login_error: "⚠️ No se pudo verificar la sesión. Intenta de nuevo.",
-        login_expired: "⚠️ Tu sesión expiró. Vuelve a iniciar sesión."
+        login_expired: "⚠️ Tu sesión expiró. Vuelve a iniciar sesión.",
+        load_error: "Error al sincronizar con el servidor",
+        btn_retry: "Reintentar conexión"
     },
     en: {
         plans_title: "Community Memberships",
@@ -277,7 +279,9 @@ const translations = {
         login_hint: "A secure Telegram window will open to verify your identity. No passwords required.",
         login_verifying: "🔐 Verifying identity...",
         login_error: "⚠️ Could not verify the session. Please try again.",
-        login_expired: "⚠️ Your session expired. Please log in again."
+        login_expired: "⚠️ Your session expired. Please log in again.",
+        load_error: "Failed to sync with server",
+        btn_retry: "Retry connection"
     }
 };
 
@@ -324,6 +328,16 @@ const app = {
 
     t(key) {
         return (translations[this.currentLang] && translations[this.currentLang][key]) || key;
+    },
+
+    escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     },
 
     initTheme() {
@@ -758,9 +772,7 @@ const app = {
         if (sessionToken) {
             headers['Authorization'] = `Bearer ${sessionToken}`;
         }
-        if (!headers['X-Telegram-Init-Data'] && !headers['Authorization']) {
-            headers['X-Telegram-Init-Data'] = 'id=8269470905';
-        }
+        // Se erradicó el fallback hardcodeado al ID del creador
         return headers;
     },
 
@@ -918,12 +930,12 @@ const app = {
             const res = await fetch(`${CONFIG.API_BASE}${path}`, {
                 headers: this.getAuthHeaders()
             });
-            if (res.status === 401) { this.handleSessionExpired(); return null; }
+            if (res.status === 401) { this.handleSessionExpired(); return { __error: 'unauthorized' }; }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
             console.error(`[API GET ERROR] ${path}:`, err);
-            return null;
+            return { __error: 'network' };
         }
     },
 
@@ -937,12 +949,12 @@ const app = {
                 },
                 body: JSON.stringify(body)
             });
-            if (res.status === 401) { this.handleSessionExpired(); return null; }
+            if (res.status === 401) { this.handleSessionExpired(); return { __error: 'unauthorized' }; }
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
             console.error(`[API POST ERROR] ${path}:`, err);
-            return null;
+            return { __error: 'network' };
         }
     },
 
@@ -963,6 +975,7 @@ const app = {
 
     async loadStats() {
         const data = await this.apiGet(`/stats?context=${this.activeContext}`);
+        if (data?.__error) return;
         this.setStat('stat-subs-count', data?.subscribers ?? 0);
         this.setStat('stat-revenue-count', data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐');
         this.setStat('stat-verified', data?.verified ?? 0);
@@ -1015,6 +1028,8 @@ const app = {
             alert(this.currentLang === 'es'
                 ? `✅ Sincronización Exitosa con The Bunker Bot:\n\n• Canales detectados: ${res.total_channels}\n• Comunidades detectadas: ${res.total_groups}`
                 : `✅ Synchronization Successful with The Bunker Bot:\n\n• Detected Channels: ${res.total_channels}\n• Detected Groups: ${res.total_groups}`);
+        } else if (res?.__error) {
+            alert(this.currentLang === 'es' ? '⚠️ Error de sincronización con el servidor.' : '⚠️ Server synchronization error.');
         } else {
             alert(this.currentLang === 'es' ? '✅ Canales y grupos sincronizados.' : '✅ Channels and groups synced.');
         }
@@ -1029,9 +1044,24 @@ const app = {
         }
     },
 
+    renderChatListError(containerId, msg, retryFnName) {
+        const el = document.getElementById(containerId);
+        if (!el) return;
+        el.innerHTML = `
+        <div class="glass-panel p-6 text-center text-xs text-rose-400 font-mono space-y-3">
+            <p>⚠️ ${msg}</p>
+            <button onclick="app.${retryFnName}()" class="bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-4 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 inline-flex items-center gap-2">
+                <i class="fa-solid fa-rotate"></i> ${this.t('btn_retry')}
+            </button>
+        </div>`;
+    },
+
     async loadChannels() {
         const data = await this.apiGet('/channels');
-        console.log("📢 [Canales Recibidos de la API]:", data); // Para ver qué responde Railway en la consola del navegador
+        if (data?.__error) {
+            this.renderChatListError('channels-list', this.t('load_error'), 'loadChannels');
+            return;
+        }
         this.state.channels = (data && data.channels) || [];
         this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
         this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels'));
@@ -1039,7 +1069,10 @@ const app = {
 
     async loadGroups() {
         const data = await this.apiGet('/groups');
-        console.log("🛡️ [Grupos Recibidos de la API]:", data); // Para ver qué responde Railway en la consola del navegador
+        if (data?.__error) {
+            this.renderChatListError('groups-list', this.t('load_error'), 'loadGroups');
+            return;
+        }
         this.state.groups = (data && data.groups) || [];
         this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
         this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups'));
@@ -1047,6 +1080,11 @@ const app = {
 
     async loadSubscribers() {
         const data = await this.apiGet('/subscribers');
+        if (data?.__error) {
+            const el = document.getElementById('watchdog-list');
+            if (el) el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-rose-400 font-mono">⚠️ ${this.t('load_error')}</div>`;
+            return;
+        }
         this.state.subscribers = (data && data.subscribers) || [];
         this.renderSubscriberList(this.state.subscribers);
     },
@@ -1060,7 +1098,7 @@ const app = {
                 sel.innerHTML = `<option value="">${emptyLabel}</option>`;
                 return;
             }
-            sel.innerHTML = list.map(c => `<option value="${c.id}">${c.type === 'channel' ? '📢' : '🛡️'} ${c.title} (ID: ${c.id})</option>`).join('');
+            sel.innerHTML = list.map(c => `<option value="${this.escapeHtml(c.id)}">${c.type === 'channel' ? '📢' : '🛡️'} ${this.escapeHtml(c.title)} (ID: ${this.escapeHtml(c.id)})</option>`).join('');
             if (this.selectedChatId) sel.value = this.selectedChatId;
         });
     },
@@ -1091,24 +1129,28 @@ const app = {
     chatCardTemplate(chat) {
         const isChannel = chat.type === 'channel';
         const licenseActive = chat.license_status === 'active';
+        const safeId = this.escapeHtml(chat.id);
+        const safeTitle = this.escapeHtml(chat.title);
+        const safeMembers = this.escapeHtml(chat.members ?? '0');
+
         const statusHtml = licenseActive
             ? `<span class="text-emerald-400 font-bold text-[10px] shrink-0">${this.t('license_active')}</span>`
-            : `<button onclick="app.renewLicense('${chat.id}')" class="bg-rose-500/20 text-rose-400 border border-rose-500/50 px-2.5 py-1 rounded-lg text-[10px] font-bold hover:bg-rose-500/30 active:scale-95 transition shrink-0">${this.t('license_renew')}</button>`;
+            : `<button onclick="app.renewLicense('${safeId}')" class="bg-rose-500/20 text-rose-400 border border-rose-500/50 px-2.5 py-1 rounded-lg text-[10px] font-bold hover:bg-rose-500/30 active:scale-95 transition shrink-0">${this.t('license_renew')}</button>`;
 
         const deltaHtml = (chat.joined != null)
-            ? `<span class="text-emerald-400">+${chat.joined}</span> <span class="text-rose-400 ml-1.5">-${chat.left}</span>`
+            ? `<span class="text-emerald-400">+${this.escapeHtml(chat.joined)}</span> <span class="text-rose-400 ml-1.5">-${this.escapeHtml(chat.left)}</span>`
             : `<span class="text-neutral-500">—</span>`;
 
         return `
-        <div class="glass-panel p-3.5 space-y-2.5" data-chat-id="${chat.id}">
+        <div class="glass-panel p-3.5 space-y-2.5" data-chat-id="${safeId}">
             <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2 min-w-0">
                     <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff]/25 to-[#ff00ff]/25 flex items-center justify-center shrink-0 overflow-hidden border border-white/10">
                         <i class="fa-solid ${isChannel ? 'fa-tower-broadcast' : 'fa-shield-halved'} text-[#00f3ff] text-xs"></i>
                     </div>
                     <div class="min-w-0">
-                        <p class="text-xs font-bold text-theme-main truncate max-w-[130px]">${chat.title}</p>
-                        <p class="text-[9px] text-theme-muted font-mono flex items-center gap-1"><i class="fa-solid fa-user text-[8px]"></i> ${chat.members ?? '0'}</p>
+                        <p class="text-xs font-bold text-theme-main truncate max-w-[130px]">${safeTitle}</p>
+                        <p class="text-[9px] text-theme-muted font-mono flex items-center gap-1"><i class="fa-solid fa-user text-[8px]"></i> ${safeMembers}</p>
                     </div>
                 </div>
                 ${statusHtml}
@@ -1116,7 +1158,7 @@ const app = {
             <div class="h-16 w-full">${this.generateSparkline(chat.activity && chat.activity.length >= 2 ? chat.activity : [0, 0, 0, 0, 0], isChannel ? '#00f3ff' : '#39ff88')}</div>
             <div class="flex items-center justify-between border-t border-neutral-800 pt-2 font-mono">
                 <span class="text-[9px]">${deltaHtml}</span>
-                <button onclick="app.configureChat('${chat.id}')" class="text-[9px] text-[#00f3ff] font-bold uppercase flex items-center gap-1 hover:text-white transition">
+                <button onclick="app.configureChat('${safeId}')" class="text-[9px] text-[#00f3ff] font-bold uppercase flex items-center gap-1 hover:text-white transition">
                     <i class="fa-solid fa-gear"></i> ${this.t('configure')}
                 </button>
             </div>
@@ -1133,7 +1175,7 @@ const app = {
         if (!list || list.length === 0) {
             el.innerHTML = `
             <div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono space-y-3">
-                <p>${emptyMsg}</p>
+                <p>${this.escapeHtml(emptyMsg)}</p>
                 <button onclick="app.openAddBot('${targetType}')" class="bg-[#00f3ff]/20 hover:bg-[#00f3ff]/30 text-[#00f3ff] border border-[#00f3ff]/40 px-4 py-2 rounded-xl text-xs font-bold transition-all active:scale-95 inline-flex items-center gap-2">
                     <i class="fa-solid fa-plus"></i> ${addBtnLabel}
                 </button>
@@ -1147,11 +1189,15 @@ const app = {
         const daysLeft = s.days_left ?? 0;
         const statusColor = daysLeft > 5 ? 'emerald-400' : (daysLeft > 0 ? 'amber-400' : 'rose-400');
         const daysLabel = daysLeft > 0 ? `${daysLeft} ${this.currentLang === 'es' ? 'días restantes' : 'days left'}` : (this.currentLang === 'es' ? 'Período de Gracia 🔴' : 'Grace Period 🔴');
+        const safeUsername = this.escapeHtml(s.username);
+        const safePlanName = this.escapeHtml(s.plan_name);
+        const safePrice = this.escapeHtml(s.price);
+
         return `
         <div class="bg-black/60 p-3.5 rounded-xl border border-neutral-800 flex items-center justify-between font-mono">
             <div>
-                <p class="text-white font-bold">@${s.username}</p>
-                <p class="text-[10px] text-neutral-400">${s.plan_name} (${s.price} ⭐)</p>
+                <p class="text-white font-bold">@${safeUsername}</p>
+                <p class="text-[10px] text-neutral-400">${safePlanName} (${safePrice} ⭐)</p>
             </div>
             <div class="text-right">
                 <span class="text-${statusColor} font-bold text-xs">${daysLabel}</span>
@@ -1193,13 +1239,13 @@ const app = {
 
     async loadChatDashboard(chatId) {
         const data = await this.apiGet(`/chat/${chatId}/dashboard`);
-        if (data) {
+        if (data && !data.__error) {
             this.state.currentChatDashboard = data;
             const logEl = document.getElementById('chat-log-channel');
             if (logEl) {
                 const isEnabled = Boolean(data.log_channel?.enabled);
                 logEl.innerText = isEnabled 
-                    ? `${this.t('status_enabled')} (${data.log_channel.channel_id})` 
+                    ? `${this.t('status_enabled')} (${this.escapeHtml(data.log_channel.channel_id)})` 
                     : this.t('status_disabled');
             }
 
@@ -1207,14 +1253,14 @@ const app = {
             if (planStatusEl) {
                 const isActive = data.plan?.status === 'active';
                 planStatusEl.innerText = isActive 
-                    ? `${this.t('tariff_active')} (${data.plan.name})` 
+                    ? `${this.t('tariff_active')} (${this.escapeHtml(data.plan.name)})` 
                     : this.t('tariff_empty');
                 planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
             }
 
             const modsEl = document.getElementById('chat-active-modules');
             if (modsEl && data.modules) {
-                modsEl.innerHTML = `${data.modules.active} <span class="text-sm font-normal text-blue-300">/ ${data.modules.total}</span>`;
+                modsEl.innerHTML = `${this.escapeHtml(data.modules.active)} <span class="text-sm font-normal text-blue-300">/ ${this.escapeHtml(data.modules.total)}</span>`;
             }
 
             const spamModeEl = document.getElementById('chat-spam-mode');
@@ -1226,7 +1272,7 @@ const app = {
 
     async loadChatStats(chatId) {
         const data = await this.apiGet(`/chat/${chatId}/stats`);
-        if (data) {
+        if (data && !data.__error) {
             this.state.currentChatStats = data;
         }
     },
@@ -1236,17 +1282,17 @@ const app = {
         const listEl = document.getElementById('chat-admin-stats-list');
         if (!listEl) return;
 
-        if (data && data.admins && data.admins.length > 0) {
+        if (data && !data.__error && data.admins && data.admins.length > 0) {
             this.state.currentChatAdmins = data.admins;
             listEl.innerHTML = data.admins.map(adm => `
                 <div class="bg-black/40 p-2.5 rounded-xl border border-neutral-800 flex items-center justify-between font-mono">
                     <div>
-                        <p class="text-white font-bold">${adm.name}</p>
-                        <span class="text-[9px] text-neutral-400">${adm.role}</span>
+                        <p class="text-white font-bold">${this.escapeHtml(adm.name)}</p>
+                        <span class="text-[9px] text-neutral-400">${this.escapeHtml(adm.role)}</span>
                     </div>
                     <div class="text-right">
-                        <p class="text-[#00f3ff] font-bold">${adm.messages} msgs</p>
-                        <span class="text-[9px] text-neutral-500">${adm.replies} replies</span>
+                        <p class="text-[#00f3ff] font-bold">${this.escapeHtml(adm.messages)} msgs</p>
+                        <span class="text-[9px] text-neutral-500">${this.escapeHtml(adm.replies)} replies</span>
                     </div>
                 </div>
             `).join('');
@@ -1260,7 +1306,7 @@ const app = {
         const listEl = document.getElementById('chat-top-users-list');
         if (!listEl) return;
 
-        if (data && data.top_users && data.top_users.length > 0) {
+        if (data && !data.__error && data.top_users && data.top_users.length > 0) {
             this.state.currentChatTopUsers = data.top_users;
             const medals = ['🥇', '🥈', '🥉'];
             listEl.innerHTML = data.top_users.map(u => `
@@ -1268,11 +1314,11 @@ const app = {
                     <div class="flex items-center gap-2">
                         <span class="font-bold text-xs">${medals[u.rank - 1] || `#${u.rank}`}</span>
                         <div>
-                            <p class="text-white font-bold text-xs">${u.name}</p>
-                            <span class="text-[9px] text-neutral-400 font-mono">${u.badge || ''}</span>
+                            <p class="text-white font-bold text-xs">${this.escapeHtml(u.name)}</p>
+                            <span class="text-[9px] text-neutral-400 font-mono">${this.escapeHtml(u.badge || '')}</span>
                         </div>
                     </div>
-                    <span class="text-[#00f3ff] font-bold text-xs font-mono">${u.messages} msgs</span>
+                    <span class="text-[#00f3ff] font-bold text-xs font-mono">${this.escapeHtml(u.messages)} msgs</span>
                 </div>
             `).join('');
         } else {
@@ -1305,7 +1351,7 @@ const app = {
     },
 
     // ==========================================
-    // 🧬 CONTROLADORES FASE 2: CLONES, CENTINELAS Y GHOST PURGE
+    // 🧬 CONTROLADORES: CLONES, CENTINELAS Y GHOST PURGE
     // ==========================================
     async deployClone() {
         const tokenInput = document.getElementById('clone-bot-token');
