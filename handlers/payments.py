@@ -8,10 +8,11 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 from aiogram.filters import Command, CommandObject
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from database.database import (
     approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
-    get_vip_badge_title, get_channel_plans, get_channel_plan, record_channel_subscription
+    get_vip_badge_title, get_channel_plans, get_channel_plan, 
+    record_channel_subscription, get_channel_settings
 )
 from assistant import set_participant_mic
 from handlers.user_private import is_clone_bot, get_master_bot_username
@@ -414,12 +415,10 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             media_type = target_plan.get("media_type")
             target_link = target_plan.get("target_link")
 
-            # Construcción de la leyenda promocional integrando target_link si existe
             caption = promo_text.strip() if promo_text and promo_text.strip() else f"💎 <b>{plan_name}</b>\n\n{duration_days} días — {stars_price} ⭐"
             if target_link:
                 caption += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>" if lang == "es" else f"\n\n🔗 <b>VIP Target:</b> <code>{target_link}</code>"
 
-            # Despacho opcional del activo promocional (Foto/Video/Animación) previo a la factura
             if media_id and media_type:
                 try:
                     if media_type == "photo":
@@ -560,7 +559,7 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
 
 
 # ==========================================
-# 🛡️ VALIDACIÓN DE PRE-CHECKOUT FILTRADA (NO CAPTURA /speakers)
+# 🛡️ VALIDACIÓN DE PRE-CHECKOUT FILTRADA
 # ==========================================
 @router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
@@ -568,7 +567,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 
 
 # ==========================================
-# 💎 PROCESADOR DE PAGO EXITOSO FILTRADO (PERMITE QUE speak_ LLEGUE A GROUPS.PY)
+# 💎 PROCESADOR DE PAGO EXITOSO (FASE 3: ENTREGA VIP & CRIPTO-ENLACES)
 # ==========================================
 @router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
 async def process_successful_payment(message: Message, bot: Bot):
@@ -619,7 +618,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para suscripción: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 2: FASE 6 / FASE 4 — MEMBRESÍAS DE CANAL, ENLACES DE 1 USO Y ENTREGA DE DESTINO VIP
+    # CASO 2: FASE 3 — MEMBRESÍAS DE CANAL, ENLACES DE 1 USO Y ENTREGA DE DESTINO VIP
     elif payload.startswith("chan_sub_"):
         try:
             parts = payload.split("_")
@@ -628,11 +627,13 @@ async def process_successful_payment(message: Message, bot: Bot):
             duration_days = int(parts[4])
             stars_paid = message.successful_payment.total_amount
 
-            # Recuperar el plan para obtener el target_link configurado
+            # 1. Recuperar ajustes y plan configurado
             target_plan = await get_channel_plan(plan_id)
             target_link = target_plan.get("target_link") if target_plan else None
+            ch_settings = await get_channel_settings(channel_id)
+            custom_welcome = ch_settings.get("custom_welcome") if ch_settings else ""
 
-            # Genera un enlace de invitación de un solo uso que se quema al entrar
+            # 2. Generar enlace criptográfico de 1 solo uso
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
                 member_limit=1,
@@ -640,7 +641,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             )
             invite_link = invite.invite_link
 
-            # Registra la suscripción activa en la base de datos
+            # 3. Registrar suscripción en la base de datos
             await record_channel_subscription(
                 channel_id=channel_id,
                 user_id=user_id,
@@ -650,7 +651,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 invite_link=invite_link
             )
 
-            # Construcción de botones post-pago: Enlace de 1 uso + Enlace de destino VIP
+            # 4. Construcción de botones y destino VIP
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
             ]
@@ -667,20 +668,25 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             join_markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
+            welcome_extra = f"\n\n💬 <i>{custom_welcome}</i>" if custom_welcome else ""
+
             success_text = (
                 f"💎 <b>¡Membresía de Canal Activada con Éxito!</b>\n\n"
                 f"• Pago procesado: <b>{stars_paid} Stars (XTR)</b>\n"
+                f"• Período de vigencia: <b>{duration_days} días</b>\n"
                 f"• Tu <b>enlace criptográfico de un solo uso</b> está listo (se quemará automáticamente al unirte):\n\n"
-                f"🔗 <a href='{invite_link}'>Entrar al Canal Seguro</a>{target_extra}\n\n"
+                f"🔗 <a href='{invite_link}'>Entrar al Canal Seguro</a>{target_extra}{welcome_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 f"💎 <b>Channel Membership Activated Successfully!</b>\n\n"
                 f"• Payment processed: <b>{stars_paid} Stars (XTR)</b>\n"
+                f"• Validity period: <b>{duration_days} days</b>\n"
                 f"• Your <b>single-use cryptographic invite link</b> is ready (burns automatically upon joining):\n\n"
-                f"🔗 <a href='{invite_link}'>Join Secure Channel</a>{target_extra}\n\n"
+                f"🔗 <a href='{invite_link}'>Join Secure Channel</a>{target_extra}{welcome_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
+            logging.info(f"✅ [Membresía Activada]: Usuario {user_id} en canal {channel_id} por {duration_days} días ({stars_paid} Stars).")
         except Exception as e:
             logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
             try:
