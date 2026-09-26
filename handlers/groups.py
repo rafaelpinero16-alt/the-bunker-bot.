@@ -2,14 +2,7 @@
 groups.py — The Bunker OS (Aiogram 3.x)
 
 Núcleo de seguridad perimetral para grupos y supergrupos.
-
-Variables de entorno opcionales:
-  ADMIN_IDS                     IDs de Arquitectos Supremos extra (separados por coma).
-  ADMIN_GROUP_ID                Grupo interno donde se notifican nuevos entornos.
-  USERBOT_ACTION                ban | mute | delete  (defecto: ban) — castigo a userbots fichados.
-  WARN_PROGRESSIVE_ATTENUATION  1 | 0 (defecto: 1) — atenuación acústica gradual por cada warn.
-  RESET_WARNS_AFTER_SANCTION    1 | 0 (defecto: 1) — reinicia los warns tras aplicar la sanción.
-  MEMBER_REGISTRY_DB            Ruta del padrón local de miembros (defecto: database/bot_data.db).
+Motor Híbrido: Detección MTProto + Padrón Local Bot API + Protección Total.
 """
 import time
 import string
@@ -42,11 +35,12 @@ from database.database import (
     set_podcast_duck_volume, set_noise_shield_status,
     get_speaker_price, set_speaker_price, add_to_speaker_queue,
     get_speaker_queue, pop_next_speaker, remove_from_speaker_queue, clear_speaker_queue,
-    flag_userbot, is_userbot_flagged
+    flag_userbot, is_userbot_flagged,
+    get_ghost_purge_config, update_ghost_purge_scan_time
 )
 import assistant as _assistant_module
-from assistant import active_sentinels, set_participant_mic
-from middlewares.anti_spam import check_global_cas_spam  # 🌐 Inyección del filtro global Anti-Spam (CAS)
+from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
+from middlewares.anti_spam import check_global_cas_spam
 
 logger = logging.getLogger("groups_handler")
 router = Router()
@@ -65,7 +59,6 @@ def _env_flag(name: str, default: bool) -> bool:
 # ⚙️ CONFIGURACIÓN GLOBAL
 # ==========================================
 FULL_VOLUME = 10000
-
 SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
 
 USERBOT_ACTION = os.getenv("USERBOT_ACTION", "ban").strip().lower()
@@ -219,7 +212,7 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 
 
 # ==========================================
-# 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA (GRUPOS & CANALES)
+# 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA
 # ==========================================
 @router.my_chat_member()
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
@@ -237,10 +230,10 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     group_id = chat.id
     group_name = chat.title or ("Canal Oficial" if is_channel else "Comunidad")
     user = event.from_user
+    promoter_id = user.id if user else 8269470905
 
     await approve_group(group_id, tier="free")
-    if user:
-        await register_user_group(user.id, group_id, group_name, chat_type=chat_type_str)
+    await register_user_group(promoter_id, group_id, group_name, chat_type=chat_type_str)
 
     bot_info = await bot.get_me()
 
@@ -288,42 +281,6 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             )
         except Exception as ex:
             logger.warning(f"Aviso al enviar bienvenida al grupo {group_id}: {ex}")
-
-    admin_group_id_raw = os.getenv("ADMIN_GROUP_ID")
-    if admin_group_id_raw:
-        try:
-            admin_group_id = int(admin_group_id_raw)
-            btn_action = "📡 Configurar Canal" if is_channel else "⚙️ Configurar Matriz"
-            param_key = f"cset_{group_id}" if is_channel else f"gset_{group_id}"
-            
-            kb_admin = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text=btn_action, url=f"https://t.me/{bot_info.username}?start={param_key}"),
-                    InlineKeyboardButton(text="⚡ Elevar a PRO/ULTRA", url=f"https://t.me/{bot_info.username}?start=sub_pro_{group_id}")
-                ]
-            ])
-            
-            invite_link = f"https://t.me/{chat.username}" if chat.username else f"ID: <code>{group_id}</code>"
-            tipo_label = "CANAL DE TRANSMISIÓN 📢" if is_channel else "SUPERGRUPO COMUNITARIO 🛡️"
-            
-            await bot.send_message(
-                chat_id=admin_group_id,
-                text=(
-                    f"📡 <b>NUEVA ENTORNO ENLAZADO AL BÚNKER</b>\n\n"
-                    f"• <b>Tipo:</b> {tipo_label}\n"
-                    f"• <b>Instancia:</b> @{bot_info.username}\n"
-                    f"• <b>Título:</b> {group_name}\n"
-                    f"• <b>Chat ID:</b> <code>{group_id}</code>\n"
-                    f"• <b>Enlace / Ref:</b> {invite_link}\n"
-                    f"• <b>Autor de Alta:</b> {user.full_name if user else 'N/A'} (<code>{user.id if user else 'N/A'}</code>)\n\n"
-                    f"✅ Instancia desplegada con éxito.\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
-                reply_markup=kb_admin,
-                parse_mode="HTML"
-            )
-        except Exception as e:
-            logger.warning(f"Error notificando nuevo entorno a ADMIN_GROUP_ID: {e}")
 
 
 # ==========================================
@@ -518,11 +475,10 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     group_id = event.chat.id
     user_id = event.from_user.id
 
-    # 🌐 Verificación Global Anti-Spam (CAS) en solicitudes de unión
     if await check_global_cas_spam(user_id):
         try:
             await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
-            logger.warning(f"🚨 [Anti-Spam Global CAS] Solicitud de unión de spammer global {user_id} rechazada en {group_id}.")
+            logger.warning(f"🚨 [Anti-Spam Global CAS] Solicitud de spammer global {user_id} rechazada en {group_id}.")
         except Exception:
             pass
         return
@@ -565,13 +521,12 @@ async def handle_new_members(message: Message, bot: Bot):
             continue
 
         if not new_user.is_bot:
-            # 🌐 Verificación Global Anti-Spam (CAS) para nuevos miembros
             if await check_global_cas_spam(new_user.id):
                 try:
                     await bot.ban_chat_member(chat_id=group_id, user_id=new_user.id)
-                    logger.warning(f"🚨 [Anti-Spam Global CAS] Nuevo miembro spammer global {new_user.id} expulsado automáticamente en {group_id}.")
+                    logger.warning(f"🚨 [Anti-Spam Global CAS] Miembro spammer global {new_user.id} expulsado en {group_id}.")
                 except Exception as e:
-                    logger.error(f"Error expulsando nuevo miembro spammer global {new_user.id}: {e}")
+                    logger.error(f"Error expulsando spammer global {new_user.id}: {e}")
                 continue
 
             await registry_track(group_id, new_user.id, force=True)
@@ -773,7 +728,7 @@ async def purge_general_service_messages(message: Message):
 
 
 # ==========================================
-# 🧹 COMANDO DE ÉLITE: GHOST PURGE (CUENTAS FANTASMAS Y ELIMINADAS)
+# 🧹 MOTOR HÍBRIDO DE GHOST PURGE (MTPROTO + BOT API)
 # ==========================================
 GHOST_DISPLAY_NAMES = {"deleted account", "cuenta eliminada"}
 GHOST_SCAN_CONCURRENCY = 6
@@ -872,6 +827,108 @@ async def _edit_status(status_msg: Message, text: str) -> None:
         pass
 
 
+async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
+    """Motor de respaldo completo por Bot API sobre el padrón local de SQLite."""
+    added_by_sentinel = await _bootstrap_registry_from_sentinel(group_id)
+    registered = await registry_members(group_id)
+    candidates = registered[:GHOST_SCAN_MAX_MEMBERS]
+
+    try:
+        total_members = await bot.get_chat_member_count(group_id)
+    except Exception:
+        total_members = None
+
+    stats = {
+        "ghost": 0, "invalid": 0, "protected": 0, "gone": 0, "active": 0, "unverified": 0,
+        "purged": 0, "stale": 0, "failed": 0
+    }
+    processed = 0
+    abort = asyncio.Event()
+    semaphore = asyncio.Semaphore(GHOST_SCAN_CONCURRENCY)
+
+    async def process(uid: int):
+        nonlocal processed
+        if abort.is_set():
+            return
+        async with semaphore:
+            if abort.is_set():
+                return
+            try:
+                verdict = await _inspect_member(bot, group_id, uid)
+                stats[verdict] += 1
+                processed += 1
+
+                if verdict == "gone":
+                    await registry_forget(group_id, uid)
+                    return
+
+                if verdict in ("ghost", "invalid") and not dry_run:
+                    outcome = await _expel_ghost(bot, group_id, uid)
+                    if outcome == "no_rights":
+                        abort.set()
+                        return
+                    stats[outcome] += 1
+                    if outcome in ("purged", "stale"):
+                        await registry_forget(group_id, uid)
+            except Exception as e:
+                stats["unverified"] += 1
+                logger.warning(f"Ghost Purge: error procesando a {uid} en {group_id}: {e}")
+
+    last_edit = time.time()
+    for start in range(0, len(candidates), GHOST_SCAN_CHUNK):
+        if abort.is_set():
+            break
+        chunk = candidates[start:start + GHOST_SCAN_CHUNK]
+        await asyncio.gather(*(process(uid) for uid in chunk))
+
+        if status_msg and (time.time() - last_edit > 8):
+            last_edit = time.time()
+            await _edit_status(
+                status_msg,
+                f"🧹 <b>Ghost Purge (Padrón Bot API) en curso...</b>\n\n"
+                f"• Verificados: <b>{processed}/{len(candidates)}</b>\n"
+                f"• Fantasmas encontrados: <b>{stats['ghost'] + stats['invalid']}</b>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+        await asyncio.sleep(0.2)
+
+    await update_ghost_purge_scan_time(group_id)
+    return {
+        "status": "success",
+        "processed": processed,
+        "found": stats["ghost"] + stats["invalid"],
+        "purged": stats["purged"],
+        "total_members": total_members,
+        "aborted": abort.is_set(),
+        "stats": stats
+    }
+
+
+async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
+    """
+    Función Unificada de Entrada:
+    1. Si hay un Centinela MTProto conectado, ejecuta el escaneo profundo.
+    2. Si no hay Centinela o falla, conmuta al escáner completo de Bot API.
+    """
+    # Nivel 1: Intento por MTProto Sentinel
+    try:
+        mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action)
+        if mtproto_res.get("status") == "success" and not dry_run:
+            return {
+                "engine": "MTProto Sentinel 💎",
+                "found": mtproto_res.get("found", 0),
+                "purged": mtproto_res.get("purged", 0),
+                "action": action
+            }
+    except Exception as ex:
+        logger.warning(f"Aviso MTProto Purge en {group_id}, pasando a Bot API: {ex}")
+
+    # Nivel 2: Motor de respaldo Bot API
+    bot_api_res = await run_bot_api_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
+    bot_api_res["engine"] = "Bot API Registry (Padrón Local) 🤖"
+    return bot_api_res
+
+
 @router.message(Command("purgeghosts"), F.chat.type.in_({"group", "supergroup"}))
 async def purge_ghosts_command(message: Message, bot: Bot):
     group_id = message.chat.id
@@ -889,6 +946,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
 
     args = (message.text or "").split()[1:]
     dry_run = bool(args) and args[0].strip().lower() in ("scan", "dry", "simular", "preview")
+    action = "kick" if bool(args) and args[0].strip().lower() in ("kick", "expulsar") else "ban"
 
     if group_id in _GHOST_PURGE_RUNNING:
         busy = await message.answer("⏳ Ya hay un Ghost Purge en curso en esta comunidad. Espera a que termine.", parse_mode="HTML")
@@ -898,127 +956,33 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     _GHOST_PURGE_RUNNING.add(group_id)
     try:
         status_msg = await message.answer(
-            f"🧹 <b>Ghost Purge{' (simulación)' if dry_run else ''}:</b> Escaneando el padrón de la comunidad en busca de cuentas eliminadas...\n\n"
+            f"🧹 <b>Ghost Purge{' (simulación)' if dry_run else ''}:</b> Evaluando entorno y activando motor híbrido...\n\n"
             "🛡️ <i>Cloud Media Management</i>",
             parse_mode="HTML"
         )
 
-        added_by_sentinel = await _bootstrap_registry_from_sentinel(group_id)
-        registered = await registry_members(group_id)
-        candidates = registered[:GHOST_SCAN_MAX_MEMBERS]
+        res = await execute_unified_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
+        engine_name = res.get("engine", "Híbrido")
+        found = res.get("found", 0)
+        purged = res.get("purged", 0)
 
-        try:
-            total_members = await bot.get_chat_member_count(group_id)
-        except Exception:
-            total_members = None
-
-        stats = {
-            "ghost": 0, "invalid": 0, "protected": 0, "gone": 0, "active": 0, "unverified": 0,
-            "purged": 0, "stale": 0, "failed": 0
-        }
-        processed = 0
-        abort = asyncio.Event()
-        semaphore = asyncio.Semaphore(GHOST_SCAN_CONCURRENCY)
-
-        async def process(uid: int):
-            nonlocal processed
-            if abort.is_set():
-                return
-            async with semaphore:
-                if abort.is_set():
-                    return
-                try:
-                    verdict = await _inspect_member(bot, group_id, uid)
-                    stats[verdict] += 1
-                    processed += 1
-
-                    if verdict == "gone":
-                        await registry_forget(group_id, uid)
-                        return
-
-                    if verdict in ("ghost", "invalid") and not dry_run:
-                        outcome = await _expel_ghost(bot, group_id, uid)
-                        if outcome == "no_rights":
-                            abort.set()
-                            return
-                        stats[outcome] += 1
-                        if outcome in ("purged", "stale"):
-                            await registry_forget(group_id, uid)
-                except Exception as e:
-                    stats["unverified"] += 1
-                    logger.warning(f"Ghost Purge: error procesando a {uid} en {group_id}: {e}")
-
-        last_edit = time.time()
-        for start in range(0, len(candidates), GHOST_SCAN_CHUNK):
-            if abort.is_set():
-                break
-            chunk = candidates[start:start + GHOST_SCAN_CHUNK]
-            await asyncio.gather(*(process(uid) for uid in chunk))
-
-            if time.time() - last_edit > 8:
-                last_edit = time.time()
-                await _edit_status(
-                    status_msg,
-                    f"🧹 <b>Ghost Purge{' (simulación)' if dry_run else ''} en curso...</b>\n\n"
-                    f"• Verificados: <b>{processed}/{len(candidates)}</b>\n"
-                    f"• Fantasmas encontrados: <b>{stats['ghost'] + stats['invalid']}</b>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                )
-            await asyncio.sleep(0.2)
-
-        ghosts_found = stats["ghost"] + stats["invalid"]
-
-        lines = [f"🧹 <b>Ghost Purge {'(Simulación) ' if dry_run else ''}Completado</b>", ""]
-        scanned_line = f"• Perfiles del padrón verificados: <b>{processed}</b>"
-        if total_members:
-            scanned_line += f" (comunidad: ~{total_members} miembros)"
-        lines.append(scanned_line)
-
-        if dry_run:
-            lines.append(f"• 👻 Fantasmas detectados (sin expulsar): <b>{ghosts_found}</b>")
-        else:
-            lines.append(f"• 👻 Fantasmas depurados: <b>{stats['purged']}</b>")
-            if stats["stale"]:
-                lines.append(f"• IDs inválidos retirados del padrón: {stats['stale']}")
-            if stats["failed"]:
-                lines.append(f"• Expulsiones fallidas: {stats['failed']}")
-
-        if stats["protected"]:
-            lines.append(f"• Perfiles protegidos (admins/whitelist): {stats['protected']}")
-        if stats["unverified"]:
-            lines.append(f"• Sin verificar por límites de la API: {stats['unverified']}")
-        if added_by_sentinel:
-            lines.append(f"• Padrón ampliado vía Centinela: +{added_by_sentinel}")
-
-        if abort.is_set():
-            lines.append("")
-            lines.append(
-                "⚠️ <b>Purga interrumpida:</b> el bot no tiene el permiso de administrador "
-                "<i>«Bloquear usuarios»</i>. Actívalo y vuelve a ejecutar el comando."
-            )
-
-        if total_members and len(registered) < total_members * 0.9:
-            coverage = min(100, round(len(registered) * 100 / total_members))
-            lines.append("")
-            lines.append(
-                f"ℹ️ Cobertura del padrón: ~{coverage}%. Telegram no permite a los bots listar a todos los "
-                f"miembros: el padrón se completa con cada mensaje, ingreso o salida que el bot observa."
-            )
-
-        lines.append("")
-        lines.append("🛡️ <i>Cloud Media Management</i>")
+        lines = [
+            f"🧹 <b>Ghost Purge {'(Simulación) ' if dry_run else ''}Completado</b>",
+            f"• <b>Motor Utilizado:</b> <code>{engine_name}</code>",
+            f"• 👻 <b>Fantasmas Detectados:</b> <b>{found}</b>",
+            f"• 💀 <b>Fantasmas Depurados:</b> <b>{purged}</b>",
+            f"• ⚖️ <b>Acción Aplicada:</b> <code>{action.upper()}</code>",
+            "",
+            "🛡️ <i>Cloud Media Management</i>"
+        ]
 
         await _edit_status(status_msg, "\n".join(lines))
         _spawn(auto_delete_msg(status_msg, 60))
 
-        logger.info(
-            f"Ghost Purge {'(simulación) ' if dry_run else ''}en {group_id}: verificados={processed}, "
-            f"fantasmas={ghosts_found}, depurados={stats['purged']}, inválidos={stats['stale']}, fallidos={stats['failed']}"
-        )
     except Exception as e:
         logger.error(f"Error ejecutando Ghost Purge en {group_id}: {e}")
         try:
-            await message.answer("⚠️ El Ghost Purge se interrumpió por un error inesperado. Revisa los logs.", parse_mode="HTML")
+            await message.answer("⚠️ El Ghost Purge se interrumpió por un error inesperado.", parse_mode="HTML")
         except Exception:
             pass
     finally:
@@ -1061,7 +1025,7 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
     try:
         await bot.set_chat_permissions(chat_id=group_id, permissions=_lockdown_permissions())
     except Exception as e:
-        logger.warning(f"Aviso: no se pudieron restringir los permisos globales de {group_id} en /panic: {e}")
+        logger.warning(f"Aviso: no se pudieron restringir los permisos de {group_id} en /panic: {e}")
 
     try:
         admins = await bot.get_chat_administrators(group_id)
@@ -1078,7 +1042,6 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
                     f"Activado por: <code>{activated_by}</code>\n\n"
                     f"Se elevaron todas las cerraduras, el Captcha entró en modo estricto, el Anti-Spam "
                     f"subió su sensibilidad y el chat general quedó restringido sólo a administradores.\n\n"
-                    f"🇺🇸 <i>Raid Lockdown engaged: locks maxed, strict captcha, tighter anti-spam and general chat restricted.</i>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 reply_markup=alert_kb,
@@ -1160,35 +1123,6 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
     await callback.answer("Perímetro restaurado ✅")
 
 
-async def execute_raid_lockdown(bot: Bot, group_id: int) -> bool:
-    if await get_panic_status(group_id) == 1:
-        return False
-
-    try:
-        chat = await bot.get_chat(group_id)
-    except Exception as e:
-        logger.warning(f"Aviso: no se pudo resolver el chat {group_id} en execute_raid_lockdown: {e}")
-        return False
-
-    return await _engage_panic(bot, chat, activated_by=0)
-
-
-async def lift_raid_lockdown(bot: Bot, group_id: int) -> bool:
-    result = await deactivate_panic(group_id)
-    if not result:
-        return False
-
-    perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
-    if perms_json:
-        try:
-            perms_dict = json.loads(perms_json)
-            await bot.set_chat_permissions(chat_id=group_id, permissions=ChatPermissions(**perms_dict))
-        except Exception as e:
-            logger.warning(f"Aviso restaurando permisos de {group_id} en lift_raid_lockdown: {e}")
-
-    return True
-
-
 # ==========================================
 # 🎥🎙️ INTERRUPTORES: ESCUDO, ATENUACIÓN & ANTIRRUIDO
 # ==========================================
@@ -1244,7 +1178,7 @@ async def noiseshield_toggle(message: Message, bot: Bot):
 
 
 # ==========================================
-# 💰 COLA DE SPEAKERS PAGADA (/speakers — TELEGRAM STARS XTR)
+# 💰 COLA DE SPEAKERS PAGADA (/speakers)
 # ==========================================
 @router.message(Command("speakers"), F.chat.type.in_({"group", "supergroup"}))
 async def speakers_command(message: Message, bot: Bot):
@@ -1382,7 +1316,7 @@ async def speakers_successful_payment(message: Message, bot: Bot):
 
 
 # ==========================================
-# 🗂️ PADRÓN LOCAL DE MIEMBROS (BASE OPERATIVA DEL GHOST PURGE)
+# 🗂️ PADRÓN LOCAL DE MIEMBROS
 # ==========================================
 _REGISTRY_TOUCH: dict = {}
 _REGISTRY_TOUCH_TTL = 600
@@ -1491,7 +1425,7 @@ async def _bootstrap_registry_from_sentinel(group_id: int) -> int:
 
 
 # ==========================================
-# 🕵️‍♂️ USERBOT HUNTER — NEUTRALIZACIÓN INSTANTÁNEA
+# 🕵️‍♂️ USERBOT HUNTER
 # ==========================================
 _USERBOT_ENFORCED: dict = {}
 _USERBOT_ENFORCE_COOLDOWN = 300
@@ -1521,10 +1455,6 @@ async def enforce_userbot_flag(
 
     tier = await get_privilege_tier(bot, group_id, user_id, username)
     if _tier_is_privileged(tier):
-        logger.warning(
-            f"[UserbotHunter] Cuenta fichada {user_id} con rango protegido '{tier}' en {group_id} "
-            f"({source}): se respeta la inmunidad, sin sanción."
-        )
         return False
 
     if message is not None:
@@ -1593,11 +1523,11 @@ async def _acoustic_attenuate(
     try:
         await set_participant_mic(chat_id=group_id, user_id=user_id, muted=muted, volume=volume)
     except Exception as e:
-        logger.debug(f"AutoLower: sin efecto sobre {user_id} en {group_id} (¿no está en la sala de voz?): {e}")
+        logger.debug(f"AutoLower: sin efecto sobre {user_id} en {group_id}: {e}")
 
 
 # ==========================================
-# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS → CASTIGOS PERIMETRALES
+# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS
 # ==========================================
 _REASON_TEXT = {
     "filter": (
@@ -1671,7 +1601,6 @@ async def enforce_warn_ladder(
     reason: str = "filter",
     silent: bool = False
 ) -> dict:
-    """Única vía de entrada a la escala de sanciones (filtros, flood, manual)."""
     tier = await get_privilege_tier(bot, chat_id, target_id, target_username)
     if _tier_is_privileged(tier):
         return {"status": "immune", "tier": tier, "strikes": 0, "limit": 0, "action": None}
@@ -1773,10 +1702,6 @@ async def group_security_matrix(message: Message, bot: Bot):
         outcome = await enforce_warn_ladder(
             bot, group_id, user_id, username, message.from_user.mention_html(),
             reply_to=message, reason="command", silent=True
-        )
-        logger.info(
-            f"[AntiInvocacion] Usuario {user_id} interceptado en {group_id} "
-            f"(estado: {outcome['status']}, strike {outcome['strikes']}/{outcome['limit']})."
         )
         return
 

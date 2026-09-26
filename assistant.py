@@ -40,13 +40,14 @@ from database.database import (
     activate_universal_night_mode,
     deactivate_universal_night_mode,
     flag_userbot, is_userbot_flagged,
-    get_ai_sentinel_config
+    get_ai_sentinel_config,
+    get_ghost_purge_config,
+    update_ghost_purge_scan_time
 )
 
 # 🤖 Integración del SDK oficial de Mistral AI para el Guardián de Voz y Copiloto AMA
 try:
     from importlib import import_module
-
     Mistral = import_module("mistralai").Mistral
 except ImportError:
     Mistral = None
@@ -136,7 +137,7 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
 async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> dict:
     """
     Analiza un fragmento de texto transcrito del videochat utilizando Mistral AI
-    para detectar toxicidad, insultos o estafas financieras en tiempo real[cite: 12].
+    para detectar toxicidad, insultos o estafas financieras en tiempo real.
     """
     if not mistral_client:
         return {"toxic": False, "reason": "Mistral API Key no configurada en el entorno"}
@@ -192,17 +193,12 @@ NOISE_SHIELD_ALERT_TEXT = (
     "🛡️ <i>Cloud Media Management</i>"
 )
 
-AI_GUARDIAN_ALERT_TEXT = (
-    "🤖 <b>The Bunker Bot: Guardián de IA Activo</b>\n\n"
-    "<b>{user_name}</b> fue silenciado por la IA tras detectar infracción verbal: <i>{reason}</i>\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
-)
-
-USERBOT_HUNTER_ALERT_TEXT = (
-    "🕵️‍♂️ <b>The Bunker Bot: Radar Userbot Hunter Activado</b>\n\n"
-    "Se ha detectado y fichado un comportamiento automatizado sospechoso en la cuenta de <b>{user_name}</b>. "
-    "El protocolo preventivo ha interceptado la señal para salvaguardar la integridad de la comunidad.\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
+GHOST_PURGE_ALERT_TEXT = (
+    "💀 <b>The Bunker Bot: Ghost Purge Completado</b>\n\n"
+    "• Cuentas Fantasma / Eliminadas detectadas: <b>{found}</b>\n"
+    "• Cuentas purgadas exitosamente: <b>{purged}</b>\n"
+    "• Acción ejecutada: <code>{action}</code>\n\n"
+    "🛡️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
 )
 
 RADAR_TEXTS = {
@@ -347,6 +343,59 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
         logger.info(f"💎 [Payload Ultra Pro Despachado] Grupo {chat_id} (origen={origin}).")
 
     return sent
+
+
+# ==========================================
+# 💀 MOTOR TÁCTICO: GHOST PURGE (FASE 4)
+# ==========================================
+async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
+    """
+    Escanea en tiempo real la comunidad y purga cuentas eliminadas/fantasma (is_deleted).
+    Utiliza el Centinela dedicado activo o el asistente maestro.
+    """
+    sentinel_data = active_sentinels.get(chat_id)
+    client: Client = sentinel_data["client"] if sentinel_data else assistant_app
+
+    if not client or not client.is_connected:
+        return {"status": "error", "message": "No active sentinel available for this chat", "purged": 0}
+
+    found = 0
+    purged = 0
+
+    try:
+        async for member in client.get_chat_members(chat_id):
+            user = member.user
+            if user and getattr(user, "is_deleted", False):
+                found += 1
+                try:
+                    if action == "ban":
+                        await client.ban_chat_member(chat_id, user.id)
+                    else:
+                        await client.ban_chat_member(chat_id, user.id)
+                        await client.unban_chat_member(chat_id, user.id)
+                    purged += 1
+                except Exception as p_err:
+                    logger.warning(f"Aviso purgando usuario eliminado {user.id} en {chat_id}: {p_err}")
+
+        await update_ghost_purge_scan_time(chat_id)
+
+        if _global_bot and purged > 0:
+            try:
+                alert_text = GHOST_PURGE_ALERT_TEXT.format(
+                    found=found,
+                    purged=purged,
+                    action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
+                )
+                await _dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60)
+            except Exception:
+                pass
+
+        logger.info(f"💀 [Ghost Purge Finalizado] Grupo {chat_id}: {purged}/{found} cuentas eliminadas depuradas.")
+        return {"status": "success", "found": found, "purged": purged, "action": action}
+
+    except Exception as e:
+        logger.error(f"❌ [Ghost Purge Error] Error crítico ejecutando purga en {chat_id}: {e}")
+        return {"status": "error", "message": str(e), "purged": purged}
 
 
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
@@ -1012,79 +1061,6 @@ async def night_mode_autonomous_loop():
         await asyncio.sleep(60)
 
 
-# ==========================================
-# 📢 BUCLE DE AUDITORÍA Y EXPULSIÓN DE CANALES
-# ==========================================
-async def channel_subscription_audit_loop():
-    logger.info("📡 [Auditor de Canales] Bucle de membresías y renovación automática iniciado.")
-    while True:
-        try:
-            expiring = await get_expiring_channel_subscriptions(hours_ahead=48)
-            for row in expiring:
-                channel_id, user_id, expires_at, stars_paid, grace_days = row
-                if is_super_admin(user_id):
-                    continue
-
-                if _global_bot:
-                    try:
-                        bot_info = await _global_bot.get_me()
-                        renew_kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(
-                                text="💎 Renovar Membresía", 
-                                url=f"https://t.me/{bot_info.username}?start=cset_{channel_id}"
-                            )]
-                        ])
-                        warning_text = (
-                            f"⏳ <b>Aviso de Renovación — The Bunker OS</b>\n\n"
-                            f"Tu membresía en el canal expira el <code>{expires_at}</code>.\n"
-                            f"Renueva a tiempo para mantener tus privilegios de acceso exclusivo.\n\n"
-                            f"🛡️ <i>Cloud Media Management</i>"
-                        )
-                        await _global_bot.send_message(
-                            chat_id=user_id, 
-                            text=warning_text, 
-                            reply_markup=renew_kb, 
-                            parse_mode="HTML"
-                        )
-                        await mark_subscription_warned(channel_id, user_id)
-                    except Exception as e:
-                        logger.debug(f"Aviso al notificar expiración a {user_id} para canal {channel_id}: {e}")
-
-            expired = await get_expired_channel_subscriptions()
-            for row in expired:
-                channel_id, user_id, expires_at, grace_days, auto_kick = row
-                if is_super_admin(user_id):
-                    continue
-
-                if auto_kick == 1 and _global_bot:
-                    try:
-                        await _global_bot.ban_chat_member(chat_id=channel_id, user_id=user_id, until_date=int(time.time() + 35))
-                        await _global_bot.unban_chat_member(chat_id=channel_id, user_id=user_id)
-                        
-                        try:
-                            expired_text = (
-                                f"⚠️ <b>Membresía Expirada — The Bunker OS</b>\n\n"
-                                f"Tu acceso al canal ha concluido tras agotar el período de gracia. Has sido retirado automáticamente.\n\n"
-                                f"🛡️ <i>Cloud Media Management</i>"
-                            )
-                            await _global_bot.send_message(chat_id=user_id, text=expired_text, parse_mode="HTML")
-                        except Exception:
-                            pass
-
-                        await update_subscription_status(channel_id, user_id, "kicked")
-                        logger.info(f"👢 [Auto-Kick Canal] Usuario {user_id} expulsado del canal {channel_id} por falta de renovación.")
-                    except Exception as e:
-                        logger.warning(f"Aviso al expulsar al usuario {user_id} del canal {channel_id}: {e}")
-                        await update_subscription_status(channel_id, user_id, "expired")
-                else:
-                    await update_subscription_status(channel_id, user_id, "expired")
-
-        except Exception as e:
-            logger.error(f"Error en bucle de auditoría de canales: {e}")
-
-        await asyncio.sleep(1800)
-
-
 async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
     client_api_id = api_id if api_id else DEFAULT_API_ID
     client_api_hash = api_hash if api_hash else DEFAULT_API_HASH
@@ -1263,7 +1239,6 @@ async def init_assistant_master():
     asyncio.create_task(radar_master_loop())
     asyncio.create_task(vc_scheduler_loop())
     asyncio.create_task(pending_auth_cleanup_loop())
-    asyncio.create_task(channel_subscription_audit_loop())
     asyncio.create_task(night_mode_autonomous_loop())
 
 
