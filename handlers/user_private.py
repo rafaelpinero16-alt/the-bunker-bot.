@@ -88,7 +88,7 @@ class CallbackAutoAnswerMiddleware(BaseMiddleware):
 router.callback_query.middleware(CallbackAutoAnswerMiddleware())
 
 ADMIN_GROUP_ID = -1004351489258
-WEBAPP_URL = "https://thebunkerapp.netlify.app"
+WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
 
 
 def fire_and_forget_auto_delete(messages: list, delay: int = 60):

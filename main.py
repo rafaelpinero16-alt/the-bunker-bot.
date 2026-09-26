@@ -68,7 +68,7 @@ from assistant import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
-WEBAPP_URL = "https://thebunkerapp.netlify.app"
+WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN no está definido en las variables de entorno.")
