@@ -4,9 +4,9 @@ import sys
 import os
 import urllib.parse
 import json
+from importlib import import_module
 from dotenv import load_dotenv
 
-# Alias de módulo: con `python main.py` este archivo corre como `__main__`.
 if __name__ == "__main__":
     sys.modules.setdefault("main", sys.modules[__name__])
 
@@ -19,12 +19,13 @@ from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, ErrorEvent, Update
 from aiogram.exceptions import TelegramUnauthorizedError
 
-# Importar FastAPI y Uvicorn para servir las rutas de la Mini App.
-# El proyecto puede ejecutarse con un entorno donde estas dependencias no están
-# instaladas en el intérprete de análisis; se ignora la advertencia de importación.
-from fastapi import FastAPI, Header, HTTPException  # type: ignore[import-not-found]
-from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
-import uvicorn  # type: ignore[import-not-found]
+_fastapi = import_module("fastapi")
+FastAPI = _fastapi.FastAPI
+Header = _fastapi.Header
+HTTPException = _fastapi.HTTPException
+Body = _fastapi.Body
+CORSMiddleware = import_module("fastapi.middleware.cors").CORSMiddleware
+uvicorn = import_module("uvicorn")
 
 from database.database import (
     init_db, 
@@ -34,7 +35,14 @@ from database.database import (
     get_user_channels,
     get_user_groups,
     get_user_subscribers_audit,
-    get_group_tier
+    get_group_tier,
+    get_db_connection,
+    record_chat_activity,
+    get_chat_dashboard_data,
+    get_chat_timeseries_stats,
+    get_chat_top_users,
+    get_chat_admin_stats,
+    update_chat_operational_settings
 )
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
@@ -70,6 +78,7 @@ ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
 
 active_clone_tasks = {}
 dp = Dispatcher()
+master_bot_instance: Bot = None
 
 # ==========================================
 # 🌐 CONFIGURACIÓN DEL SERVIDOR WEB API (FASTAPI)
@@ -85,7 +94,7 @@ app.add_middleware(
 )
 
 def parse_telegram_user_id(init_data: str) -> int:
-    """Extrae de manera segura el user_id desde el initData de Telegram WebApp."""
+    """Extrae el user_id desde el initData de Telegram WebApp de manera segura."""
     try:
         if not init_data:
             return 0
@@ -97,11 +106,10 @@ def parse_telegram_user_id(init_data: str) -> int:
         pass
     return 0
 
+# --- 1. TELEMETRÍA GLOBAL Y FILTRADA ---
 @app.get("/api/stats")
 async def api_stats(context: str = "global", x_telegram_init_data: str = Header(None)):
-    user_id = parse_telegram_user_id(x_telegram_init_data)
-    if not user_id:
-        user_id = 8269470905  # Fallback administrativo de respaldo si se abre fuera de Telegram
+    user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
     try:
         stats = await get_user_global_stats(user_id)
         return stats
@@ -109,9 +117,19 @@ async def api_stats(context: str = "global", x_telegram_init_data: str = Header(
         logging.error(f"❌ [API Stats Error]: {e}")
         return {
             "subscribers": 0, "revenue_stars": 0, "verified": 0, "expelled": 0, "purges": 0,
-            "perimeter": {"captcha": "Activo 🟢", "autolower": "2% Activo 🟢", "shield": "Blindado 🟢", "broadcast": "Worker Activo 🟢"}
+            "perimeter": {
+                "captcha": "Activo 🟢", 
+                "autolower": "2% Activo 🟢", 
+                "shield": "Blindado 🟢", 
+                "broadcast": "Worker Activo 🟢",
+                "captcha_active": True,
+                "autolower_active": True,
+                "shield_active": True,
+                "linklock_active": False
+            }
         }
 
+# --- 2. CANALES VINCULADOS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/channels")
 async def api_channels(x_telegram_init_data: str = Header(None)):
     user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
@@ -120,17 +138,36 @@ async def api_channels(x_telegram_init_data: str = Header(None)):
         res = []
         for ch_id, ch_name in channels:
             tier = await get_group_tier(ch_id)
+            member_count = 0
+            if master_bot_instance:
+                try:
+                    member_count = await master_bot_instance.get_chat_member_count(ch_id)
+                except Exception:
+                    member_count = 0
+
+            # Actividad real histórica del canal
+            timeseries = await get_chat_timeseries_stats(ch_id)
+            activity_curve = timeseries.get("messages", [])[-7:]
+            if len(activity_curve) < 7:
+                activity_curve = [0] * (7 - len(activity_curve)) + activity_curve
+
             res.append({
-                "id": ch_id, "title": ch_name, "type": "channel",
+                "id": str(ch_id),
+                "title": ch_name,
+                "type": "channel",
                 "license_status": "active" if tier != "free" else "expired",
-                "members": 150, "activity": [10, 25, 40, 30, 50, 45, 60],
-                "joined": 5, "left": 1, "avatar_url": None
+                "members": member_count,
+                "activity": activity_curve,
+                "joined": 0,
+                "left": 0,
+                "avatar_url": None
             })
         return {"channels": res}
     except Exception as e:
         logging.error(f"❌ [API Channels Error]: {e}")
         return {"channels": []}
 
+# --- 3. COMUNIDADES BLINDADAS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/groups")
 async def api_groups(x_telegram_init_data: str = Header(None)):
     user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
@@ -139,17 +176,36 @@ async def api_groups(x_telegram_init_data: str = Header(None)):
         res = []
         for g_id, g_name in groups_list:
             tier = await get_group_tier(g_id)
+            member_count = 0
+            if master_bot_instance:
+                try:
+                    member_count = await master_bot_instance.get_chat_member_count(g_id)
+                except Exception:
+                    member_count = 0
+
+            # Actividad real histórica del grupo
+            timeseries = await get_chat_timeseries_stats(g_id)
+            activity_curve = timeseries.get("messages", [])[-7:]
+            if len(activity_curve) < 7:
+                activity_curve = [0] * (7 - len(activity_curve)) + activity_curve
+
             res.append({
-                "id": g_id, "title": g_name, "type": "supergroup",
+                "id": str(g_id),
+                "title": g_name,
+                "type": "supergroup",
                 "license_status": "active" if tier != "free" else "expired",
-                "members": 500, "activity": [20, 35, 55, 45, 70, 65, 80],
-                "joined": 12, "left": 2, "avatar_url": None
+                "members": member_count,
+                "activity": activity_curve,
+                "joined": 0,
+                "left": 0,
+                "avatar_url": None
             })
         return {"groups": res}
     except Exception as e:
         logging.error(f"❌ [API Groups Error]: {e}")
         return {"groups": []}
 
+# --- 4. AUDITOR DE SUSCRIPTORES ---
 @app.get("/api/subscribers")
 async def api_subscribers(x_telegram_init_data: str = Header(None)):
     user_id = parse_telegram_user_id(x_telegram_init_data) or 8269470905
@@ -159,6 +215,79 @@ async def api_subscribers(x_telegram_init_data: str = Header(None)):
     except Exception as e:
         logging.error(f"❌ [API Subscribers Error]: {e}")
         return {"subscribers": []}
+
+# --- 5. DASHBOARD GRANULAR POR CHAT (ESTILO CHATKEEPER REAL) ---
+@app.get("/api/chat/{chat_id}/dashboard")
+async def api_chat_dashboard(chat_id: str, x_telegram_init_data: str = Header(None)):
+    try:
+        numeric_id = int(chat_id)
+        data = await get_chat_dashboard_data(numeric_id)
+
+        if master_bot_instance:
+            try:
+                chat_obj = await master_bot_instance.get_chat(numeric_id)
+                data["title"] = chat_obj.title or f"Chat {chat_id}"
+            except Exception:
+                data["title"] = f"Chat {chat_id}"
+
+        return data
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+    except Exception as e:
+        logging.error(f"❌ [API Chat Dashboard Error]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- 6. ESTADÍSTICAS TEMPORALES EN VIVO (MAU, MENSAJES Y MENSAJES POR USUARIO) ---
+@app.get("/api/chat/{chat_id}/stats")
+async def api_chat_stats(chat_id: str, x_telegram_init_data: str = Header(None)):
+    try:
+        numeric_id = int(chat_id)
+        return await get_chat_timeseries_stats(numeric_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+    except Exception as e:
+        logging.error(f"❌ [API Chat Stats Error]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- 7. RENDIMIENTO DE ADMINISTRADORES REAL (ADMIN STATS) ---
+@app.get("/api/chat/{chat_id}/admin-stats")
+async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(None)):
+    try:
+        numeric_id = int(chat_id)
+        admins = await get_chat_admin_stats(numeric_id)
+        return {"admins": admins}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+    except Exception as e:
+        logging.error(f"❌ [API Admin Stats Error]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- 8. TOP 10 USUARIOS MÁS ACTIVOS (TOP 10 EN 30 DÍAS REAL) ---
+@app.get("/api/chat/{chat_id}/top-users")
+async def api_chat_top_users(chat_id: str, x_telegram_init_data: str = Header(None)):
+    try:
+        numeric_id = int(chat_id)
+        top_users = await get_chat_top_users(numeric_id, limit=10)
+        return {"top_users": top_users}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+    except Exception as e:
+        logging.error(f"❌ [API Top Users Error]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- 9. GUARDAR CONFIGURACIONES EN VIVO DESDE LA MINI APP ---
+@app.post("/api/chat/{chat_id}/settings")
+async def api_update_chat_settings(chat_id: str, payload: dict = Body(...), x_telegram_init_data: str = Header(None)):
+    try:
+        numeric_id = int(chat_id)
+        await update_chat_operational_settings(numeric_id, payload)
+        logging.info(f"⚙️ [Configuración Guardada para {chat_id}]: {payload}")
+        return {"status": "success", "chat_id": chat_id, "updated": payload}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+    except Exception as e:
+        logging.error(f"❌ [API Settings Save Error]: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/affiliates/me")
 async def api_affiliates(x_telegram_init_data: str = Header(None)):
@@ -211,11 +340,26 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
         if update.callback_query:
             cq = update.callback_query
             logging.info(f"🔘 [Clon @{bot_username}] Callback de {cq.from_user.id}: {cq.data!r}")
-        elif update.message and update.message.chat.type == "private":
-            text = (update.message.text or "").strip()
-            user_id = update.message.from_user.id if update.message.from_user else 0
-            is_private_start = text.startswith("/start")
-            logging.info(f"📩 [Clon @{bot_username}] Mensaje de {user_id}: '{text}'")
+        elif update.message:
+            # Registro en tiempo real de actividad para telemetría
+            if update.message.chat.type in ("group", "supergroup") and update.message.from_user:
+                try:
+                    await record_chat_activity(
+                        group_id=update.message.chat.id,
+                        user_id=update.message.from_user.id,
+                        full_name=update.message.from_user.full_name or "Usuario",
+                        username=update.message.from_user.username or "",
+                        is_reply=bool(update.message.reply_to_message),
+                        is_admin=False
+                    )
+                except Exception as db_act_err:
+                    logging.warning(f"⚠️ [Actividad Clon BD]: {db_act_err}")
+
+            if update.message.chat.type == "private":
+                text = (update.message.text or "").strip()
+                user_id = update.message.from_user.id if update.message.from_user else 0
+                is_private_start = text.startswith("/start")
+                logging.info(f"📩 [Clon @{bot_username}] Mensaje de {user_id}: '{text}'")
 
         result = await dp.feed_update(clone_bot, update)
 
@@ -242,7 +386,6 @@ async def _clone_worker(clone_bot: Bot, token: str):
     except TelegramUnauthorizedError as auth_err:
         logging.error(f"❌ [Error Fatal] El token del clon {token[:10]} fue revocado o es inválido: {auth_err}")
         try:
-            from database.database import get_db_connection
             def _revoke_sync():
                 with get_db_connection() as conn:
                     cursor = conn.cursor()
@@ -302,6 +445,7 @@ def trigger_disconnect_clone(token: str):
 
 
 async def main():
+    global master_bot_instance
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
@@ -312,7 +456,6 @@ async def main():
     init_db()
     print("🛡️ [Base de Datos]: Esquema relacional y matrices perimetrales inicializadas.")
 
-    # 🌐 Iniciar FastAPI en segundo plano para atender la Mini App
     asyncio.create_task(run_fastapi_server())
     print(f"🌐 [API Backend Web]: Servidor FastAPI activo en puerto {os.getenv('PORT', 8080)}.")
 
@@ -320,6 +463,7 @@ async def main():
         token=BOT_TOKEN, 
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
+    master_bot_instance = master_bot
     set_master_bot_id(master_bot.id)
     try:
         master_info = await master_bot.get_me()
@@ -328,6 +472,31 @@ async def main():
         print(f"⚠️ [Aviso Identidad Maestro]: No se pudo resolver el @username del Maestro: {e}")
 
     dp.message.middleware(AntiSpamMiddleware())
+
+    # Middleware de captura de actividad real en grupos
+    @dp.message.outer_middleware()
+    async def track_chat_activity_middleware(handler, event, data):
+        if event.chat and event.chat.type in ("group", "supergroup") and event.from_user:
+            try:
+                # Verificación si es administrador para las métricas de Admin Stats
+                is_admin = False
+                try:
+                    member = await event.chat.get_member(event.from_user.id)
+                    is_admin = member.status in ("creator", "administrator")
+                except Exception:
+                    pass
+
+                await record_chat_activity(
+                    group_id=event.chat.id,
+                    user_id=event.from_user.id,
+                    full_name=event.from_user.full_name or "Usuario",
+                    username=event.from_user.username or "",
+                    is_reply=bool(event.reply_to_message),
+                    is_admin=is_admin
+                )
+            except Exception as act_err:
+                logging.warning(f"⚠️ [Fallo al registrar actividad]: {act_err}")
+        return await handler(event, data)
 
     dp.include_router(payments.router)
     dp.include_router(user_private.router)

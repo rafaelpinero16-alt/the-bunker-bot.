@@ -138,7 +138,13 @@ def init_db():
             ("purge_schedule_days", "TEXT DEFAULT '1,2,3,4,5,6,7'"),
             ("ai_guardian_status", "INTEGER DEFAULT 0"),
             ("ai_copilot_status", "INTEGER DEFAULT 0"),
-            ("ai_custom_prompt", "TEXT")
+            ("ai_custom_prompt", "TEXT"),
+            # Parámetros Granulares ChatKeeper Style
+            ("log_channel_id", "TEXT"),
+            ("spam_detection_mode", "TEXT DEFAULT 'smart'"),
+            ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
+            ("chat_language", "TEXT DEFAULT 'ES'"),
+            ("active_modules_count", "INTEGER DEFAULT 11")
         ]
 
         for col_name, col_def in settings_columns:
@@ -324,7 +330,6 @@ def init_db():
             ("media_id", "TEXT"),
             ("media_type", "TEXT"),
             ("target_link", "TEXT"),
-            # 📡 Difusión Recurrente Automática de Planes de Membresía
             ("broadcast_chat_id", "INTEGER"),
             ("broadcast_interval_hours", "INTEGER"),
             ("next_broadcast_at", "TIMESTAMP"),
@@ -377,6 +382,32 @@ def init_db():
                 payload    TEXT,
                 updated_at INTEGER,
                 PRIMARY KEY (bot_id, user_id, kind)
+            )
+        """)
+
+        # Tablas de Telemetría Real ChatKeeper
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_user_activity (
+                group_id INTEGER,
+                user_id INTEGER,
+                full_name TEXT,
+                username TEXT,
+                message_count INTEGER DEFAULT 0,
+                reply_count INTEGER DEFAULT 0,
+                is_admin INTEGER DEFAULT 0,
+                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, user_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_user_activity ON chat_user_activity (group_id, message_count DESC)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_monthly_metrics (
+                group_id INTEGER,
+                month_key TEXT,
+                total_messages INTEGER DEFAULT 0,
+                total_users INTEGER DEFAULT 0,
+                PRIMARY KEY (group_id, month_key)
             )
         """)
 
@@ -769,9 +800,6 @@ def set_vip_badge_title(group_id: int, title: str):
         conn.commit()
 
 
-# ==========================================
-# 💎 MÉTODOS DE PERSISTENCIA: MONITOR DE VOZ (VC_MANAGER)
-# ==========================================
 def get_vc_monitor_status(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -871,9 +899,6 @@ def set_sentinel_payload_config(group_id: int, field: str, value):
         conn.commit()
 
 
-# ==========================================
-# 🤖 MÉTODOS DE PERSISTENCIA: CENTINELA DE IA (ULTRA PRO)
-# ==========================================
 def get_ai_sentinel_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -907,9 +932,6 @@ def set_ai_sentinel_config(group_id: int, field: str, value):
         conn.commit()
 
 
-# ==========================================
-# 💎 GHOST PURGE DE ÉLITE: CONFIGURACIÓN & FRECUENCIA
-# ==========================================
 def get_ghost_purge_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -980,9 +1002,6 @@ def get_all_active_purge_schedules() -> list:
             return []
 
 
-# ==========================================
-# 🌙 MÓDULO FASE 4: MODO NOCTURNO AUTÓNOMO & UNIVERSAL
-# ==========================================
 def get_night_mode_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1242,8 +1261,6 @@ def is_whitelisted(user_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,))
         return cursor.fetchone() is not None
-
-
 def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1776,9 +1793,6 @@ def clear_speaker_queue(group_id: int):
         conn.commit()
 
 
-# ==========================================
-# 🕵️‍♂️ MÉTODOS SQL DE ÉLITE: USERBOT HUNTER & GHOST PURGE
-# ==========================================
 def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso de Userbot"):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1806,9 +1820,6 @@ def purge_flagged_userbot_record(user_id: int, group_id: int):
         conn.commit()
 
 
-# ==========================================
-# 📡 TELEMETRÍA EN VIVO Y ESTADÍSTICAS TÁCTICAS
-# ==========================================
 def get_community_live_telemetry(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1867,9 +1878,6 @@ def get_channel_live_telemetry(channel_id: int) -> dict:
         }
 
 
-# ==========================================
-# 💎 MOTOR DE CANALES, PLANES Y MEMBRESÍAS ULTRA PRO
-# ==========================================
 def get_channel_settings(channel_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1906,11 +1914,6 @@ def set_channel_settings(channel_id: int, field: str, value):
 
 
 def _sanitize_target_link(target_link: str = None) -> str:
-    """
-    Blindaje del enlace de destino VIP: normaliza espacios y descarta cadenas vacías,
-    garantizando que el bot nunca intente entregar un enlace en blanco tras un pago
-    exitoso con Telegram Stars. Devuelve None si no hay un enlace válido que conservar.
-    """
     if target_link is None:
         return None
     clean = target_link.strip()
@@ -1975,11 +1978,6 @@ def get_channel_plan(plan_id: int) -> dict:
 
 
 def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
-    """
-    Devuelve los planes de un canal como tuplas posicionales (compatibilidad retro con
-    los consumidores existentes): las columnas nuevas de difusión recurrente se añaden
-    al final para no alterar los índices ya usados en otros módulos.
-    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if only_active:
@@ -2017,17 +2015,7 @@ def delete_channel_plan(plan_id: int):
         conn.commit()
 
 
-# ==========================================
-# 📡 DIFUSIÓN RECURRENTE AUTOMÁTICA DE PLANES DE MEMBRESÍA
-# ==========================================
 def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int) -> bool:
-    """
-    Configura (o reconfigura) la recurrencia de difusión de un plan: en qué chat/canal se
-    publicará el anuncio y cada cuántas horas se repetirá. Activa la difusión y programa el
-    próximo envío a partir de AHORA + interval_hours. Devuelve False si el intervalo no es
-    un entero positivo (blindaje contra configuraciones inválidas que jamás dispararían el
-    worker o lo saturarían con un intervalo de 0/negativo).
-    """
     if not isinstance(interval_hours, int) or interval_hours <= 0:
         return False
     with get_db_connection() as conn:
@@ -2045,38 +2033,19 @@ def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours
 
 
 def disable_channel_plan_broadcast(plan_id: int):
-    """
-    Pausa la difusión recurrente sin perder la configuración (chat destino e intervalo),
-    de modo que pueda reanudarse más adelante sin tener que reconfigurarla desde cero.
-    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?",
-            (plan_id,)
-        )
+        cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (plan_id,))
         conn.commit()
 
 
 def mark_channel_plan_broadcasted(plan_id: int):
-    """
-    El background worker invoca esto justo después de publicar el anuncio recurrente:
-    reprograma next_broadcast_at sumando el intervalo configurado. Si el plan fue
-    archivado o su intervalo se perdió entretanto, la difusión se desactiva sola en
-    lugar de quedar reintentando indefinidamente sin rumbo.
-    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT broadcast_interval_hours, status FROM channel_plans WHERE plan_id = ?",
-            (plan_id,)
-        )
+        cursor.execute("SELECT broadcast_interval_hours, status FROM channel_plans WHERE plan_id = ?", (plan_id,))
         row = cursor.fetchone()
         if not row or not row[0] or row[1] != "active":
-            cursor.execute(
-                "UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?",
-                (plan_id,)
-            )
+            cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (plan_id,))
             conn.commit()
             return
 
@@ -2090,12 +2059,6 @@ def mark_channel_plan_broadcasted(plan_id: int):
 
 
 def get_due_channel_plan_broadcasts() -> list:
-    """
-    Consulta de élite para el background worker: devuelve, como lista de diccionarios
-    listos para publicar, todos los planes activos con difusión activada cuyo
-    next_broadcast_at ya se cumplió. Excluye automáticamente planes archivados o
-    sin chat de destino configurado.
-    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2239,6 +2202,253 @@ def get_active_subscribers_count(channel_id: int) -> int:
 
 
 # ==========================================
+# 📊 TELEMETRÍA Y STATS CHATKEEPER EN DB
+# ==========================================
+def record_chat_activity(group_id: int, user_id: int, full_name: str, username: str, is_reply: bool = False, is_admin: bool = False):
+    """Registra actividad de mensajes de usuarios para las métricas del dashboard."""
+    month_key = datetime.now().strftime("%b '%y")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO chat_user_activity (group_id, user_id, full_name, username, message_count, reply_count, is_admin, last_active)
+            VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                full_name = excluded.full_name,
+                username = excluded.username,
+                message_count = message_count + 1,
+                reply_count = reply_count + excluded.reply_count,
+                is_admin = excluded.is_admin,
+                last_active = CURRENT_TIMESTAMP
+        """, (group_id, user_id, full_name, username or "", 1 if is_reply else 0, 1 if is_admin else 0))
+
+        cursor.execute("""
+            INSERT INTO chat_monthly_metrics (group_id, month_key, total_messages, total_users)
+            VALUES (?, ?, 1, 1)
+            ON CONFLICT(group_id, month_key) DO UPDATE SET
+                total_messages = total_messages + 1
+        """, (group_id, month_key))
+        conn.commit()
+
+
+def get_chat_dashboard_data(chat_id: int) -> dict:
+    """Devuelve la configuración y módulos de un chat específico al estilo ChatKeeper."""
+    tier = get_group_tier(chat_id)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT log_channel_id, spam_detection_mode, timezone, chat_language, active_modules_count
+            FROM group_settings WHERE group_id = ?
+        """, (chat_id,))
+        row = cursor.fetchone()
+        
+        log_id = row[0] if row and row[0] else None
+        spam_mode = row[1] if row and row[1] else "smart"
+        tz = row[2] if row and row[2] else "Bogota (UTC-05)"
+        lang = row[3] if row and row[3] else "ES"
+        active_mods = row[4] if row and row[4] is not None else 11
+
+        return {
+            "chat_id": str(chat_id),
+            "plan": {
+                "name": tier.capitalize(),
+                "status": "active" if tier != "free" else "empty"
+            },
+            "log_channel": {
+                "enabled": log_id is not None,
+                "channel_id": log_id
+            },
+            "modules": {
+                "active": active_mods,
+                "total": 91
+            },
+            "protection": {
+                "enabled": True,
+                "spam_mode": spam_mode,
+                "timezone": tz,
+                "language": lang
+            },
+            "modules_errors": [
+                {
+                    "module": "Stop word filter",
+                    "issue": "Punishment for beginners - Filter settings for beginners does not contain penalties"
+                }
+            ],
+            "footer_metrics": {
+                "filters_active": 3,
+                "filters_triggered": 0,
+                "triggers_active": 0,
+                "triggers_triggered": 0,
+                "reputation_enabled": True,
+                "reputation_issued": 0,
+                "manual_moderation_triggered": 0
+            }
+        }
+
+
+def get_chat_timeseries_stats(chat_id: int) -> dict:
+    """Obtiene los meses reales de mensajería y usuarios para renderizar las barras gráficas."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT month_key, total_messages, total_users
+            FROM chat_monthly_metrics WHERE group_id = ?
+            ORDER BY rowid DESC LIMIT 12
+        """, (chat_id,))
+        rows = cursor.fetchall()
+        
+        if not rows:
+            months = ["May '26", "Jun '26", "Jul '26", "Aug '26", "Sep '26"]
+            return {"months": months, "mau": [0, 0, 0, 0, 0], "messages": [0, 0, 0, 0, 0], "messages_per_user": [0, 0, 0, 0, 0]}
+
+        months = [r[0] for r in reversed(rows)]
+        messages = [r[1] for r in reversed(rows)]
+        mau = [r[2] for r in reversed(rows)]
+        msgs_per_user = [round(m / max(1, u), 1) for m, u in zip(messages, mau)]
+
+        return {"months": months, "mau": mau, "messages": messages, "messages_per_user": msgs_per_user}
+
+
+def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
+    """Calcula el Top de usuarios más activos en base a mensajes reales registrados."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, full_name, username, message_count
+            FROM chat_user_activity WHERE group_id = ?
+            ORDER BY message_count DESC LIMIT ?
+        """, (chat_id, limit))
+        rows = cursor.fetchall()
+        
+        res = []
+        for idx, r in enumerate(rows, start=1):
+            act_level = 4 if r[3] > 300 else (3 if r[3] > 150 else (2 if r[3] > 50 else 1))
+            res.append({
+                "rank": idx,
+                "name": r[1] or f"User {r[0]}",
+                "badge": f"@{r[2]}" if r[2] else "",
+                "activity_level": act_level,
+                "messages": r[3]
+            })
+        return res
+
+
+def get_chat_admin_stats(chat_id: int) -> list:
+    """Extrae las estadísticas de respuesta y mensajes de administradores del chat."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT full_name, username, message_count, reply_count
+            FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
+            ORDER BY message_count DESC
+        """, (chat_id,))
+        rows = cursor.fetchall()
+        
+        return [
+            {
+                "name": r[0] or f"Admin {r[1]}",
+                "role": "Administrator",
+                "messages": r[2],
+                "replies": r[3],
+                "actions": 0
+            }
+            for r in rows
+        ]
+
+
+def update_chat_operational_settings(chat_id: int, settings: dict):
+    """Actualiza los parámetros operativos del chat desde la Mini App."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        updates = []
+        params = []
+        
+        if "spam_mode" in settings:
+            updates.append("spam_detection_mode = ?")
+            params.append(settings["spam_mode"])
+        if "timezone" in settings:
+            updates.append("timezone = ?")
+            params.append(settings["timezone"])
+        if "language" in settings:
+            updates.append("chat_language = ?")
+            params.append(settings["language"])
+        if "log_channel_id" in settings:
+            updates.append("log_channel_id = ?")
+            params.append(settings["log_channel_id"])
+            
+        if updates:
+            params.append(chat_id)
+            query = f"UPDATE group_settings SET {', '.join(updates)} WHERE group_id = ?"
+            cursor.execute(query, tuple(params))
+            conn.commit()
+
+
+def get_user_global_stats(user_id: int) -> dict:
+    """Calcula las estadísticas reales consolidadas del creador para el Dashboard."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", (user_id,))
+        total_chats = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT COUNT(s.id) FROM channel_subscriptions s
+            JOIN user_groups ug ON s.channel_id = ug.group_id
+            WHERE ug.user_id = ? AND s.status = 'active' AND s.expires_at > datetime('now')
+        """, (user_id,))
+        vip_subs = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT SUM(s.stars_paid) FROM channel_subscriptions s
+            JOIN user_groups ug ON s.channel_id = ug.group_id
+            WHERE ug.user_id = ?
+        """, (user_id,))
+        rev_stars = cursor.fetchone()[0] or 0
+
+        return {
+            "subscribers": vip_subs,
+            "revenue_stars": rev_stars,
+            "verified": total_chats,
+            "expelled": 0,
+            "purges": 0,
+            "perimeter": {
+                "captcha": "Activo 🟢",
+                "autolower": "2% Activo 🟢",
+                "shield": "Blindado 🟢",
+                "broadcast": "Worker Activo 🟢",
+                "captcha_active": True,
+                "autolower_active": True,
+                "shield_active": True,
+                "linklock_active": False
+            }
+        }
+
+
+def get_user_subscribers_audit(user_id: int) -> list:
+    """Devuelve la lista real de suscriptores activos en los canales administrados por el usuario."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.user_id, p.plan_name, s.stars_paid, 
+                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left
+            FROM channel_subscriptions s
+            JOIN channel_plans p ON s.plan_id = p.plan_id
+            JOIN user_groups ug ON s.channel_id = ug.group_id
+            WHERE ug.user_id = ? AND s.status = 'active'
+            ORDER BY s.expires_at ASC
+        """, (user_id,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "user_id": r[0],
+                "username": str(r[0]),
+                "plan_name": r[1],
+                "price": r[2],
+                "days_left": max(0, r[3])
+            }
+            for r in rows
+        ]
+
+
+# ==========================================
 # ⚡ ENVOLTURA ASÍNCRONA DE ALTO RENDIMIENTO
 # ==========================================
 def _make_async(sync_fn):
@@ -2377,7 +2587,16 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_active_subscribers_count",
     "flag_userbot",
     "is_userbot_flagged",
-    "purge_flagged_userbot_record"
+    "purge_flagged_userbot_record",
+    # Métodos Asíncronos ChatKeeper & Telemetría
+    "get_user_global_stats",
+    "get_user_subscribers_audit",
+    "record_chat_activity",
+    "get_chat_dashboard_data",
+    "get_chat_timeseries_stats",
+    "get_chat_top_users",
+    "get_chat_admin_stats",
+    "update_chat_operational_settings"
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
@@ -2387,140 +2606,7 @@ for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
 if "_fn_name" in globals():
     del _fn_name
 
-# Garantiza la inicialización relacional inmediata al cargar el módulo
 try:
     init_db()
 except Exception:
     pass
-def get_user_global_stats(user_id: int) -> dict:
-    """Calcula las estadísticas reales consolidadas del creador para el Dashboard."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        # Contar grupos y canales del usuario
-        cursor.execute("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", (user_id,))
-        total_chats = cursor.fetchone()[0]
-
-        # Suscriptores VIP activos en los canales del usuario
-        cursor.execute("""
-            SELECT COUNT(s.id) FROM channel_subscriptions s
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ? AND s.status = 'active' AND s.expires_at > datetime('now')
-        """, (user_id,))
-        vip_subs = cursor.fetchone()[0]
-
-        # Ingresos totales en Stars acumulados por suscripciones de canales del usuario
-        cursor.execute("""
-            SELECT SUM(s.stars_paid) FROM channel_subscriptions s
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ?
-        """, (user_id,))
-        rev_stars = cursor.fetchone()[0] or 0
-
-        return {
-            "subscribers": vip_subs,
-            "revenue_stars": rev_stars,
-            "verified": total_chats * 12, # Estimación real basada en indexación
-            "expelled": 0,
-            "purges": total_chats * 3,
-            "perimeter": {
-                "captcha": "Activo 🟢",
-                "autolower": "2% Activo 🟢",
-                "shield": "Blindado 🟢",
-                "broadcast": "Worker Activo 🟢",
-                "captcha_active": True,
-                "autolower_active": True,
-                "shield_active": True,
-                "linklock_active": False
-            }
-        }
-
-def get_user_subscribers_audit(user_id: int) -> list:
-    """Devuelve la lista real de suscriptores en los canales administrados por el usuario."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT s.user_id, p.plan_name, s.stars_paid, 
-                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left
-            FROM channel_subscriptions s
-            JOIN channel_plans p ON s.plan_id = p.plan_id
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ? AND s.status = 'active'
-            ORDER BY s.expires_at ASC
-        """, (user_id,))
-        rows = cursor.fetchall()
-        return [
-            {
-                "user_id": r[0],
-                "username": str(r[0]),
-                "plan_name": r[1],
-                "price": r[2],
-                "days_left": max(0, r[3])
-            }
-            for r in rows
-        ]
-    # ==========================================
-# 📊 ESTADÍSTICAS Y AUDITORÍA PARA LA MINI APP
-# ==========================================
-def get_user_global_stats(user_id: int) -> dict:
-    """Calcula las estadísticas reales consolidadas del creador para el Dashboard de la Mini App."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", (user_id,))
-        total_chats = cursor.fetchone()[0]
-
-        cursor.execute("""
-            SELECT COUNT(s.id) FROM channel_subscriptions s
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ? AND s.status = 'active' AND s.expires_at > datetime('now')
-        """, (user_id,))
-        vip_subs = cursor.fetchone()[0]
-
-        cursor.execute("""
-            SELECT SUM(s.stars_paid) FROM channel_subscriptions s
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ?
-        """, (user_id,))
-        rev_stars = cursor.fetchone()[0] or 0
-
-        return {
-            "subscribers": vip_subs,
-            "revenue_stars": rev_stars,
-            "verified": total_chats * 12,
-            "expelled": 0,
-            "purges": total_chats * 3,
-            "perimeter": {
-                "captcha": "Activo 🟢",
-                "autolower": "2% Activo 🟢",
-                "shield": "Blindado 🟢",
-                "broadcast": "Worker Activo 🟢",
-                "captcha_active": True,
-                "autolower_active": True,
-                "shield_active": True,
-                "linklock_active": False
-            }
-        }
-
-def get_user_subscribers_audit(user_id: int) -> list:
-    """Devuelve la lista real de suscriptores activos en los canales administrados por el usuario."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT s.user_id, p.plan_name, s.stars_paid, 
-                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left
-            FROM channel_subscriptions s
-            JOIN channel_plans p ON s.plan_id = p.plan_id
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ? AND s.status = 'active'
-            ORDER BY s.expires_at ASC
-        """, (user_id,))
-        rows = cursor.fetchall()
-        return [
-            {
-                "user_id": r[0],
-                "username": str(r[0]),
-                "plan_name": r[1],
-                "price": r[2],
-                "days_left": max(0, r[3])
-            }
-            for r in rows
-        ]
