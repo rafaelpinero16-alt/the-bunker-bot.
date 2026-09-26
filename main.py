@@ -48,7 +48,8 @@ from database.database import (
     get_chat_top_users,
     get_chat_admin_stats,
     update_chat_operational_settings,
-    get_user_by_web_session
+    get_user_by_web_session,
+    mark_payment_processed
 )
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
@@ -103,28 +104,32 @@ app.add_middleware(
 )
 
 def parse_telegram_user_id(init_data: str) -> int:
-    """Extrae el user_id desde el initData de Telegram WebApp de manera robusta y segura."""
+    """Valida la firma HMAC del initData de Telegram WebApp y extrae el user_id legítimo."""
+    if not init_data:
+        return 0
     try:
-        if not init_data:
+        parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+        received_hash = parsed.pop("hash", None)
+        if not received_hash:
             return 0
-        decoded = urllib.parse.unquote(init_data)
-        parsed = urllib.parse.parse_qs(decoded)
-        if "user" in parsed:
-            user_json = json.loads(parsed["user"][0])
-            return int(user_json.get("id", 0))
-        if "id" in parsed:
-            return int(parsed["id"][0])
-    except Exception:
-        try:
-            data = json.loads(init_data)
-            if isinstance(data, dict):
-                if "id" in data:
-                    return int(data["id"])
-                if "user" in data and isinstance(data["user"], dict):
-                    return int(data["user"].get("id", 0))
-        except Exception:
-            pass
-    return 0
+
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(computed_hash, received_hash):
+            logging.warning("⚠️ [initData] Firma inválida rechazada — posible intento de suplantación.")
+            return 0
+
+        auth_date = int(parsed.get("auth_date", 0))
+        if time.time() - auth_date > 86400:
+            return 0
+
+        user_json = json.loads(parsed.get("user", "{}"))
+        return int(user_json.get("id", 0))
+    except Exception as e:
+        logging.debug(f"Error parseando initData: {e}")
+        return 0
 
 # ==========================================
 # 🔐 AUTENTICACIÓN DUAL: Telegram initData nativo O Sesión Web (Widget/Bot)
@@ -189,8 +194,15 @@ def verify_telegram_widget_login(data: dict) -> bool:
 
     return True
 
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
 def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
-    """Resuelve el user_id operador desde initData o Token Bearer."""
+    """Resuelve el user_id operador desde initData o Token Bearer sin fallbacks vulnerables."""
     uid = parse_telegram_user_id(x_telegram_init_data)
     if uid:
         return uid
@@ -200,6 +212,23 @@ def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None)
         if payload and payload.get("uid"):
             return int(payload["uid"])
     return 0
+
+def require_authenticated_user(x_telegram_init_data: str = None, authorization: str = None) -> int:
+    """Lanza 401 si no hay identidad comprobada."""
+    uid = resolve_user_id(x_telegram_init_data, authorization)
+    if not uid:
+        raise HTTPException(status_code=401, detail="No autenticado. Abre la app desde Telegram o inicia sesión.")
+    return uid
+
+async def assert_chat_ownership(user_id: int, chat_id: int):
+    """Lanza 403 si el operador no es dueño o administrador del chat (Protección Anti-IDOR)."""
+    if is_super_admin(user_id):
+        return
+    owned_channels = await get_user_channels(user_id)
+    owned_groups = await get_user_groups(user_id)
+    owned_ids = {int(c[0]) for c in owned_channels} | {int(g[0]) for g in owned_groups}
+    if chat_id not in owned_ids:
+        raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
 
 # --- 0. AUTENTICACIÓN WEB DUAL (WIDGET Y CANJE DE TOKEN TEMPORAL /LOGIN) ---
 @app.post("/api/auth/telegram-widget")
@@ -264,10 +293,35 @@ async def api_auth_session_check(authorization: str = Header(None)):
         "photo_url": payload.get("ph", "")
     }
 
+# --- HELPERS DE CONSULTA SEGURA FUERA DEL EVENT LOOP ---
+def _get_global_channels_sync():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type = 'channel'")
+        return cursor.fetchall()
+
+def _get_global_groups_sync():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type != 'channel' OR chat_type IS NULL")
+        return cursor.fetchall()
+
+def _get_groups_count_sync():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM user_groups")
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+
 # --- 1. TELEMETRÍA GLOBAL Y FILTRADA ---
 @app.get("/api/stats")
-async def api_stats(context: str = "global", x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
-    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
+async def api_stats(
+    context: str = "global", 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         stats = await get_user_global_stats(user_id)
         return stats
@@ -287,10 +341,14 @@ async def api_stats(context: str = "global", x_telegram_init_data: str = Header(
             }
         }
 
-# --- 2. CANALES VINCULADOS (TELEMETRÍA REAL EN VIVO) ---
+
+# --- 2. CANALES VINCULADOS (VERSIÓN ÚNICA Y SIN BLOQUEOS) ---
 @app.get("/api/channels")
-async def api_channels(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
-    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
+async def api_channels(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         channels = []
         if master_bot_instance:
@@ -301,60 +359,9 @@ async def api_channels(x_telegram_init_data: str = Header(None), authorization: 
         else:
             channels = await get_user_channels(user_id)
 
-        res = []
-        for ch_id, ch_name in channels:
-            tier = await get_group_tier(ch_id)
-            member_count = 0
-            resolved_title = ch_name
-            if master_bot_instance:
-                try:
-                    chat_obj = await master_bot_instance.get_chat(ch_id)
-                    resolved_title = chat_obj.title or ch_name
-                    member_count = await master_bot_instance.get_chat_member_count(ch_id)
-                except Exception:
-                    pass
-
-            timeseries = await get_chat_timeseries_stats(ch_id)
-            activity_curve = timeseries.get("messages", [])[-7:]
-            if len(activity_curve) < 7:
-                activity_curve = [0] * (7 - len(activity_curve)) + activity_curve
-
-            res.append({
-                "id": str(ch_id),
-                "title": resolved_title,
-                "type": "channel",
-                "license_status": "active" if tier != "free" else "expired",
-                "members": member_count,
-                "activity": activity_curve,
-                "joined": 0,
-                "left": 0,
-                "avatar_url": None
-            })
-        return {"channels": res}
-    except Exception as e:
-        logging.error(f"❌ [API Channels Error]: {e}")
-        return {"channels": []}
-
-# --- 2. CANALES VINCULADOS (TELEMETRÍA REAL EN VIVO) ---
-@app.get("/api/channels")
-async def api_channels(x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), authorization: str = Header(None)):
-    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
-    try:
-        channels = []
-        if master_bot_instance:
-            try:
-                channels = await get_active_user_channels(master_bot_instance, user_id)
-            except Exception:
-                channels = await get_user_channels(user_id)
-        else:
-            channels = await get_user_channels(user_id)
-
-        # 🛡️ Blindaje anti-vacío: si no hay canales para el ID exacto, buscar todos los canales globales del sistema
+        # 🛡️ Blindaje anti-vacío ejecutado fuera del event loop
         if not channels:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type = 'channel'")
-                channels = cursor.fetchall()
+            channels = await asyncio.to_thread(_get_global_channels_sync)
 
         res = []
         for ch_id, ch_name in channels:
@@ -390,10 +397,14 @@ async def api_channels(x_telegram_init_data: str = Header(None, alias="x-telegra
         logging.error(f"❌ [API Channels Error]: {e}")
         return {"channels": []}
 
-# --- 3. COMUNIDADES BLINDADAS (TELEMETRÍA REAL EN VIVO) ---
+
+# --- 3. COMUNIDADES BLINDADAS (SIN BLOQUEOS) ---
 @app.get("/api/groups")
-async def api_groups(x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), authorization: str = Header(None)):
-    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
+async def api_groups(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         groups_list = []
         if master_bot_instance:
@@ -404,12 +415,9 @@ async def api_groups(x_telegram_init_data: str = Header(None, alias="x-telegram-
         else:
             groups_list = await get_user_groups(user_id)
         
-        # 🛡️ Blindaje anti-vacío para grupos: si está vacío, recuperar todos los grupos supergroup/group de la BD
+        # 🛡️ Blindaje anti-vacío ejecutado fuera del event loop
         if not groups_list:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type != 'channel' OR chat_type IS NULL")
-                groups_list = cursor.fetchall()
+            groups_list = await asyncio.to_thread(_get_global_groups_sync)
 
         res = []
         for g_id, g_name in groups_list:
@@ -445,14 +453,15 @@ async def api_groups(x_telegram_init_data: str = Header(None, alias="x-telegram-
         logging.error(f"❌ [API Groups Error]: {e}")
         return {"groups": []}
 
-# --- 4. ENDPOINT TÁCTICO: SINCRONIZACIÓN FORZADA EN VIVO (CHATKEEPER STYLE) ---
-# --- 4. ENDPOINT TÁCTICO: SINCRONIZACIÓN FORZADA EN VIVO (CHATKEEPER STYLE) ---
+
+# --- 4. ENDPOINT TÁCTICO: SINCRONIZACIÓN FORZADA EN VIVO ---
 @app.post("/api/sync-chats")
-async def api_sync_chats(x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), authorization: str = Header(None)):
-    """Fuerza la inspección activa y asegura registros en BD para que la UI nunca quede vacía."""
-    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
+async def api_sync_chats(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     
-    # 🛡️ Auto-garantizar al menos el grupo de administración en la BD si está vació
     try:
         await register_user_group(
             user_id=user_id,
@@ -484,13 +493,8 @@ async def api_sync_chats(x_telegram_init_data: str = Header(None, alias="x-teleg
         synced_channels = len(channels)
         synced_groups = len(groups_list)
 
-    # Si aun así está en 0, forzar lectura global de la tabla user_groups
     if synced_groups == 0:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM user_groups")
-            row = cursor.fetchone()
-            synced_groups = row[0] if row else 0
+        synced_groups = await asyncio.to_thread(_get_groups_count_sync)
 
     return {
         "status": "success",
@@ -498,19 +502,21 @@ async def api_sync_chats(x_telegram_init_data: str = Header(None, alias="x-teleg
         "total_groups": max(1, synced_groups)
     }
 
+
 # --- 5. AUDITOR DE SUSCRIPTORES ---
 @app.get("/api/subscribers")
 async def api_subscribers(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
-    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         subs = await get_user_subscribers_audit(user_id)
         return {"subscribers": subs if subs is not None else []}
     except Exception as e:
         logging.error(f"❌ [API Subscribers Error] Usuario {user_id}: {e}")
         return {"subscribers": []}
+
 
 # --- 6. DASHBOARD GRANULAR POR CHAT ---
 @app.get("/api/chat/{chat_id}/dashboard")
@@ -519,11 +525,12 @@ async def api_chat_dashboard(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
         data = await get_chat_dashboard_data(numeric_id)
         
-        # 🛡️ Blindaje anti-nulos: si la BD no retorna un diccionario, proveer estructura base
         if not isinstance(data, dict):
             data = {
                 "chat_id": str(chat_id),
@@ -545,11 +552,14 @@ async def api_chat_dashboard(
             data.setdefault("title", f"Chat {chat_id}")
 
         return data
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
     except Exception as e:
         logging.error(f"❌ [API Chat Dashboard Error] Chat {chat_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- 7. ESTADÍSTICAS TEMPORALES EN VIVO ---
 @app.get("/api/chat/{chat_id}/stats")
@@ -558,30 +568,44 @@ async def api_chat_stats(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
         stats = await get_chat_timeseries_stats(numeric_id)
         if not isinstance(stats, dict):
             return {"months": [], "mau": [], "messages": [], "messages_per_user": []}
         return stats
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
     except Exception as e:
         logging.error(f"❌ [API Chat Stats Error] Chat {chat_id}: {e}")
         return {"months": [], "mau": [], "messages": [], "messages_per_user": []}
 
+
 # --- 8. RENDIMIENTO DE ADMINISTRADORES ---
 @app.get("/api/chat/{chat_id}/admin-stats")
-async def api_chat_admin_stats(chat_id: str, x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
+async def api_chat_admin_stats(
+    chat_id: str, 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
         admins = await get_chat_admin_stats(numeric_id)
-        return {"admins": admins}
+        return {"admins": admins if isinstance(admins, list) else []}
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
     except Exception as e:
         logging.error(f"❌ [API Admin Stats Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # --- 9. TOP 10 USUARIOS MÁS ACTIVOS ---
 @app.get("/api/chat/{chat_id}/top-users")
@@ -590,15 +614,20 @@ async def api_chat_top_users(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
         top_users = await get_chat_top_users(numeric_id, limit=10)
         return {"top_users": top_users if isinstance(top_users, list) else []}
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
     except Exception as e:
         logging.error(f"❌ [API Top Users Error] Chat {chat_id}: {e}")
         return {"top_users": []}
+
 
 # --- 10. GUARDAR CONFIGURACIONES EN VIVO ---
 @app.post("/api/chat/{chat_id}/settings")
@@ -608,24 +637,30 @@ async def api_update_chat_settings(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
         if not isinstance(payload, dict):
             payload = {}
         await update_chat_operational_settings(numeric_id, payload)
         logging.info(f"⚙️ [Configuración Guardada para {chat_id}]: {payload}")
         return {"status": "success", "chat_id": chat_id, "updated": payload}
+    except HTTPException:
+        raise
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
     except Exception as e:
         logging.error(f"❌ [API Settings Save Error] Chat {chat_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/api/affiliates/me")
 async def api_affiliates(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
     return {"invited_communities": 0, "earned_stars": 0, "balance": 0}
 
 async def run_fastapi_server():

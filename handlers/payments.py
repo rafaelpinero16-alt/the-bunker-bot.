@@ -12,7 +12,8 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from database.database import (
     approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
     get_vip_badge_title, get_channel_plans, get_channel_plan, 
-    record_channel_subscription, get_channel_settings
+    record_channel_subscription, get_channel_settings,
+    mark_payment_processed
 )
 from assistant import set_participant_mic
 from handlers.user_private import is_clone_bot, get_master_bot_username
@@ -567,7 +568,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 
 
 # ==========================================
-# 💎 PROCESADOR DE PAGO EXITOSO (FASE 3: ENTREGA VIP & CRIPTO-ENLACES)
+# 💎 PROCESADOR DE PAGO EXITOSO CON CONTROL DE IDEMPOTENCIA
 # ==========================================
 @router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
 async def process_successful_payment(message: Message, bot: Bot):
@@ -576,6 +577,11 @@ async def process_successful_payment(message: Message, bot: Bot):
     payload = message.successful_payment.invoice_payload
     user_id = message.from_user.id
     charge_id = message.successful_payment.telegram_payment_charge_id
+
+    # 🛡️ Blindaje de Idempotencia: evita pagos duplicados ante reintentos de red o reinicios de Railway
+    if not await mark_payment_processed(charge_id, user_id, payload):
+        logger.warning(f"⚠️ [Pago Duplicado Ignorado] charge_id={charge_id} usuario={user_id}. Beneficio ya concedido.")
+        return
 
     # CASO 1: SUSCRIPCIONES PRO / ULTRA PRO (GRUPOS Y CANALES)
     if payload.startswith("sub_"):
@@ -618,7 +624,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para suscripción: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 2: FASE 3 — MEMBRESÍAS DE CANAL, ENLACES DE 1 USO Y ENTREGA DE DESTINO VIP
+    # CASO 2: MEMBRESÍAS DE CANAL, ENLACES DE 1 USO Y ENTREGA DE DESTINO VIP
     elif payload.startswith("chan_sub_"):
         try:
             parts = payload.split("_")
@@ -667,7 +673,6 @@ async def process_successful_payment(message: Message, bot: Bot):
                 )
 
             join_markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
             welcome_extra = f"\n\n💬 <i>{custom_welcome}</i>" if custom_welcome else ""
 
             success_text = (

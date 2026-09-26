@@ -77,9 +77,11 @@ SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
-DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "37074591")))
-DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", "66c86c8b4f08a0c142749b204f673d81"))
+DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
+DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
+if not DEFAULT_API_ID or not DEFAULT_API_HASH:
+    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en las variables de entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -1183,7 +1185,10 @@ async def radar_master_loop():
                     chat = dialog.chat
                     if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
                         chat_id = chat.id
-                        if chat_id not in active_sentinels:
+                        lock = _get_launch_lock(chat_id)
+                        async with lock:
+                            if chat_id in active_sentinels:
+                                continue
                             try:
                                 peer = await assistant_app.resolve_peer(chat_id)
                                 task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, _default_my_id))

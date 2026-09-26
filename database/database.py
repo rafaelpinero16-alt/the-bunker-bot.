@@ -82,6 +82,16 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id)")
+
+        # 💳 Control de Idempotencia: evita pagos y suscripciones duplicadas
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS processed_payments (
+                charge_id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                payload TEXT,
+                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
@@ -2454,10 +2464,12 @@ def get_user_subscribers_audit(user_id: int) -> list:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT s.user_id, p.plan_name, s.stars_paid, 
-                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left
+                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left,
+                   u.username
             FROM channel_subscriptions s
             JOIN channel_plans p ON s.plan_id = p.plan_id
             JOIN user_groups ug ON s.channel_id = ug.group_id
+            LEFT JOIN users u ON s.user_id = u.user_id
             WHERE ug.user_id = ? AND s.status = 'active'
             ORDER BY s.expires_at ASC
         """, (user_id,))
@@ -2465,13 +2477,28 @@ def get_user_subscribers_audit(user_id: int) -> list:
         return [
             {
                 "user_id": r[0],
-                "username": str(r[0]),
+                "username": r[4] if r[4] else str(r[0]),
                 "plan_name": r[1],
                 "price": r[2],
-                "days_left": max(0, r[3])
+                "days_left": max(0, r[3]) if r[3] is not None else 0
             }
             for r in rows
         ]
+
+
+def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
+    """Registra el pago de forma atómica. Devuelve False si ya fue procesado antes."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO processed_payments (charge_id, user_id, payload) VALUES (?, ?, ?)",
+                (charge_id, user_id, payload)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
 
 
 def _make_async(sync_fn):
