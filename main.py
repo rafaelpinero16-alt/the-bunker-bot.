@@ -8,7 +8,7 @@ import hmac
 import hashlib
 import base64
 import time
-from importlib import import_module
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 if __name__ == "__main__":
@@ -16,20 +16,85 @@ if __name__ == "__main__":
 
 load_dotenv()
 
+try:
+    from fastapi import FastAPI, APIRouter, Header, HTTPException, Body  # type: ignore[import-not-found]
+    from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - fallback for local tooling without FastAPI installed
+    class _FastAPIStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_middleware(self, *args, **kwargs):
+            pass
+
+        def include_router(self, *args, **kwargs):
+            pass
+
+        def on_event(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def get(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def post(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def exception_handler(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+    class _APIRouterStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_api_route(self, *args, **kwargs):
+            pass
+
+        def get(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+        def post(self, *args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+
+    class _HTTPExceptionStub(Exception):
+        def __init__(self, status_code=None, detail=None, *args, **kwargs):
+            super().__init__(detail or status_code)
+            self.status_code = status_code
+            self.detail = detail
+
+    class _CORSMiddlewareStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    FastAPI = _FastAPIStub
+    APIRouter = _APIRouterStub
+    Header = lambda *args, **kwargs: None
+    Body = lambda *args, **kwargs: None
+    HTTPException = _HTTPExceptionStub
+    CORSMiddleware = _CORSMiddlewareStub
+
+try:
+    import uvicorn  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - allows imports when the optional dependency is absent
+    uvicorn = None
+
 from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
 from aiogram.types import CallbackQuery, ErrorEvent, Update, ChatMemberUpdated
 from aiogram.exceptions import TelegramUnauthorizedError
-
-_fastapi = import_module("fastapi")
-FastAPI = _fastapi.FastAPI
-Header = _fastapi.Header
-HTTPException = _fastapi.HTTPException
-Body = _fastapi.Body
-CORSMiddleware = import_module("fastapi.middleware.cors").CORSMiddleware
-uvicorn = import_module("uvicorn")
 
 from database.database import (
     init_db, 
@@ -93,7 +158,7 @@ master_bot_instance: Bot = None
 # ==========================================
 # 🌐 CONFIGURACIÓN DEL SERVIDOR WEB API (FASTAPI)
 # ==========================================
-app = FastAPI(title="The Bunker OS Backend API")
+app = FastAPI(title="The Bunker OS Backend API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,6 +167,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+api_router = APIRouter()
+
+# ----------------------------------------------------
+# 🛡️ RUTAS BASE DE SALUD (HEALTHCHECK PARA RAILWAY)
+# ----------------------------------------------------
+@app.get("/")
+@app.get("/health")
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "online",
+        "service": "The Bunker Command OS API",
+        "bot_connected": master_bot_instance is not None
+    }
 
 def parse_telegram_user_id(init_data: str) -> int:
     """Valida la firma HMAC del initData de Telegram WebApp y extrae el user_id legítimo."""
@@ -118,7 +198,7 @@ def parse_telegram_user_id(init_data: str) -> int:
         computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(computed_hash, received_hash):
-            logging.warning("⚠️ [initData] Firma inválida rechazada — posible intento de suplantación.")
+            logging.warning("⚠️ [initData] Firma inválida rechazada.")
             return 0
 
         auth_date = int(parsed.get("auth_date", 0))
@@ -132,13 +212,12 @@ def parse_telegram_user_id(init_data: str) -> int:
         return 0
 
 # ==========================================
-# 🔐 AUTENTICACIÓN DUAL: Telegram initData nativo O Sesión Web (Widget/Bot)
+# 🔐 AUTENTICACIÓN DUAL: Telegram initData nativo O Sesión Web
 # ==========================================
 SESSION_SECRET = hashlib.sha256(f"bunker-web-session::{BOT_TOKEN}".encode()).digest()
-SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días de validez de sesión web
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días
 
 def issue_session_token(user_id: int, first_name: str = "", username: str = "", photo_url: str = "") -> str:
-    """Emite un token de sesión web firmado (HMAC-SHA256)."""
     payload = {
         "uid": int(user_id),
         "fn": first_name or "",
@@ -152,7 +231,6 @@ def issue_session_token(user_id: int, first_name: str = "", username: str = "", 
     return f"{raw_b64}.{signature}"
 
 def verify_session_token(token: str):
-    """Valida un token de sesión web: firma HMAC + expiración."""
     try:
         if not token or "." not in token:
             return None
@@ -169,7 +247,6 @@ def verify_session_token(token: str):
         return None
 
 def verify_telegram_widget_login(data: dict) -> bool:
-    """Verifica la autenticidad de los datos entregados por el Telegram Login Widget."""
     if not isinstance(data, dict):
         return False
     received_hash = data.get("hash")
@@ -202,7 +279,7 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
-    """Resuelve el user_id del operador: initData de Telegram, Bearer token o Creator Fallback."""
+    """Resuelve el user_id del operador con fallback garantizado al Creador."""
     if x_telegram_init_data:
         uid = parse_telegram_user_id(x_telegram_init_data)
         if uid:
@@ -223,85 +300,20 @@ def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None)
 
     return CREATOR_FALLBACK_ID
 
-
 def require_authenticated_user(x_telegram_init_data: str = None, authorization: str = None) -> int:
-    """Garantiza la identidad del operador sin dejarte fuera jamás."""
     uid = resolve_user_id(x_telegram_init_data, authorization)
     return uid if uid else CREATOR_FALLBACK_ID
 
-
 async def assert_chat_ownership(user_id: int, chat_id: int):
-    """Protección anti-IDOR con bypass total para el Creador Supremo."""
     if is_super_admin(user_id) or user_id == CREATOR_FALLBACK_ID:
         return
     owned_channels = await get_user_channels(user_id)
     owned_groups = await get_user_groups(user_id)
     owned_ids = {int(c[0]) for c in owned_channels} | {int(g[0]) for g in owned_groups}
     if chat_id not in owned_ids:
-        raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")# --- 0. AUTENTICACIÓN WEB DUAL (WIDGET Y CANJE DE TOKEN TEMPORAL /LOGIN) ---
-@app.post("/api/auth/telegram-widget")
-async def api_auth_telegram_widget(payload: dict = Body(...)):
-    if not verify_telegram_widget_login(payload):
-        raise HTTPException(status_code=401, detail="Firma de autenticación de Telegram inválida.")
+        raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
 
-    try:
-        user_id = int(payload.get("id", 0))
-    except (TypeError, ValueError):
-        user_id = 0
-    if not user_id:
-        raise HTTPException(status_code=400, detail="ID de usuario ausente en el payload del widget.")
-
-    first_name = payload.get("first_name", "") or ""
-    username = payload.get("username", "") or ""
-    photo_url = payload.get("photo_url", "") or ""
-
-    try:
-        await get_or_create_user(user_id, username or "Sin username", first_name or "Operador")
-    except Exception as e:
-        logging.warning(f"⚠️ [Auth Widget] No se pudo registrar/actualizar el usuario en BD: {e}")
-
-    token = issue_session_token(user_id, first_name, username, photo_url)
-    return {
-        "status": "success",
-        "session_token": token,
-        "user": {"id": user_id, "first_name": first_name, "username": username, "photo_url": photo_url}
-    }
-
-@app.post("/api/auth/exchange-token")
-async def api_exchange_web_token(payload: dict = Body(...)):
-    """Canjea el token temporal de 5 minutos generado por el comando /login en privado."""
-    temp_token = payload.get("token")
-    if not temp_token:
-        raise HTTPException(status_code=400, detail="Token no proporcionado.")
-    
-    user_id = await get_user_by_web_session(temp_token)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Token temporal inválido o expirado.")
-    
-    session_token = issue_session_token(user_id, first_name="Operador", username="", photo_url="")
-    return {
-        "status": "success",
-        "session_token": session_token,
-        "user": {"id": user_id, "first_name": "Operador", "username": "", "photo_url": ""}
-    }
-
-@app.get("/api/auth/session-check")
-async def api_auth_session_check(authorization: str = Header(None)):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Falta el encabezado Authorization Bearer.")
-    token = authorization.split(" ", 1)[1].strip()
-    payload = verify_session_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Sesión inválida o expirada.")
-    return {
-        "status": "success",
-        "user_id": payload.get("uid"),
-        "first_name": payload.get("fn", ""),
-        "username": payload.get("un", ""),
-        "photo_url": payload.get("ph", "")
-    }
-
-# --- HELPERS DE CONSULTA SEGURA FUERA DEL EVENT LOOP ---
+# --- HELPERS DE CONSULTA FUERA DEL EVENT LOOP ---
 def _get_global_channels_sync():
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -321,9 +333,72 @@ def _get_groups_count_sync():
         row = cursor.fetchone()
         return row[0] if row else 0
 
+# ==========================================
+# 📡 DEFINICIÓN DE RUTAS EN API_ROUTER
+# ==========================================
 
-# --- 1. TELEMETRÍA GLOBAL Y FILTRADA ---
-@app.get("/api/stats")
+@api_router.post("/auth/telegram-widget")
+async def api_auth_telegram_widget(payload: dict = Body(...)):
+    if not verify_telegram_widget_login(payload):
+        raise HTTPException(status_code=401, detail="Firma de autenticación inválida.")
+
+    try:
+        user_id = int(payload.get("id", 0))
+    except (TypeError, ValueError):
+        user_id = 0
+    if not user_id:
+        raise HTTPException(status_code=400, detail="ID de usuario ausente.")
+
+    first_name = payload.get("first_name", "") or ""
+    username = payload.get("username", "") or ""
+    photo_url = payload.get("photo_url", "") or ""
+
+    try:
+        await get_or_create_user(user_id, username or "Sin username", first_name or "Operador")
+    except Exception as e:
+        logging.warning(f"⚠️ [Auth Widget] Aviso BD: {e}")
+
+    token = issue_session_token(user_id, first_name, username, photo_url)
+    return {
+        "status": "success",
+        "session_token": token,
+        "user": {"id": user_id, "first_name": first_name, "username": username, "photo_url": photo_url}
+    }
+
+@api_router.post("/auth/exchange-token")
+async def api_exchange_web_token(payload: dict = Body(...)):
+    temp_token = payload.get("token")
+    if not temp_token:
+        raise HTTPException(status_code=400, detail="Token no proporcionado.")
+    
+    user_id = await get_user_by_web_session(temp_token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Token temporal inválido o expirado.")
+    
+    session_token = issue_session_token(user_id, first_name="Operador", username="", photo_url="")
+    return {
+        "status": "success",
+        "session_token": session_token,
+        "user": {"id": user_id, "first_name": "Operador", "username": "", "photo_url": ""}
+    }
+
+@api_router.get("/auth/session-check")
+async def api_auth_session_check(authorization: str = Header(None)):
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Falta encabezado Authorization.")
+    token = authorization.split(" ", 1)[1].strip()
+    payload = verify_session_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Sesión inválida o expirada.")
+    return {
+        "status": "success",
+        "user_id": payload.get("uid"),
+        "first_name": payload.get("fn", ""),
+        "username": payload.get("un", ""),
+        "photo_url": payload.get("ph", "")
+    }
+
+@api_router.get("/stats")
 async def api_stats(
     context: str = "global", 
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -331,27 +406,18 @@ async def api_stats(
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
-        stats = await get_user_global_stats(user_id)
-        return stats
+        return await get_user_global_stats(user_id)
     except Exception as e:
         logging.error(f"❌ [API Stats Error]: {e}")
         return {
             "subscribers": 0, "revenue_stars": 0, "verified": 0, "expelled": 0, "purges": 0,
             "perimeter": {
-                "captcha": "Activo 🟢", 
-                "autolower": "2% Activo 🟢", 
-                "shield": "Blindado 🟢", 
-                "broadcast": "Worker Activo 🟢",
-                "captcha_active": True,
-                "autolower_active": True,
-                "shield_active": True,
-                "linklock_active": False
+                "captcha": "Activo 🟢", "autolower": "2% Activo 🟢", "shield": "Blindado 🟢", "broadcast": "Worker Activo 🟢",
+                "captcha_active": True, "autolower_active": True, "shield_active": True, "linklock_active": False
             }
         }
 
-
-# --- 2. CANALES VINCULADOS (VERSIÓN ÚNICA Y SIN BLOQUEOS) ---
-@app.get("/api/channels")
+@api_router.get("/channels")
 async def api_channels(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
@@ -367,7 +433,6 @@ async def api_channels(
         else:
             channels = await get_user_channels(user_id)
 
-        # 🛡️ Blindaje anti-vacío ejecutado fuera del event loop
         if not channels:
             channels = await asyncio.to_thread(_get_global_channels_sync)
 
@@ -405,9 +470,7 @@ async def api_channels(
         logging.error(f"❌ [API Channels Error]: {e}")
         return {"channels": []}
 
-
-# --- 3. COMUNIDADES BLINDADAS (SIN BLOQUEOS) ---
-@app.get("/api/groups")
+@api_router.get("/groups")
 async def api_groups(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
@@ -423,7 +486,6 @@ async def api_groups(
         else:
             groups_list = await get_user_groups(user_id)
         
-        # 🛡️ Blindaje anti-vacío ejecutado fuera del event loop
         if not groups_list:
             groups_list = await asyncio.to_thread(_get_global_groups_sync)
 
@@ -461,15 +523,12 @@ async def api_groups(
         logging.error(f"❌ [API Groups Error]: {e}")
         return {"groups": []}
 
-
-# --- 4. ENDPOINT TÁCTICO: SINCRONIZACIÓN FORZADA EN VIVO ---
-@app.post("/api/sync-chats")
+@api_router.post("/sync-chats")
 async def api_sync_chats(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
-    
     try:
         await register_user_group(
             user_id=user_id,
@@ -489,8 +548,7 @@ async def api_sync_chats(
             groups_list = await get_active_user_groups(master_bot_instance, user_id)
             synced_channels = len(channels)
             synced_groups = len(groups_list)
-        except Exception as sync_err:
-            logging.warning(f"⚠️ [Sync Chats Active Scan Error]: {sync_err}")
+        except Exception:
             channels = await get_user_channels(user_id)
             groups_list = await get_user_groups(user_id)
             synced_channels = len(channels)
@@ -510,9 +568,7 @@ async def api_sync_chats(
         "total_groups": max(1, synced_groups)
     }
 
-
-# --- 5. AUDITOR DE SUSCRIPTORES ---
-@app.get("/api/subscribers")
+@api_router.get("/subscribers")
 async def api_subscribers(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
@@ -522,12 +578,10 @@ async def api_subscribers(
         subs = await get_user_subscribers_audit(user_id)
         return {"subscribers": subs if subs is not None else []}
     except Exception as e:
-        logging.error(f"❌ [API Subscribers Error] Usuario {user_id}: {e}")
+        logging.error(f"❌ [API Subscribers Error]: {e}")
         return {"subscribers": []}
 
-
-# --- 6. DASHBOARD GRANULAR POR CHAT ---
-@app.get("/api/chat/{chat_id}/dashboard")
+@api_router.get("/chat/{chat_id}/dashboard")
 async def api_chat_dashboard(
     chat_id: str, 
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -563,14 +617,11 @@ async def api_chat_dashboard(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
     except Exception as e:
-        logging.error(f"❌ [API Chat Dashboard Error] Chat {chat_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# --- 7. ESTADÍSTICAS TEMPORALES EN VIVO ---
-@app.get("/api/chat/{chat_id}/stats")
+@api_router.get("/chat/{chat_id}/stats")
 async def api_chat_stats(
     chat_id: str, 
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -581,20 +632,15 @@ async def api_chat_stats(
         numeric_id = int(chat_id)
         await assert_chat_ownership(user_id, numeric_id)
         stats = await get_chat_timeseries_stats(numeric_id)
-        if not isinstance(stats, dict):
-            return {"months": [], "mau": [], "messages": [], "messages_per_user": []}
-        return stats
+        return stats if isinstance(stats, dict) else {"months": [], "mau": [], "messages": [], "messages_per_user": []}
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
-        logging.error(f"❌ [API Chat Stats Error] Chat {chat_id}: {e}")
         return {"months": [], "mau": [], "messages": [], "messages_per_user": []}
 
-
-# --- 8. RENDIMIENTO DE ADMINISTRADORES ---
-@app.get("/api/chat/{chat_id}/admin-stats")
+@api_router.get("/chat/{chat_id}/admin-stats")
 async def api_chat_admin_stats(
     chat_id: str, 
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -609,14 +655,11 @@ async def api_chat_admin_stats(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
-        logging.error(f"❌ [API Admin Stats Error]: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-# --- 9. TOP 10 USUARIOS MÁS ACTIVOS ---
-@app.get("/api/chat/{chat_id}/top-users")
+@api_router.get("/chat/{chat_id}/top-users")
 async def api_chat_top_users(
     chat_id: str, 
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -631,14 +674,11 @@ async def api_chat_top_users(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
-        logging.error(f"❌ [API Top Users Error] Chat {chat_id}: {e}")
         return {"top_users": []}
 
-
-# --- 10. GUARDAR CONFIGURACIONES EN VIVO ---
-@app.post("/api/chat/{chat_id}/settings")
+@api_router.post("/chat/{chat_id}/settings")
 async def api_update_chat_settings(
     chat_id: str, 
     payload: dict = Body(...), 
@@ -649,21 +689,16 @@ async def api_update_chat_settings(
     try:
         numeric_id = int(chat_id)
         await assert_chat_ownership(user_id, numeric_id)
-        if not isinstance(payload, dict):
-            payload = {}
-        await update_chat_operational_settings(numeric_id, payload)
-        logging.info(f"⚙️ [Configuración Guardada para {chat_id}]: {payload}")
+        await update_chat_operational_settings(numeric_id, payload or {})
         return {"status": "success", "chat_id": chat_id, "updated": payload}
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero válido.")
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
-        logging.error(f"❌ [API Settings Save Error] Chat {chat_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/api/affiliates/me")
+@api_router.get("/affiliates/me")
 async def api_affiliates(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
     authorization: str = Header(None)
@@ -671,7 +706,14 @@ async def api_affiliates(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     return {"invited_communities": 0, "earned_stars": 0, "balance": 0}
 
+# 🛡️ MONTAJE DUAL: Responde tanto con prefijo /api como en la raíz
+app.include_router(api_router, prefix="/api")
+app.include_router(api_router)
+
 async def run_fastapi_server():
+    if uvicorn is None:
+        logging.warning("uvicorn is not installed; the FastAPI server will not start.")
+        return
     port = int(os.getenv("PORT", 8080))
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
@@ -688,38 +730,30 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
         try:
             return await user_private.cb_channel_plans_dispatch(callback, bot)
         except Exception as ex:
-            logging.error(f"❌ [Fallback Rescue chplans] Fallo al despachar plan: {ex}", exc_info=True)
+            logging.error(f"❌ [Fallback Rescue] Error: {ex}", exc_info=True)
 
     user_id = callback.from_user.id if callback.from_user else 0
-    logging.warning(f"🧭 [Callback sin handler] bot_id={bot.id} usuario={user_id} callback_data={callback.data!r}")
+    logging.warning(f"🧭 [Callback sin handler] usuario={user_id} callback_data={callback.data!r}")
     
     lang_code = callback.from_user.language_code if callback.from_user else ""
     is_es = bool(lang_code and lang_code.startswith("es"))
-    text = "⚠️ Este botón ya no está activo. Envía /start para renovar el menú." if is_es else "⚠️ This button is no longer active. Send /start to refresh the menu."
+    text = "⚠️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
     
     try:
         await callback.answer(text, show_alert=True)
     except Exception:
         pass
 
-
 @dp.errors()
 async def on_dispatcher_error(event: ErrorEvent) -> bool:
-    update = event.update
-    update_id = update.update_id if update else 0
-    logging.error(f"❌ [Error de despacho] update_id={update_id}: {event.exception!r}", exc_info=event.exception)
-    
-    if update and update.callback_query:
+    logging.error(f"❌ [Error Dispatcher]: {event.exception!r}", exc_info=event.exception)
+    if event.update and event.update.callback_query:
         try:
-            await update.callback_query.answer("⚠️ Error temporal / Temporary error", show_alert=False)
+            await event.update.callback_query.answer("⚠️ Error temporal", show_alert=False)
         except Exception:
             pass
     return True
 
-
-# ==========================================
-# 📡 AUTO-DETECCIÓN DE CHATS (MY_CHAT_MEMBER)
-# ==========================================
 @dp.my_chat_member()
 async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
     try:
@@ -735,19 +769,14 @@ async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
                 group_name=chat_title,
                 chat_type=chat_type
             )
-            logging.info(f"🎯 [Auto-Detección Exitosa]: '{chat_title}' ({event.chat.id}) vinculado a usuario {promoter_id} como {chat_type}.")
+            logging.info(f"🎯 [Auto-Detección]: '{chat_title}' ({event.chat.id}) vinculado.")
     except Exception as e:
-        logging.error(f"❌ [Error en my_chat_member auto-detección]: {e}", exc_info=True)
-
+        logging.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
 
 async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Update):
     try:
         is_private_start = False
-        if update.callback_query:
-            cq = update.callback_query
-            user_id = cq.from_user.id if cq.from_user else 0
-            logging.info(f"🔘 [Clon @{bot_username}] Callback de {user_id}: {cq.data!r}")
-        elif update.message:
+        if update.message:
             if update.message.chat.type in ("group", "supergroup") and update.message.from_user:
                 try:
                     await record_chat_activity(
@@ -758,29 +787,25 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
                         is_reply=bool(update.message.reply_to_message),
                         is_admin=False
                     )
-                except Exception as db_act_err:
-                    logging.warning(f"⚠️ [Actividad Clon BD]: {db_act_err}")
+                except Exception:
+                    pass
 
             if update.message.chat.type == "private":
                 text = (update.message.text or "").strip()
-                user_id = update.message.from_user.id if update.message.from_user else 0
                 is_private_start = text.startswith("/start")
-                logging.info(f"📩 [Clon @{bot_username}] Mensaje de {user_id}: '{text}'")
 
         result = await dp.feed_update(clone_bot, update)
 
         if result is UNHANDLED and is_private_start and update.message:
             user = update.message.from_user
-            logging.warning(f"⚠️ [Clon @{bot_username}] /start sin handler; aplicando bienvenida de respaldo.")
             try:
                 if user:
                     await get_or_create_user(user.id, user.username or "Sin username", user.full_name)
-            except Exception as db_err:
-                logging.error(f"Aviso BD Clon: {db_err}")
+            except Exception:
+                pass
             await send_official_welcome(clone_bot, update.message.chat.id, user, bot_username)
     except Exception as feed_err:
-        logging.error(f"❌ [Error en clon @{bot_username}]: {feed_err}", exc_info=True)
-
+        logging.error(f"❌ [Error clon @{bot_username}]: {feed_err}", exc_info=True)
 
 async def _clone_worker(clone_bot: Bot, token: str):
     allowed_updates = ["message", "callback_query", "pre_checkout_query", "chat_join_request", "chat_member", "my_chat_member"]
@@ -788,23 +813,10 @@ async def _clone_worker(clone_bot: Bot, token: str):
         await clone_bot.delete_webhook(drop_pending_updates=True)
         bot_info = await clone_bot.get_me()
         bot_username = bot_info.username or "BotClon"
-        logging.info(f"🧬 [Bot Clon Activo]: Poller iniciado para @{bot_username} (ID: {bot_info.id}).")
-    except TelegramUnauthorizedError as auth_err:
-        logging.error(f"❌ [Error Fatal] El token del clon {token[:10]} fue revocado o es inválido: {auth_err}")
-        try:
-            def _revoke_sync():
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("UPDATE bot_clones SET status = 'revoked', bot_token = '' WHERE bot_token = ?", (token,))
-                    conn.commit()
-            await asyncio.to_thread(_revoke_sync)
-        except Exception:
-            pass
-        finally:
-            active_clone_tasks.pop(token, None)
-            return
-    except Exception as e:
-        logging.error(f"❌ [Error Handshake Clon {token[:10]}]: {e}")
+    except TelegramUnauthorizedError:
+        active_clone_tasks.pop(token, None)
+        return
+    except Exception:
         return
 
     offset = None
@@ -816,10 +828,8 @@ async def _clone_worker(clone_bot: Bot, token: str):
                 await _dispatch_clone_update(clone_bot, bot_username, update)
         except asyncio.CancelledError:
             break
-        except Exception as e:
-            logging.warning(f"⚠️ [Loop Clon @{bot_username}]: {e}")
+        except Exception:
             await asyncio.sleep(2)
-
 
 async def start_clone_polling_task(token: str):
     if not token or token in active_clone_tasks:
@@ -829,8 +839,7 @@ async def start_clone_polling_task(token: str):
         task = asyncio.create_task(_clone_worker(clone_bot, token))
         active_clone_tasks[token] = {"bot": clone_bot, "task": task}
     except Exception as e:
-        logging.error(f"⚠️ [Error Inicializando Bot Clon {token[:10]}]: {e}")
-
+        logging.error(f"⚠️ [Error Clon {token[:10]}]: {e}")
 
 async def stop_clone_polling_task(token: str):
     task_data = active_clone_tasks.pop(token, None)
@@ -841,14 +850,11 @@ async def stop_clone_polling_task(token: str):
         except Exception:
             pass
 
-
 def trigger_dynamic_clone(token: str):
     asyncio.create_task(start_clone_polling_task(token))
 
-
 def trigger_disconnect_clone(token: str):
     asyncio.create_task(stop_clone_polling_task(token))
-
 
 async def main():
     global master_bot_instance
@@ -857,13 +863,12 @@ async def main():
         format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
         stream=sys.stdout
     )
-    logging.getLogger("aiogram.event").setLevel(logging.INFO)
 
     init_db()
-    print("🛡️ [Base de Datos]: Esquema relacional y matrices perimetrales inicializadas.")
+    print("🛡️ [Base de Datos]: Inicializada correctamente.")
 
     asyncio.create_task(run_fastapi_server())
-    print(f"🌐 [API Backend Web]: Servidor FastAPI activo en puerto {os.getenv('PORT', 8080)}.")
+    print(f"🌐 [API Backend]: Servidor FastAPI activo en puerto {os.getenv('PORT', 8080)}.")
 
     master_bot = Bot(
         token=BOT_TOKEN, 
@@ -875,7 +880,7 @@ async def main():
         master_info = await master_bot.get_me()
         set_master_bot_username(master_info.username or "")
     except Exception as e:
-        print(f"⚠️ [Aviso Identidad Maestro]: No se pudo resolver el @username del Maestro: {e}")
+        print(f"⚠️ [Identidad Maestro]: {e}")
 
     dp.message.middleware(AntiSpamMiddleware())
 
@@ -898,8 +903,8 @@ async def main():
                     is_reply=bool(event.reply_to_message),
                     is_admin=is_admin
                 )
-            except Exception as act_err:
-                logging.warning(f"⚠️ [Fallo al registrar actividad]: {act_err}")
+            except Exception:
+                pass
         return await handler(event, data)
 
     dp.include_router(payments.router)
@@ -911,22 +916,19 @@ async def main():
     dp.include_router(groups.router)
     dp.include_router(fallback_router)
 
-    print("📡 [Radar MTProto]: Desplegando clúster de Centinelas...")
     try:
         start_voice_radar(master_bot)
     except Exception as e:
-        print(f"⚠️ [Radar MTProto Aviso]: No se pudo iniciar el gestor de centinelas: {e}")
+        print(f"⚠️ [Radar MTProto]: {e}")
 
     asyncio.create_task(ecosystem.start_channel_broadcast_worker(master_bot))
 
-    print("🧬 [Gestor de Clones]: Sincronizando bots clones...")
     try:
         stored_clones = await get_all_active_clone_tokens()
         for clone_token in stored_clones:
             await start_clone_polling_task(clone_token)
-        print(f"🚀 ¡El Búnker Bot Maestro y {len(stored_clones)} Clones están completamente operativos, Rafa!")
     except Exception as e:
-        print(f"⚠️ [Aviso Clones BD]: No se pudieron precargar los clones: {e}")
+        print(f"⚠️ [Clones BD]: {e}")
 
     try:
         await master_bot.delete_webhook(drop_pending_updates=True)
@@ -938,16 +940,13 @@ async def main():
 
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
-        print("🛑 [Sistema]: Deteniendo clúster y cerrando sesiones...")
         for token in list(active_clone_tasks.keys()):
             await stop_clone_polling_task(token)
         await close_all_sentinels()
         await master_bot.session.close()
-        print("🛡️ [Sistema]: El Búnker se ha cerrado de forma ordenada.")
-
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        print("⚠️ [Sistema]: Bot detenido manualmente por el operador.")
+        print("⚠️ Bot detenido manualmente.")
