@@ -2268,7 +2268,13 @@ def record_chat_activity(group_id: int, user_id: int, full_name: str, username: 
 
 
 def get_chat_dashboard_data(chat_id: int) -> dict:
-    tier = get_group_tier(chat_id)
+    # Consulta directa del tier para evitar llamadas cruzadas síncronas/asíncronas
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT tier FROM approved_groups WHERE group_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        tier = row[0] if row else "free"
+    
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
