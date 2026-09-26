@@ -127,7 +127,6 @@ def init_db():
             ("ai_guardian_status", "INTEGER DEFAULT 0"),
             ("ai_copilot_status", "INTEGER DEFAULT 0"),
             ("ai_custom_prompt", "TEXT"),
-            # Parámetros Granulares ChatKeeper Style
             ("log_channel_id", "TEXT"),
             ("spam_detection_mode", "TEXT DEFAULT 'smart'"),
             ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
@@ -373,7 +372,6 @@ def init_db():
             )
         """)
 
-        # Tablas de Telemetría Real ChatKeeper
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS chat_user_activity (
                 group_id INTEGER,
@@ -807,6 +805,31 @@ def set_vc_monitor_status(group_id: int, status: int):
             ON CONFLICT(group_id) DO UPDATE SET vc_enabled = excluded.vc_enabled
         """, (group_id, status))
         conn.commit()
+        # ==========================================
+# 🌐 GESTIÓN DE SESIONES WEB TEMPORALES (ChatKeeper Style)
+# ==========================================
+def create_web_session(user_id: int) -> str:
+    import secrets
+    token = secrets.token_urlsafe(32)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO web_sessions (token, user_id, expires_at)
+            VALUES (?, ?, datetime('now', '+5 minutes'))
+        """, (token, user_id))
+        conn.commit()
+    return token
+
+
+def get_user_by_web_session(token: str) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id FROM web_sessions 
+            WHERE token = ? AND expires_at > datetime('now')
+        """, (token,))
+        row = cursor.fetchone()
+        return row[0] if row else None
 
 
 _RADAR_CONFIG_FIELDS = {
@@ -1249,6 +1272,8 @@ def is_whitelisted(user_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,))
         return cursor.fetchone() is not None
+
+
 def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2189,11 +2214,7 @@ def get_active_subscribers_count(channel_id: int) -> int:
         return row[0] if row else 0
 
 
-# ==========================================
-# 📊 TELEMETRÍA Y STATS CHATKEEPER EN DB
-# ==========================================
 def record_chat_activity(group_id: int, user_id: int, full_name: str, username: str, is_reply: bool = False, is_admin: bool = False):
-    """Registra actividad de mensajes de usuarios para las métricas del dashboard."""
     month_key = datetime.now().strftime("%b '%y")
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2219,7 +2240,6 @@ def record_chat_activity(group_id: int, user_id: int, full_name: str, username: 
 
 
 def get_chat_dashboard_data(chat_id: int) -> dict:
-    """Devuelve la configuración y módulos de un chat específico al estilo ChatKeeper."""
     tier = get_group_tier(chat_id)
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2274,7 +2294,6 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
 
 
 def get_chat_timeseries_stats(chat_id: int) -> dict:
-    """Obtiene los meses reales de mensajería y usuarios para renderizar las barras gráficas."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2297,7 +2316,6 @@ def get_chat_timeseries_stats(chat_id: int) -> dict:
 
 
 def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
-    """Calcula el Top de usuarios más activos en base a mensajes reales registrados."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2321,7 +2339,6 @@ def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
 
 
 def get_chat_admin_stats(chat_id: int) -> list:
-    """Extrae las estadísticas de respuesta y mensajes de administradores del chat."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2344,7 +2361,6 @@ def get_chat_admin_stats(chat_id: int) -> list:
 
 
 def update_chat_operational_settings(chat_id: int, settings: dict):
-    """Actualiza los parámetros operativos del chat desde la Mini App."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         updates = []
@@ -2371,7 +2387,6 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
 
 
 def get_user_global_stats(user_id: int) -> dict:
-    """Calcula las estadísticas reales consolidadas del creador para el Dashboard."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", (user_id,))
@@ -2411,7 +2426,6 @@ def get_user_global_stats(user_id: int) -> dict:
 
 
 def get_user_subscribers_audit(user_id: int) -> list:
-    """Devuelve la lista real de suscriptores activos en los canales administrados por el usuario."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2436,9 +2450,6 @@ def get_user_subscribers_audit(user_id: int) -> list:
         ]
 
 
-# ==========================================
-# ⚡ ENVOLTURA ASÍNCRONA DE ALTO RENDIMIENTO
-# ==========================================
 def _make_async(sync_fn):
     @functools.wraps(sync_fn)
     async def _async_wrapper(*args, **kwargs):
@@ -2576,7 +2587,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "flag_userbot",
     "is_userbot_flagged",
     "purge_flagged_userbot_record",
-    # Métodos Asíncronos ChatKeeper & Telemetría
     "get_user_global_stats",
     "get_user_subscribers_audit",
     "record_chat_activity",
@@ -2584,7 +2594,10 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_chat_timeseries_stats",
     "get_chat_top_users",
     "get_chat_admin_stats",
-    "update_chat_operational_settings"
+    "update_chat_operational_settings",
+    # 🌐 Funciones Web Session Añadidas y Asíncronas
+    "create_web_session",
+    "get_user_by_web_session"
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
