@@ -1,13 +1,30 @@
 :root {
-    --bg-deep: #030407; /* Fondo ultra oscuro y elegante */
+    --bg-deep: #030407;
+    --panel-bg: rgba(10, 12, 18, 0.75);
+    --panel-border: rgba(255, 255, 255, 0.08);
+    --text-primary: #ffffff;
+    --text-secondary: #94a3b8;
+    --card-bg: rgba(0, 0, 0, 0.5);
+    --grid-color: rgba(0, 243, 255, 0.03);
+}
+
+[data-theme="light"] {
+    --bg-deep: #f1f5f9;
+    --panel-bg: rgba(255, 255, 255, 0.9);
+    --panel-border: rgba(0, 0, 0, 0.1);
+    --text-primary: #090d16;
+    --text-secondary: #475569;
+    --card-bg: rgba(241, 245, 249, 0.85);
+    --grid-color: rgba(0, 150, 200, 0.05);
 }
 
 html, body {
     background-color: var(--bg-deep);
-    color: #fff;
-    font-family: 'Rajdhani', sans-serif;
+    color: var(--text-primary);
+    font-family: 'Plus Jakarta Sans', sans-serif;
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
+    transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 body {
@@ -18,46 +35,48 @@ body {
     box-shadow: 0 0 50px rgba(0, 243, 255, 0.05);
 }
 
-.gpu-accelerated {
-    transform: translate3d(0, 0, 0);
-    will-change: transform, opacity;
-    backface-visibility: hidden;
+.text-theme-main {
+    color: var(--text-primary);
 }
 
-/* Efecto Glassmorphism 3D Refinado y Sobrio */
+.text-theme-muted {
+    color: var(--text-secondary);
+}
+
+/* Efecto Glassmorphism Refinado */
 .glass-panel {
-    background: rgba(10, 12, 18, 0.7);
+    background: var(--panel-bg);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--panel-border);
     border-radius: 24px;
-    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    transition: background 0.3s ease, border-color 0.3s ease;
 }
 
-/* Títulos 3D Limpios sin saturación para los Planes */
-.text-3d-neutral {
-    font-family: 'Orbitron', sans-serif;
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 15px rgba(163, 163, 163, 0.2);
+/* Drawer background adaptativo */
+.drawer-content {
+    background: var(--bg-deep);
+    border-right: 1px solid var(--panel-border);
 }
 
+/* Títulos 3D Limpios */
 .text-3d-cyan {
-    font-family: 'Orbitron', sans-serif;
     text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(0, 243, 255, 0.4);
 }
 
 .text-3d-magenta {
-    font-family: 'Orbitron', sans-serif;
     text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(255, 0, 255, 0.4);
 }
 
-/* Rejilla 3D con Perspectiva Infinita */
+/* Rejilla 3D con Perspectiva Tron */
 .tron-grid {
     position: fixed;
     top: 0; left: 0; right: 0; margin: 0 auto;
     width: 100%; max-width: 480px; height: 100vh;
     background-image: 
-        linear-gradient(rgba(0, 243, 255, 0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0, 243, 255, 0.03) 1px, transparent 1px);
+        linear-gradient(var(--grid-color) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
     background-size: 35px 35px;
     transform: perspective(600px) rotateX(60deg) translateY(-100px) translateZ(-250px);
     animation: gridMove 25s linear infinite;
@@ -77,23 +96,17 @@ body {
     z-index: -1;
 }
 
-/* Transiciones Suaves para Pestañas estilo ChatKeeper OS */
+/* Transiciones Suaves para Pestañas */
 .tab-view {
     animation: tabFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 @keyframes tabFadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(6px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
-/* Deslizamiento Lateral Fluido para el Cyber-Drawer OS */
+/* Cyber-Drawer Deslizante */
 #cyber-drawer {
     transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -104,17 +117,13 @@ body {
 }
 
 @keyframes drawerSlideIn {
-    from {
-        transform: translateX(-100%);
-    }
-    to {
-        transform: translateX(0);
-    }
+    from { transform: translateX(-100%); }
+    to { transform: translateX(0); }
 }
 
-/* Personalización de Campos de Entrada y Selectores */
+/* Inputs y Selectores */
 input[type="text"], input[type="number"], select {
-    font-family: 'Rajdhani', sans-serif;
+    font-family: 'Plus Jakarta Sans', sans-serif;
     transition: all 0.2s ease-in-out;
 }
 
@@ -123,42 +132,23 @@ input:focus, select:focus {
     border-color: #00f3ff !important;
 }
 
-select:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
 select option {
     background-color: #0a0c12;
     color: #00f3ff;
 }
 
-/* Levitación Flotante para el Botón de Idioma */
-.levitate {
-    animation: levitate 3s ease-in-out infinite;
+/* Botón Flotante Arrastrable (Draggable Puro en Viewport) */
+#floating-lang-btn {
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+    position: fixed;
+    bottom: 24px;
+    right: 16px;
+    z-index: 999;
 }
 
-@keyframes levitate {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-5px); }
-}
-
-/* Tarjetas de Comunidad (Chat Cards) — entrada suave individual */
-#channels-list > div,
-#groups-list > div,
-#watchdog-list > div {
-    animation: tabFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
-
-/* Navegación inferior de 6 secciones: iconos compactos en móvil estrecho */
-@media (max-width: 360px) {
-    nav .glass-panel button span {
-        font-size: 6px;
-    }
-}
-
-/* Scrollbar Minimalista Táctica */
+/* Scrollbar Minimalista */
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(0, 243, 255, 0.3); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(0, 243, 255, 0.6); }

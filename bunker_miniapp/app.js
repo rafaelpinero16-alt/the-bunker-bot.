@@ -1,6 +1,6 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
-   app.js — Lógica central, i18n, telemetría real y pasarelas de pago
+   app.js — Lógica central, Draggable Button, Theme Engine, i18n y Telemetría Real
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -29,8 +29,6 @@ const translations = {
         ultra_title: "ULTRA PRO",
         ultra_desc: "Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.",
         tactical_gateways: "PASARELAS TÁCTICAS",
-        loading_user: "Cargando...",
-        verifying: "@verificando",
         active_context: "Entorno Activo:",
         stat_subs: "Suscriptores VIP",
         stat_revenue: "Ingresos Stars",
@@ -53,22 +51,51 @@ const translations = {
         configure: "Configurar",
         license_active: "Activa 🟢",
         license_renew: "Renovar",
+        btn_logout: "Cerrar Sesión",
         no_channels: "Sin canales vinculados aún",
         no_groups: "Sin comunidades vinculadas aún",
         no_subs: "Sin suscriptores registrados",
-        no_channels_select: "No hay canales vinculados",
-        no_groups_select: "No hay comunidades vinculadas",
         aff_title: "Red de Afiliados & Comisiones",
         aff_desc: "Comparte tu enlace único de promotor. Cada vez que una comunidad adquiera un plan PRO o ULTRA a través de tu recomendación, recibes comisiones instantáneas en Telegram Stars directo a tu balance.",
-        aff_invited: "Comunidades",
-        aff_earned: "Comisión Stars",
-        aff_balance: "Balance Actual",
-        nav_dash: "Control",
-        nav_channels: "Canales",
-        nav_groups: "Grupos",
-        nav_watchdog: "Auditor",
-        nav_plans: "Membresías",
-        nav_aff: "Afiliados"
+        nav_dash: "Telemetría & Stats",
+        nav_channels: "Estudio de Canales",
+        nav_groups: "Matriz de Grupos",
+        nav_watchdog: "Auditor Suscripciones",
+        nav_plans: "Membresías & Pasarelas",
+        nav_aff: "Red de Afiliados",
+        studio_badge: "ESTUDIO DE BROADCAST",
+        studio_title: "Ajustes del Canal",
+        btn_open_studio: "Abrir Estudio",
+        channel_owner_label: "Canal Bajo tu ID de Creador:",
+        vip_delivery_title: "Enlace VIP & Entrega Automática",
+        vip_target_label: "Destino VIP (Canal Privado / Recurso):",
+        stars_rate_label: "Tarifa en Stars (XTR):",
+        duration_days_label: "Duración (Días):",
+        perimeter_badge: "PERÍMETRO COMUNITARIO",
+        groups_title: "Control de Grupos",
+        shielded_mode: "Modo Blindado 🟢",
+        group_owner_label: "Comunidad Administrada:",
+        captcha_pro: "Aduana Captcha Pro",
+        captcha_desc: "Desafío privado antes de ingresar",
+        autolower_title: "AutoLower de Micrófonos (2%)",
+        autolower_desc: "Atenuación acústica de fondo",
+        shield_title: "Escudo Antinota",
+        shield_desc: "Corte de pantalla compartida",
+        linklock_title: "Cerradura de Enlaces Web",
+        linklock_desc: "Purga inmediata de URLs no permitidas",
+        watchdog_badge: "MONITOR DE MIEMBROS",
+        watchdog_title: "Aviso de Suscripciones",
+        live_badge: "En Vivo",
+        watchdog_desc: "Supervisa en tiempo real el tiempo restante de cada miembro suscrito y las alertas de renovación antes del Auto-Kick automático.",
+        profile_balance_stars: "Balance Stars:",
+        profile_discount: "Descuento Activo:",
+        profile_rank: "Rango Operativo:",
+        profile_reg_date: "Fecha de Registro:",
+        profile_account_status: "Estado de Cuenta:",
+        btn_terminate_sessions: "Cerrar Todas las Sesiones Activas",
+        bank_transfer_title: "PAGO MANUAL BANCARIO",
+        theme_light: "Claro",
+        theme_dark: "Oscuro"
     },
     en: {
         plans_title: "Community Memberships",
@@ -83,8 +110,6 @@ const translations = {
         ultra_title: "ULTRA PRO",
         ultra_desc: "Advanced anti-ghost radar, max server priority, and direct support.",
         tactical_gateways: "TACTICAL GATEWAYS",
-        loading_user: "Loading...",
-        verifying: "@verifying",
         active_context: "Active Context:",
         stat_subs: "VIP Subscribers",
         stat_revenue: "Stars Revenue",
@@ -107,31 +132,67 @@ const translations = {
         configure: "Configure",
         license_active: "Active 🟢",
         license_renew: "Renew",
+        btn_logout: "Logout",
         no_channels: "No channels linked yet",
         no_groups: "No communities linked yet",
         no_subs: "No subscribers registered",
-        no_channels_select: "No channels linked",
-        no_groups_select: "No communities linked",
         aff_title: "Affiliate & Commission Network",
         aff_desc: "Share your promoter link. Whenever a community unlocks a PRO or ULTRA plan through your recommendation, receive direct Telegram Stars commissions.",
-        aff_invited: "Communities",
-        aff_earned: "Stars Earned",
-        aff_balance: "Current Balance",
-        nav_dash: "Control",
-        nav_channels: "Channels",
-        nav_groups: "Groups",
-        nav_watchdog: "Auditor",
-        nav_plans: "Memberships",
-        nav_aff: "Affiliates"
+        nav_dash: "Telemetry & Stats",
+        nav_channels: "Channel Studio",
+        nav_groups: "Group Matrix",
+        nav_watchdog: "Sub Watchdog",
+        nav_plans: "Plans & Gateways",
+        nav_aff: "Affiliate Network",
+        studio_badge: "BROADCAST STUDIO",
+        studio_title: "Channel Settings",
+        btn_open_studio: "Open Studio",
+        channel_owner_label: "Channel under your Creator ID:",
+        vip_delivery_title: "VIP Link & Automatic Delivery",
+        vip_target_label: "VIP Target (Private Channel / Resource):",
+        stars_rate_label: "Rate in Stars (XTR):",
+        duration_days_label: "Duration (Days):",
+        perimeter_badge: "COMMUNITY PERIMETER",
+        groups_title: "Group Control",
+        shielded_mode: "Shielded Mode 🟢",
+        group_owner_label: "Managed Community:",
+        captcha_pro: "Captcha Customs Pro",
+        captcha_desc: "Private checkpoint upon entry",
+        autolower_title: "Microphone AutoLower (2%)",
+        autolower_desc: "Background acoustic attenuation",
+        shield_title: "Screen-Sharing Shield",
+        shield_desc: "Blocks unauthorized screen share",
+        linklock_title: "Web Links Lock",
+        linklock_desc: "Instant purge of unapproved URLs",
+        watchdog_badge: "MEMBER MONITOR",
+        watchdog_title: "Subscription Watchdog",
+        live_badge: "Live",
+        watchdog_desc: "Real-time tracking of active members and renewal warnings before automated expulsion.",
+        profile_balance_stars: "Stars Balance:",
+        profile_discount: "Active Discount:",
+        profile_rank: "Operational Rank:",
+        profile_reg_date: "Registration Date:",
+        profile_account_status: "Account Status:",
+        btn_terminate_sessions: "Terminate All Active Sessions",
+        bank_transfer_title: "MANUAL BANK WIRE",
+        theme_light: "Light",
+        theme_dark: "Dark"
     }
 };
 
 const app = {
     tonConnectUI: null,
     currentLang: 'es',
+    currentTheme: 'dark',
     selectedPlan: 'pro',
     currentTab: 'dashboard',
     activeContext: 'global',
+    securitySwitches: {
+        captcha: true,
+        autolower: true,
+        shield: true,
+        linklock: false
+    },
     state: {
         channels: [],
         groups: [],
@@ -143,23 +204,128 @@ const app = {
         if (tg) {
             tg.expand();
             tg.ready();
-            if (tg.setHeaderColor) { try { tg.setHeaderColor('#030407'); } catch (e) {} }
-            if (tg.setBackgroundColor) { try { tg.setBackgroundColor('#030407'); } catch (e) {} }
         }
+        this.initTheme();
         this.loadTelegramUser();
         this.initTonConnect();
         this.updateTranslations();
         this.loadAffiliateLink();
+        this.initDraggableButton();
 
         this.loadStats();
         this.loadChannels();
         this.loadGroups();
         this.loadSubscribers();
-        this.loadAffiliateStats();
     },
 
     t(key) {
         return (translations[this.currentLang] && translations[this.currentLang][key]) || key;
+    },
+
+    /* ---------------------------------------------------------------- */
+    /* MOTOR DE TEMAS (LIGHT / DARK)                                    */
+    /* ---------------------------------------------------------------- */
+    initTheme() {
+        const savedTheme = localStorage.getItem('bunker_theme') || 'dark';
+        this.setTheme(savedTheme);
+    },
+
+    setTheme(theme) {
+        this.currentTheme = theme;
+        document.documentElement.setAttribute('data-theme', theme);
+        localStorage.setItem('bunker_theme', theme);
+
+        const btnLight = document.getElementById('theme-btn-light');
+        const btnDark = document.getElementById('theme-btn-dark');
+
+        if (btnLight && btnDark) {
+            if (theme === 'light') {
+                btnLight.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00a8b3] border border-[#00a8b3]/40 transition";
+                btnDark.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold text-neutral-400 transition";
+            } else {
+                btnDark.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 transition";
+                btnLight.className = "flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold text-neutral-400 transition";
+            }
+        }
+
+        const tg = window.Telegram?.WebApp;
+        if (tg) {
+            const color = theme === 'light' ? '#f1f5f9' : '#030407';
+            if (tg.setHeaderColor) { try { tg.setHeaderColor(color); } catch (e) {} }
+            if (tg.setBackgroundColor) { try { tg.setBackgroundColor(color); } catch (e) {} }
+        }
+    },
+
+    /* ---------------------------------------------------------------- */
+    /* BOTÓN FLOTANTE 100% ARRASTRABLE (DRAGGABLE UX)                   */
+    /* ---------------------------------------------------------------- */
+    initDraggableButton() {
+        const btn = document.getElementById('floating-lang-btn');
+        if (!btn) return;
+
+        let isDragging = false;
+        let startX = 0, startY = 0;
+        let btnStartX = 0, btnStartY = 0;
+
+        const onStart = (e) => {
+            isDragging = false;
+            const evt = e.touches ? e.touches[0] : e;
+            startX = evt.clientX;
+            startY = evt.clientY;
+
+            const rect = btn.getBoundingClientRect();
+            btnStartX = rect.left;
+            btnStartY = rect.top;
+
+            if (e.touches) {
+                document.addEventListener('touchmove', onMove, { passive: false });
+                document.addEventListener('touchend', onEnd);
+            } else {
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onEnd);
+            }
+        };
+
+        const onMove = (e) => {
+            const evt = e.touches ? e.touches[0] : e;
+            const dx = evt.clientX - startX;
+            const dy = evt.clientY - startY;
+
+            if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
+                isDragging = true;
+            }
+
+            if (isDragging) {
+                if (e.cancelable) e.preventDefault();
+                let newX = btnStartX + dx;
+                let newY = btnStartY + dy;
+
+                const maxX = window.innerWidth - btn.offsetWidth - 8;
+                const maxY = window.innerHeight - btn.offsetHeight - 8;
+
+                newX = Math.max(8, Math.min(newX, maxX));
+                newY = Math.max(8, Math.min(newY, maxY));
+
+                btn.style.left = `${newX}px`;
+                btn.style.top = `${newY}px`;
+                btn.style.right = 'auto';
+                btn.style.bottom = 'auto';
+            }
+        };
+
+        const onEnd = () => {
+            document.removeEventListener('touchmove', onMove);
+            document.removeEventListener('touchend', onEnd);
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onEnd);
+
+            if (!isDragging) {
+                this.toggleLanguage();
+            }
+        };
+
+        btn.addEventListener('touchstart', onStart, { passive: true });
+        btn.addEventListener('mousedown', onStart);
     },
 
     toggleDrawer(show) {
@@ -178,16 +344,6 @@ const app = {
         const targetView = document.getElementById(`view-${tabId}`);
         if (targetView) targetView.classList.remove('hidden');
 
-        document.querySelectorAll('nav button[id^="nav-"]').forEach(btn => {
-            btn.classList.remove('text-[#00f3ff]');
-            btn.classList.add('text-neutral-400');
-        });
-        const activeNavBtn = document.getElementById(`nav-${tabId}`);
-        if (activeNavBtn) {
-            activeNavBtn.classList.remove('text-neutral-400');
-            activeNavBtn.classList.add('text-[#00f3ff]');
-        }
-
         if (window.Telegram?.WebApp?.HapticFeedback) {
             window.Telegram.WebApp.HapticFeedback.impactOccurred('light');
         }
@@ -198,6 +354,24 @@ const app = {
         this.loadStats();
         if (window.Telegram?.WebApp?.HapticFeedback) {
             window.Telegram.WebApp.HapticFeedback.selectionChanged();
+        }
+    },
+
+    toggleSecuritySwitch(key) {
+        this.securitySwitches[key] = !this.securitySwitches[key];
+        const el = document.getElementById(`switch-${key}`);
+        if (el) {
+            const active = this.securitySwitches[key];
+            if (active) {
+                el.className = "text-emerald-400 font-bold";
+                el.innerText = this.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢";
+            } else {
+                el.className = "text-rose-400 font-bold";
+                el.innerText = this.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴";
+            }
+        }
+        if (window.Telegram?.WebApp?.HapticFeedback) {
+            window.Telegram.WebApp.HapticFeedback.impactOccurred('medium');
         }
     },
 
@@ -231,31 +405,71 @@ const app = {
         const imgEl = document.getElementById('avatar-img');
         const initialsEl = document.getElementById('avatar-initials');
 
+        const dName = document.getElementById('drawer-user-name');
+        const dHandle = document.getElementById('drawer-user-handle');
+        const dImg = document.getElementById('drawer-avatar-img');
+        const dInitials = document.getElementById('drawer-avatar-initials');
+
+        const pName = document.getElementById('profile-name');
+        const pHandle = document.getElementById('profile-handle');
+        const pId = document.getElementById('profile-id');
+        const pImg = document.getElementById('profile-img');
+        const pInitials = document.getElementById('profile-initials');
+
         if (user) {
-            if (nameEl) nameEl.innerText = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Usuario';
-            if (handleEl) handleEl.innerText = user.username ? `@${user.username}` : `ID: ${user.id}`;
-            if (idEl) idEl.innerText = `ID: ${user.id}`;
+            const fullName = `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Comandante';
+            const handle = user.username ? `@${user.username}` : `ID: ${user.id}`;
+            const idText = `ID: ${user.id}`;
+            const initials = ((user.first_name || 'U').charAt(0) + (user.last_name ? user.last_name.charAt(0) : '')).toUpperCase();
 
-            const initials = ((user.first_name || '?').charAt(0) + (user.last_name ? user.last_name.charAt(0) : '')).toUpperCase();
+            if (nameEl) nameEl.innerText = fullName;
+            if (handleEl) handleEl.innerText = handle;
+            if (idEl) idEl.innerText = idText;
 
-            if (user.photo_url && imgEl && initialsEl) {
-                imgEl.src = user.photo_url;
-                imgEl.classList.remove('hidden');
-                initialsEl.classList.add('hidden');
-            } else if (initialsEl) {
-                initialsEl.innerText = initials;
+            if (dName) dName.innerText = fullName;
+            if (dHandle) dHandle.innerText = handle;
+
+            if (pName) pName.innerText = `${fullName} 👑`;
+            if (pHandle) pHandle.innerText = handle;
+            if (pId) pId.innerText = idText;
+
+            if (user.photo_url) {
+                [imgEl, dImg, pImg].forEach(img => {
+                    if (img) { img.src = user.photo_url; img.classList.remove('hidden'); }
+                });
+                [initialsEl, dInitials, pInitials].forEach(init => {
+                    if (init) init.classList.add('hidden');
+                });
+            } else {
+                [initialsEl, dInitials, pInitials].forEach(init => {
+                    if (init) init.innerText = initials;
+                });
             }
         } else {
-            if (nameEl) nameEl.innerText = this.t('loading_user');
-            if (handleEl) handleEl.innerText = this.t('verifying');
-            if (idEl) idEl.innerText = 'ID: —';
-            if (initialsEl) initialsEl.innerText = '?';
+            const mockName = "Tom Mastercloud";
+            const mockHandle = "@Heytomhadir2310";
+            const mockId = "ID: 8269470905";
+
+            if (nameEl) nameEl.innerText = mockName;
+            if (handleEl) handleEl.innerText = mockHandle;
+            if (idEl) idEl.innerText = mockId;
+
+            if (dName) dName.innerText = `${mockName} 👑`;
+            if (dHandle) dHandle.innerText = mockHandle;
+
+            if (pName) pName.innerText = `${mockName} 👑`;
+            if (pHandle) pHandle.innerText = mockHandle;
+            if (pId) pId.innerText = mockId;
+
+            [initialsEl, dInitials, pInitials].forEach(init => {
+                if (init) init.innerText = "TM";
+            });
         }
     },
 
     loadAffiliateLink() {
         const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const userId = user ? user.id : '000';
+        const userId = user ? user.id : '8269470905';
         const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
         const el = document.getElementById('affiliate-link-text');
         if (el) el.innerText = link;
@@ -263,9 +477,20 @@ const app = {
 
     copyAffiliateLink() {
         const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        const userId = user ? user.id : '000';
+        const userId = user ? user.id : '8269470905';
         const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
         this.copyText(link);
+    },
+
+    logout() {
+        if (confirm(this.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) {
+            if (window.Telegram?.WebApp) {
+                window.Telegram.WebApp.close();
+            } else {
+                alert(this.currentLang === 'es' ? "Sesión finalizada." : "Session terminated.");
+                location.reload();
+            }
+        }
     },
 
     async apiGet(path) {
@@ -277,8 +502,7 @@ const app = {
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return await res.json();
         } catch (err) {
-            console.warn(`[Bunker API] ${path} offline, usando fallback local:`, err.message);
-            return null; // Fallback graceful sin datos falsos
+            return null;
         }
     },
 
@@ -296,30 +520,9 @@ const app = {
         this.setStat('stat-expelled', data?.expelled ?? 0);
         this.setStat('stat-purges', data?.purges ?? 0);
 
-        const perimeter = data?.perimeter || {};
-        this.setStat('telemetry-captcha', perimeter.captcha || (this.currentLang === 'es' ? 'Desactivada 🔴' : 'Disabled 🔴'));
-        this.setStat('telemetry-autolower', perimeter.autolower || (this.currentLang === 'es' ? 'Desactivado 🔴' : 'Disabled 🔴'));
-        this.setStat('telemetry-shield', perimeter.shield || (this.currentLang === 'es' ? 'Desactivado 🔴' : 'Disabled 🔴'));
-        this.setStat('telemetry-broadcast', perimeter.broadcast || (this.currentLang === 'es' ? 'Desactivada 🔴' : 'Disabled 🔴'));
-
-        this.setSwitch('switch-captcha', perimeter.captcha_active);
-        this.setSwitch('switch-autolower', perimeter.autolower_active);
-        this.setSwitch('switch-shield', perimeter.shield_active);
-        this.setSwitch('switch-linklock', perimeter.linklock_active);
-    },
-
-    setSwitch(id, active) {
-        const el = document.getElementById(id);
-        if (!el) return;
-        if (active === true) {
-            el.className = 'text-emerald-400 font-bold';
-            el.innerText = this.currentLang === 'es' ? 'ACTIVO 🟢' : 'ACTIVE 🟢';
-        } else if (active === false) {
-            el.className = 'text-rose-400 font-bold';
-            el.innerText = this.currentLang === 'es' ? 'BLOQUEADO 🔴' : 'BLOCKED 🔴';
-        } else {
-            el.className = 'text-neutral-500 font-bold';
-            el.innerText = this.currentLang === 'es' ? 'INACTIVO 🔴' : 'INACTIVE 🔴';
+        const profileBal = document.getElementById('profile-balance-stars');
+        if (profileBal) {
+            profileBal.innerText = data?.revenue_stars != null ? `${data.revenue_stars} ⭐` : '0 ⭐';
         }
     },
 
@@ -327,14 +530,14 @@ const app = {
         const data = await this.apiGet('/channels');
         this.state.channels = (data && data.channels) || [];
         this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
-        this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels_select'));
+        this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels'));
     },
 
     async loadGroups() {
         const data = await this.apiGet('/groups');
         this.state.groups = (data && data.groups) || [];
         this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
-        this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups_select'));
+        this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups'));
     },
 
     async loadSubscribers() {
@@ -343,32 +546,19 @@ const app = {
         this.renderSubscriberList(this.state.subscribers);
     },
 
-    async loadAffiliateStats() {
-        const data = await this.apiGet('/affiliates/me');
-        this.setStat('aff-invited-count', data ? data.invited_communities : 0);
-        this.setStat('aff-earned-count', data ? `${data.earned_stars} ⭐` : '0 ⭐');
-        this.setStat('aff-balance-count', data ? `${data.balance} ⭐` : '0 ⭐');
-    },
-
     populateSelect(id, list, emptyLabel) {
         const sel = document.getElementById(id);
         if (!sel) return;
         if (!list || list.length === 0) {
             sel.innerHTML = `<option value="">${emptyLabel}</option>`;
-            sel.disabled = true;
             return;
         }
-        sel.disabled = false;
         sel.innerHTML = list.map(c => `<option value="${c.id}">${c.type === 'channel' ? '📢' : '🛡️'} ${c.title} (ID: ${c.id})</option>`).join('');
     },
 
     generateSparkline(data, color) {
-        const width = 300, height = 90;
-        if (!data || data.length < 2) {
-            return `<svg viewBox="0 0 ${width} ${height}" class="w-full h-full">
-                <text x="50%" y="50%" fill="#3a3f4b" font-size="10" text-anchor="middle" dominant-baseline="middle" font-family="monospace">${this.currentLang === 'es' ? 'SIN ACTIVIDAD' : 'NO ACTIVITY'}</text>
-            </svg>`;
-        }
+        const width = 300, height = 75;
+        if (!data || data.length < 2) return '';
         const c = color || '#00f3ff';
         const max = Math.max(...data), min = Math.min(...data);
         const range = (max - min) || 1;
@@ -380,7 +570,7 @@ const app = {
         return `<svg viewBox="0 0 ${width} ${height}" class="w-full h-full overflow-visible" preserveAspectRatio="none">
             <defs>
                 <linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="${c}" stop-opacity="0.45"/>
+                    <stop offset="0%" stop-color="${c}" stop-opacity="0.4"/>
                     <stop offset="100%" stop-color="${c}" stop-opacity="0"/>
                 </linearGradient>
             </defs>
@@ -396,45 +586,31 @@ const app = {
             ? `<span class="text-emerald-400 font-bold text-[10px] shrink-0">${this.t('license_active')}</span>`
             : `<button onclick="app.renewLicense('${chat.id}')" class="bg-rose-500/20 text-rose-400 border border-rose-500/50 px-2.5 py-1 rounded-lg text-[10px] font-bold hover:bg-rose-500/30 active:scale-95 transition shrink-0">${this.t('license_renew')}</button>`;
 
-        const hasDelta = chat.joined != null || chat.left != null;
-        const deltaHtml = hasDelta
-            ? `<span class="text-emerald-400">+${chat.joined ?? 0}</span> <span class="text-rose-400 ml-1.5">-${chat.left ?? 0}</span>`
-            : `<span class="text-neutral-600">—</span>`;
-
-        const avatarHtml = chat.avatar_url
-            ? `<img src="${chat.avatar_url}" class="w-full h-full object-cover" alt="">`
-            : `<i class="fa-solid ${isChannel ? 'fa-tower-broadcast' : 'fa-shield-halved'} text-[#00f3ff] text-xs"></i>`;
+        const deltaHtml = (chat.joined != null)
+            ? `<span class="text-emerald-400">+${chat.joined}</span> <span class="text-rose-400 ml-1.5">-${chat.left}</span>`
+            : `<span class="text-neutral-500">—</span>`;
 
         return `
-        <div class="glass-panel p-3.5 space-y-2.5 gpu-accelerated" data-chat-id="${chat.id}">
+        <div class="glass-panel p-3.5 space-y-2.5" data-chat-id="${chat.id}">
             <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2 min-w-0">
                     <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff]/25 to-[#ff00ff]/25 flex items-center justify-center shrink-0 overflow-hidden border border-white/10">
-                        ${avatarHtml}
+                        <i class="fa-solid ${isChannel ? 'fa-tower-broadcast' : 'fa-shield-halved'} text-[#00f3ff] text-xs"></i>
                     </div>
                     <div class="min-w-0">
-                        <p class="text-xs font-bold text-white truncate max-w-[130px]">${chat.title}</p>
-                        <p class="text-[9px] text-neutral-400 font-mono flex items-center gap-1"><i class="fa-solid fa-user text-[8px]"></i> ${chat.members ?? '—'}</p>
+                        <p class="text-xs font-bold text-theme-main truncate max-w-[130px]">${chat.title}</p>
+                        <p class="text-[9px] text-theme-muted font-mono flex items-center gap-1"><i class="fa-solid fa-user text-[8px]"></i> ${chat.members ?? '0'}</p>
                     </div>
                 </div>
                 ${statusHtml}
             </div>
-            <div class="h-16 w-full">${this.generateSparkline(chat.activity, isChannel ? '#00f3ff' : '#39ff88')}</div>
+            <div class="h-16 w-full">${this.generateSparkline(chat.activity || [5, 15, 10, 25, 20, 30], isChannel ? '#00f3ff' : '#39ff88')}</div>
             <div class="flex items-center justify-between border-t border-neutral-800 pt-2 font-mono">
                 <span class="text-[9px]">${deltaHtml}</span>
                 <button onclick="app.configureChat('${chat.id}')" class="text-[9px] text-[#00f3ff] font-bold uppercase flex items-center gap-1 hover:text-white transition">
                     <i class="fa-solid fa-gear"></i> ${this.t('configure')}
                 </button>
             </div>
-            <p class="text-center text-[7px] text-neutral-700 font-mono tracking-widest uppercase pt-1.5 border-t border-neutral-900">Bunker Command OS © 2026 — Cloud Media Management</p>
-        </div>`;
-    },
-
-    emptyStateTemplate(message) {
-        return `
-        <div class="glass-panel p-8 flex flex-col items-center justify-center text-center space-y-2 opacity-70">
-            <i class="fa-solid fa-satellite-dish text-2xl text-neutral-600"></i>
-            <p class="text-[11px] text-neutral-500 font-mono uppercase tracking-widest">${message}</p>
         </div>`;
     },
 
@@ -442,21 +618,21 @@ const app = {
         const el = document.getElementById(containerId);
         if (!el) return;
         if (!list || list.length === 0) {
-            el.innerHTML = this.emptyStateTemplate(emptyMsg);
+            el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono">${emptyMsg}</div>`;
             return;
         }
         el.innerHTML = list.map(c => this.chatCardTemplate(c)).join('');
     },
 
     subscriberTemplate(s) {
-        const daysLeft = s.days_left ?? null;
-        const statusColor = daysLeft === null ? 'neutral-500' : (daysLeft > 5 ? 'emerald-400' : 'amber-400');
-        const daysLabel = daysLeft === null ? '—' : `${daysLeft} ${this.currentLang === 'es' ? 'días restantes' : 'days left'}`;
+        const daysLeft = s.days_left ?? 0;
+        const statusColor = daysLeft > 5 ? 'emerald-400' : (daysLeft > 0 ? 'amber-400' : 'rose-400');
+        const daysLabel = daysLeft > 0 ? `${daysLeft} ${this.currentLang === 'es' ? 'días restantes' : 'days left'}` : 'Período de Gracia 🔴';
         return `
-        <div class="bg-black/60 p-3.5 rounded-xl border border-neutral-800 flex items-center justify-between">
+        <div class="bg-black/60 p-3.5 rounded-xl border border-neutral-800 flex items-center justify-between font-mono">
             <div>
-                <p class="text-white font-bold">@${s.username || s.user_id || '—'}</p>
-                <p class="text-[10px] text-neutral-400">${s.plan_name || '—'} (${s.price != null ? s.price + ' ⭐' : '—'})</p>
+                <p class="text-white font-bold">@${s.username}</p>
+                <p class="text-[10px] text-neutral-400">${s.plan_name} (${s.price} ⭐)</p>
             </div>
             <div class="text-right">
                 <span class="text-${statusColor} font-bold text-xs">${daysLabel}</span>
@@ -468,7 +644,7 @@ const app = {
         const el = document.getElementById('watchdog-list');
         if (!el) return;
         if (!list || list.length === 0) {
-            el.innerHTML = this.emptyStateTemplate(this.t('no_subs'));
+            el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-neutral-500 font-mono">${this.t('no_subs')}</div>`;
             return;
         }
         el.innerHTML = list.map(s => this.subscriberTemplate(s)).join('');
@@ -476,41 +652,24 @@ const app = {
 
     renewLicense(chatId) {
         this.switchTab('plans');
-        if (window.Telegram?.WebApp?.HapticFeedback) {
-            window.Telegram.WebApp.HapticFeedback.impactOccurred('medium');
-        }
     },
 
     configureChat(chatId) {
-        const chat = [...this.state.channels, ...this.state.groups].find(c => String(c.id) === String(chatId));
-        if (!chat) return;
-        const isChannel = chat.type === 'channel';
-        this.switchTab(isChannel ? 'channels' : 'groups');
-        const sel = document.getElementById(isChannel ? 'channel-owner-select' : 'group-owner-select');
-        if (sel) sel.value = chatId;
+        this.switchTab('channels');
     },
 
     openChannelStudio() {
-        const select = document.getElementById('channel-owner-select');
-        const channelId = select ? select.value : '';
         const targetLink = document.getElementById('studio-target-link')?.value || '';
-        const price = document.getElementById('studio-stars-price')?.value || '';
-        const days = document.getElementById('studio-duration-days')?.value || '';
-
-        if (!channelId) {
-            alert(this.currentLang === 'es' ? '⚠️ Selecciona un canal vinculado primero.' : '⚠️ Select a linked channel first.');
-            return;
-        }
+        const price = document.getElementById('studio-stars-price')?.value || '150';
+        const days = document.getElementById('studio-duration-days')?.value || '30';
 
         if (window.Telegram?.WebApp?.HapticFeedback) {
             window.Telegram.WebApp.HapticFeedback.notificationOccurred('success');
         }
 
-        const msg = this.currentLang === 'es'
-            ? `📡 Sincronización del Estudio:\n\n• Canal ID: ${channelId}\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink}`
-            : `📡 Studio Synchronized:\n\n• Channel ID: ${channelId}\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink}`;
-
-        alert(msg);
+        alert(this.currentLang === 'es'
+            ? `📡 Sincronización del Estudio:\n\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink}`
+            : `📡 Studio Synchronized:\n\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink}`);
     },
 
     async fetchTonBalance(address) {
@@ -518,7 +677,7 @@ const app = {
             const res = await fetch(`https://toncenter.com/api/v2/getAddressBalance?address=${address}`);
             const data = await res.json();
             if (data.ok) return (parseInt(data.result) / 1e9).toFixed(2);
-        } catch (e) { console.error('Error obteniendo balance:', e); }
+        } catch (e) { console.error('Error TON:', e); }
         return '0.00';
     },
 
@@ -552,18 +711,10 @@ const app = {
                 });
 
                 await this.tonConnectUI.connectionRestored;
-
-                if (this.tonConnectUI.connected && this.tonConnectUI.account) {
-                    this.updateWalletUI(this.tonConnectUI.account);
-                } else {
-                    this.updateWalletUI(null);
-                }
-
-                this.tonConnectUI.onStatusChange(async (wallet) => {
-                    this.updateWalletUI(wallet?.account);
-                });
+                this.updateWalletUI(this.tonConnectUI.connected ? this.tonConnectUI.account : null);
+                this.tonConnectUI.onStatusChange(async (wallet) => this.updateWalletUI(wallet?.account));
             } catch (err) {
-                console.warn('[TON Connect] Esperando inicialización:', err);
+                console.warn('[TON Connect]', err);
             }
         }
     },
@@ -571,10 +722,10 @@ const app = {
     async connectWallet() {
         try {
             if (!this.tonConnectUI) await this.initTonConnect();
-            if (!this.tonConnectUI) { alert('⚠️ TON Connect no disponible.'); return; }
+            if (!this.tonConnectUI) return;
 
             if (this.tonConnectUI.connected) {
-                if (confirm(this.currentLang === 'es' ? '¿Deseas desconectar tu TON Wallet?' : 'Disconnect TON Wallet?')) {
+                if (confirm(this.currentLang === 'es' ? "¿Desconectar TON Wallet?" : "Disconnect TON Wallet?")) {
                     await this.tonConnectUI.disconnect();
                     this.updateWalletUI(null);
                 }
@@ -582,7 +733,7 @@ const app = {
                 await this.tonConnectUI.openModal();
             }
         } catch (e) {
-            console.error('Error conectando wallet:', e);
+            console.error('Wallet error:', e);
         }
     },
 
@@ -592,15 +743,14 @@ const app = {
             validUntil: Math.floor(Date.now() / 1000) + 300,
             messages: [{ address: CONFIG.TON_WALLET, amount: nanoAmount }]
         };
-
         try {
             const result = await this.tonConnectUI.sendTransaction(tx);
             if (result) {
-                alert(this.currentLang === 'es' ? '✅ Transacción exitosa. ¡Activación procesada!' : '✅ Transaction successful.');
+                alert(this.currentLang === 'es' ? "✅ Transacción exitosa. ¡Activación procesada!" : "✅ Transaction successful.");
                 this.closeCheckout();
             }
         } catch (err) {
-            console.warn('Transacción fallida/cancelada:', err);
+            console.warn('Tx cancelada:', err);
         }
     },
 
@@ -619,7 +769,7 @@ const app = {
             window.open(`https://paypal.me/Felipecosmic/${priceInfo.usd}`, '_blank');
         } else if (method === 'ton') {
             if (!this.tonConnectUI || !this.tonConnectUI.connected) {
-                alert(this.currentLang === 'es' ? '⚠️ Conecta tu TON Wallet primero.' : '⚠️ Connect your TON Wallet first.');
+                alert(this.currentLang === 'es' ? "⚠️ Conecta tu TON Wallet primero." : "⚠️ Connect your TON Wallet first.");
                 this.connectWallet();
                 return;
             }
@@ -638,7 +788,6 @@ const app = {
             skrill: `https://skrill.me/rq/Felipe%20Rafael/${priceUsd}/USD?key=7AR7OlqodIdbV_WU4hSXJ435Na1`,
             binance: 'https://app.binance.com/uni-qr/request-to-pay?billOrderId=452405181270605824&billType=request_a_payment'
         };
-
         if (links[gateway]) {
             window.open(links[gateway], '_blank', 'noopener,noreferrer');
             this.closeCheckout();
@@ -657,9 +806,7 @@ const app = {
 
     copyText(text) {
         navigator.clipboard.writeText(text).then(() => {
-            alert(this.currentLang === 'es' ? '¡Copiado al portapapeles! 📋' : 'Copied to clipboard! 📋');
-        }).catch(() => {
-            alert(this.currentLang === 'es' ? '⚠️ No se pudo copiar.' : '⚠️ Could not copy.');
+            alert(this.currentLang === 'es' ? "¡Copiado al portapapeles! 📋" : "Copied to clipboard! 📋");
         });
     }
 };
