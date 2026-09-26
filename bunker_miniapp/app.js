@@ -1031,6 +1031,7 @@ const app = {
 
     async loadChannels() {
         const data = await this.apiGet('/channels');
+        console.log("📢 [Canales Recibidos de la API]:", data); // Para ver qué responde Railway en la consola del navegador
         this.state.channels = (data && data.channels) || [];
         this.renderChatList('channels-list', this.state.channels, this.t('no_channels'));
         this.populateSelect('channel-owner-select', this.state.channels, this.t('no_channels'));
@@ -1038,6 +1039,7 @@ const app = {
 
     async loadGroups() {
         const data = await this.apiGet('/groups');
+        console.log("🛡️ [Grupos Recibidos de la API]:", data); // Para ver qué responde Railway en la consola del navegador
         this.state.groups = (data && data.groups) || [];
         this.renderChatList('groups-list', this.state.groups, this.t('no_groups'));
         this.populateSelect('group-owner-select', this.state.groups, this.t('no_groups'));

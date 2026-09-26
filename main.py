@@ -335,9 +335,64 @@ async def api_channels(x_telegram_init_data: str = Header(None), authorization: 
         logging.error(f"❌ [API Channels Error]: {e}")
         return {"channels": []}
 
+# --- 2. CANALES VINCULADOS (TELEMETRÍA REAL EN VIVO) ---
+@app.get("/api/channels")
+async def api_channels(x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), authorization: str = Header(None)):
+    user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
+    try:
+        channels = []
+        if master_bot_instance:
+            try:
+                channels = await get_active_user_channels(master_bot_instance, user_id)
+            except Exception:
+                channels = await get_user_channels(user_id)
+        else:
+            channels = await get_user_channels(user_id)
+
+        # 🛡️ Blindaje anti-vacío: si no hay canales para el ID exacto, buscar todos los canales globales del sistema
+        if not channels:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type = 'channel'")
+                channels = cursor.fetchall()
+
+        res = []
+        for ch_id, ch_name in channels:
+            tier = await get_group_tier(ch_id)
+            member_count = 0
+            resolved_title = ch_name
+            if master_bot_instance:
+                try:
+                    chat_obj = await master_bot_instance.get_chat(ch_id)
+                    resolved_title = chat_obj.title or ch_name
+                    member_count = await master_bot_instance.get_chat_member_count(ch_id)
+                except Exception:
+                    pass
+
+            timeseries = await get_chat_timeseries_stats(ch_id)
+            activity_curve = timeseries.get("messages", [])[-7:]
+            if len(activity_curve) < 7:
+                activity_curve = [0] * (7 - len(activity_curve)) + activity_curve
+
+            res.append({
+                "id": str(ch_id),
+                "title": resolved_title,
+                "type": "channel",
+                "license_status": "active" if tier != "free" else "expired",
+                "members": member_count,
+                "activity": activity_curve,
+                "joined": 0,
+                "left": 0,
+                "avatar_url": None
+            })
+        return {"channels": res}
+    except Exception as e:
+        logging.error(f"❌ [API Channels Error]: {e}")
+        return {"channels": []}
+
 # --- 3. COMUNIDADES BLINDADAS (TELEMETRÍA REAL EN VIVO) ---
 @app.get("/api/groups")
-async def api_groups(x_telegram_init_data: str = Header(None), authorization: str = Header(None)):
+async def api_groups(x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), authorization: str = Header(None)):
     user_id = resolve_user_id(x_telegram_init_data, authorization) or CREATOR_FALLBACK_ID
     try:
         groups_list = []
@@ -349,18 +404,12 @@ async def api_groups(x_telegram_init_data: str = Header(None), authorization: st
         else:
             groups_list = await get_user_groups(user_id)
         
-        if not groups_list and user_id == CREATOR_FALLBACK_ID and master_bot_instance:
-            try:
-                chat_info = await master_bot_instance.get_chat(ADMIN_GROUP_ID)
-                await register_user_group(
-                    user_id=user_id,
-                    group_id=ADMIN_GROUP_ID,
-                    group_name=chat_info.title or "The Bunker Admin Matrix",
-                    chat_type="supergroup"
-                )
-                groups_list = await get_active_user_groups(master_bot_instance, user_id)
-            except Exception as auto_reg_err:
-                logging.warning(f"⚠️ [Auto-Reg Admin Group]: {auto_reg_err}")
+        # 🛡️ Blindaje anti-vacío para grupos: si está vacío, recuperar todos los grupos supergroup/group de la BD
+        if not groups_list:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type != 'channel' OR chat_type IS NULL")
+                groups_list = cursor.fetchall()
 
         res = []
         for g_id, g_name in groups_list:
