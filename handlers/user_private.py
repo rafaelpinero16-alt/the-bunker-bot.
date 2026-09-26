@@ -49,11 +49,12 @@ from database.database import (
     get_sentinel_payload_config, set_sentinel_payload_config,
     # 💎 Módulos de Canales & Membresías
     get_channel_plans, get_active_subscribers_count,
-    create_channel_plan, delete_channel_plan,  # <--- Añadir aquí
+    create_channel_plan, delete_channel_plan,
+    create_web_session,  # <--- Sesiones web temporales (ChatKeeper Style)
     set_channel_plan_broadcast_config,
     get_night_mode_config,
     set_night_mode_config,
-    get_ai_sentinel_config, 
+    get_ai_sentinel_config,
     set_ai_sentinel_config,
 )
 from assistant import (
@@ -2465,6 +2466,35 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         logging.error(f"❌ [cmd_start ERROR CRÍTICO]: {e}", exc_info=True)
 
 
+@router.message(Command("login"), F.chat.type == "private")
+async def cmd_login(message: Message, bot: Bot):
+    """
+    Genera un enlace temporal de acceso directo al dashboard web autenticado
+    con un token criptográfico de un solo uso (validez de 5 minutos).
+    """
+    user_id = message.from_user.id
+    lang = user_lang(message.from_user)
+    
+    # Generar token temporal de 5 minutos en la base de datos
+    token = await create_web_session(user_id)
+    login_url = f"{WEBAPP_URL.rstrip('/')}/?token={token}"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Abrir Dashboard Web / Open Dashboard", url=login_url)]
+    ])
+    
+    text = (
+        "🔐 <b>Acceso Web Autorizado / Web Access Authorized</b>\n\n"
+        "Pulsa el botón inferior para abrir tu consola de administración en el navegador. "
+        "Este enlace es único y expirará en <b>5 minutos</b> por seguridad.\n\n"
+        "🇺🇸 <i>Tap the button below to open your web console. This unique link expires in <b>5 minutes</b>.</i>\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    )
+    
+    resp = await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    fire_and_forget_auto_delete([message, resp], delay=120)
+
+
 @router.message(Command("cancel"), F.chat.type == "private")
 async def cmd_cancel(message: Message, bot: Bot):
     """Salida de emergencia universal: libera cualquier flujo pendiente y devuelve al menú principal."""
@@ -2480,7 +2510,6 @@ async def cmd_cancel(message: Message, bot: Bot):
         [InlineKeyboardButton(text=t["btn_main_menu"], callback_data=f"menu_main_{lang}")]
     ])
     await message.answer(f"✅ {t['op_canceled']}{PERIMETER_SIGNATURE}", reply_markup=kb, parse_mode="HTML")
-
 
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery):

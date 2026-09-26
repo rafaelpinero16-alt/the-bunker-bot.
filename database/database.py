@@ -42,34 +42,22 @@ def init_db():
         cursor = conn.cursor()
         
         cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                topic_id INTEGER,
-                warnings INTEGER DEFAULT 0,
-                is_banned INTEGER DEFAULT 0
-            )
-        """)
-        
-        cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (word TEXT UNIQUE)")
-        cursor.execute("CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS approved_groups (
-                group_id INTEGER PRIMARY KEY,
-                tier TEXT DEFAULT 'free',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP
-            )
-        """)
-        
-        cursor.execute("""
             CREATE TABLE IF NOT EXISTS group_settings (
                 group_id INTEGER PRIMARY KEY,
                 autolower INTEGER DEFAULT 1
             )
         """)
+        
+        # 🌐 Tabla de Sesiones Web Temporales (ChatKeeper Style)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS web_sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_web_sessions_user ON web_sessions (user_id)")
         
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
