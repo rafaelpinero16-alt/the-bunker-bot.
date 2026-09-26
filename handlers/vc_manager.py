@@ -3,7 +3,7 @@ import asyncio
 import logging
 import time
 from aiogram import Router, F, Bot
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
@@ -24,6 +24,8 @@ router = Router()
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
 
 def is_super_admin(user_id: int) -> bool:
@@ -96,6 +98,7 @@ TEXTS = {
         "btn_reset": "🔄 Sync Voice Room",
         "btn_back_vc": "🔙 Back to Telemetry",
         "btn_close_vc": "🗑️ Close Panel",
+        "btn_miniapp": "🌐 Mini App Command Center",
         "getid_text": (
             "✅ <b>Connectivity Telemetry:</b>\n"
             "• Chat Type: <code>{type}</code>\n"
@@ -159,6 +162,7 @@ TEXTS = {
         "btn_reset": "🔄 Sincronizar Sala",
         "btn_back_vc": "🔙 Volver a Telemetría",
         "btn_close_vc": "🗑️ Cerrar Panel",
+        "btn_miniapp": "🌐 Mini App Command Center",
         "getid_text": (
             "✅ <b>Telemetría de Conectividad:</b>\n"
             "• Tipo de Chat: <code>{type}</code>\n"
@@ -208,7 +212,7 @@ def get_user_mention_html(user) -> str:
 
 
 async def extract_vc_target(message: Message, command: CommandObject, bot: Bot):
-    """Función unificada para extraer el objetivo de voz por respuesta, mención o ID[cite: 17]."""
+    """Función unificada para extraer el objetivo de voz por respuesta, mención o ID."""
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
         return target_user.id, get_user_mention_html(target_user)
@@ -230,7 +234,7 @@ async def extract_vc_target(message: Message, command: CommandObject, bot: Bot):
 # 📡 FUENTE ÚNICA DE VERDAD: TELEMETRÍA EN CALIENTE
 # ==========================================
 async def get_telemetry_context(chat_id: int, lang: str) -> dict:
-    """Punto único de acceso a la telemetría en tiempo real de la sala[cite: 17]."""
+    """Punto único de acceso a la telemetría en tiempo real de la sala."""
     try:
         telem = await get_community_live_telemetry(chat_id)
     except Exception:
@@ -310,7 +314,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
 
 
 async def send_private_response(message: Message, text: str, reply_markup=None):
-    """Fuerza que las respuestas a comandos de administración lleguen al chat privado[cite: 17]."""
+    """Fuerza que las respuestas a comandos de administración lleguen al chat privado."""
     user_id = message.from_user.id
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
@@ -384,12 +388,18 @@ async def cmd_cams(message: Message, bot: Bot):
         return
     chat_id = message.chat.id
     lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
 
     ctx = await get_telemetry_context(chat_id, lang)
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+    ])
+
     await send_private_response(
         message,
-        TEXTS[lang]["cams_report"].format(**ctx)
+        t["cams_report"].format(**ctx),
+        reply_markup=keyboard
     )
 
 
@@ -425,7 +435,7 @@ async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("vcwhitelist", "vcwl"))
 async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
-    """Permite autorizar identidades para no ser atenuadas por el Centinela[cite: 17]."""
+    """Permite autorizar identidades para no ser atenuadas por el Centinela."""
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
@@ -435,6 +445,10 @@ async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
 
     if target_id:
         await add_to_whitelist(target_id)
+        try:
+            await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=10000)
+        except Exception:
+            pass
         await send_private_response(message, t["wl_added"].format(target=target_mention))
     else:
         await send_private_response(message, t["wl_needed"])
@@ -442,7 +456,7 @@ async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
 
 @router.message(Command("vcunwhitelist", "vcunwl"))
 async def cmd_vc_unwhitelist(message: Message, command: CommandObject, bot: Bot):
-    """Retira una identidad de la whitelist de voz[cite: 17]."""
+    """Retira una identidad de la whitelist de voz."""
     if not await verify_creator_and_approved(message, bot):
         return
     lang = get_lang(message.from_user.language_code)
@@ -452,6 +466,10 @@ async def cmd_vc_unwhitelist(message: Message, command: CommandObject, bot: Bot)
 
     if target_id:
         await remove_from_whitelist(target_id)
+        try:
+            await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=200)
+        except Exception:
+            pass
         await send_private_response(message, t["wl_removed"].format(target=target_mention))
     else:
         await send_private_response(message, t["wl_needed"])
@@ -478,6 +496,9 @@ async def cmd_status_vc(message: Message, bot: Bot):
         [
             InlineKeyboardButton(text=t["btn_cams"], callback_data=f"vc_cams_{chat_id}"),
             InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
+        ],
+        [
+            InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
         ],
         [
             InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
@@ -540,6 +561,9 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
                     InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
                 ],
                 [
+                    InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
+                ],
+                [
                     InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
                 ]
             ])
@@ -558,7 +582,8 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
 
             report = t["cams_report"].format(**ctx)
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]
+                [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")],
+                [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
             ])
             await callback.message.edit_text(report, reply_markup=back_kb, parse_mode="HTML")
 

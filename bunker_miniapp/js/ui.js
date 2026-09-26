@@ -201,13 +201,27 @@ export const ui = {
         const elements = document.querySelectorAll(`#${id}`);
         if (!elements.length) return;
 
+        const isGroup = id.includes('group');
+        const placeholderText = isGroup 
+            ? (state.currentLang === 'es' ? '— Selecciona una comunidad —' : '— Select a community —')
+            : (state.currentLang === 'es' ? '— Selecciona un canal —' : '— Select a channel —');
+
         elements.forEach(sel => {
             if (!list || list.length === 0) {
-                sel.innerHTML = `<option value="">${emptyLabel}</option>`;
+                sel.innerHTML = `<option value="">⚠️ ${emptyLabel}</option>`;
                 return;
             }
-            sel.innerHTML = list.map(c => `<option value="${this.escapeHtml(c.id)}">${c.type === 'channel' ? '📢' : '🛡️'} ${this.escapeHtml(c.title)} (ID: ${this.escapeHtml(c.id)})</option>`).join('');
-            if (state.selectedChatId) sel.value = state.selectedChatId;
+
+            const optionsHtml = list.map(c => {
+                const icon = c.type === 'channel' ? '📢' : '🛡️';
+                return `<option value="${this.escapeHtml(c.id)}">${icon} ${this.escapeHtml(c.title)}</option>`;
+            }).join('');
+
+            sel.innerHTML = `<option value="">${placeholderText}</option>${optionsHtml}`;
+
+            if (state.selectedChatId && list.some(item => String(item.id) === String(state.selectedChatId))) {
+                sel.value = String(state.selectedChatId);
+            }
         });
     },
 

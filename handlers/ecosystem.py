@@ -12,6 +12,7 @@ from database.database import (
     is_group_approved,
     get_due_channel_plan_broadcasts,
     mark_channel_plan_broadcasted,
+    disable_channel_plan_broadcast,
     get_expiring_channel_subscriptions,
     get_expired_channel_subscriptions,
     mark_subscription_warned,
@@ -287,7 +288,7 @@ async def cb_close_panel(callback: CallbackQuery):
 
 
 # ==========================================================
-# 👁️ WATCHDOG VIP EN SEGUNDO PLANO (FASE 3: AUTO-KICK & RENOVACIÓN)
+# 👁️ WATCHDOG VIP EN SEGUNDO PLANO (AUTO-KICK & RENOVACIÓN)
 # ==========================================================
 async def start_subscription_watchdog_worker(bot: Bot):
     """
@@ -295,7 +296,7 @@ async def start_subscription_watchdog_worker(bot: Bot):
     1. Alerta de renovación a miembros con 48h de anticipación.
     2. Aplica Auto-Kick y revocación tras vencer los días de gracia configurados.
     """
-    logging.info("👁️ [Subscription Watchdog]: Auditor de membresías VIP y auto-kick iniciado.")
+    logger.info("👁️ [Subscription Watchdog]: Auditor de membresías VIP y auto-kick iniciado.")
     while True:
         try:
             # 1. Alertas de renovación (próximos a vencer)
@@ -316,9 +317,11 @@ async def start_subscription_watchdog_worker(bot: Bot):
                         ])
                         await bot.send_message(chat_id=u_id, text=warn_text, reply_markup=kb, parse_mode="HTML")
                         await mark_subscription_warned(ch_id, u_id)
-                        logging.info(f"📢 [Watchdog] Alerta enviada a usuario {u_id} (Canal {ch_id}).")
+                        logger.info(f"📢 [Watchdog] Alerta enviada a usuario {u_id} (Canal {ch_id}).")
+                    except TelegramForbiddenError:
+                        await mark_subscription_warned(ch_id, u_id)
                     except Exception as warn_err:
-                        logging.warning(f"⚠️ [Watchdog] Fallo al alertar usuario {u_id}: {warn_err}")
+                        logger.warning(f"⚠️ [Watchdog] Fallo al alertar usuario {u_id}: {warn_err}")
                         await mark_subscription_warned(ch_id, u_id)
 
             # 2. Expulsión automática (Auto-Kick) al agotarse la gracia
@@ -327,11 +330,10 @@ async def start_subscription_watchdog_worker(bot: Bot):
                 for ch_id, u_id, exp_at, grace_days, auto_kick in expired:
                     if auto_kick:
                         try:
-                            # Expulsar y desbanear de inmediato para permitir reincorporación tras pago
                             await bot.ban_chat_member(chat_id=ch_id, user_id=u_id)
                             await bot.unban_chat_member(chat_id=ch_id, user_id=u_id)
                             await update_subscription_status(ch_id, u_id, "kicked")
-                            logging.info(f"🚫 [Watchdog Auto-Kick]: Usuario {u_id} removido del canal {ch_id} por membresía expirada.")
+                            logger.info(f"🚫 [Watchdog Auto-Kick]: Usuario {u_id} removido del canal {ch_id} por membresía expirada.")
                             
                             try:
                                 kick_msg = (
@@ -343,12 +345,12 @@ async def start_subscription_watchdog_worker(bot: Bot):
                             except Exception:
                                 pass
                         except Exception as kick_err:
-                            logging.error(f"❌ [Watchdog Auto-Kick Error] Fallo al remover usuario {u_id} en canal {ch_id}: {kick_err}")
+                            logger.error(f"❌ [Watchdog Auto-Kick Error] Fallo al remover usuario {u_id} en canal {ch_id}: {kick_err}")
                     else:
                         await update_subscription_status(ch_id, u_id, "expired")
 
         except Exception as ex:
-            logging.error(f"❌ [Subscription Watchdog Error]: {ex}")
+            logger.error(f"❌ [Subscription Watchdog Error]: {ex}")
         
         await asyncio.sleep(60)
 
@@ -360,11 +362,10 @@ async def start_channel_broadcast_worker(bot: Bot):
     """
     Worker perimetral en segundo plano: evalúa continuamente los planes de membresía 
     con difusión recurrente activa y publica los anuncios de pago con Telegram Stars.
-    También inicializa concurrentemente el Watchdog de suscripciones VIP.
+    Maneja destinos numéricos o @alias y desactiva difusiones si el bot es revocado.
     """
-    # Despliegue concurrente del Watchdog VIP de membresías
     asyncio.create_task(start_subscription_watchdog_worker(bot))
-    logging.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
+    logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
     
     while True:
         try:
@@ -375,7 +376,7 @@ async def start_channel_broadcast_worker(bot: Bot):
 
                 for plan in due_plans:
                     plan_id = plan["plan_id"]
-                    chat_id = plan["broadcast_chat_id"]
+                    raw_chat_id = plan["broadcast_chat_id"]
                     plan_name = plan["plan_name"]
                     duration_days = plan["duration_days"]
                     stars_price = plan["stars_price"]
@@ -384,6 +385,14 @@ async def start_channel_broadcast_worker(bot: Bot):
                     media_type = plan["media_type"]
                     target_link = plan["target_link"]
                     channel_id = plan["channel_id"]
+
+                    # Convertir a entero si es un ID numérico almacenado como string
+                    target_chat = raw_chat_id
+                    if isinstance(raw_chat_id, str) and (raw_chat_id.startswith("-") or raw_chat_id.isdigit()):
+                        try:
+                            target_chat = int(raw_chat_id)
+                        except ValueError:
+                            pass
 
                     pay_link = f"https://t.me/{bot_username}?start=chanplan_{plan_id}_{channel_id}"
 
@@ -397,20 +406,23 @@ async def start_channel_broadcast_worker(bot: Bot):
 
                     try:
                         if media_id and media_type == "photo":
-                            await bot.send_photo(chat_id=chat_id, photo=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
+                            await bot.send_photo(chat_id=target_chat, photo=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
                         elif media_id and media_type == "video":
-                            await bot.send_video(chat_id=chat_id, video=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
+                            await bot.send_video(chat_id=target_chat, video=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
                         elif media_id and media_type == "animation":
-                            await bot.send_animation(chat_id=chat_id, animation=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
+                            await bot.send_animation(chat_id=target_chat, animation=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
                         else:
-                            await bot.send_message(chat_id=chat_id, text=caption, reply_markup=markup, parse_mode="HTML")
+                            await bot.send_message(chat_id=target_chat, text=caption, reply_markup=markup, parse_mode="HTML")
                         
                         await mark_channel_plan_broadcasted(plan_id)
-                        logging.info(f"✅ [Broadcast Worker] Plan {plan_id} difundido exitosamente en chat {chat_id}.")
+                        logger.info(f"✅ [Broadcast Worker] Plan {plan_id} difundido exitosamente en chat {target_chat}.")
+                    except (TelegramForbiddenError, TelegramBadRequest) as perm_err:
+                        logger.warning(f"⚠️ [Broadcast Worker] Permiso denegado en chat {target_chat}. Difusión pausada para plan {plan_id}: {perm_err}")
+                        await disable_channel_plan_broadcast(plan_id)
                     except Exception as send_err:
-                        logging.error(f"❌ [Broadcast Worker] Error publicando plan {plan_id} en chat {chat_id}: {send_err}")
+                        logger.error(f"❌ [Broadcast Worker] Error publicando plan {plan_id} en chat {target_chat}: {send_err}")
 
         except Exception as ex:
-            logging.error(f"❌ [Broadcast Worker Error]: {ex}")
+            logger.error(f"❌ [Broadcast Worker Error]: {ex}")
         
         await asyncio.sleep(60)

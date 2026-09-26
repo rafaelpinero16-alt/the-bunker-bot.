@@ -21,7 +21,8 @@ from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRet
 from aiogram.filters import Command
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
-    CallbackQuery, ChatMemberUpdated, ChatJoinRequest, LabeledPrice, PreCheckoutQuery
+    CallbackQuery, ChatMemberUpdated, ChatJoinRequest, LabeledPrice, PreCheckoutQuery,
+    WebAppInfo
 )
 import database.database as _db_module
 from database.database import (
@@ -46,6 +47,7 @@ logger = logging.getLogger("groups_handler")
 router = Router()
 
 _db_reset_warnings = getattr(_db_module, "reset_warnings", None)
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -240,6 +242,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     if is_channel:
         if user:
             ch_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Abrir Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?channel_id={group_id}"))],
                 [InlineKeyboardButton(text="📡 Consola del Canal / Studio Panel", url=f"https://t.me/{bot_info.username}?start=cset_{group_id}")]
             ])
             channel_welcome_text = (
@@ -248,7 +251,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
                 f"• 🎙️ <b>Moderación de Lives:</b> Desmuteo inteligente tras 'Levantar Mano' (*Raise Hand*).\n"
                 f"• 💎 <b>Membresías VIP:</b> Enlaces efímeros de 1 solo uso y expulsión automática de morosos.\n"
                 f"• ⭐ <b>Propinas Stars:</b> Monetización directa en tus transmisiones.\n\n"
-                f"Pulsa el botón inferior para abrir la consola de gestión de este canal en privado.\n\n"
+                f"Pulsa el botón inferior para abrir la consola de gestión de este canal en privado o en la Mini App.\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             try:
@@ -257,6 +260,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
                 logger.warning(f"Aviso al enviar bienvenida privada de canal al usuario {user.id}: {ex}")
     else:
         group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🌐 Abrir Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))],
             [
                 InlineKeyboardButton(text="🚀 Iniciar Bot / Start Bot", url=f"https://t.me/{bot_info.username}?start=true"),
                 InlineKeyboardButton(text="⚙️ Configurar / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")
@@ -268,7 +272,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             f"Hola a todos. He sido activado como administrador para blindar el perímetro de <b>{group_name}</b> con aduana alfanumérica, anti-spam y protección de transmisiones.\n\n"
             f"🇺🇸 <i>Greetings! I have been activated as an administrator to protect <b>{group_name}</b> with automated captcha customs, anti-spam shields, and stream monitoring.</i>\n\n"
             f"👑 <b>Panel de Control / Management:</b>\n"
-            f"El Propietario del grupo puede pulsar los botones inferiores para configurar la matriz en privado.\n\n"
+            f"El Propietario del grupo puede pulsar los botones inferiores para configurar la matriz en privado o vía Mini App.\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
 
@@ -725,9 +729,7 @@ async def purge_general_service_messages(message: Message):
             await message.delete()
         except Exception: 
             pass
-
-
-# ==========================================
+        # ==========================================
 # 🧹 MOTOR HÍBRIDO DE GHOST PURGE (MTPROTO + BOT API)
 # ==========================================
 GHOST_DISPLAY_NAMES = {"deleted account", "cuenta eliminada"}
@@ -905,11 +907,6 @@ async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", 
 
 
 async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
-    """
-    Función Unificada de Entrada:
-    1. Si hay un Centinela MTProto conectado, ejecuta el escaneo profundo.
-    2. Si no hay Centinela o falla, conmuta al escáner completo de Bot API.
-    """
     try:
         mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action)
         if mtproto_res.get("status") == "success" and not dry_run:
@@ -985,7 +982,9 @@ async def purge_ghosts_command(message: Message, bot: Bot):
             pass
     finally:
         _GHOST_PURGE_RUNNING.discard(group_id)
-        # ==========================================
+
+
+# ==========================================
 # 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
 # ==========================================
 _FULL_PERMISSION_FIELDS = [

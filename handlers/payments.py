@@ -5,7 +5,7 @@ import time
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, LabeledPrice, PreCheckoutQuery, 
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
 )
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
@@ -27,6 +27,8 @@ router = Router()
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
@@ -75,10 +77,7 @@ async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 15):
 
 
 async def resolve_chat_context(bot: Bot, chat_id: int) -> tuple[str, str]:
-    """
-    Identifica si el chat_id corresponde a un Canal o a un Grupo/Supergrupo.
-    Retorna ('c', callback_back) o ('g', callback_back) para garantizar navegación contextual sin desvíos.
-    """
+    """Identifica si el chat_id corresponde a un Canal o a un Grupo/Supergrupo."""
     try:
         chat = await bot.get_chat(chat_id)
         if chat.type == "channel":
@@ -89,10 +88,7 @@ async def resolve_chat_context(bot: Bot, chat_id: int) -> tuple[str, str]:
 
 
 def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
-    """
-    Construye el aviso y botón que redirige el cobro de una suscripción PRO/ULTRA PRO
-    hacia el Bot Maestro cuando la orden se originó en un Bot Clon.
-    """
+    """Construye el aviso y botón que redirige el cobro de una suscripción hacia el Bot Maestro."""
     master_username = get_master_bot_username()
     if not master_username:
         return None, None
@@ -143,6 +139,7 @@ TEXTS = {
         "btn_paypal": "💳 PayPal ($3 / $6 USD)",
         "btn_binance": "🟡 Binance Pay (Instant)",
         "btn_ton": "💎 TON Wallet (Mini App)",
+        "btn_miniapp": "🌐 Open Command Center",
         "btn_back": "🔙 Back to Main Menu",
         "btn_back_group": "🔙 Back to Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
@@ -184,7 +181,7 @@ TEXTS = {
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
     },
     "es": {
-        "owner_only": "⛔ <b>Acceso Denegado:</b> Las opciones de suscripción y facturación son exclusivas para el Dueño de la comunidad o canal.\n\n🛡️ <i>Cloud Media Management</i>",
+        "owner_only": "⛔ <b>Access Denied:</b> Las opciones de suscripción y facturación son exclusivas para el Dueño de la comunidad o canal.\n\n🛡️ <i>Cloud Media Management</i>",
         "active": (
             "✨ <b>Centro de Mando: Suscripciones y Licencias</b>\n\n"
             "• <b>Entorno ID:</b> <code>{chat_id}</code>\n"
@@ -205,6 +202,7 @@ TEXTS = {
         "btn_paypal": "💳 PayPal ($3 / $6 USD)",
         "btn_binance": "🟡 Binance Pay (Instantáneo)",
         "btn_ton": "💎 TON Wallet (Mini App)",
+        "btn_miniapp": "🌐 Abrir Command Center",
         "btn_back": "🔙 Volver al Menú Principal",
         "btn_back_group": "🔙 Volver al Panel",
         "btn_pay_stars": "⭐ Pagar con Stars",
@@ -285,6 +283,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
         tier_display = "PRO ⭐" if current_tier == "pro" else "ULTRA PRO 💎"
         private_text = t["active"].format(chat_id=chat_id, tier=tier_display)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
         ])
     else:
@@ -301,6 +300,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
             [
                 InlineKeyboardButton(text=t["btn_ton"], url=TON_MINI_APP_LINK)
             ],
+            [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
         ])
 
@@ -324,7 +324,6 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     t = TEXTS[lang]
     args = command.args or ""
 
-    # 1. FLUJO SUSCRIPCIONES PRO / ULTRA PRO (GRUPOS Y CANALES)
     if args.startswith("sub_"):
         if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
             redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
@@ -392,7 +391,6 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             await message.answer(t["err_inv"], parse_mode="HTML")
         return
 
-    # 2. FLUJO MEMBRESÍAS DE CANAL (chanplan_<plan_id>_<channel_id>)
     elif args.startswith("chanplan_"):
         try:
             parts = args.split("_")
@@ -429,7 +427,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                     elif media_type == "animation":
                         await bot.send_animation(chat_id=message.chat.id, animation=media_id, caption=caption, parse_mode="HTML")
                 except Exception as promo_err:
-                    logger.warning(f"Aviso despachando multimedia promocional en chanplan: {promo_err}")
+                    logger.warning(f"Aviso despachando multimedia en chanplan: {promo_err}")
             elif caption:
                 try:
                     await message.answer(caption, parse_mode="HTML")
@@ -461,7 +459,6 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             await message.answer(t["err_inv"], parse_mode="HTML")
         return
 
-    # 3. FLUJO PASE VIP DE MICRÓFONO (vipmic_<chat_id>)
     elif args.startswith("vipmic_"):
         try:
             chat_id = int(args.split("_")[1])
@@ -496,9 +493,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             logger.error(f"Error generando factura de Micrófono VIP: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
         return
-
-
-# ==========================================
+    # ==========================================
 # ⚡ DESPACHO DE FACTURAS DESDE BOTONES INLINE (inv_)
 # ==========================================
 @router.callback_query(F.data.startswith("inv_"))
@@ -578,7 +573,7 @@ async def process_successful_payment(message: Message, bot: Bot):
     user_id = message.from_user.id
     charge_id = message.successful_payment.telegram_payment_charge_id
 
-    # 🛡️ Blindaje de Idempotencia: evita pagos duplicados ante reintentos de red o reinicios de Railway
+    # 🛡️ Blindaje de Idempotencia: evita pagos duplicados ante reintentos de red o reinicios
     if not await mark_payment_processed(charge_id, user_id, payload):
         logger.warning(f"⚠️ [Pago Duplicado Ignorado] charge_id={charge_id} usuario={user_id}. Beneficio ya concedido.")
         return
@@ -598,6 +593,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             if plan_type == "pro":
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=t["btn_add_master"], url=ASSISTANT_INVITE_URL)],
+                    [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
                     [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
                 ])
                 await message.answer(
@@ -609,6 +605,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 clone_cb = f"gset_clone_{chat_id}_{lang}"
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=clone_cb)],
+                    [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
                     [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
                 ])
                 await message.answer(
@@ -633,13 +630,11 @@ async def process_successful_payment(message: Message, bot: Bot):
             duration_days = int(parts[4])
             stars_paid = message.successful_payment.total_amount
 
-            # 1. Recuperar ajustes y plan configurado
             target_plan = await get_channel_plan(plan_id)
             target_link = target_plan.get("target_link") if target_plan else None
             ch_settings = await get_channel_settings(channel_id)
             custom_welcome = ch_settings.get("custom_welcome") if ch_settings else ""
 
-            # 2. Generar enlace criptográfico de 1 solo uso
             invite = await bot.create_chat_invite_link(
                 chat_id=channel_id,
                 member_limit=1,
@@ -647,7 +642,6 @@ async def process_successful_payment(message: Message, bot: Bot):
             )
             invite_link = invite.invite_link
 
-            # 3. Registrar suscripción en la base de datos
             await record_channel_subscription(
                 channel_id=channel_id,
                 user_id=user_id,
@@ -657,7 +651,6 @@ async def process_successful_payment(message: Message, bot: Bot):
                 invite_link=invite_link
             )
 
-            # 4. Construcción de botones y destino VIP
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
             ]
@@ -691,7 +684,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
-            logging.info(f"✅ [Membresía Activada]: Usuario {user_id} en canal {channel_id} por {duration_days} días ({stars_paid} Stars).")
+            logger.info(f"✅ [Membresía Activada]: Usuario {user_id} en canal {channel_id} por {duration_days} días ({stars_paid} Stars).")
         except Exception as e:
             logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
             try:
@@ -735,6 +728,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.warning(f"Error general al asignar título VIP de micrófono: {admin_err}")
             
             markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
             await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)

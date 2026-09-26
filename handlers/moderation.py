@@ -12,7 +12,8 @@ from database.database import (
     check_command_limit, get_group_tier, 
     add_to_whitelist, remove_from_whitelist,
     ban_user, add_to_blacklist, get_blacklist,
-    is_whitelisted
+    is_whitelisted, add_user_strike, get_user_strikes,
+    reset_user_strikes, get_warns_config
 )
 from assistant import set_participant_mic
 
@@ -94,14 +95,12 @@ TEXTS = {
         "ban_title": "🚫 <b>Community:</b> {group_name}\n<b>Target:</b> {name}\n\nSelect Ban Duration:\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_title": "🔇 <b>Community:</b> {group_name}\n<b>Target:</b> {name}\n\nSelect Mute Duration:\n\n🛡️ <i>Cloud Media Management</i>",
         "kick_title": "👢 <b>Community:</b> {group_name}\n<b>Target:</b> {name}\n\nConfirm Temporary Kick:\n\n🛡️ <i>Cloud Media Management</i>",
-        
         "btn_1m": "⏱️ 1 Min",
         "btn_10m": "⏱️ 10 Min",
         "btn_1h": "⏰ 1 Hour",
         "btn_24h": "⏰ 24 Hours",
         "btn_30d": "📅 30 Days",
         "btn_perm": "♾️ Permanent",
-        
         "btn_confirm_kick": "⚡ Execute Kick",
         "btn_add_wl": "➕ Add User to Whitelist",
         "btn_add_bl": "➕ Add Word to Blacklist",
@@ -112,6 +111,9 @@ TEXTS = {
         "mute_success": "🔇 <b>{name}</b> has been silenced for <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_perm": "🔇 <b>{name}</b> has been permanently silenced.\n\n🛡️ <i>Cloud Media Management</i>",
         "unmute_success": "🔊 <b>{name}</b>'s voice and chat privileges have been restored.\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_issued": "⚠️ <b>Warning Issued</b>\n\nTarget: <b>{name}</b>\nStrikes: <b>{current}/{limit}</b>\nReason: <i>{reason}</i>\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_max_hit": "🚨 <b>Strike Limit Reached</b>\n\n<b>{name}</b> hit <b>{limit}/{limit}</b> warnings. Executing automated action: <code>{action}</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_cleared": "🟢 Warnings reset for <b>{name}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "⚪ <b>{name}</b> registered in Whitelist. Tactical immunity active 🟢\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_removed": "⚪ <b>{name}</b> removed from Whitelist. Tactical immunity revoked 🔴\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_status": "⚪ <b>Active Whitelist:</b> Verified users exempt from security filters.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -131,14 +133,12 @@ TEXTS = {
         "ban_title": "🚫 <b>Comunidad:</b> {group_name}\n<b>Objetivo:</b> {name}\n\nSelecciona la duración del Baneo:\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_title": "🔇 <b>Comunidad:</b> {group_name}\n<b>Objetivo:</b> {name}\n\nSelecciona la duración del Silencio:\n\n🛡️ <i>Cloud Media Management</i>",
         "kick_title": "👢 <b>Comunidad:</b> {group_name}\n<b>Objetivo:</b> {name}\n\nConfirmar Expulsión Temporal:\n\n🛡️ <i>Cloud Media Management</i>",
-        
         "btn_1m": "⏱️ 1 Min",
         "btn_10m": "⏱️ 10 Min",
         "btn_1h": "⏰ 1 Hora",
         "btn_24h": "⏰ 24 Horas",
         "btn_30d": "📅 30 Días",
         "btn_perm": "♾️ Permanente",
-        
         "btn_confirm_kick": "⚡ Ejecutar Expulsión",
         "btn_add_wl": "➕ Añadir Usuario a Whitelist",
         "btn_add_bl": "➕ Añadir Término a Blacklist",
@@ -149,6 +149,9 @@ TEXTS = {
         "mute_success": "🔇 <b>{name}</b> ha sido silenciado por <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_perm": "🔇 <b>{name}</b> ha sido silenciado permanentemente.\n\n🛡️ <i>Cloud Media Management</i>",
         "unmute_success": "🔊 Privilegios de voz y chat de <b>{name}</b> restaurados con éxito.\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_issued": "⚠️ <b>Advertencia Aplicada</b>\n\nObjetivo: <b>{name}</b>\nStrikes: <b>{current}/{limit}</b>\nMotivo: <i>{reason}</i>\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_max_hit": "🚨 <b>Límite de Advertencias Superado</b>\n\n<b>{name}</b> alcanzó <b>{limit}/{limit}</b> strikes. Ejecutando acción automática: <code>{action}</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_cleared": "🟢 Historial de advertencias restablecido para <b>{name}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "⚪ <b>{name}</b> registrado en Whitelist. Inmunidad táctica concedida 🟢\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_removed": "⚪ <b>{name}</b> retirado de la Whitelist. Inmunidad táctica revocada 🔴\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_status": "⚪ <b>Whitelist Activa:</b> Usuarios exentos de filtros anti-spam y moderación.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -217,10 +220,7 @@ async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKey
 
 
 async def validate_moderation_target(message: Message, command: CommandObject, bot: Bot, cmd_name: str):
-    """
-    Función unificada para validar permisos, extraer el objetivo y aplicar filtros de protección.
-    Evita código duplicado en /ban, /kick y /mute[cite: 16].
-    """
+    """Función unificada para validar permisos, extraer el objetivo y aplicar filtros de protección."""
     if message.chat.type == "private":
         return None, None, None
 
@@ -248,7 +248,7 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
     bot_info = await bot.get_me()
     if target.id == bot_info.id:
         msg = await message.reply(t["bot_sanction"], parse_mode="HTML")
-        asyncio.sleep(8)
+        await asyncio.sleep(8)
         try:
             await msg.delete()
             await message.delete()
@@ -258,7 +258,7 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
 
     if target.id == message.from_user.id:
         msg = await message.reply(t["self_sanction"], parse_mode="HTML")
-        asyncio.sleep(8)
+        await asyncio.sleep(8)
         try:
             await msg.delete()
             await message.delete()
@@ -268,7 +268,7 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
 
     if await is_target_protected(bot, message.chat.id, target.id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        asyncio.sleep(8)
+        await asyncio.sleep(8)
         try:
             await msg.delete()
             await message.delete()
@@ -307,7 +307,8 @@ async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
         ]
     ])
     
-    text = t["ban_title"].format(group_name=message.chat.title, name=target_name)
+    chat_title = message.chat.title or f"Chat {message.chat.id}"
+    text = t["ban_title"].format(group_name=chat_title, name=target_name)
     await send_remote_menu(message, lang, text, kb)
 
 
@@ -323,7 +324,8 @@ async def cmd_kick(message: Message, command: CommandObject, bot: Bot):
         [InlineKeyboardButton(text=t["btn_confirm_kick"], callback_data=f"exec_kick_{message.chat.id}_{target.id}_0")]
     ])
     
-    text = t["kick_title"].format(group_name=message.chat.title, name=target_name)
+    chat_title = message.chat.title or f"Chat {message.chat.id}"
+    text = t["kick_title"].format(group_name=chat_title, name=target_name)
     await send_remote_menu(message, lang, text, kb)
 
 
@@ -350,8 +352,95 @@ async def cmd_mute(message: Message, command: CommandObject, bot: Bot):
         ]
     ])
     
-    text = t["mute_title"].format(group_name=message.chat.title, name=target_name)
+    chat_title = message.chat.title or f"Chat {message.chat.id}"
+    text = t["mute_title"].format(group_name=chat_title, name=target_name)
     await send_remote_menu(message, lang, text, kb)
+
+
+# ==========================================
+# ⚠️ SISTEMA TÁCTICO DE ADVERTENCIAS (WARNS)
+# ==========================================
+@router.message(Command("warn"))
+async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
+    """Aplica una advertencia (strike) al usuario con penalización automática al alcanzar el límite."""
+    lang, t, target = await validate_moderation_target(message, command, bot, "warn")
+    if not target:
+        return
+
+    reason = "Infracción de reglas"
+    if command.args:
+        args_parts = command.args.split(maxsplit=1)
+        if len(args_parts) > 1:
+            reason = args_parts[1].strip()
+
+    cfg = await get_warns_config(message.chat.id)
+    limit = cfg.get("limit", 3)
+    action = cfg.get("action", "mute")
+
+    current_strikes = await add_user_strike(message.chat.id, target.id, reason=reason)
+    target_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
+
+    if current_strikes >= limit:
+        await reset_user_strikes(message.chat.id, target.id)
+        try:
+            await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=True, volume=0)
+        except Exception:
+            pass
+
+        if action == "ban":
+            await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
+            await ban_user(target.id)
+        elif action == "kick":
+            await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id, until_date=int(time.time() + 35))
+            await bot.unban_chat_member(chat_id=message.chat.id, user_id=target.id)
+        else:
+            perms = ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_other_messages=False
+            )
+            await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target.id, permissions=perms, until_date=int(time.time() + 86400))
+
+        text = t["warn_max_hit"].format(name=target_name, limit=limit, action=action.upper())
+        await message.reply(text, parse_mode="HTML")
+    else:
+        text = t["warn_issued"].format(name=target_name, current=current_strikes, limit=limit, reason=reason)
+        await message.reply(text, parse_mode="HTML")
+
+
+@router.message(Command("unwarn", "resetwarns"))
+async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
+    """Restablece a cero las advertencias acumuladas por un usuario."""
+    if message.chat.type == "private":
+        return
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+
+    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    target = await extract_target_user(message, command)
+    if not target:
+        msg = await message.reply(t["target_needed"].format(cmd="unwarn"), parse_mode="HTML")
+        await asyncio.sleep(8)
+        try:
+            await msg.delete()
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    await reset_user_strikes(message.chat.id, target.id)
+    target_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
+    text = t["warn_cleared"].format(name=target_name)
+    await message.reply(text, parse_mode="HTML")
 
 
 # ==========================================
@@ -388,7 +477,7 @@ async def cb_mod_execution(callback: CallbackQuery):
         target_name = f"ID: {target_id}"
 
     try:
-        # Sincronización con el Centinela: silenciarlo en la sala de audio en vivo
+        # Sincronización en vivo con el Centinela acústico
         try:
             await set_participant_mic(chat_id=group_id, user_id=target_id, muted=True, volume=0)
         except Exception:
@@ -411,7 +500,18 @@ async def cb_mod_execution(callback: CallbackQuery):
             await callback.message.edit_text(t["kick_success"].format(name=target_name), parse_mode="HTML")
         
         elif action == "mute":
-            perms = ChatPermissions(can_send_messages=False)
+            perms = ChatPermissions(
+                can_send_messages=False,
+                can_send_audios=False,
+                can_send_documents=False,
+                can_send_photos=False,
+                can_send_videos=False,
+                can_send_video_notes=False,
+                can_send_voice_notes=False,
+                can_send_polls=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
+            )
             if minutes == 0:
                 await callback.bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms)
                 await callback.message.edit_text(t["mute_perm"].format(name=target_name), parse_mode="HTML")
@@ -476,10 +576,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
     )
 
     try:
-        # 1. Restaurar permisos de chat en Telegram
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target.id, permissions=permissions)
-        
-        # 2. Restaurar voz al 100% en la sala activa de videochat mediante el Centinela
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=False, volume=10000)
         except Exception:

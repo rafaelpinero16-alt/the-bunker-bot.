@@ -157,25 +157,39 @@ export const app = {
     },
 
     async toggleSecuritySwitch(key) {
-        state.securitySwitches[key] = !state.securitySwitches[key];
-        const el = document.getElementById(`switch-${key}`);
-        const active = state.securitySwitches[key];
-
-        if (el) {
-            if (active) {
-                el.className = "text-emerald-400 font-bold";
-                el.innerText = state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢";
-            } else {
-                el.className = "text-rose-400 font-bold";
-                el.innerText = state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴";
-            }
+        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
+        if (!selectedGroup) {
+            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero una comunidad administrada.' : '⚠️ Select a managed community first.');
+            return;
         }
 
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
-        if (selectedGroup) {
-            const payload = {};
-            payload[key] = active;
-            await api.updateChatSettings(selectedGroup, payload);
+        const previousVal = Boolean(state.securitySwitches[key]);
+        const newVal = !previousVal;
+        state.securitySwitches[key] = newVal;
+
+        const el = document.getElementById(`switch-${key}`);
+        if (el) {
+            el.className = newVal ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
+            el.innerText = newVal 
+                ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
+                : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
+        }
+
+        const payload = {};
+        payload[key] = newVal;
+        const res = await api.updateChatSettings(selectedGroup, payload);
+
+        if (res?.__error) {
+            // Revertir estado si el servidor falló
+            state.securitySwitches[key] = previousVal;
+            if (el) {
+                el.className = previousVal ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
+                el.innerText = previousVal 
+                    ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
+                    : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
+            }
+            alert(state.currentLang === 'es' ? '⚠️ Error al guardar en el servidor. Intenta de nuevo.' : '⚠️ Server error. Try again.');
+            return;
         }
 
         tgApp.hapticImpact('medium');
@@ -555,14 +569,20 @@ export const app = {
         const data = await api.fetchChatDashboard(chatId);
         if (data && !data.__error) {
             state.data.currentChatDashboard = data;
+            
+            // 1. Sincronizar estado visual del Canal de Registro (Log Channel)
             const logEl = document.getElementById('chat-log-channel');
             if (logEl) {
                 const isEnabled = Boolean(data.log_channel?.enabled);
                 logEl.innerText = isEnabled 
                     ? `${ui.t('status_enabled')} (${ui.escapeHtml(data.log_channel.channel_id)})` 
                     : ui.t('status_disabled');
+                logEl.className = isEnabled 
+                    ? 'text-xs font-bold text-emerald-400 mt-1 truncate' 
+                    : 'text-xs font-bold text-neutral-400 mt-1 truncate';
             }
 
+            // 2. Estado del Plan Tarifario
             const planStatusEl = document.getElementById('chat-plan-status');
             if (planStatusEl) {
                 const isActive = data.plan?.status === 'active';
@@ -572,16 +592,64 @@ export const app = {
                 planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
             }
 
+            // 3. Módulos Activos
             const modsEl = document.getElementById('chat-active-modules');
             if (modsEl && data.modules) {
                 modsEl.innerHTML = `${ui.escapeHtml(data.modules.active)} <span class="text-sm font-normal text-blue-300">/ ${ui.escapeHtml(data.modules.total)}</span>`;
             }
 
+            // 4. Sincronizar interruptores de seguridad reales de la base de datos
+            if (data.switches) {
+                state.securitySwitches = { ...state.securitySwitches, ...data.switches };
+                ['captcha', 'autolower', 'shield', 'linklock'].forEach(k => {
+                    const el = document.getElementById(`switch-${k}`);
+                    if (el) {
+                        const active = Boolean(state.securitySwitches[k]);
+                        el.className = active ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
+                        el.innerText = active 
+                            ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
+                            : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
+                    }
+                });
+            }
+
+            // 5. Modo de Spam
             const spamModeEl = document.getElementById('chat-spam-mode');
             if (spamModeEl && data.protection?.spam_mode) {
                 spamModeEl.value = data.protection.spam_mode;
             }
         }
+    },
+
+    openLogChannelModal() {
+        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
+        if (!selectedGroup) {
+            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero una comunidad administrada.' : '⚠️ Select a managed community first.');
+            return;
+        }
+        const currentLog = state.data.currentChatDashboard?.log_channel?.channel_id || '';
+        const newLog = prompt(
+            state.currentLang === 'es' 
+                ? 'Ingresa el ID o @alias del canal de registro para auditorías:' 
+                : 'Enter the ID or @alias of the log channel for audits:', 
+            currentLog
+        );
+        if (newLog !== null) {
+            api.updateChatSettings(selectedGroup, { log_channel_id: newLog.trim() }).then(() => {
+                this.loadChatDashboard(selectedGroup);
+                tgApp.hapticNotification('success');
+            });
+        }
+    },
+
+    openModulesManager() {
+        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
+        if (!selectedGroup) {
+            alert(state.currentLang === 'es' ? '⚠️ Selecciona una comunidad para gestionar sus 91 módulos.' : '⚠️ Select a community to manage its 91 modules.');
+            return;
+        }
+        this.switchTab('bot-settings');
+        tgApp.hapticImpact('medium');
     },
 
     async loadChatStats(chatId) {
@@ -641,18 +709,27 @@ export const app = {
     },
 
     async openChannelStudio() {
-        const targetLink = document.getElementById('studio-target-link')?.value || '';
-        const price = parseInt(document.getElementById('studio-stars-price')?.value || '150');
-        const days = parseInt(document.getElementById('studio-duration-days')?.value || '30');
         const channelSelect = document.getElementById('channel-owner-select');
         const selectedChannel = channelSelect?.value;
 
-        if (selectedChannel) {
-            await api.updateChatSettings(selectedChannel, {
-                target_link: targetLink,
-                stars_price: price,
-                duration_days: days
-            });
+        if (!selectedChannel) {
+            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero un canal bajo tu ID de creador.' : '⚠️ Select a channel under your Creator ID first.');
+            return;
+        }
+
+        const targetLink = document.getElementById('studio-target-link')?.value || '';
+        const price = parseInt(document.getElementById('studio-stars-price')?.value || '150');
+        const days = parseInt(document.getElementById('studio-duration-days')?.value || '30');
+
+        const res = await api.updateChatSettings(selectedChannel, {
+            target_link: targetLink,
+            stars_price: price,
+            duration_days: days
+        });
+
+        if (res?.__error) {
+            alert(state.currentLang === 'es' ? '⚠️ Error al guardar los ajustes del canal en el servidor.' : '⚠️ Error saving channel settings.');
+            return;
         }
 
         tgApp.hapticNotification('success');
@@ -677,18 +754,22 @@ export const app = {
             return;
         }
 
-        await api.updateChatSettings(selectedGroup, {
+        const res = await api.updateChatSettings(selectedGroup, {
             action: 'deploy_clone',
             bot_token: token
         });
 
-        tgApp.hapticNotification('success');
-
-        alert(state.currentLang === 'es'
-            ? '🚀 Bot Clon sincronizado y puesto en marcha en memoria exitosamente.'
-            : '🚀 Bot Clone synchronized and running in memory successfully.');
-
-        if (tokenInput) tokenInput.value = '';
+        if (res?.status === 'success') {
+            tgApp.hapticNotification('success');
+            alert(state.currentLang === 'es'
+                ? `🚀 Bot Clon (@${res.clone_username || 'Bot'}) sincronizado y activo en memoria exitosamente.`
+                : `🚀 Bot Clone (@${res.clone_username || 'Bot'}) synchronized and active in memory.`);
+            if (tokenInput) tokenInput.value = '';
+        } else {
+            alert(state.currentLang === 'es'
+                ? `❌ Error al desplegar clon: ${res?.detail || 'Token inválido o bot inaccesible.'}`
+                : `❌ Failed to deploy clone: ${res?.detail || 'Invalid token.'}`);
+        }
     },
 
     async connectSentinel() {
@@ -706,18 +787,22 @@ export const app = {
             return;
         }
 
-        await api.updateChatSettings(selectedGroup, {
+        const res = await api.updateChatSettings(selectedGroup, {
             action: 'connect_sentinel',
             session_string: sessionString
         });
 
-        tgApp.hapticNotification('success');
-
-        alert(state.currentLang === 'es'
-            ? '📡 Centinela Acústico MTProto conectado al clúster de The Bunker.'
-            : '📡 MTProto Acoustic Sentinel connected to The Bunker cluster.');
-
-        if (sessionInput) sessionInput.value = '';
+        if (res?.status === 'success') {
+            tgApp.hapticNotification('success');
+            alert(state.currentLang === 'es'
+                ? '📡 Centinela Acústico MTProto conectado al clúster de The Bunker exitosamente.'
+                : '📡 MTProto Acoustic Sentinel connected to The Bunker cluster successfully.');
+            if (sessionInput) sessionInput.value = '';
+        } else {
+            alert(state.currentLang === 'es'
+                ? `❌ Error al conectar centinela: ${res?.detail || 'Error de sesión.'}`
+                : `❌ Failed to connect sentinel: ${res?.detail || 'Session error.'}`);
+        }
     },
 
     async runGhostPurge() {
@@ -732,15 +817,20 @@ export const app = {
             return;
         }
 
-        await api.updateChatSettings(selectedGroup, {
+        const res = await api.updateChatSettings(selectedGroup, {
             action: 'run_ghost_purge'
         });
 
-        tgApp.hapticImpact('heavy');
-
-        alert(state.currentLang === 'es'
-            ? '⚡ Orden de Ghost Purge enviada al Búnker Bot. La purga se ejecutará en segundo plano.'
-            : '⚡ Ghost Purge command sent. Purge is running in background.');
+        if (res?.status === 'success') {
+            tgApp.hapticImpact('heavy');
+            alert(state.currentLang === 'es'
+                ? '⚡ Orden de Ghost Purge enviada al Búnker Bot. La purga se está ejecutando en segundo plano.'
+                : '⚡ Ghost Purge command sent. Purge is running in background.');
+        } else {
+            alert(state.currentLang === 'es'
+                ? '❌ Error al iniciar Ghost Purge con el bot.'
+                : '❌ Error triggering Ghost Purge.');
+        }
     },
 
     async initTonConnect() {

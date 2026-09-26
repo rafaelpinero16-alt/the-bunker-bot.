@@ -6,7 +6,7 @@ import logging
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, 
-    InlineKeyboardButton, CallbackQuery
+    InlineKeyboardButton, CallbackQuery, WebAppInfo
 )
 from aiogram.filters import Command, CommandObject
 import database.database as _db_module
@@ -37,6 +37,8 @@ _db_reset_warnings = getattr(_db_module, "reset_warnings", None)
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
 
 def is_super_admin(user_id: int) -> bool:
@@ -100,6 +102,7 @@ TEXTS = {
             "Configure alphanumeric customs, content locks, purge limits, and voice sentinels.\n\n"
             "© <i>Cloud Media Management</i>"
         ),
+        "btn_open_miniapp": "🌐 Mini App Command Center",
         "btn_open_pv": "⚙️ Open in DMs",
         "autolower_panel": (
             "🎛️ <b>Radar Console: AutoLower Acoustic Shield</b>\n\n"
@@ -153,6 +156,7 @@ TEXTS = {
             "Configura aduana alfanumérica, cerraduras, purgas y centinelas de voz.\n\n"
             "© <i>Cloud Media Management</i>"
         ),
+        "btn_open_miniapp": "🌐 Abrir Command Center",
         "btn_open_pv": "⚙️ Abrir en Privado",
         "autolower_panel": (
             "🎛️ <b>Panel de Control: Radar AutoLower</b>\n\n"
@@ -270,11 +274,11 @@ async def cmd_reload_group(message: Message, bot: Bot):
 
 
 # ==========================================================
-# ⚙️ COMANDO DE ENLACE A CONFIGURACIÓN (/settings)
+# ⚙️ COMANDO DE ENLACE A CONFIGURACIÓN Y MATRIX (/settings, /matrix)
 # ==========================================================
-@router.message(Command("settings"))
+@router.message(Command("settings", "matrix", "panel"))
 async def cmd_settings_group(message: Message, bot: Bot):
-    """Entrega un acceso directo por DM al panel de configuración del búnker."""
+    """Entrega acceso directo al panel DM y al Command Center de la Mini App."""
     if message.chat.type == "private": 
         return
     
@@ -296,11 +300,12 @@ async def cmd_settings_group(message: Message, bot: Bot):
     t = TEXTS[lang]
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_open_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={message.chat.id}"))],
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{message.chat.id}")]
     ])
     
     msg = await message.answer(t["settings_title"].format(title=message.chat.title), reply_markup=kb, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 15))
+    asyncio.create_task(auto_delete_pair(message, msg, 20))
 
 
 # ==========================================================
@@ -346,7 +351,7 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
     try:
         group_id = int(data_parts[2])
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Callback inválido / Invalid callback.", show_alert=True)
+        await callback.answer("⚠️ Callback inválido.", show_alert=True)
         return
     lang = data_parts[3] if len(data_parts) > 3 else get_lang(callback.from_user.language_code)
     t = TEXTS.get(lang, TEXTS["en"])
@@ -407,7 +412,7 @@ async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
     try:
         group_id = int(data_parts[2])
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Callback inválido / Invalid callback.", show_alert=True)
+        await callback.answer("⚠️ Callback inválido.", show_alert=True)
         return
     lang = data_parts[3] if len(data_parts) > 3 else get_lang(callback.from_user.language_code)
     t = TEXTS.get(lang, TEXTS["en"])
@@ -473,7 +478,7 @@ async def process_shield_callback(callback: CallbackQuery, bot: Bot):
     try:
         group_id = int(data_parts[2])
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Callback inválido / Invalid callback.", show_alert=True)
+        await callback.answer("⚠️ Callback inválido.", show_alert=True)
         return
     lang = data_parts[3] if len(data_parts) > 3 else get_lang(callback.from_user.language_code)
     t = TEXTS.get(lang, TEXTS["en"])
@@ -549,13 +554,11 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
         asyncio.create_task(auto_delete_pair(message, msg, 10))
         return
 
-    # Inmunidad para Arquitectos y Administradores del grupo
     if is_super_admin(target_id) or await is_user_admin(bot, message.chat.id, target_id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
         asyncio.create_task(auto_delete_pair(message, msg, 8))
         return
 
-    # Conectar con el motor integral de sanciones y atenuación acústica de groups.py
     try:
         from handlers.groups import enforce_warn_ladder
         clean_username = target_tag.replace("@", "") if target_tag.startswith("@") else ""
@@ -573,7 +576,6 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     except Exception as e:
         logger.debug(f"Aviso ejecutando ladder de warns: {e}")
 
-    # Fallback local con sincronización acústica en tiempo real
     reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
     if command and command.args:
         args_parts = command.args.split(maxsplit=1)
@@ -583,8 +585,8 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             reason = args_parts[1].strip()
 
     cfg = await get_warns_config(message.chat.id)
-    limit = cfg["limit"]
-    action = cfg["action"]
+    limit = cfg.get("limit", 3)
+    action = cfg.get("action", "mute")
     current_strikes = await add_user_strike(message.chat.id, target_id, reason)
 
     if current_strikes >= limit:

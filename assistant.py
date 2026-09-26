@@ -3,6 +3,7 @@ import logging
 import random
 import os
 import time
+import json
 from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client
@@ -28,15 +29,11 @@ from database.database import (
     get_autolower_status, is_whitelisted,
     get_all_active_sessions, get_session_by_group,
     get_all_active_vc_schedules, update_vc_call_status,
-    get_radar_config, revoke_owner_session,
+    get_radar_config, revoke_owner_session, save_owner_session,
     get_screen_shield_status, set_screen_shield_status,
     get_podcast_config, set_podcast_mode, set_podcast_duck_volume,
     get_night_mode_config, is_night_mode_time,
     get_lock_status, get_db_connection,
-    get_expiring_channel_subscriptions,
-    get_expired_channel_subscriptions,
-    mark_subscription_warned,
-    update_subscription_status,
     activate_universal_night_mode,
     deactivate_universal_night_mode,
     flag_userbot, is_userbot_flagged,
@@ -45,7 +42,7 @@ from database.database import (
     update_ghost_purge_scan_time
 )
 
-# 🤖 Integración del SDK oficial de Mistral AI para el Guardián de Voz y Copiloto AMA
+# 🤖 Integración de Mistral AI para el Guardián de Voz
 try:
     from importlib import import_module
     Mistral = import_module("mistralai").Mistral
@@ -81,7 +78,7 @@ DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
 DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
 if not DEFAULT_API_ID or not DEFAULT_API_HASH:
-    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en las variables de entorno.")
+    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -94,10 +91,7 @@ if MASTER_SESSION:
     )
 else:
     assistant_app = None
-    logger.warning(
-        "⚠️ [MASTER_SESSION no configurado] El Centinela Maestro global quedará inactivo. "
-        "Los Centinelas propios por comunidad siguen funcionando con normalidad."
-    )
+    logger.warning("⚠️ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
 
 _global_bot = None
 _default_my_id = None
@@ -113,7 +107,6 @@ _autolower_cooldowns = {}
 FORBIDDEN_STRIKE_LIMIT = 3
 FORBIDDEN_COOLDOWN_SECONDS = 900  
 
-# --- ESTADO EN CALIENTE POR COMUNIDAD ---
 _screen_shield_flagged = {}
 _noise_unmute_history = {}
 NOISE_SPIKE_WINDOW_SECONDS = 12
@@ -133,21 +126,14 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
     return lock
 
 
-# ==========================================
-# 🤖 MÓDULO DE INTELIGENCIA ARTIFICIAL (MISTRAL AI)
-# ==========================================
 async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> dict:
-    """
-    Analiza un fragmento de texto transcrito del videochat utilizando Mistral AI
-    para detectar toxicidad, insultos o estafas financieras en tiempo real.
-    """
     if not mistral_client:
-        return {"toxic": False, "reason": "Mistral API Key no configurada en el entorno"}
+        return {"toxic": False, "reason": "Mistral API Key no configurada"}
 
     system_prompt = custom_prompt if custom_prompt else (
         "Eres el Guardián de Voz de The Bunker OS. Analiza el siguiente texto transcrito de una "
-        "comunidad de Telegram. Determina si contiene insultos graves, toxicidad extrema o intentos de estafa financiera. "
-        "Responde estrictamente en formato JSON con dos campos: 'toxic' (true/false) y 'reason' (breve explicación en español)."
+        "comunidad de Telegram. Determina si contiene insultos graves, toxicidad extrema o intentos de estafa. "
+        "Responde estrictamente en formato JSON con dos campos: 'toxic' (true/false) y 'reason' (breve explicación)."
     )
 
     try:
@@ -160,9 +146,7 @@ async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> 
             ],
             response_format={"type": "json_object"}
         )
-        result_text = response.choices[0].message.content
-        import json
-        return json.loads(result_text)
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
         logger.error(f"❌ [Error API Mistral AI Guardián]: {e}")
         return {"toxic": False, "reason": str(e)}
@@ -348,61 +332,84 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
 
 
 # ==========================================
-# 💀 MOTOR TÁCTICO: GHOST PURGE (FASE 4)
+# 💀 MOTOR TÁCTICO: GHOST PURGE RESILIENTE
 # ==========================================
 async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
     """
-    Escanea en tiempo real la comunidad y purga cuentas eliminadas/fantasma (is_deleted).
-    Utiliza el Centinela dedicado activo o el asistente maestro.
+    Escanea en tiempo real la comunidad y purga cuentas eliminadas/fantasma.
+    Usa el Centinela dedicado activo o ejecuta el fallback mediante el Bot de Aiogram.
     """
     sentinel_data = active_sentinels.get(chat_id)
     client: Client = sentinel_data["client"] if sentinel_data else assistant_app
 
-    if not client or not client.is_connected:
-        return {"status": "error", "message": "No active sentinel available for this chat", "purged": 0}
-
     found = 0
     purged = 0
 
-    try:
-        async for member in client.get_chat_members(chat_id):
-            user = member.user
-            if user and getattr(user, "is_deleted", False):
-                found += 1
-                try:
-                    if action == "ban":
-                        await client.ban_chat_member(chat_id, user.id)
-                    else:
-                        await client.ban_chat_member(chat_id, user.id)
-                        await client.unban_chat_member(chat_id, user.id)
-                    purged += 1
-                except Exception as p_err:
-                    logger.warning(f"Aviso purgando usuario eliminado {user.id} en {chat_id}: {p_err}")
+    if client and client.is_connected:
+        try:
+            async for member in client.get_chat_members(chat_id):
+                user = member.user
+                if user and getattr(user, "is_deleted", False):
+                    found += 1
+                    try:
+                        if action == "ban":
+                            await client.ban_chat_member(chat_id, user.id)
+                        else:
+                            await client.ban_chat_member(chat_id, user.id)
+                            await client.unban_chat_member(chat_id, user.id)
+                        purged += 1
+                    except Exception as p_err:
+                        logger.warning(f"Aviso purgando usuario {user.id} en {chat_id}: {p_err}")
 
-        await update_ghost_purge_scan_time(chat_id)
-
-        if _global_bot and purged > 0:
-            try:
+            await update_ghost_purge_scan_time(chat_id)
+            if _global_bot and purged > 0:
                 alert_text = GHOST_PURGE_ALERT_TEXT.format(
                     found=found,
                     purged=purged,
                     action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
                 )
                 await _dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60)
-            except Exception:
-                pass
 
-        logger.info(f"💀 [Ghost Purge Finalizado] Grupo {chat_id}: {purged}/{found} cuentas eliminadas depuradas.")
-        return {"status": "success", "found": found, "purged": purged, "action": action}
+            return {"status": "success", "found": found, "purged": purged, "action": action}
+        except Exception as e:
+            logger.warning(f"Aviso en Ghost Purge MTProto para {chat_id}, activando fallback: {e}")
 
-    except Exception as e:
-        logger.error(f"❌ [Ghost Purge Error] Error crítico ejecutando purga en {chat_id}: {e}")
-        return {"status": "error", "message": str(e), "purged": purged}
+    # Fallback de contingencia mediante Aiogram Bot
+    if _global_bot:
+        try:
+            await update_ghost_purge_scan_time(chat_id)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,))
+                tracked = cursor.fetchall()
+
+            for (uid,) in tracked:
+                try:
+                    chat_member = await _global_bot.get_chat_member(chat_id, uid)
+                    user = chat_member.user
+                    if getattr(user, "is_deleted", False) or (user.first_name and "Deleted Account" in user.first_name):
+                        found += 1
+                        if chat_member.status not in ("creator", "administrator"):
+                            await _global_bot.ban_chat_member(chat_id, uid)
+                            if action != "ban":
+                                await _global_bot.unban_chat_member(chat_id, uid)
+                            purged += 1
+                            await asyncio.sleep(0.1)
+                except Exception:
+                    continue
+
+            return {"status": "success", "found": found, "purged": purged, "action": action, "fallback": True}
+        except Exception as fb_err:
+            logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
+
+    return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}
 
 
+# ==========================================
+# 📱 FLUJO DE AUTENTICACIÓN POR TELÉFONO / SESIÓN
+# ==========================================
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
     await cancel_phone_auth(user_id)
-    
     clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
     if not clean_phone.startswith("+"):
         clean_phone = f"+{clean_phone}"
@@ -440,7 +447,6 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
                 await client.disconnect()
             except Exception:
                 pass
-        logger.exception(f"🔥 [CRITICAL Auth Error] Falló start_phone_auth para {clean_phone}: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -464,6 +470,8 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
         group_id = auth_data["group_id"]
         
         await cancel_phone_auth(user_id)
+        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data["phone"])
+        await register_or_update_sentinel(user_id, group_id, session_str)
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except SessionPasswordNeeded:
@@ -473,7 +481,6 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
     except FloodWait as fw:
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
     except Exception as e:
-        logger.error(f"Error al verificar código para {user_id}: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -492,6 +499,8 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
         group_id = auth_data["group_id"]
 
         await cancel_phone_auth(user_id)
+        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data.get("phone"))
+        await register_or_update_sentinel(user_id, group_id, session_str)
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except PasswordHashInvalid:
@@ -499,7 +508,6 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
     except FloodWait as fw:
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
     except Exception as e:
-        logger.error(f"Error al validar contraseña 2FA para {user_id}: {e}")
         return {"status": "error", "message": str(e)}
 
 
@@ -512,8 +520,6 @@ async def cancel_phone_auth(user_id: int):
                 await client.disconnect()
             except Exception:
                 pass
-
-
 def _register_forbidden_strike(chat_id: int, action: str):
     strikes = _forbidden_strikes.get(chat_id, 0) + 1
     if strikes >= FORBIDDEN_STRIKE_LIMIT:
@@ -777,7 +783,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     u_id = peer_user.user_id
                     active_users.add(u_id)
 
-                    # 🕵️‍♂️ Userbot Hunter: Verificar si el usuario ya está fichado como userbot malicioso
+                    # 🕵️‍♂️ Userbot Hunter: Control estricto de bots maliciosos
                     if await is_userbot_flagged(u_id, chat_id):
                         try:
                             await client.invoke(
@@ -993,11 +999,7 @@ async def vc_scheduler_loop():
         await asyncio.sleep(50)
 
 
-# ==========================================
-# 🌙 BUCLE AUTÓNOMO DE MODO NOCTURNO UNIVERSAL
-# ==========================================
 async def _get_all_night_groups() -> list[int]:
-    """Recupera de la base de datos todas las comunidades con modo nocturno activado."""
     def _sync():
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -1263,6 +1265,9 @@ async def close_all_sentinels():
             pass
 
 
+# ==========================================================
+# 🎛️ CONTROLADORES DE LLAMADA EXPORTADOS PARA HANDLERS
+# ==========================================================
 async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: int = 10000) -> bool:
     sentinel_data = active_sentinels.get(chat_id)
     client = sentinel_data["client"] if sentinel_data else assistant_app
