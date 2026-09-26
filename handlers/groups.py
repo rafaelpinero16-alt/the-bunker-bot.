@@ -910,7 +910,6 @@ async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ba
     1. Si hay un Centinela MTProto conectado, ejecuta el escaneo profundo.
     2. Si no hay Centinela o falla, conmuta al escáner completo de Bot API.
     """
-    # Nivel 1: Intento por MTProto Sentinel
     try:
         mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action)
         if mtproto_res.get("status") == "success" and not dry_run:
@@ -923,7 +922,6 @@ async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ba
     except Exception as ex:
         logger.warning(f"Aviso MTProto Purge en {group_id}, pasando a Bot API: {ex}")
 
-    # Nivel 2: Motor de respaldo Bot API
     bot_api_res = await run_bot_api_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
     bot_api_res["engine"] = "Bot API Registry (Padrón Local) 🤖"
     return bot_api_res
@@ -987,9 +985,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
             pass
     finally:
         _GHOST_PURGE_RUNNING.discard(group_id)
-
-
-# ==========================================
+        # ==========================================
 # 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
 # ==========================================
 _FULL_PERMISSION_FIELDS = [
@@ -1121,6 +1117,35 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
     except Exception:
         pass
     await callback.answer("Perímetro restaurado ✅")
+
+
+async def execute_raid_lockdown(bot: Bot, group_id: int) -> bool:
+    if await get_panic_status(group_id) == 1:
+        return False
+
+    try:
+        chat = await bot.get_chat(group_id)
+    except Exception as e:
+        logger.warning(f"Aviso: no se pudo resolver el chat {group_id} en execute_raid_lockdown: {e}")
+        return False
+
+    return await _engage_panic(bot, chat, activated_by=0)
+
+
+async def lift_raid_lockdown(bot: Bot, group_id: int) -> bool:
+    result = await deactivate_panic(group_id)
+    if not result:
+        return False
+
+    perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
+    if perms_json:
+        try:
+            perms_dict = json.loads(perms_json)
+            await bot.set_chat_permissions(chat_id=group_id, permissions=ChatPermissions(**perms_dict))
+        except Exception as e:
+            logger.warning(f"Aviso restaurando permisos de {group_id} en lift_raid_lockdown: {e}")
+
+    return True
 
 
 # ==========================================
