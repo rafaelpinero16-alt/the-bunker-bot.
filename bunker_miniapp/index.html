@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<!-- THE BUNKER — COMMAND OS v7.0 — Edición Profesional ChatKeeper Style Completa (Fase 1 y 2 Integradas) -->
+<!-- THE BUNKER — COMMAND OS v7.0 — Edición Modular ChatKeeper Style (Fase 1 y 2 Integradas) -->
 <html lang="es" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>The Bunker - Command OS</title>
+    <link rel="icon" type="image/jpeg" href="logo.jpg">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/@tonconnect/ui@2.0.9/dist/tonconnect-ui.min.js"></script>
@@ -51,360 +52,360 @@
     <!-- ============================================================== -->
     <div id="app-shell" class="hidden">
 
-    <!-- Menú Deslizante Lateral (Cyber-Drawer OS con Enlaces a Fases 1 y 2) -->
-    <div id="cyber-drawer" class="fixed inset-0 z-[150] bg-black/80 backdrop-blur-md hidden transition-opacity duration-300">
-        <div class="drawer-content fixed top-0 left-0 bottom-0 w-72 p-5 flex flex-col justify-between shadow-[15px_0_30px_rgba(0,243,255,0.15)] z-[160]">
-            <div class="space-y-5">
-                <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
-                    <div class="flex items-center space-x-2.5">
-                        <img src="logo.png" onerror="this.onerror=null; this.classList.add('hidden'); document.getElementById('bunker-drawer-fallback-logo').classList.remove('hidden');" class="w-8 h-8 object-contain drop-shadow-[0_0_8px_rgba(0,243,255,0.6)]" alt="Bunker Logo">
-                        <div id="bunker-drawer-fallback-logo" class="hidden w-8 h-8 rounded-lg bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-0.5 shadow-[0_0_10px_rgba(0,243,255,0.5)]">
-                            <div class="w-full h-full bg-black rounded-[6px] flex items-center justify-center font-black text-sm text-[#00f3ff]">B</div>
+        <!-- Menú Deslizante Lateral (Cyber-Drawer OS con Enlaces a Fases 1 y 2) -->
+        <div id="cyber-drawer" class="fixed inset-0 z-[150] bg-black/80 backdrop-blur-md hidden transition-opacity duration-300">
+            <div class="drawer-content fixed top-0 left-0 bottom-0 w-72 p-5 flex flex-col justify-between shadow-[15px_0_30px_rgba(0,243,255,0.15)] z-[160]">
+                <div class="space-y-5">
+                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                        <div class="flex items-center space-x-2.5">
+                            <img src="logo.jpg" onerror="if(this.src.endsWith('logo.jpg')){this.src='logo.png';}else{this.onerror=null; this.classList.add('hidden'); document.getElementById('bunker-drawer-fallback-logo').classList.remove('hidden');}" class="w-8 h-8 rounded-lg object-cover drop-shadow-[0_0_8px_rgba(0,243,255,0.6)]" alt="Bunker Logo">
+                            <div id="bunker-drawer-fallback-logo" class="hidden w-8 h-8 rounded-lg bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-0.5 shadow-[0_0_10px_rgba(0,243,255,0.5)]">
+                                <div class="w-full h-full bg-black rounded-[6px] flex items-center justify-center font-black text-sm text-[#00f3ff]">B</div>
+                            </div>
+                            <div>
+                                <span class="font-extrabold text-sm text-theme-main tracking-wider uppercase font-sans">BUNKER OS</span>
+                                <p class="text-[8px] text-theme-muted tracking-widest uppercase">Command Suite</p>
+                            </div>
                         </div>
-                        <div>
-                            <span class="font-extrabold text-sm text-theme-main tracking-wider uppercase font-sans">BUNKER OS</span>
-                            <p class="text-[8px] text-theme-muted tracking-widest uppercase">Command Suite</p>
-                        </div>
+                        <button onclick="app.toggleDrawer(false)" class="text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
                     </div>
-                    <button onclick="app.toggleDrawer(false)" class="text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
-                </div>
 
-                <!-- Enlaces del Menú Lateral -->
-                <nav class="space-y-1.5 font-medium">
-                    <button onclick="app.switchTab('dashboard'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-chart-line text-[#00f3ff] w-5"></i>
-                        <span data-i18n="nav_dash">Telemetría & Stats</span>
-                    </button>
-                    <button onclick="app.switchTab('channels'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-tower-broadcast text-[#00f3ff] w-5"></i>
-                        <span data-i18n="nav_channels">Estudio de Canales</span>
-                    </button>
-                    <button onclick="app.switchTab('groups'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-shield-halved text-[#00f3ff] w-5"></i>
-                        <span data-i18n="nav_groups">Matriz de Grupos</span>
-                    </button>
-                    <button onclick="app.switchTab('bot-settings'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-sliders text-[#00f3ff] w-5"></i>
-                        <span>Ajustes del Bot ⚙️</span>
-                    </button>
-                    <button onclick="app.switchTab('watchdog'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-user-clock text-[#ff00ff] w-5"></i>
-                        <span data-i18n="nav_watchdog">Auditor Suscripciones</span>
-                    </button>
-                    <button onclick="app.switchTab('plans'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-gem text-amber-400 w-5"></i>
-                        <span data-i18n="nav_plans">Membresías & Pasarelas</span>
-                    </button>
-                    <button onclick="app.switchTab('affiliates'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
-                        <i class="fa-solid fa-network-wired text-[#ff00ff] w-5"></i>
-                        <span data-i18n="nav_aff">Red de Afiliados</span>
-                    </button>
-                </nav>
+                    <!-- Enlaces del Menú Lateral -->
+                    <nav class="space-y-1.5 font-medium">
+                        <button onclick="app.switchTab('dashboard'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-chart-line text-[#00f3ff] w-5"></i>
+                            <span data-i18n="nav_dash">Telemetría & Stats</span>
+                        </button>
+                        <button onclick="app.switchTab('channels'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-tower-broadcast text-[#00f3ff] w-5"></i>
+                            <span data-i18n="nav_channels">Estudio de Canales</span>
+                        </button>
+                        <button onclick="app.switchTab('groups'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-shield-halved text-[#00f3ff] w-5"></i>
+                            <span data-i18n="nav_groups">Matriz de Grupos</span>
+                        </button>
+                        <button onclick="app.switchTab('bot-settings'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-sliders text-[#00f3ff] w-5"></i>
+                            <span>Ajustes del Bot ⚙️</span>
+                        </button>
+                        <button onclick="app.switchTab('watchdog'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-user-clock text-[#ff00ff] w-5"></i>
+                            <span data-i18n="nav_watchdog">Auditor Suscripciones</span>
+                        </button>
+                        <button onclick="app.switchTab('plans'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-gem text-amber-400 w-5"></i>
+                            <span data-i18n="nav_plans">Membresías & Pasarelas</span>
+                        </button>
+                        <button onclick="app.switchTab('affiliates'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-network-wired text-[#ff00ff] w-5"></i>
+                            <span data-i18n="nav_aff">Red de Afiliados</span>
+                        </button>
+                    </nav>
 
-                <!-- Menú Auxiliar de Asistencia y Registro (Estilo ChatKeeper) -->
-                <div class="border-t border-neutral-800 pt-3 space-y-1.5 text-xs text-neutral-300">
-                    <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
-                        <i class="fa-regular fa-user text-[#00f3ff] w-5"></i> <span data-i18n="menu_my_profile">My profile</span>
-                    </button>
-                    <button onclick="app.openHelpModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
-                        <i class="fa-regular fa-circle-question text-[#00f3ff] w-5"></i> <span data-i18n="menu_help">Help & Support</span>
-                    </button>
-                    <button onclick="app.openCompanyRegModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
-                        <i class="fa-regular fa-building text-[#00f3ff] w-5"></i> <span data-i18n="menu_company_reg">Company registration</span>
-                    </button>
-                </div>
-            </div>
-
-            <!-- GABINETE DE USUARIO AL PIE -->
-            <div class="border-t border-neutral-800 pt-3 space-y-2.5">
-                <div class="theme-switch-container flex items-center justify-between p-1 bg-black/60 rounded-xl border border-neutral-800 text-xs">
-                    <button onclick="app.setTheme('light')" id="theme-btn-light" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition">
-                        <i class="fa-regular fa-sun text-amber-400"></i> <span data-i18n="theme_light">Light</span>
-                    </button>
-                    <button onclick="app.setTheme('dark')" id="theme-btn-dark" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 transition">
-                        <i class="fa-regular fa-moon text-[#00f3ff]"></i> <span data-i18n="theme_dark">Dark</span>
-                    </button>
-                </div>
-
-                <div class="glass-panel p-2.5 rounded-2xl flex items-center justify-between">
-                    <div class="flex items-center space-x-2.5 min-w-0">
-                        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] flex items-center justify-center font-bold text-xs text-black shrink-0 overflow-hidden relative">
-                            <span id="drawer-avatar-initials">TM</span>
-                            <img id="drawer-avatar-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
-                        </div>
-                        <div class="min-w-0">
-                            <p id="drawer-user-name" class="text-xs font-bold text-theme-main truncate">Tom Mastercloud 👑</p>
-                            <p id="drawer-user-handle" class="text-[10px] text-[#00f3ff] truncate">@Heytomhadir2310</p>
-                        </div>
+                    <!-- Menú Auxiliar de Asistencia y Registro (Estilo ChatKeeper) -->
+                    <div class="border-t border-neutral-800 pt-3 space-y-1.5 text-xs text-neutral-300">
+                        <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
+                            <i class="fa-regular fa-user text-[#00f3ff] w-5"></i> <span data-i18n="menu_my_profile">My profile</span>
+                        </button>
+                        <button onclick="app.openHelpModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
+                            <i class="fa-regular fa-circle-question text-[#00f3ff] w-5"></i> <span data-i18n="menu_help">Help & Support</span>
+                        </button>
+                        <button onclick="app.openCompanyRegModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
+                            <i class="fa-regular fa-building text-[#00f3ff] w-5"></i> <span data-i18n="menu_company_reg">Company registration</span>
+                        </button>
                     </div>
-                    <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-8 h-8 rounded-xl bg-neutral-800 hover:bg-[#00f3ff]/20 text-[#00f3ff] flex items-center justify-center transition active:scale-95 shrink-0 border border-neutral-700">
-                        <i class="fa-solid fa-gear text-xs"></i>
+                </div>
+
+                <!-- GABINETE DE USUARIO AL PIE -->
+                <div class="border-t border-neutral-800 pt-3 space-y-2.5">
+                    <div class="theme-switch-container flex items-center justify-between p-1 bg-black/60 rounded-xl border border-neutral-800 text-xs">
+                        <button onclick="app.setTheme('light')" id="theme-btn-light" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition">
+                            <i class="fa-regular fa-sun text-amber-400"></i> <span data-i18n="theme_light">Light</span>
+                        </button>
+                        <button onclick="app.setTheme('dark')" id="theme-btn-dark" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 transition">
+                            <i class="fa-regular fa-moon text-[#00f3ff]"></i> <span data-i18n="theme_dark">Dark</span>
+                        </button>
+                    </div>
+
+                    <div class="glass-panel p-2.5 rounded-2xl flex items-center justify-between">
+                        <div class="flex items-center space-x-2.5 min-w-0">
+                            <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] flex items-center justify-center font-bold text-xs text-black shrink-0 overflow-hidden relative">
+                                <span id="drawer-avatar-initials">TM</span>
+                                <img id="drawer-avatar-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
+                            </div>
+                            <div class="min-w-0">
+                                <p id="drawer-user-name" class="text-xs font-bold text-theme-main truncate">Tom Mastercloud 👑</p>
+                                <p id="drawer-user-handle" class="text-[10px] text-[#00f3ff] truncate">@Heytomhadir2310</p>
+                            </div>
+                        </div>
+                        <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-8 h-8 rounded-xl bg-neutral-800 hover:bg-[#00f3ff]/20 text-[#00f3ff] flex items-center justify-center transition active:scale-95 shrink-0 border border-neutral-700">
+                            <i class="fa-solid fa-gear text-xs"></i>
+                        </button>
+                    </div>
+                    <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition active:scale-95">
+                        <i class="fa-solid fa-arrow-right-from-bracket"></i>
+                        <span data-i18n="btn_logout">Cerrar Sesión</span>
                     </button>
                 </div>
-                <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition active:scale-95">
-                    <i class="fa-solid fa-arrow-right-from-bracket"></i>
-                    <span data-i18n="btn_logout">Cerrar Sesión</span>
-                </button>
             </div>
         </div>
-    </div>
 
-    <!-- Header Táctico y Conectividad con Logo Oficial -->
-    <div class="space-y-4 relative z-10">
-        <header class="glass-panel p-4 shadow-2xl relative overflow-hidden flex items-center justify-between">
-            <div class="absolute -right-10 -top-10 w-32 h-32 bg-[#00f3ff]/10 rounded-full blur-2xl pointer-events-none"></div>
+        <!-- Header Táctico y Conectividad con Logo Oficial -->
+        <div class="space-y-4 relative z-10">
+            <header class="glass-panel p-4 shadow-2xl relative overflow-hidden flex items-center justify-between">
+                <div class="absolute -right-10 -top-10 w-32 h-32 bg-[#00f3ff]/10 rounded-full blur-2xl pointer-events-none"></div>
 
-            <div class="flex items-center space-x-3 relative z-10">
-                <button onclick="app.toggleDrawer(true)" class="w-9 h-9 rounded-xl bg-black/60 border border-neutral-700 text-[#00f3ff] flex items-center justify-center hover:bg-[#00f3ff]/20 active:scale-95 transition-all shadow-[0_0_10px_rgba(0,243,255,0.2)]">
-                    <i class="fa-solid fa-bars text-sm"></i>
+                <div class="flex items-center space-x-3 relative z-10">
+                    <button onclick="app.toggleDrawer(true)" class="w-9 h-9 rounded-xl bg-black/60 border border-neutral-700 text-[#00f3ff] flex items-center justify-center hover:bg-[#00f3ff]/20 active:scale-95 transition-all shadow-[0_0_10px_rgba(0,243,255,0.2)]">
+                        <i class="fa-solid fa-bars text-sm"></i>
+                    </button>
+                    <div class="relative">
+                        <img src="logo.jpg" onerror="if(this.src.endsWith('logo.jpg')){this.src='logo.png';}else{this.onerror=null; this.classList.add('hidden'); document.getElementById('bunker-header-fallback-logo').classList.remove('hidden');}" class="w-10 h-10 rounded-xl object-cover drop-shadow-[0_0_10px_rgba(0,243,255,0.7)]" alt="Bunker Logo">
+                        <div id="bunker-header-fallback-logo" class="hidden w-10 h-10 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-0.5 shadow-lg">
+                            <div class="w-full h-full bg-black rounded-[10px] flex items-center justify-center font-extrabold text-sm text-[#00f3ff]">B</div>
+                        </div>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-1.5">
+                            <h1 id="user-name" class="font-extrabold text-xs tracking-wide text-theme-main uppercase">Tom Mastercloud</h1>
+                            <i class="fa-solid fa-circle-check text-[10px] text-[#00f3ff]"></i>
+                        </div>
+                        <p id="user-handle" class="text-[11px] text-[#00f3ff]">@Heytomhadir2310</p>
+                        <p id="user-id-display" class="text-[9px] text-theme-muted font-mono">ID: 8269470905</p>
+                    </div>
+                </div>
+
+                <button id="btn-connect-wallet" onclick="app.connectWallet()" class="bg-black/60 border border-[#00f3ff] text-[#00f3ff] px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center shadow-[0_0_10px_rgba(0,243,255,0.3)] active:scale-95 hover:bg-[#00f3ff]/20 relative z-10">
+                    <span id="wallet-status-dot" class="w-2 h-2 rounded-full bg-amber-500 mr-1.5 animate-pulse"></span>
+                    <span id="wallet-btn-text">TON Wallet</span>
                 </button>
-                <div class="relative">
-                    <img src="logo.png" onerror="this.onerror=null; this.classList.add('hidden'); document.getElementById('bunker-header-fallback-logo').classList.remove('hidden');" class="w-10 h-10 object-contain drop-shadow-[0_0_10px_rgba(0,243,255,0.7)]" alt="Bunker Logo">
-                    <div id="bunker-header-fallback-logo" class="hidden w-10 h-10 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-0.5 shadow-lg">
-                        <div class="w-full h-full bg-black rounded-[10px] flex items-center justify-center font-extrabold text-sm text-[#00f3ff]">B</div>
-                    </div>
+            </header>
+
+            <!-- Selector de Contexto Rápido -->
+            <div class="glass-panel p-3 flex items-center justify-between">
+                <div class="flex items-center space-x-2">
+                    <i class="fa-solid fa-network-wired text-[#00f3ff] animate-pulse"></i>
+                    <span class="text-xs text-theme-muted uppercase font-semibold" data-i18n="active_context">Entorno Activo:</span>
                 </div>
-                <div>
-                    <div class="flex items-center gap-1.5">
-                        <h1 id="user-name" class="font-extrabold text-xs tracking-wide text-theme-main uppercase">Tom Mastercloud</h1>
-                        <i class="fa-solid fa-circle-check text-[10px] text-[#00f3ff]"></i>
-                    </div>
-                    <p id="user-handle" class="text-[11px] text-[#00f3ff]">@Heytomhadir2310</p>
-                    <p id="user-id-display" class="text-[9px] text-theme-muted font-mono">ID: 8269470905</p>
-                </div>
+                <select id="target-context-select" onchange="app.switchContext(this.value)" class="bg-black/80 border border-neutral-700 text-[#00f3ff] text-xs font-bold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-[#00f3ff]">
+                    <option value="global">🌐 Búnker OS (Global)</option>
+                    <option value="channels">📢 Canales Vinculados</option>
+                    <option value="groups">🛡️ Comunidades Blindadas</option>
+                </select>
             </div>
 
-            <button id="btn-connect-wallet" onclick="app.connectWallet()" class="bg-black/60 border border-[#00f3ff] text-[#00f3ff] px-2.5 py-1.5 rounded-xl text-[11px] font-bold transition-all flex items-center shadow-[0_0_10px_rgba(0,243,255,0.3)] active:scale-95 hover:bg-[#00f3ff]/20 relative z-10">
-                <span id="wallet-status-dot" class="w-2 h-2 rounded-full bg-amber-500 mr-1.5 animate-pulse"></span>
-                <span id="wallet-btn-text">TON Wallet</span>
-            </button>
-        </header>
+            <!-- ============================================================== -->
+            <!-- CONTENEDOR MULTI-VISTA (COMMAND OS) -->
+            <!-- ============================================================== -->
+            <main id="tab-container">
 
-        <!-- Selector de Contexto Rápido -->
-        <div class="glass-panel p-3 flex items-center justify-between">
-            <div class="flex items-center space-x-2">
-                <i class="fa-solid fa-network-wired text-[#00f3ff] animate-pulse"></i>
-                <span class="text-xs text-theme-muted uppercase font-semibold" data-i18n="active_context">Entorno Activo:</span>
-            </div>
-            <select id="target-context-select" onchange="app.switchContext(this.value)" class="bg-black/80 border border-neutral-700 text-[#00f3ff] text-xs font-bold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-[#00f3ff]">
-                <option value="global">🌐 Búnker OS (Global)</option>
-                <option value="channels">📢 Canales Vinculados</option>
-                <option value="groups">🛡️ Comunidades Blindadas</option>
-            </select>
-        </div>
-
-        <!-- ============================================================== -->
-        <!-- CONTENEDOR MULTI-VISTA (COMMAND OS) -->
-        <!-- ============================================================== -->
-        <main id="tab-container">
-
-            <!-- VISTA 1: TELEMETRÍA & STATS REALES -->
-            <section id="view-dashboard" class="space-y-4 tab-view">
-                <div class="grid grid-cols-2 gap-3">
-                    <div class="glass-panel p-4 text-center border-t-2 border-t-[#00f3ff]">
-                        <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="stat_subs">Suscriptores VIP</p>
-                        <h3 id="stat-subs-count" class="font-extrabold text-2xl text-theme-main mt-1">0</h3>
-                        <span class="text-[9px] text-neutral-500" data-i18n="live_sync">Sincronización en vivo</span>
-                    </div>
-                    <div class="glass-panel p-4 text-center border-t-2 border-t-[#ff00ff]">
-                        <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="stat_revenue">Ingresos Stars</p>
-                        <h3 id="stat-revenue-count" class="font-extrabold text-2xl text-amber-300 mt-1">0 ⭐</h3>
-                        <span class="text-[9px] text-[#00f3ff]" data-i18n="stat_source">Datos reales del bot</span>
-                    </div>
-                </div>
-
-                <!-- Métricas Avanzadas -->
-                <div class="glass-panel p-5 space-y-3">
-                    <h3 class="text-xs font-extrabold text-[#00f3ff] uppercase tracking-wider flex items-center justify-between">
-                        <span><i class="fa-solid fa-chart-pie mr-2"></i><span data-i18n="dash_telemetry">Telemetría del Búnker</span></span>
-                        <span class="text-[9px] text-emerald-400 font-semibold" data-i18n="online_tag">En Línea 🟢</span>
-                    </h3>
-                    <div class="grid grid-cols-3 gap-2 text-center pt-1 font-mono">
-                        <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
-                            <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_verified">Verificados</span>
-                            <p id="stat-verified" class="text-xs font-bold text-theme-main mt-0.5">0</p>
+                <!-- VISTA 1: TELEMETRÍA & STATS REALES -->
+                <section id="view-dashboard" class="space-y-4 tab-view">
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="glass-panel p-4 text-center border-t-2 border-t-[#00f3ff]">
+                            <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="stat_subs">Suscriptores VIP</p>
+                            <h3 id="stat-subs-count" class="font-extrabold text-2xl text-theme-main mt-1">0</h3>
+                            <span class="text-[9px] text-neutral-500" data-i18n="live_sync">Sincronización en vivo</span>
                         </div>
-                        <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
-                            <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_expelled">Expulsados</span>
-                            <p id="stat-expelled" class="text-xs font-bold text-rose-400 mt-0.5">0</p>
-                        </div>
-                        <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
-                            <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_purges">Purgas</span>
-                            <p id="stat-purges" class="text-xs font-bold text-cyan-300 mt-0.5">0</p>
+                        <div class="glass-panel p-4 text-center border-t-2 border-t-[#ff00ff]">
+                            <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="stat_revenue">Ingresos Stars</p>
+                            <h3 id="stat-revenue-count" class="font-extrabold text-2xl text-amber-300 mt-1">0 ⭐</h3>
+                            <span class="text-[9px] text-[#00f3ff]" data-i18n="stat_source">Datos reales del bot</span>
                         </div>
                     </div>
-                </div>
 
-                <!-- Perímetro Operativo -->
-                <div class="glass-panel p-5 space-y-2.5 text-xs text-theme-main">
-                    <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider pb-1 border-b border-neutral-800 flex items-center justify-between">
-                        <span><i class="fa-solid fa-shield-halved text-[#00f3ff] mr-2"></i><span data-i18n="perimeter_title">Perímetro Operativo</span></span>
-                        <span class="text-[10px] text-neutral-500 font-normal" data-i18n="perimeter_sub">Supervisión 24/7</span>
-                    </h3>
-                    <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="captcha_label">Aduana Captcha:</span> <strong id="telemetry-captcha" class="text-emerald-400">Activa 🟢</strong></p>
-                    <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="autolower_label">Radar AutoLower:</span> <strong id="telemetry-autolower" class="text-emerald-400">2% Atenuado 🟢</strong></p>
-                    <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="shield_label">Escudo Antinota:</span> <strong id="telemetry-shield" class="text-emerald-400">Blindado 🟢</strong></p>
-                    <p class="flex justify-between pb-1"><span data-i18n="broadcast_label">Difusión Recurrente:</span> <strong id="telemetry-broadcast" class="text-emerald-400">Worker Activo 🟢</strong></p>
-                </div>
-
-                <p class="text-center text-[8px] text-theme-muted tracking-widest uppercase pt-1 font-semibold" data-i18n="footer_copyright">The Bunker Command OS © 2026 — Cloud Media Management</p>
-            </section>
-
-            <!-- VISTA 2: ESTUDIO DE CANALES (STUDIO OS) -->
-            <section id="view-channels" class="space-y-4 tab-view hidden">
-                <div class="space-y-3">
-                    <div class="flex items-center justify-between">
-                        <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_channels">Canales Conectados</h3>
-                        <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
-                            <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
-                        </button>
-                    </div>
-                    <div id="channels-list" class="space-y-3"></div>
-                </div>
-
-                <div class="glass-panel p-5 space-y-4">
-                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
-                        <div>
-                            <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="studio_badge">ESTUDIO DE BROADCAST</span>
-                            <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="studio_title">Ajustes del Canal</h2>
-                        </div>
-                        <button onclick="app.openChannelStudio()" class="bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/50 px-3 py-1.5 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center gap-1.5">
-                            <i class="fa-solid fa-satellite"></i> <span data-i18n="btn_open_studio">Guardar Ajustes</span>
-                        </button>
-                    </div>
-
-                    <div class="space-y-1.5">
-                        <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="channel_owner_label">Canal Bajo tu ID de Creador:</label>
-                        <select id="channel-owner-select" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
-                            <option value="" data-i18n="select_your_channel">Selecciona tu canal...</option>
-                        </select>
-                    </div>
-
-                    <div class="bg-black/50 p-4 rounded-2xl border border-neutral-800 space-y-3">
-                        <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-2">
-                            <i class="fa-solid fa-link"></i> <span data-i18n="vip_delivery_title">Enlace VIP & Entrega Automática</span>
-                        </h4>
-                        <div class="space-y-2 text-xs">
-                            <div>
-                                <span class="text-[10px] text-theme-muted" data-i18n="vip_target_label">Destino VIP (Canal Privado / Recurso):</span>
-                                <input type="text" id="studio-target-link" placeholder="https://t.me/+..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                    <!-- Métricas Avanzadas -->
+                    <div class="glass-panel p-5 space-y-3">
+                        <h3 class="text-xs font-extrabold text-[#00f3ff] uppercase tracking-wider flex items-center justify-between">
+                            <span><i class="fa-solid fa-chart-pie mr-2"></i><span data-i18n="dash_telemetry">Telemetría del Búnker</span></span>
+                            <span class="text-[9px] text-emerald-400 font-semibold" data-i18n="online_tag">En Línea 🟢</span>
+                        </h3>
+                        <div class="grid grid-cols-3 gap-2 text-center pt-1 font-mono">
+                            <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                                <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_verified">Verificados</span>
+                                <p id="stat-verified" class="text-xs font-bold text-theme-main mt-0.5">0</p>
                             </div>
-                            <div class="grid grid-cols-2 gap-2">
+                            <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                                <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_expelled">Expulsados</span>
+                                <p id="stat-expelled" class="text-xs font-bold text-rose-400 mt-0.5">0</p>
+                            </div>
+                            <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                                <span class="text-[9px] text-theme-muted uppercase font-medium" data-i18n="stat_purges">Purgas</span>
+                                <p id="stat-purges" class="text-xs font-bold text-cyan-300 mt-0.5">0</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Perímetro Operativo -->
+                    <div class="glass-panel p-5 space-y-2.5 text-xs text-theme-main">
+                        <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider pb-1 border-b border-neutral-800 flex items-center justify-between">
+                            <span><i class="fa-solid fa-shield-halved text-[#00f3ff] mr-2"></i><span data-i18n="perimeter_title">Perímetro Operativo</span></span>
+                            <span class="text-[10px] text-neutral-500 font-normal" data-i18n="perimeter_sub">Supervisión 24/7</span>
+                        </h3>
+                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="captcha_label">Aduana Captcha:</span> <strong id="telemetry-captcha" class="text-emerald-400">Activa 🟢</strong></p>
+                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="autolower_label">Radar AutoLower:</span> <strong id="telemetry-autolower" class="text-emerald-400">2% Atenuado 🟢</strong></p>
+                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="shield_label">Escudo Antinota:</span> <strong id="telemetry-shield" class="text-emerald-400">Blindado 🟢</strong></p>
+                        <p class="flex justify-between pb-1"><span data-i18n="broadcast_label">Difusión Recurrente:</span> <strong id="telemetry-broadcast" class="text-emerald-400">Worker Activo 🟢</strong></p>
+                    </div>
+
+                    <p class="text-center text-[8px] text-theme-muted tracking-widest uppercase pt-1 font-semibold" data-i18n="footer_copyright">The Bunker Command OS © 2026 — Cloud Media Management</p>
+                </section>
+
+                <!-- VISTA 2: ESTUDIO DE CANALES (STUDIO OS) -->
+                <section id="view-channels" class="space-y-4 tab-view hidden">
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_channels">Canales Conectados</h3>
+                            <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
+                                <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
+                            </button>
+                        </div>
+                        <div id="channels-list" class="space-y-3"></div>
+                    </div>
+
+                    <div class="glass-panel p-5 space-y-4">
+                        <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                            <div>
+                                <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="studio_badge">ESTUDIO DE BROADCAST</span>
+                                <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="studio_title">Ajustes del Canal</h2>
+                            </div>
+                            <button onclick="app.openChannelStudio()" class="bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/50 px-3 py-1.5 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center gap-1.5">
+                                <i class="fa-solid fa-satellite"></i> <span data-i18n="btn_open_studio">Guardar Ajustes</span>
+                            </button>
+                        </div>
+
+                        <div class="space-y-1.5">
+                            <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="channel_owner_label">Canal Bajo tu ID de Creador:</label>
+                            <select id="channel-owner-select" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
+                                <option value="" data-i18n="select_your_channel">Selecciona tu canal...</option>
+                            </select>
+                        </div>
+
+                        <div class="bg-black/50 p-4 rounded-2xl border border-neutral-800 space-y-3">
+                            <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-2">
+                                <i class="fa-solid fa-link"></i> <span data-i18n="vip_delivery_title">Enlace VIP & Entrega Automática</span>
+                            </h4>
+                            <div class="space-y-2 text-xs">
                                 <div>
-                                    <span class="text-[10px] text-theme-muted" data-i18n="stars_rate_label">Tarifa en Stars (XTR):</span>
-                                    <input type="number" id="studio-stars-price" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                    <span class="text-[10px] text-theme-muted" data-i18n="vip_target_label">Destino VIP (Canal Privado / Recurso):</span>
+                                    <input type="text" id="studio-target-link" placeholder="https://t.me/+..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
                                 </div>
-                                <div>
-                                    <span class="text-[10px] text-theme-muted" data-i18n="duration_days_label">Duración (Días):</span>
-                                    <input type="number" id="studio-duration-days" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <span class="text-[10px] text-theme-muted" data-i18n="stars_rate_label">Tarifa en Stars (XTR):</span>
+                                        <input type="number" id="studio-stars-price" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                    </div>
+                                    <div>
+                                        <span class="text-[10px] text-theme-muted" data-i18n="duration_days_label">Duración (Días):</span>
+                                        <input type="number" id="studio-duration-days" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            </section>
+                </section>
 
-            <!-- VISTA 3: MATRIZ DE GRUPOS & TELEMETRÍA CHATKEEPER -->
-            <section id="view-groups" class="space-y-4 tab-view hidden">
-                <div class="space-y-3">
-                    <div class="flex items-center justify-between">
-                        <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_groups">Comunidades Conectadas</h3>
-                        <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
-                            <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
-                        </button>
-                    </div>
-                    <div id="groups-list" class="space-y-3"></div>
-                </div>
-
-                <!-- SUITE GRANULAR CHATKEEPER STYLE -->
-                <div id="chatkeeper-suite-panel" class="space-y-4">
-                    <!-- Banner de Errores de Módulos (ChatKeeper) -->
-                    <div class="bg-rose-950/20 border border-rose-900/40 rounded-2xl p-4 text-xs space-y-1">
-                        <span class="text-neutral-400 font-bold text-[10px] uppercase tracking-wider">Modules errors</span>
-                        <p class="text-theme-main font-bold flex items-center gap-1.5"><i class="fa-solid fa-triangle-exclamation text-rose-400"></i> Stop word filter</p>
-                        <p class="text-[11px] text-blue-400">Punishment for beginners <span class="text-neutral-400">- Filter settings for beginners does not contain penalties</span></p>
+                <!-- VISTA 3: MATRIZ DE GRUPOS & TELEMETRÍA CHATKEEPER -->
+                <section id="view-groups" class="space-y-4 tab-view hidden">
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-xs font-extrabold text-theme-main uppercase tracking-wider" data-i18n="linked_groups">Comunidades Conectadas</h3>
+                            <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
+                                <i class="fa-solid fa-rotate"></i> <span data-i18n="sync">Sincronizar</span>
+                            </button>
+                        </div>
+                        <div id="groups-list" class="space-y-3"></div>
                     </div>
 
-                    <!-- Grid: Plan y Log Channel -->
-                    <div class="grid grid-cols-2 gap-2.5">
-                        <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
-                            <div>
-                                <span class="text-[10px] text-theme-muted uppercase font-bold">A Plan</span>
-                                <p id="chat-plan-status" class="text-xs font-bold text-rose-400 mt-1">Tariff empty</p>
+                    <!-- SUITE GRANULAR CHATKEEPER STYLE -->
+                    <div id="chatkeeper-suite-panel" class="space-y-4">
+                        <!-- Banner de Errores de Módulos (ChatKeeper) -->
+                        <div class="bg-rose-950/20 border border-rose-900/40 rounded-2xl p-4 text-xs space-y-1">
+                            <span class="text-neutral-400 font-bold text-[10px] uppercase tracking-wider">Modules errors</span>
+                            <p class="text-theme-main font-bold flex items-center gap-1.5"><i class="fa-solid fa-triangle-exclamation text-rose-400"></i> Stop word filter</p>
+                            <p class="text-[11px] text-blue-400">Punishment for beginners <span class="text-neutral-400">- Filter settings for beginners does not contain penalties</span></p>
+                        </div>
+
+                        <!-- Grid: Plan y Log Channel -->
+                        <div class="grid grid-cols-2 gap-2.5">
+                            <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
+                                <div>
+                                    <span class="text-[10px] text-theme-muted uppercase font-bold">A Plan</span>
+                                    <p id="chat-plan-status" class="text-xs font-bold text-rose-400 mt-1">Tariff empty</p>
+                                </div>
+                                <button onclick="app.switchTab('plans')" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-1.5 rounded-xl text-[10px] font-bold transition">Buy</button>
                             </div>
-                            <button onclick="app.switchTab('plans')" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-1.5 rounded-xl text-[10px] font-bold transition">Buy</button>
-                        </div>
-                        <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
-                            <div>
-                                <span class="text-[10px] text-theme-muted uppercase font-bold">Log Channel</span>
-                                <p id="chat-log-channel" class="text-xs font-bold text-emerald-400 mt-1 truncate">Disabled</p>
+                            <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
+                                <div>
+                                    <span class="text-[10px] text-theme-muted uppercase font-bold">Log Channel</span>
+                                    <p id="chat-log-channel" class="text-xs font-bold text-emerald-400 mt-1 truncate">Disabled</p>
+                                </div>
+                                <button onclick="app.switchTab('bot-settings')" class="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 py-1.5 rounded-xl text-[10px] font-bold transition">Configure</button>
                             </div>
-                            <button onclick="app.switchTab('bot-settings')" class="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 py-1.5 rounded-xl text-[10px] font-bold transition">Configure</button>
+                        </div>
+
+                        <!-- Módulos Activos (Card Azul ChatKeeper) -->
+                        <div class="bg-gradient-to-br from-blue-900/60 to-blue-950/80 border border-blue-500/30 rounded-2xl p-4 flex items-center justify-between shadow-[0_0_20px_rgba(37,99,235,0.2)]">
+                            <div>
+                                <span class="text-[10px] text-blue-300 uppercase font-bold" data-i18n="active_modules_label">Módulos Activos</span>
+                                <h3 id="chat-active-modules" class="text-2xl font-black text-white tracking-wider mt-0.5">11 <span class="text-sm font-normal text-blue-300">/ 91</span></h3>
+                            </div>
+                            <button onclick="app.switchTab('bot-settings')" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-lg transition active:scale-95 flex items-center gap-1.5">
+                                <i class="fa-solid fa-sliders"></i> Ajustar
+                            </button>
+                        </div>
+
+                        <!-- Top 10 Usuarios Activos en 30 Días (ChatKeeper) -->
+                        <div class="glass-panel p-4 space-y-3">
+                            <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
+                                <span><i class="fa-solid fa-trophy text-amber-400 mr-1.5"></i> <span data-i18n="top_users_title">Top 10 Usuarios Activos</span></span>
+                                <span class="text-[9px] text-[#00f3ff] font-normal">30 days</span>
+                            </h4>
+                            <div id="chat-top-users-list" class="space-y-2 text-xs">
+                                <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin registros de actividad reciente</div>
+                            </div>
+                        </div>
+
+                        <!-- Admin Stats (ChatKeeper) -->
+                        <div class="glass-panel p-4 space-y-3">
+                            <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
+                                <span><i class="fa-solid fa-user-shield text-blue-400 mr-1.5"></i> <span data-i18n="admin_stats_title">Rendimiento de Admins</span></span>
+                                <span class="text-[9px] text-emerald-400 font-semibold">Active</span>
+                            </h4>
+                            <div id="chat-admin-stats-list" class="space-y-2 text-xs">
+                                <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin estadísticas de administradores</div>
+                            </div>
                         </div>
                     </div>
+                </section>
 
-                    <!-- Módulos Activos (Card Azul ChatKeeper) -->
-                    <div class="bg-gradient-to-br from-blue-900/60 to-blue-950/80 border border-blue-500/30 rounded-2xl p-4 flex items-center justify-between shadow-[0_0_20px_rgba(37,99,235,0.2)]">
-                        <div>
-                            <span class="text-[10px] text-blue-300 uppercase font-bold" data-i18n="active_modules_label">Módulos Activos</span>
-                            <h3 id="chat-active-modules" class="text-2xl font-black text-white tracking-wider mt-0.5">11 <span class="text-sm font-normal text-blue-300">/ 91</span></h3>
+                <!-- VISTA NUEVA (FASE 2): CONSOLA DE AJUSTES DEL BOT & HERRAMIENTAS ULTRA -->
+                <section id="view-bot-settings" class="space-y-4 tab-view hidden">
+                    <div class="glass-panel p-5 space-y-4">
+                        <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
+                            <div>
+                                <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold">CONTROL MAESTRO</span>
+                                <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5">Ajustes de Comunidad</h2>
+                            </div>
+                            <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
+                                <i class="fa-solid fa-rotate"></i> <span>Sincronizar</span>
+                            </button>
                         </div>
-                        <button onclick="app.switchTab('bot-settings')" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-lg transition active:scale-95 flex items-center gap-1.5">
-                            <i class="fa-solid fa-sliders"></i> Ajustar
-                        </button>
-                    </div>
 
-                    <!-- Top 10 Usuarios Activos en 30 Días (ChatKeeper) -->
-                    <div class="glass-panel p-4 space-y-3">
-                        <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
-                            <span><i class="fa-solid fa-trophy text-amber-400 mr-1.5"></i> <span data-i18n="top_users_title">Top 10 Usuarios Activos</span></span>
-                            <span class="text-[9px] text-[#00f3ff] font-normal">30 days</span>
-                        </h4>
-                        <div id="chat-top-users-list" class="space-y-2 text-xs">
-                            <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin registros de actividad reciente</div>
+                        <div class="space-y-1.5">
+                            <label class="text-[11px] text-theme-muted uppercase font-semibold">Comunidad Administrada:</label>
+                            <select id="group-owner-select" onchange="app.configureChat(this.value)" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
+                                <option value="" data-i18n="select_your_community">Selecciona tu comunidad...</option>
+                            </select>
                         </div>
-                    </div>
 
-                    <!-- Admin Stats (ChatKeeper) -->
-                    <div class="glass-panel p-4 space-y-3">
-                        <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
-                            <span><i class="fa-solid fa-user-shield text-blue-400 mr-1.5"></i> <span data-i18n="admin_stats_title">Rendimiento de Admins</span></span>
-                            <span class="text-[9px] text-emerald-400 font-semibold">Active</span>
-                        </h4>
-                        <div id="chat-admin-stats-list" class="space-y-2 text-xs">
-                            <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin estadísticas de administradores</div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- VISTA NUEVA (FASE 2): CONSOLA DE AJUSTES DEL BOT & HERRAMIENTAS ULTRA -->
-            <section id="view-bot-settings" class="space-y-4 tab-view hidden">
-                <div class="glass-panel p-5 space-y-4">
-                    <div class="flex items-center justify-between border-b border-neutral-800 pb-3">
-                        <div>
-                            <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold">CONTROL MAESTRO</span>
-                            <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5">Ajustes de Comunidad</h2>
-                        </div>
-                        <button onclick="app.syncChats()" class="text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1 rounded-lg">
-                            <i class="fa-solid fa-rotate"></i> <span>Sincronizar</span>
-                        </button>
-                    </div>
-
-                    <div class="space-y-1.5">
-                        <label class="text-[11px] text-theme-muted uppercase font-semibold">Comunidad Administrada:</label>
-                        <select id="group-owner-select" onchange="app.configureChat(this.value)" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
-                            <option value="" data-i18n="select_your_community">Selecciona tu comunidad...</option>
-                        </select>
-                    </div>
-
-                    <!-- BLOQUE 1: MATRIZ DE MODERACIÓN Y CERRADURAS TÁCTICAS -->
-                    <div class="space-y-2.5 pt-2">
-                        <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-1.5">
-                            <i class="fa-solid fa-shield-halved"></i> Matriz de Moderación & Filtros
-                        </h4>
-                        <div class="space-y-2 text-xs">
-                            <div onclick="app.toggleSecuritySwitch('captcha')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                        <!-- BLOQUE 1: MATRIZ DE MODERACIÓN Y CERRADURAS TÁCTICAS -->
+                        <div class="space-y-2.5 pt-2">
+                            <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-1.5">
+                                <i class="fa-solid fa-shield-halved"></i> Matriz de Moderación & Filtros
+                            </h4>
+                            <div class="space-y-2 text-xs">
+                                <div onclick="app.toggleSecuritySwitch('captcha')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
                                 <div>
                                     <p class="text-theme-main font-bold" data-i18n="captcha_pro">Aduana Captcha Pro</p>
                                     <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
@@ -766,6 +767,7 @@
         <span id="lang-indicator" class="text-[10px] font-black text-[#00f3ff] uppercase pointer-events-none">ES</span>
     </div>
 
-    <script src="app.js"></script>
+    <!-- Módulo Central de Orquestación -->
+    <script type="module" src="js/app.js"></script>
 </body>
 </html>
