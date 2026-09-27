@@ -6,12 +6,12 @@
 export const CONFIG = {
     BOT_USERNAME: 'thebunkerapp_bot',
     WEBAPP_URL: 'https://thebunkerapp2.netlify.app/',
-    API_BASE: 'https://the-bunker-bot-production.up.railway.app/api',
+    API_BASE: 'https://the-bunker-bot-production.up.railway.app',
     TON_MANIFEST: 'https://the-bunker-bot-production.up.railway.app/tonconnect-manifest.json',
     TON_WALLET: 'UQAAnX4bGBzI0ujk35-XChap_wZ7x67NeJ85C_M1YIvLbYUF',
     PRICES: {
-        pro:   { stars: 500, usd: 5, ton: '1000000000' },
-        ultra: { stars: 800, usd: 8, ton: '1600000000' }
+        pro:   { stars: 300, usd: 3, ton: '600000000' },
+        ultra: { stars: 600, usd: 6, ton: '1200000000' }
     }
 };
 
@@ -147,7 +147,10 @@ export const translations = {
         login_error: "⚠️ No se pudo verificar la sesión. Intenta de nuevo.",
         login_expired: "⚠️ Tu sesión expiró. Vuelve a iniciar sesión.",
         load_error: "Error al sincronizar con el servidor",
-        btn_retry: "Reintentar conexión"
+        btn_retry: "Reintentar conexión",
+        action_clone_success: "¡Bot Clon desplegado y activo correctamente! 🟢",
+        action_sentinel_success: "¡Centinela MTProto vinculado con éxito! 💎",
+        action_purge_started: "Ghost Purge iniciada en segundo plano 🧹"
     },
     en: {
         plans_title: "Community Memberships",
@@ -280,6 +283,9 @@ export const translations = {
         login_error: "⚠️ Could not verify the session. Please try again.",
         login_expired: "⚠️ Your session expired. Please log in again.",
         load_error: "Failed to sync with server",
-        btn_retry: "Retry connection"
+        btn_retry: "Retry connection",
+        action_clone_success: "Clone Bot successfully deployed and active! 🟢",
+        action_sentinel_success: "MTProto Sentinel successfully linked! 💎",
+        action_purge_started: "Ghost Purge initiated in background 🧹"
     }
 };

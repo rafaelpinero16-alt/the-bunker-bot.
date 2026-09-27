@@ -36,6 +36,7 @@ export const app = {
         ui.updateTranslations();
         this.initDraggableButton();
         this.initCharCounter();
+        this.initUrlRouting();
         this.initAuth();
     },
 
@@ -46,6 +47,20 @@ export const app = {
 
     setTheme(theme) {
         ui.setTheme(theme);
+    },
+
+    initUrlRouting() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const chatId = urlParams.get('chat_id');
+        const channelId = urlParams.get('channel_id');
+
+        if (chatId) {
+            state.selectedChatId = chatId;
+            state.activeContext = 'groups';
+        } else if (channelId) {
+            state.selectedChatId = channelId;
+            state.activeContext = 'channels';
+        }
     },
 
     initDraggableButton() {
@@ -180,7 +195,6 @@ export const app = {
         const res = await api.updateChatSettings(selectedGroup, payload);
 
         if (res?.__error) {
-            // Revertir estado si el servidor falló
             state.securitySwitches[key] = previousVal;
             if (el) {
                 el.className = previousVal ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
@@ -188,7 +202,7 @@ export const app = {
                     ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
                     : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
             }
-            alert(state.currentLang === 'es' ? '⚠️ Error al guardar en el servidor. Intenta de nuevo.' : '⚠️ Server error. Try again.');
+            alert(state.currentLang === 'es' ? `⚠️ Error al guardar: ${res.__error}` : `⚠️ Save error: ${res.__error}`);
             return;
         }
 
@@ -392,13 +406,19 @@ export const app = {
         document.getElementById('app-shell')?.classList.remove('hidden');
     },
 
-    bootstrapDashboard() {
+    async bootstrapDashboard() {
         this.loadTelegramUser();
         this.loadAffiliateLink();
-        this.loadStats();
-        this.loadChannels();
-        this.loadGroups();
-        this.loadSubscribers();
+        await Promise.all([
+            this.loadStats(),
+            this.loadChannels(),
+            this.loadGroups(),
+            this.loadSubscribers()
+        ]);
+
+        if (state.selectedChatId) {
+            this.configureChat(state.selectedChatId);
+        }
     },
 
     async handleTelegramWidgetAuth(user) {
@@ -499,7 +519,7 @@ export const app = {
                 ? `✅ Sincronización Exitosa con The Bunker Bot:\n\n• Canales detectados: ${res.total_channels}\n• Comunidades detectadas: ${res.total_groups}`
                 : `✅ Synchronization Successful with The Bunker Bot:\n\n• Detected Channels: ${res.total_channels}\n• Detected Groups: ${res.total_groups}`);
         } else if (res?.__error) {
-            alert(state.currentLang === 'es' ? '⚠️ Error de sincronización con el servidor.' : '⚠️ Server synchronization error.');
+            alert(state.currentLang === 'es' ? `⚠️ Error de sincronización: ${res.__error}` : `⚠️ Synchronization error: ${res.__error}`);
         } else {
             alert(state.currentLang === 'es' ? '✅ Canales y grupos sincronizados.' : '✅ Channels and groups synced.');
         }
@@ -570,7 +590,7 @@ export const app = {
         if (data && !data.__error) {
             state.data.currentChatDashboard = data;
             
-            // 1. Sincronizar estado visual del Canal de Registro (Log Channel)
+            // 1. Canal de Registro (Log Channel)
             const logEl = document.getElementById('chat-log-channel');
             if (logEl) {
                 const isEnabled = Boolean(data.log_channel?.enabled);
@@ -728,7 +748,7 @@ export const app = {
         });
 
         if (res?.__error) {
-            alert(state.currentLang === 'es' ? '⚠️ Error al guardar los ajustes del canal en el servidor.' : '⚠️ Error saving channel settings.');
+            alert(state.currentLang === 'es' ? `⚠️ Error al guardar los ajustes: ${res.__error}` : `⚠️ Error saving settings: ${res.__error}`);
             return;
         }
 
@@ -754,21 +774,18 @@ export const app = {
             return;
         }
 
-        const res = await api.updateChatSettings(selectedGroup, {
-            action: 'deploy_clone',
-            bot_token: token
-        });
+        const res = await api.deployBotClone(selectedGroup, token);
 
         if (res?.status === 'success') {
             tgApp.hapticNotification('success');
             alert(state.currentLang === 'es'
-                ? `🚀 Bot Clon (@${res.clone_username || 'Bot'}) sincronizado y activo en memoria exitosamente.`
-                : `🚀 Bot Clone (@${res.clone_username || 'Bot'}) synchronized and active in memory.`);
+                ? `🚀 Bot Clon (@${res.clone_username || 'Bot'}) desplegado y activo en memoria exitosamente.`
+                : `🚀 Bot Clone (@${res.clone_username || 'Bot'}) deployed and active in memory.`);
             if (tokenInput) tokenInput.value = '';
         } else {
             alert(state.currentLang === 'es'
-                ? `❌ Error al desplegar clon: ${res?.detail || 'Token inválido o bot inaccesible.'}`
-                : `❌ Failed to deploy clone: ${res?.detail || 'Invalid token.'}`);
+                ? `❌ Error al desplegar clon: ${res?.__error || 'Token inválido o bot inaccesible.'}`
+                : `❌ Failed to deploy clone: ${res?.__error || 'Invalid token.'}`);
         }
     },
 
@@ -787,10 +804,7 @@ export const app = {
             return;
         }
 
-        const res = await api.updateChatSettings(selectedGroup, {
-            action: 'connect_sentinel',
-            session_string: sessionString
-        });
+        const res = await api.connectSentinel(selectedGroup, sessionString);
 
         if (res?.status === 'success') {
             tgApp.hapticNotification('success');
@@ -800,8 +814,8 @@ export const app = {
             if (sessionInput) sessionInput.value = '';
         } else {
             alert(state.currentLang === 'es'
-                ? `❌ Error al conectar centinela: ${res?.detail || 'Error de sesión.'}`
-                : `❌ Failed to connect sentinel: ${res?.detail || 'Session error.'}`);
+                ? `❌ Error al conectar centinela: ${res?.__error || 'Error de sesión.'}`
+                : `❌ Failed to connect sentinel: ${res?.__error || 'Session error.'}`);
         }
     },
 
@@ -817,9 +831,7 @@ export const app = {
             return;
         }
 
-        const res = await api.updateChatSettings(selectedGroup, {
-            action: 'run_ghost_purge'
-        });
+        const res = await api.triggerGhostPurge(selectedGroup);
 
         if (res?.status === 'success') {
             tgApp.hapticImpact('heavy');
@@ -828,8 +840,8 @@ export const app = {
                 : '⚡ Ghost Purge command sent. Purge is running in background.');
         } else {
             alert(state.currentLang === 'es'
-                ? '❌ Error al iniciar Ghost Purge con el bot.'
-                : '❌ Error triggering Ghost Purge.');
+                ? `❌ Error al iniciar Ghost Purge: ${res?.__error || 'Fallo de comunicación.'}`
+                : `❌ Error triggering Ghost Purge: ${res?.__error || 'Communication failure.'}`);
         }
     },
 
@@ -870,7 +882,7 @@ export const app = {
     },
 
     async executeTonPayment(plan) {
-        const nanoAmount = CONFIG.PRICES[plan]?.ton || '1000000000';
+        const nanoAmount = CONFIG.PRICES[plan]?.ton || '600000000';
         const tx = {
             validUntil: Math.floor(Date.now() / 1000) + 300,
             messages: [{ address: CONFIG.TON_WALLET, amount: nanoAmount }]
@@ -892,7 +904,8 @@ export const app = {
         if (!priceInfo) return;
 
         if (method === 'stars') {
-            const param = plan === 'pro' ? 'sub_pro' : 'sub_ultra';
+            const targetChat = state.selectedChatId ? `_${state.selectedChatId}` : '';
+            const param = plan === 'pro' ? `sub_pro${targetChat}` : `sub_ultra${targetChat}`;
             tgApp.openTelegramLink(`https://t.me/${CONFIG.BOT_USERNAME}?start=${param}`);
             setTimeout(() => tgApp.closeApp(), 300);
         } else if (method === 'paypal') {
@@ -913,7 +926,7 @@ export const app = {
     },
 
     processOneClickPay(gateway) {
-        const priceUsd = `${CONFIG.PRICES[state.selectedPlan]?.usd || 5}.00`;
+        const priceUsd = `${CONFIG.PRICES[state.selectedPlan]?.usd || 3}.00`;
         const links = {
             skrill: `https://skrill.me/rq/Felipe%20Rafael/${priceUsd}/USD?key=7AR7OlqodIdbV_WU4hSXJ435Na1`,
             binance: 'https://app.binance.com/uni-qr/request-to-pay?billOrderId=452405181270605824&billType=request_a_payment'

@@ -7,17 +7,35 @@ import { CONFIG } from './config.js';
 import { tgApp } from './telegram.js';
 import { state } from './state.js';
 
+function buildUrl(path) {
+    const base = (CONFIG.API_BASE || '').replace(/\/+$/, '');
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    
+    // Si la base no incluye ya /api y el path tampoco, lo prefijamos
+    if (!base.endsWith('/api') && !cleanPath.startsWith('/api')) {
+        return `${base}/api${cleanPath}`;
+    }
+    return `${base}${cleanPath}`;
+}
+
 export const api = {
     async get(path) {
         try {
-            const res = await fetch(`${CONFIG.API_BASE}${path}`, {
+            const url = buildUrl(path);
+            const res = await fetch(url, {
                 headers: tgApp.getAuthHeaders()
             });
+
             if (res.status === 401) {
                 this.handleSessionExpired();
                 return { __error: 'unauthorized' };
             }
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                return { __error: errData.detail || `HTTP ${res.status}` };
+            }
+
             return await res.json();
         } catch (err) {
             console.error(`[API GET ERROR] ${path}:`, err);
@@ -27,7 +45,8 @@ export const api = {
 
     async post(path, body = {}) {
         try {
-            const res = await fetch(`${CONFIG.API_BASE}${path}`, {
+            const url = buildUrl(path);
+            const res = await fetch(url, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -35,11 +54,17 @@ export const api = {
                 },
                 body: JSON.stringify(body)
             });
+
             if (res.status === 401) {
                 this.handleSessionExpired();
                 return { __error: 'unauthorized' };
             }
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                return { __error: errData.detail || `HTTP ${res.status}` };
+            }
+
             return await res.json();
         } catch (err) {
             console.error(`[API POST ERROR] ${path}:`, err);
@@ -56,7 +81,7 @@ export const api = {
         }
     },
 
-    // --- Endpoints Específicos del Búnker ---
+    // --- Endpoints de Telemetría y Ecosistema ---
 
     async fetchStats(context = 'global') {
         return await this.get(`/stats?context=${context}`);
@@ -78,6 +103,8 @@ export const api = {
         return await this.post('/sync-chats', {});
     },
 
+    // --- Endpoints del Dashboard de Comunidad ---
+
     async fetchChatDashboard(chatId) {
         return await this.get(`/chat/${chatId}/dashboard`);
     },
@@ -98,13 +125,38 @@ export const api = {
         return await this.post(`/chat/${chatId}/settings`, settings);
     },
 
+    // --- Acciones Tácticas Ultra Pro ---
+
+    async deployBotClone(chatId, botToken) {
+        return await this.updateChatSettings(chatId, {
+            action: 'deploy_clone',
+            bot_token: botToken
+        });
+    },
+
+    async connectSentinel(chatId, sessionString) {
+        return await this.updateChatSettings(chatId, {
+            action: 'connect_sentinel',
+            session_string: sessionString
+        });
+    },
+
+    async triggerGhostPurge(chatId) {
+        return await this.updateChatSettings(chatId, {
+            action: 'run_ghost_purge'
+        });
+    },
+
+    // --- Sesión Web y Autenticación Widget ---
+
     async exchangeWebToken(tempToken) {
         return await this.post('/auth/exchange-token', { token: tempToken });
     },
 
     async verifyWebSession(sessionToken) {
         try {
-            const res = await fetch(`${CONFIG.API_BASE}/auth/session-check`, {
+            const url = buildUrl('/auth/session-check');
+            const res = await fetch(url, {
                 headers: { 'Authorization': `Bearer ${sessionToken}` }
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);

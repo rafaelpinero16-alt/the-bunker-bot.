@@ -78,21 +78,21 @@ export const ui = {
         if (!data || data.length < 2) return '';
         const c = color || '#00f3ff';
         const max = Math.max(...data), min = Math.min(...data);
-        const range = (max - min) || 1;
+        const range = (max - min) === 0 ? 1 : (max - min);
         const stepX = width / (data.length - 1);
-        const pts = data.map((v, i) => [i * stepX, height - ((v - min) / range) * (height - 12) - 6]);
+        const pts = data.map((v, i) => [i * stepX, height - ((v - min) / range) * (height - 16) - 8]);
         const line = pts.map((p, i) => (i === 0 ? `M${p[0].toFixed(1)},${p[1].toFixed(1)}` : `L${p[0].toFixed(1)},${p[1].toFixed(1)}`)).join(' ');
         const area = `${line} L${width},${height} L0,${height} Z`;
         const gid = `spark-${Math.random().toString(36).slice(2, 9)}`;
         return `<svg viewBox="0 0 ${width} ${height}" class="w-full h-full overflow-visible" preserveAspectRatio="none">
             <defs>
                 <linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="${c}" stop-opacity="0.4"/>
-                    <stop offset="100%" stop-color="${c}" stop-opacity="0"/>
+                    <stop offset="0%" stop-color="${c}" stop-opacity="0.35"/>
+                    <stop offset="100%" stop-color="${c}" stop-opacity="0.0"/>
                 </linearGradient>
             </defs>
             <path d="${area}" fill="url(#${gid})"/>
-            <path d="${line}" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="filter:drop-shadow(0 0 4px ${c})"/>
+            <path d="${line}" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="filter:drop-shadow(0 0 5px ${c})"/>
         </svg>`;
     },
 
@@ -104,12 +104,12 @@ export const ui = {
         const safeMembers = this.escapeHtml(chat.members ?? '0');
 
         const statusHtml = licenseActive
-            ? `<span class="text-emerald-400 font-bold text-[10px] shrink-0">${this.t('license_active')}</span>`
+            ? `<span class="text-emerald-400 font-bold text-[10px] shrink-0 font-mono">${this.t('license_active')}</span>`
             : `<button onclick="app.renewLicense('${safeId}')" class="bg-rose-500/20 text-rose-400 border border-rose-500/50 px-2.5 py-1 rounded-lg text-[10px] font-bold hover:bg-rose-500/30 active:scale-95 transition shrink-0">${this.t('license_renew')}</button>`;
 
         const deltaHtml = (chat.joined != null)
-            ? `<span class="text-emerald-400">+${this.escapeHtml(chat.joined)}</span> <span class="text-rose-400 ml-1.5">-${this.escapeHtml(chat.left)}</span>`
-            : `<span class="text-neutral-500">—</span>`;
+            ? `<span class="text-emerald-400 font-mono">+${this.escapeHtml(chat.joined)}</span> <span class="text-rose-400 ml-1.5 font-mono">-${this.escapeHtml(chat.left)}</span>`
+            : `<span class="text-neutral-500 font-mono">—</span>`;
 
         return `
         <div class="glass-panel p-3.5 space-y-2.5" data-chat-id="${safeId}">
@@ -169,11 +169,15 @@ export const ui = {
 
     subscriberTemplate(s) {
         const daysLeft = s.days_left ?? 0;
-        const statusColor = daysLeft > 5 ? 'emerald-400' : (daysLeft > 0 ? 'amber-400' : 'rose-400');
-        const daysLabel = daysLeft > 0 ? `${daysLeft} ${state.currentLang === 'es' ? 'días restantes' : 'days left'}` : (state.currentLang === 'es' ? 'Período de Gracia 🔴' : 'Grace Period 🔴');
-        const safeUsername = this.escapeHtml(s.username);
-        const safePlanName = this.escapeHtml(s.plan_name);
-        const safePrice = this.escapeHtml(s.price);
+        const isGrace = daysLeft <= 0;
+        const statusColor = isGrace ? 'rose-400' : (daysLeft <= 3 ? 'amber-400' : 'emerald-400');
+        const daysLabel = isGrace 
+            ? (state.currentLang === 'es' ? 'Período de Gracia 🔴' : 'Grace Period 🔴')
+            : `${daysLeft} ${state.currentLang === 'es' ? 'días' : 'days'}`;
+
+        const safeUsername = this.escapeHtml(s.username || s.user_id);
+        const safePlanName = this.escapeHtml(s.plan_name || 'Membresía');
+        const safePrice = this.escapeHtml(s.price ?? 0);
 
         return `
         <div class="bg-black/60 p-3.5 rounded-xl border border-neutral-800 flex items-center justify-between font-mono">
