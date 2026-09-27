@@ -275,7 +275,10 @@
                         </div>
 
                         <div class="space-y-1.5">
-                            <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="channel_owner_label">Canal Bajo tu ID de Creador:</label>
+                            <div class="flex items-center justify-between">
+                                <label class="text-[11px] text-theme-muted uppercase font-semibold" data-i18n="channel_owner_label">Canal Bajo tu ID de Creador:</label>
+                                <span id="channel-id-display" class="text-[10px] text-[#00f3ff] font-mono font-bold">ID: —</span>
+                            </div>
                             <select id="channel-owner-select" class="w-full bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
                                 <option value="" data-i18n="select_your_channel">Selecciona tu canal...</option>
                             </select>
@@ -289,7 +292,7 @@
                             <div class="space-y-2.5 text-xs">
                                 <div>
                                     <span class="text-[10px] text-theme-muted" data-i18n="vip_target_label">Destino VIP (Canal Privado / Recurso):</span>
-                                    <input type="text" id="studio-target-link" placeholder="https://t.me/+..." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                    <input type="text" id="studio-target-link" placeholder="https://t.me/+... (Se incrustará en un Botón Inline)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
                                 </div>
                                 <div class="grid grid-cols-2 gap-2">
                                     <div>
@@ -540,7 +543,7 @@
                         </div>
                     </div>
 
-                    <!-- PLAN PRO — 500 Stars (XTR) -->
+                    <!-- PLAN PRO — 300 Stars (XTR) -->
                     <div class="glass-panel p-5 border-t-2 border-t-[#00f3ff] shadow-[0_10px_30px_rgba(0,243,255,0.05)] relative overflow-hidden">
                         <div class="mb-4 text-center">
                             <span class="text-[10px] text-[#00f3ff] font-bold tracking-wider" data-i18n="pro_badge">PLAN MENSUAL</span>
@@ -549,7 +552,7 @@
                         </div>
                         <div class="grid grid-cols-2 gap-2.5 relative z-10">
                             <button onclick="app.pagarPlan('pro', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                                <i class="fa-solid fa-star text-amber-300"></i> 500 XTR
+                                <i class="fa-solid fa-star text-amber-300"></i> 300 XTR
                             </button>
                             <button onclick="app.pagarPlan('pro', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
                                 <i class="fa-solid fa-gem text-white"></i> TON Crypto
@@ -563,7 +566,7 @@
                         </div>
                     </div>
 
-                    <!-- PLAN ULTRA PRO — 800 Stars (XTR) -->
+                    <!-- PLAN ULTRA PRO — 600 Stars (XTR) -->
                     <div class="glass-panel p-5 border-t-2 border-t-[#ff00ff] shadow-[0_10px_30px_rgba(255,0,255,0.05)] relative overflow-hidden">
                         <div class="mb-4 text-center">
                             <span class="text-[10px] text-[#ff00ff] font-bold tracking-wider" data-i18n="ultra_badge">ACCESO ILIMITADO</span>
@@ -572,7 +575,7 @@
                         </div>
                         <div class="grid grid-cols-2 gap-2.5 relative z-10">
                             <button onclick="app.pagarPlan('ultra', 'stars')" class="bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
-                                <i class="fa-solid fa-star text-amber-300"></i> 800 XTR
+                                <i class="fa-solid fa-star text-amber-300"></i> 600 XTR
                             </button>
                             <button onclick="app.pagarPlan('ultra', 'ton')" class="bg-cyan-600/90 hover:bg-cyan-500 text-white font-bold text-xs py-3 rounded-xl transition-all shadow-[0_0_15px_rgba(8,145,178,0.3)] active:scale-95 flex items-center justify-center gap-2">
                                 <i class="fa-solid fa-gem text-white"></i> TON Crypto

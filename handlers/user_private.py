@@ -1595,7 +1595,7 @@ async def _finalize_and_preview_channel_plan(
     days: int, price: int, promo_text: str, media_id: str = None,
     media_type: str = None, target_link: str = None, recurrence_hours: int = 0
 ) -> None:
-    """Guarda el plan del canal, configura la difusión recurrente si está activa y envía una vista previa al administrador."""
+    """Guarda el plan del canal y envía una vista previa donde el enlace VIP es un botón inline."""
     t = TEXTS.get(lang, TEXTS["es"])
     try:
         plan_id = await create_channel_plan(
@@ -1608,22 +1608,33 @@ async def _finalize_and_preview_channel_plan(
         await bot.send_message(chat_id, t["plan_create_error"], parse_mode="HTML")
         return
 
+    # Mensaje limpio: el texto promocional ya no lleva la URL en bruto
     preview = (
         f"💎 <b>{html.escape(name)}</b>\n\n"
         f"⏳ {days} {'días' if lang == 'es' else 'days'}\n"
         f"⭐ {price} XTR\n\n{promo_text}"
     )
-    if target_link:
-        preview += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>" if lang == "es" else f"\n\n🔗 <b>VIP Target:</b> <code>{target_link}</code>"
     if recurrence_hours and recurrence_hours > 0:
         preview += f"\n\n⏰ <b>Recurrencia:</b> Cada {recurrence_hours}h"
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
+    # Filas de botones inline
+    inline_rows = []
+    
+    # 🔗 El enlace VIP ahora vive dentro de su propio botón inline
+    if target_link:
+        btn_label = "🔗 Acceder al Recurso / Canal VIP" if lang == "es" else "🔗 Access VIP Resource / Channel"
+        clean_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
+        inline_rows.append([InlineKeyboardButton(text=btn_label, url=clean_url)])
+
+    inline_rows.append([
+        InlineKeyboardButton(
             text=t["btn_back_channel"],
             callback_data=f"cpanel_{channel_id}_{lang}"
-        )]
+        )
     ])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=inline_rows)
+
     if media_id and media_type == "photo":
         await bot.send_photo(chat_id, media_id, caption=preview, reply_markup=keyboard, parse_mode="HTML")
     elif media_id and media_type == "video":
@@ -1632,7 +1643,6 @@ async def _finalize_and_preview_channel_plan(
         await bot.send_animation(chat_id, media_id, caption=preview, reply_markup=keyboard, parse_mode="HTML")
     else:
         await bot.send_message(chat_id, preview, reply_markup=keyboard, parse_mode="HTML")
-
 
 # ==========================================
 # 🧭 BLINDAJE DE NAVEGACIÓN CONTEXTUAL (CANAL VS GRUPO)

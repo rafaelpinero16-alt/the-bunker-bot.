@@ -36,6 +36,7 @@ export const app = {
         ui.updateTranslations();
         this.initDraggableButton();
         this.initCharCounter();
+        this.bindChannelSelectListener();
         this.initUrlRouting();
         this.initAuth();
     },
@@ -60,6 +61,11 @@ export const app = {
         } else if (channelId) {
             state.selectedChatId = channelId;
             state.activeContext = 'channels';
+            const select = document.getElementById('channel-owner-select');
+            if (select) {
+                select.value = channelId;
+            }
+            this.onChannelSelectChange(channelId);
         }
     },
 
@@ -530,6 +536,51 @@ export const app = {
         tgApp.openTelegramLink(url);
     },
 
+    onChannelSelectChange(channelId) {
+        const idLabel = document.getElementById('channel-id-display') || document.getElementById('channel-id-text');
+        if (idLabel) {
+            idLabel.innerText = channelId ? `ID: ${channelId}` : 'ID: —';
+        }
+
+        if (!channelId) {
+            const targetEl = document.getElementById('studio-target-link');
+            const priceEl = document.getElementById('studio-stars-price');
+            const daysEl = document.getElementById('studio-duration-days');
+            if (targetEl) targetEl.value = '';
+            if (priceEl) priceEl.value = '150';
+            if (daysEl) daysEl.value = '30';
+            return;
+        }
+
+        state.selectedChatId = channelId;
+
+        // Consultar ajustes del canal para autorrellenar los campos
+        api.fetchChatDashboard(channelId).then(data => {
+            if (data && !data.__error) {
+                if (data.target_link !== undefined && document.getElementById('studio-target-link')) {
+                    document.getElementById('studio-target-link').value = data.target_link || '';
+                }
+                if (data.stars_price !== undefined && document.getElementById('studio-stars-price')) {
+                    document.getElementById('studio-stars-price').value = data.stars_price || 150;
+                }
+                if (data.duration_days !== undefined && document.getElementById('studio-duration-days')) {
+                    document.getElementById('studio-duration-days').value = data.duration_days || 30;
+                }
+            }
+        });
+    },
+
+    bindChannelSelectListener() {
+        const select = document.getElementById('channel-owner-select');
+        if (!select || select.dataset.bound) return;
+
+        select.dataset.bound = 'true';
+        select.addEventListener('change', (e) => {
+            this.onChannelSelectChange(e.target.value);
+            tgApp.hapticSelection();
+        });
+    },
+
     async loadChannels() {
         const data = await api.fetchChannels();
         if (data?.__error) {
@@ -539,6 +590,16 @@ export const app = {
         state.data.channels = (data && data.channels) || [];
         ui.renderChatList('channels-list', state.data.channels, ui.t('no_channels'));
         ui.populateSelect('channel-owner-select', state.data.channels, ui.t('no_channels'));
+
+        this.bindChannelSelectListener();
+
+        const select = document.getElementById('channel-owner-select');
+        if (select && select.value) {
+            this.onChannelSelectChange(select.value);
+        } else if (select && select.options.length > 1) {
+            select.selectedIndex = 1;
+            this.onChannelSelectChange(select.value);
+        }
     },
 
     async loadGroups() {

@@ -361,8 +361,7 @@ async def start_subscription_watchdog_worker(bot: Bot):
 async def start_channel_broadcast_worker(bot: Bot):
     """
     Worker perimetral en segundo plano: evalúa continuamente los planes de membresía 
-    con difusión recurrente activa y publica los anuncios de pago con Telegram Stars.
-    Maneja destinos numéricos o @alias y desactiva difusiones si el bot es revocado.
+    con difusión recurrente activa y publica los anuncios con botones inline limpios.
     """
     asyncio.create_task(start_subscription_watchdog_worker(bot))
     logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
@@ -386,7 +385,6 @@ async def start_channel_broadcast_worker(bot: Bot):
                     target_link = plan["target_link"]
                     channel_id = plan["channel_id"]
 
-                    # Convertir a entero si es un ID numérico almacenado como string
                     target_chat = raw_chat_id
                     if isinstance(raw_chat_id, str) and (raw_chat_id.startswith("-") or raw_chat_id.isdigit()):
                         try:
@@ -396,13 +394,19 @@ async def start_channel_broadcast_worker(bot: Bot):
 
                     pay_link = f"https://t.me/{bot_username}?start=chanplan_{plan_id}_{channel_id}"
 
+                    # Texto limpio sin URL cruda
                     caption = promo_text.strip() if promo_text else f"💎 <b>{plan_name}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR"
-                    if target_link:
-                        caption += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>"
 
-                    markup = InlineKeyboardMarkup(inline_keyboard=[
+                    # Botones inline interactivos
+                    kb_rows = [
                         [InlineKeyboardButton(text=f"⭐ Adquirir por {stars_price} Stars", url=pay_link)]
-                    ])
+                    ]
+                    
+                    if target_link:
+                        target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
+                        kb_rows.append([InlineKeyboardButton(text="🔗 Ver Recurso / Canal VIP", url=target_url)])
+
+                    markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
                     try:
                         if media_id and media_type == "photo":
