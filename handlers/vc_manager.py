@@ -1,14 +1,22 @@
+"""
+vc_manager.py — The Bunker OS (Aiogram 3.x)
+
+Módulo de gestión y supervisión acústica de videochats (Voice Rooms).
+Integrado con Centinela MTProto, pasarela de Telegram Stars, telemetría CAMS y botoneras bilingües.
+The Bunker Command OS © 2026 — Cloud Media Management
+"""
 import os
 import asyncio
 import logging
 import time
+import html
 from aiogram import Router, F, Bot
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
     add_to_whitelist, remove_from_whitelist, is_group_approved, 
-    get_mic_vip_price, get_session_by_group,
+    get_mic_vip_price, get_mic_vip_custom_config, get_session_by_group,
     get_night_mode_config,
     get_community_live_telemetry,
     get_vc_monitor_status, set_vc_monitor_status
@@ -227,7 +235,7 @@ def get_user_mention_html(user) -> str:
     if getattr(user, "username", None):
         return f"@{user.username}"
     name = getattr(user, "full_name", getattr(user, "first_name", "Usuario"))
-    return f'<a href="tg://user?id={user.id}">{name}</a>'
+    return f'<a href="tg://user?id={user.id}">{html.escape(name)}</a>'
 
 
 async def extract_vc_target(message: Message, command: CommandObject, bot: Bot):
@@ -358,13 +366,17 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
 # ==========================================
 @router.callback_query(F.data.startswith("vcinfo_micvip_"))
 async def cb_vcinfo_micvip(callback: CallbackQuery):
-    """Abre en segundo plano la ventana emergente oficial con la información de MicVIP."""
+    """Abre en segundo plano la ventana emergente oficial con la información personalizada de MicVIP."""
     parts = callback.data.split("_")
     chat_id = int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 0
     lang = parts[3] if len(parts) > 3 and parts[3] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
-    price = (await get_mic_vip_price(chat_id)) or 50 if chat_id else 50
-    alert_text = t["micvip_info_alert"].format(price=price)
+    
+    custom_cfg = await get_mic_vip_custom_config(chat_id) if chat_id else {"price": 50, "text": ""}
+    price = custom_cfg.get("price") or 50
+    custom_desc = custom_cfg.get("text")
+    
+    alert_text = custom_desc if custom_desc else t["micvip_info_alert"].format(price=price)
     await callback.answer(alert_text, show_alert=True)
 
 
@@ -385,7 +397,8 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
     new_lang = parts[3] if parts[3] in ["es", "en"] else "es"
     bot_info = await bot.get_me()
     bot_username = bot_info.username or "thebunkerapp_bot"
-    price = await get_mic_vip_price(chat_id) or 50
+    custom_cfg = await get_mic_vip_custom_config(chat_id)
+    price = custom_cfg.get("price") or 50
 
     current_text = callback.message.text or callback.message.caption or ""
     if "UN NUEVO MIEMBRO" in current_text.upper() or "A NEW MEMBER" in current_text.upper():
@@ -557,7 +570,8 @@ async def cmd_status_vc(message: Message, bot: Bot):
     t = TEXTS[lang]
 
     ctx = await get_telemetry_context(chat_id, lang)
-    mic_price = await get_mic_vip_price(chat_id) or 50
+    custom_cfg = await get_mic_vip_custom_config(chat_id)
+    mic_price = custom_cfg.get("price") or 50
 
     if lang == "en":
         status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
@@ -620,7 +634,8 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
         if action == "vc_status":
             is_active = (await get_vc_monitor_status(chat_id)) == 1
             ctx = await get_telemetry_context(chat_id, lang)
-            mic_price = await get_mic_vip_price(chat_id) or 50
+            custom_cfg = await get_mic_vip_custom_config(chat_id)
+            mic_price = custom_cfg.get("price") or 50
 
             if lang == "en":
                 status_text = "🟢 Active and monitoring" if is_active else "🔴 Paused"
@@ -711,7 +726,8 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
         return
 
     bot_info = await bot.get_me()
-    price = await get_mic_vip_price(chat_id) or 50
+    custom_cfg = await get_mic_vip_custom_config(chat_id)
+    price = custom_cfg.get("price") or 50
 
     mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
     
