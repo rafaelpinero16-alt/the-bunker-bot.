@@ -741,7 +741,9 @@ async def purge_general_service_messages(message: Message):
             await message.delete()
         except Exception: 
             pass
-        # ==========================================
+
+
+# ==========================================
 # 🧹 MOTOR HÍBRIDO DE GHOST PURGE (MTPROTO + BOT API)
 # ==========================================
 GHOST_DISPLAY_NAMES = {"deleted account", "cuenta eliminada"}
@@ -1211,8 +1213,6 @@ async def noiseshield_toggle(message: Message, bot: Bot):
         f"🔇 Escudo Antirruido: <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
         f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
     )
-
-
 # ==========================================
 # 💰 COLA DE SPEAKERS PAGADA (/speakers)
 # ==========================================
@@ -1798,7 +1798,6 @@ async def enforce_warn_ladder(
             f"🇺🇸 <i>{en_txt}</i>\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
-        # En ULTRA PRO se acompaña la sanción con la multimedia si está configurada
         use_media = media_id if group_tier in ("ultra_pro", "ultra") else None
         use_type = media_type if group_tier in ("ultra_pro", "ultra") else None
         await _send_temp(bot, chat_id, sanction_notice, ttl=25, reply_to=reply_to, media_id=use_media, media_type=use_type)
