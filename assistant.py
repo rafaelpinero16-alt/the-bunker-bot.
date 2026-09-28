@@ -1,3 +1,10 @@
+"""
+assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
+
+Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
+Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
+The Bunker Command OS © 2026 — Cloud Media Management
+"""
 import asyncio
 import logging
 import random
@@ -175,7 +182,6 @@ def _extract_urls_to_markup(text: str, custom_btn_text: str = None,
         label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
         buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
 
-    # Buscar URLs en texto plano
     url_pattern = re.compile(r'https?://[^\s<>"]+')
     found_urls = url_pattern.findall(text)
 
@@ -217,15 +223,6 @@ async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> 
         return {"toxic": False, "reason": str(e)}
 
 
-DUCK_TEXT = (
-    "🎙️ <b>The Bunker Bot: Modo Podcast — Prioridad de Orador</b>\n\n"
-    "El micrófono de <b>{user_name}</b> fue calibrado temporalmente al <b>{pct}%</b> "
-    "mientras el anfitrión principal hace uso de la palabra.\n\n"
-    "🇺🇸 <i><b>{user_name}</b>'s mic was dynamically ducked to <b>{pct}%</b> while the "
-    "host is speaking.</i>\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
-)
-
 SCREEN_SHIELD_ALERT_TEXT = (
     "🎥 <b>The Bunker Bot: Escudo Antinota Activado</b>\n\n"
     "Se detectó una transmisión de pantalla no autorizada por parte de <b>{user_name}</b>. "
@@ -257,13 +254,15 @@ VC_START_TEXTS = {
         "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
         "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
         "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
-        "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓"
+        "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
     ),
     "en": (
         "THE VOICE CHAT FOR ⚜️🔐The Búnker Chat🔐⚜️ HAS STARTED! EVERYONE IS WELCOME TO JOIN 🔥🐽💨🚀\n\n"
         "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
         "⚜️ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
-        "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓"
+        "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
     )
 }
 
@@ -272,13 +271,15 @@ VC_MEMBER_JOIN_TEXTS = {
         "UN NUEVO MIEMBRO SE HA UNIDO AL VC DE THE BÚNKER CHAT.\n\n"
         "🔇 {user_name}, el volumen de tu micrófono se ha establecido por defecto a un máximo del 2%.\n\n"
         "¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y ACTIVAR EL VOLUMEN DE TU MICRÓFONO AL 100% DE CAPACIDAD?\n\n"
-        "Usa los siguientes botones para obtener tu ⚜️MIC🎙️VIP⚜️"
+        "Usa los siguientes botones para obtener tu ⚜️MIC🎙️VIP⚜️\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
     ),
     "en": (
         "A NEW MEMBER HAS JOINED THE BÚNKER CHAT VC.\n\n"
         "🔇 {user_name}, your microphone volume has been set to a maximum of 2% by default.\n\n"
         "DO YOU WANT TO BECOME A VIP MEMBER AND UNLOCK YOUR MICROPHONE VOLUME AT 100% CAPACITY?\n\n"
-        "Use the buttons below to get your ⚜️MIC🎙️VIP⚜️"
+        "Use the buttons below to get your ⚜️MIC🎙️VIP⚜️\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
     )
 }
 
@@ -286,7 +287,6 @@ OPTIMIZATION_TEXT = (
     "🔄 <b>Protocolo de Optimización Audiovisual — The Bunker</b>\n\n"
     "Estamos realizando una optimización de rutina en segundo plano para refrescar cámaras, purgar la transmisión y garantizar máxima fluidez sin retrasos.\n\n"
     "⚡ <i>La sala se reiniciará en 3 segundos y se abrirá limpia de inmediato. Los pases VIP se mantendrán activos al reconectarse.</i>\n\n"
-    "🇺🇸 <i>Giving the live stream a quick background refresh to clear video lag and keep camera feeds smooth. Reopening fresh in 3 seconds! VIP passes stay active.</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
 
@@ -294,13 +294,11 @@ VC_SCHED_MESSAGES = {
     "start": (
         "📡 <b>Apertura Programada — The Bunker</b>\n\n"
         "El videochat de la comunidad ha sido abierto automáticamente según el cronograma ULTRA PRO.\n\n"
-        "🇺🇸 <i>The community voice chat has automatically kicked off according to the ULTRA PRO schedule!</i>\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     ),
     "end": (
         "📡 <b>Cierre Programado — The Bunker</b>\n\n"
         "El ciclo programado de videochat ha concluido. La sala ha sido cerrada de forma ordenada.\n\n"
-        "🇺🇸 <i>The scheduled voice chat session has wrapped up. The room has been closed out smoothly.</i>\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     )
 }
@@ -812,7 +810,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
-            # Protocolo de reinicio de rutina preventivo cada 3.5h (12600 seg)
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
@@ -919,7 +916,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     u_id = peer_user.user_id
                     active_users.add(u_id)
 
-                    # 🕵️‍♂️ Userbot Hunter: Control estricto de bots maliciosos
                     if await is_userbot_flagged(u_id, chat_id):
                         try:
                             await client.invoke(
@@ -944,7 +940,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     is_vip = await is_vip_mic_active(u_id, chat_id) or await is_whitelisted(u_id)
                     is_authorized = is_admin_or_owner or is_vip
 
-                    # 1. Escudo Antinota (Pantalla no autorizada)
                     if not is_authorized and screen_shield_on and getattr(p, "presentation", None):
                         flag_key = (chat_id, u_id)
                         if not _screen_shield_flagged.get(flag_key):
@@ -972,7 +967,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     else:
                         _screen_shield_flagged.pop((chat_id, u_id), None)
 
-                    # 2. Modo Podcast: Ducking sobre participantes VIP cuando habla el anfitrión
                     if is_vip and not is_admin_or_owner:
                         vol = p.volume if getattr(p, "volume", None) is not None else 10000
                         target_vip_vol = podcast_cfg["duck_volume"] if (podcast_cfg["status"] == 1 and host_is_speaking) else 10000
@@ -986,11 +980,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 pass
                         continue
 
-                    # Administradores conservan 100% de micrófono
                     if is_admin_or_owner:
                         continue
 
-                    # 3. Usuarios comunes no verificados: Atenuación acústica constante al 2%
                     vol = p.volume if getattr(p, "volume", None) is not None else 10000
                     is_muted = getattr(p, "muted", True)
 
@@ -1076,9 +1068,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
         await asyncio.sleep(3)
 
 
-# ==========================================
-# 🗓️ PROGRAMADOR AUTÓNOMO SEMANAL (VC SCHEDULER)
-# ==========================================
 async def vc_scheduler_loop():
     """Bucle autónomo de supervisión de horarios de videochats con evaluación por ventana."""
     logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
@@ -1092,6 +1081,8 @@ async def vc_scheduler_loop():
             for row in schedules:
                 group_id, days_allowed, start_time, end_time, status, call_active = row[0], row[1], row[2], row[3], row[4], row[5]
                 
+                if not days_allowed:
+                    continue
                 allowed_days_list = [d.strip() for d in days_allowed.split(",")]
                 if current_day_str not in allowed_days_list:
                     continue
@@ -1108,7 +1099,6 @@ async def vc_scheduler_loop():
 
                 is_in_window = _is_time_in_window(current_time_str, start_time, end_time)
 
-                # Apertura programada
                 if is_in_window and call_active == 0:
                     try:
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
@@ -1128,7 +1118,6 @@ async def vc_scheduler_loop():
                         else:
                             logger.error(f"Error abriendo videochat en grupo {group_id}: {e}")
 
-                # Cierre programado
                 elif not is_in_window and call_active == 1:
                     try:
                         full_chat_res = await client.invoke(GetFullChannel(channel=peer))
