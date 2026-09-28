@@ -1,3 +1,11 @@
+"""
+payments.py — The Bunker OS (Aiogram 3.x)
+
+Pasarela de pagos oficial con Telegram Stars (XTR).
+Gestiona la facturación automatizada de licencias PRO/ULTRA PRO, pases VIP de micrófono,
+membresías de canales con enlaces criptográficos de un solo uso, cola de speakers y propinas.
+The Bunker Command OS © 2026 — Cloud Media Management
+"""
 import os
 import asyncio
 import logging
@@ -230,7 +238,7 @@ TEXTS = {
         "btn_back": "🔙 Volver al Menú Principal",
         "btn_back_group": "🔙 Volver al Panel",
         "btn_pay_stars": "⭐ Pagar con Stars",
-        
+
         "inv_pro_t": "Suscripción PRO (300 XTR)",
         "inv_pro_d": "Comandos ilimitados, purga de mensajes automatizada, captcha pro y centinela maestro.",
         "inv_ultra_t": "Licencia ULTRA PRO (600 XTR)",
@@ -241,7 +249,7 @@ TEXTS = {
         "inv_speaker_d": "Prioridad en la cola de oradores del videochat con micrófono abierto según tu turno.",
         "inv_tip_t": "Propina Stars para la Comunidad",
         "inv_tip_d": "Aporte voluntario en Telegram Stars en apoyo directo a la comunidad y a sus creadores.",
-        
+
         "pmt_ok_pro": (
             "🎉 <b>¡Pago Confirmado! Plan PRO Activado</b>\n\n"
             "• Entorno <code>{chat_id}</code> elevado al estándar <b>PRO ⭐</b> con éxito.\n"
