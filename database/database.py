@@ -785,21 +785,26 @@ def set_mic_vip_price(group_id: int, price: int):
         conn.commit()
 
 
+# ==========================================
+# 💎 CONFIGURACIÓN MICVIP EXTENDIDA (Tarifa, Tag y Copy Explicativo)
+# ==========================================
 def get_mic_vip_custom_config(group_id: int) -> dict:
     """Devuelve precio, etiqueta y texto promocional personalizado para el MicVIP de la comunidad."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT mic_vip_price, mic_vip_custom_tag, mic_vip_custom_text
+                SELECT mic_vip_price, mic_vip_custom_price, mic_vip_custom_tag, mic_vip_custom_text
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
+                # Priorizar tarifa personalizada si existe, luego la estándar, o caer en 50 por defecto
+                price_val = row[1] if (row[1] is not None and row[1] > 0) else (row[0] if (row[0] is not None and row[0] > 0) else 50)
                 return {
-                    "price": row[0] if (row[0] is not None and row[0] > 0) else 50,
-                    "tag": row[1] if row[1] else "⚜️MIC🎙️VIP⚜️",
-                    "text": row[2] if row[2] else ""
+                    "price": price_val,
+                    "tag": row[2] if row[2] else "⚜️MIC🎙️VIP⚜️",
+                    "text": row[3] if row[3] else ""
                 }
         except sqlite3.OperationalError:
             pass
@@ -812,10 +817,19 @@ def set_mic_vip_custom_config(group_id: int, field: str, value):
         return
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
-        """, (group_id, value))
+        # Si actualizan el precio estándar o personalizado, sincronizamos ambos campos para evitar desvíos
+        if field in ("mic_vip_price", "mic_vip_custom_price"):
+            cursor.execute(f"""
+                INSERT INTO group_settings (group_id, mic_vip_price, mic_vip_custom_price) VALUES (?, ?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET 
+                    mic_vip_price = excluded.mic_vip_price,
+                    mic_vip_custom_price = excluded.mic_vip_custom_price
+            """, (group_id, value, value))
+        else:
+            cursor.execute(f"""
+                INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+            """, (group_id, value))
         conn.commit()
 
 
@@ -851,9 +865,14 @@ def get_vip_badge_title(group_id: int) -> str:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT vip_mic_badge_title FROM group_settings WHERE group_id = ?", (group_id,))
+            cursor.execute("SELECT mic_vip_custom_tag, vip_mic_badge_title FROM group_settings WHERE group_id = ?", (group_id,))
             row = cursor.fetchone()
-            title = row[0] if row and row[0] else "Pase VIP 24h 🎙️"
+            if row and row[0]:
+                title = row[0]
+            elif row and row[1]:
+                title = row[1]
+            else:
+                title = "Pase VIP 24h 🎙️"
         except sqlite3.OperationalError:
             title = "Pase VIP 24h 🎙️"
     return title[:16]
@@ -866,9 +885,11 @@ def set_vip_badge_title(group_id: int, title: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO group_settings (group_id, vip_mic_badge_title) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET vip_mic_badge_title = excluded.vip_mic_badge_title
-        """, (group_id, clean_title))
+            INSERT INTO group_settings (group_id, vip_mic_badge_title, mic_vip_custom_tag) VALUES (?, ?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET 
+                vip_mic_badge_title = excluded.vip_mic_badge_title,
+                mic_vip_custom_tag = excluded.mic_vip_custom_tag
+        """, (group_id, clean_title, clean_title))
         conn.commit()
 
 

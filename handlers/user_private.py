@@ -4606,7 +4606,6 @@ def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: 
     F.data.startswith("payload_") | F.data.startswith("ai_")
 )
 async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
-    # 🧹 Entrar a una herramienta libera cualquier conversación pendiente (los prompts la re-arman después).
     clear_user_states(bot.id, callback.from_user.id)
 
     data = callback.data.split("_")
@@ -4642,7 +4641,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 g_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["guardian_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
                 c_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["copilot_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
                 prompt_prev = ai_cfg["custom_prompt"][:40] + "..." if len(ai_cfg["custom_prompt"]) > 40 else (ai_cfg["custom_prompt"] or (tr(lang, "Por defecto (Estándar)", "Default (Standard)")))
-                text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev)
+                text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev) + PERIMETER_SIGNATURE
                 keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
             elif sub == "toggle":
                 db_field = "ai_guardian_status" if sub_target == "guardian" else "ai_copilot_status"
@@ -4652,11 +4651,11 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 g_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["guardian_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
                 c_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["copilot_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
                 prompt_prev = ai_cfg["custom_prompt"][:40] + "..." if len(ai_cfg["custom_prompt"]) > 40 else (ai_cfg["custom_prompt"] or (tr(lang, "Por defecto (Estándar)", "Default (Standard)")))
-                text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev)
+                text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev) + PERIMETER_SIGNATURE
                 keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
             elif sub == "prompt":
                 AI_PROMPT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-                prompt = await callback.message.answer(t["ai_prompt_prompt"], reply_markup=_cancel_kb(t, f"ai_menu_{group_id}_{lang}"), parse_mode="HTML")
+                prompt = await callback.message.answer(t["ai_prompt_prompt"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"ai_menu_{group_id}_{lang}"), parse_mode="HTML")
                 fire_and_forget_auto_delete([prompt], delay=60)
                 return
 
@@ -4673,10 +4672,10 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
         elif sub == "menu":
             status = await get_panic_status(group_id)
             status_str = tr(lang, "🚨 BLOQUEADO", "🚨 LOCKED") if status == 1 else "🟢 Normal"
-            text = t["panic_menu"].format(status_str=status_str)
+            text = t["panic_menu"].format(status_str=status_str) + PERIMETER_SIGNATURE
             keyboard = get_panic_keyboard(group_id, lang, status, chat_type=chat_kind)
         elif sub == "confirm":
-            text = t["panic_confirm"]
+            text = t["panic_confirm"] + PERIMETER_SIGNATURE
             keyboard = get_panic_confirm_keyboard(group_id, lang)
         elif sub == "activate":
             await set_panic_status(group_id, 1)
@@ -4684,7 +4683,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 await execute_raid_lockdown(bot, group_id)
             except Exception as ex:
                 logging.error(f"❌ [Panic] Fallo lockdown en {group_id}: {ex}")
-            text = t["panic_activated"]
+            text = t["panic_activated"] + PERIMETER_SIGNATURE
             keyboard = get_panic_keyboard(group_id, lang, 1, chat_type=chat_kind)
         elif sub == "deactivate":
             await set_panic_status(group_id, 0)
@@ -4692,7 +4691,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 await lift_raid_lockdown(bot, group_id)
             except Exception as ex:
                 logging.error(f"❌ [Panic] Fallo levantar lockdown en {group_id}: {ex}")
-            text = t["panic_deactivated"]
+            text = t["panic_deactivated"] + PERIMETER_SIGNATURE
             keyboard = get_panic_keyboard(group_id, lang, 0, chat_type=chat_kind)
 
     elif module == "shield":
@@ -4712,7 +4711,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
         elif sub == "menu":
             status = await get_shield_status(group_id)
             status_str = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if status == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
-            text = t["shield_menu"].format(status_str=status_str)
+            text = t["shield_menu"].format(status_str=status_str) + PERIMETER_SIGNATURE
             keyboard = get_shield_keyboard(group_id, lang, status, chat_type=chat_kind)
         elif sub == "toggle":
             await set_shield_status(group_id, new_status)
@@ -4726,7 +4725,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.answer(t["shield_updated_1"] if new_status == 1 else t["shield_updated_0"])
             status = await get_shield_status(group_id)
             status_str = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if status == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
-            text = t["shield_menu"].format(status_str=status_str)
+            text = t["shield_menu"].format(status_str=status_str) + PERIMETER_SIGNATURE
             keyboard = get_shield_keyboard(group_id, lang, status, chat_type=chat_kind)
 
     elif module == "podcast":
@@ -4747,7 +4746,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             status = await get_podcast_status(group_id)
             duck_level = GROUP_DUCK_LEVEL.get(group_id, 20)
             status_str = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if status == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
-            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
+            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level) + PERIMETER_SIGNATURE
             keyboard = get_podcast_keyboard(group_id, lang, status, duck_level, chat_type=chat_kind)
         elif sub == "toggle":
             new_status = int(val)
@@ -4763,7 +4762,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.answer(t["podcast_updated_1"] if new_status == 1 else t["podcast_updated_0"])
             status = await get_podcast_status(group_id)
             status_str = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if status == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
-            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
+            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level) + PERIMETER_SIGNATURE
             keyboard = get_podcast_keyboard(group_id, lang, status, duck_level, chat_type=chat_kind)
         elif sub == "duckval":
             duck_level = int(val)
@@ -4777,11 +4776,11 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                     logging.error(f"❌ [Podcast] Fallo actualizacion ducking en {group_id}: {ex}")
             await callback.answer(t["duck_updated"].format(group_id=group_id, duck_level=duck_level), show_alert=True)
             status_str = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if status == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
-            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level)
+            text = t["podcast_menu"].format(status_str=status_str, duck_level=duck_level) + PERIMETER_SIGNATURE
             keyboard = get_podcast_keyboard(group_id, lang, status, duck_level, chat_type=chat_kind)
         elif sub == "duckset":
             PODCAST_DUCK_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt = await callback.message.answer(t["duck_custom_prompt"], reply_markup=_cancel_kb(t, f"podcast_menu_{group_id}_{lang}"), parse_mode="HTML")
+            prompt = await callback.message.answer(t["duck_custom_prompt"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"podcast_menu_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
@@ -4804,7 +4803,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             queue = await get_speaker_queue(group_id)
             queue_count = len(queue) if queue else 0
             status_str = tr(lang, "🟢 ACTIVA", "🟢 ACTIVE")
-            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count) + PERIMETER_SIGNATURE
             keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
         elif sub == "toggle":
             new_status = int(val)
@@ -4813,7 +4812,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             queue = await get_speaker_queue(group_id)
             queue_count = len(queue) if queue else 0
             status_str = tr(lang, "🟢 ACTIVADA", "🟢 ACTIVE") if new_status == 1 else tr(lang, "🔴 DESACTIVADA", "🔴 DISABLED")
-            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count) + PERIMETER_SIGNATURE
             keyboard = get_speakers_keyboard(group_id, lang, new_status, price, chat_type=chat_kind)
         elif sub == "priceval":
             price = int(val)
@@ -4822,11 +4821,11 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             queue = await get_speaker_queue(group_id)
             queue_count = len(queue) if queue else 0
             status_str = tr(lang, "🟢 ACTIVA", "🟢 ACTIVE")
-            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count)
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=queue_count) + PERIMETER_SIGNATURE
             keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
         elif sub == "priceset":
             SPEAKER_PRICE_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt = await callback.message.answer(t["speakers_price_prompt"], reply_markup=_cancel_kb(t, f"speakers_menu_{group_id}_{lang}"), parse_mode="HTML")
+            prompt = await callback.message.answer(t["speakers_price_prompt"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"speakers_menu_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
         elif sub == "clear":
@@ -4837,9 +4836,18 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.answer(t["speakers_cleared"])
             price = GROUP_SPEAKER_PRICE.get(group_id, 20)
             status_str = tr(lang, "🟢 ACTIVA", "🟢 ACTIVE")
-            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=0)
+            text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=0) + PERIMETER_SIGNATURE
             keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
 
+    if text and keyboard:
+        try:
+            await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
+        except TelegramBadRequest:
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     elif module == "payload":
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
