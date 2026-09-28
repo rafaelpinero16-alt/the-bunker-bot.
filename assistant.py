@@ -5,6 +5,7 @@ import os
 import time
 import json
 import html
+import re
 from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client
@@ -40,7 +41,8 @@ from database.database import (
     flag_userbot, is_userbot_flagged,
     get_ai_sentinel_config,
     get_ghost_purge_config,
-    update_ghost_purge_scan_time
+    update_ghost_purge_scan_time,
+    get_mic_vip_price
 )
 
 # 🤖 Integración de Mistral AI para el Guardián de Voz
@@ -97,6 +99,18 @@ else:
 _global_bot = None
 _default_my_id = None
 
+
+def get_assistant_bot_id() -> int:
+    """Retorna con seguridad el ID de la cuenta MTProto activa (maestra o por defecto)."""
+    global _default_my_id
+    if _default_my_id:
+        return _default_my_id
+    if assistant_app and getattr(assistant_app, "me", None):
+        _default_my_id = assistant_app.me.id
+        return _default_my_id
+    return 0
+
+
 active_sentinels = {}
 admin_caches = {}  
 ADMIN_CACHE_TTL = 300
@@ -131,6 +145,52 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
     return lock
 
 
+def _get_group_now(tz_name: str = None) -> datetime:
+    """Devuelve la fecha/hora actual calibrada con la zona horaria del bot o comunidad."""
+    tz_str = tz_name or os.getenv("BOT_TIMEZONE", "America/Bogota")
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_str))
+    except Exception:
+        return datetime.now()
+
+
+def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
+    """Evalúa si una hora HH:MM se encuentra dentro de un intervalo (soporta cambio de medianoche)."""
+    if start_hm <= end_hm:
+        return start_hm <= current_hm < end_hm
+    else:
+        return current_hm >= start_hm or current_hm < end_hm
+
+
+def _extract_urls_to_markup(text: str, custom_btn_text: str = None, 
+                            custom_btn_url: str = None) -> tuple[str, InlineKeyboardMarkup | None]:
+    """
+    Higieniza el texto eliminando enlaces en texto plano y generando una
+    botonera inline interactiva limpia para el payload de la comunidad.
+    """
+    buttons = []
+    
+    if custom_btn_url:
+        label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
+        buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
+
+    # Buscar URLs en texto plano
+    url_pattern = re.compile(r'https?://[^\s<>"]+')
+    found_urls = url_pattern.findall(text)
+
+    cleaned_text = text
+    for i, u in enumerate(found_urls):
+        cleaned_text = cleaned_text.replace(u, "").strip()
+        if not custom_btn_url or u != custom_btn_url:
+            btn_title = f"🔗 Enlace {i + 1}" if len(found_urls) > 1 else "🌐 Acceder"
+            buttons.append([InlineKeyboardButton(text=btn_title, url=u)])
+
+    cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
+    markup = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+    return cleaned_text, markup
+
+
 async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> dict:
     if not mistral_client:
         return {"toxic": False, "reason": "Mistral API Key no configurada"}
@@ -158,11 +218,11 @@ async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> 
 
 
 DUCK_TEXT = (
-    "🎙️ <b>The Bunker Bot: Modo Podcast — Atenuación Dinámica</b>\n\n"
-    "El volumen de fondo de <b>{user_name}</b> fue atenuado automáticamente al <b>{pct}%</b> "
-    "mientras el orador principal tiene el micrófono activo, para priorizar su voz.\n\n"
-    "🇺🇸 <i><b>{user_name}</b>'s background volume was dialed down to <b>{pct}%</b> while the "
-    "main speaker is on mic, to keep their voice front and center.</i>\n\n"
+    "🎙️ <b>The Bunker Bot: Modo Podcast — Prioridad de Orador</b>\n\n"
+    "El micrófono de <b>{user_name}</b> fue calibrado temporalmente al <b>{pct}%</b> "
+    "mientras el anfitrión principal hace uso de la palabra.\n\n"
+    "🇺🇸 <i><b>{user_name}</b>'s mic was dynamically ducked to <b>{pct}%</b> while the "
+    "host is speaking.</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
 
@@ -192,7 +252,6 @@ GHOST_PURGE_ALERT_TEXT = (
     "🛡️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
 )
 
-# Textos oficiales bilingües de inicio y moderación dinámica
 VC_START_TEXTS = {
     "es": (
         "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
@@ -247,9 +306,9 @@ VC_SCHED_MESSAGES = {
 }
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es") -> InlineKeyboardMarkup:
-    """Construye la botonera bilingüe interactiva con deep-link de cobro nativo en Stars."""
-    btn1_text = "🎙️ MICVIP - 50 STARS ⭐"
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50) -> InlineKeyboardMarkup:
+    """Construye la botonera bilingüe interactiva con precio dinámico en Stars y deep-link nativo."""
+    btn1_text = f"🎙️ MICVIP - {price} STARS ⭐"
     btn2_text = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
     btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
     next_lang = "en" if lang == "es" else "es"
@@ -270,8 +329,9 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
     try:
         bot_info = await _global_bot.get_me()
         bot_username = bot_info.username or "thebunkerapp_bot"
+        price = await get_mic_vip_price(chat_id) or 50
         text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang)
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
 
         sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
         if sent:
@@ -290,7 +350,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
     if not _global_bot:
         return
     try:
-        # Borrar mensaje anterior si existe en el registro
         last_id = _last_vc_notice.get(chat_id)
         if last_id:
             try:
@@ -300,9 +359,10 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
 
         bot_info = await _global_bot.get_me()
         bot_username = bot_info.username or "thebunkerapp_bot"
+        price = await get_mic_vip_price(chat_id) or 50
         template = VC_MEMBER_JOIN_TEXTS.get(lang, VC_MEMBER_JOIN_TEXTS["es"])
         text = template.format(user_name=user_name)
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang)
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
 
         sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
         if sent:
@@ -324,23 +384,28 @@ async def _is_night_active(chat_id: int) -> tuple[bool, str]:
 
 
 async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
-                                  media_type: str = None, auto_delete_after: int = None):
+                                  media_type: str = None, auto_delete_after: int = None,
+                                  reply_markup: InlineKeyboardMarkup = None):
+    """Despachador multimedia enriquecido con soporte de botonera inline e higienización de enlaces."""
     if not _global_bot:
         return None
 
+    cleaned_text, extracted_markup = _extract_urls_to_markup(text)
+    final_markup = reply_markup if reply_markup else extracted_markup
+
     try:
         if media_id and media_type == "video":
-            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=text, parse_mode="HTML")
+            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=text, parse_mode="HTML")
+            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         elif media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=text, parse_mode="HTML")
+            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         else:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
     except Exception as e:
         logger.warning(f"Aviso al despachar notificación del Centinela en {chat_id}: {e}")
         try:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         except Exception:
             return None
 
@@ -382,12 +447,17 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     if now - last_sent < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
         return None
 
+    btn_text = payload_cfg.get("button_text")
+    btn_url = payload_cfg.get("button_url")
+    cleaned_text, markup = _extract_urls_to_markup(text, btn_text, btn_url)
+
     sent = await _dispatch_radar_notice(
         chat_id=chat_id,
-        text=text,
+        text=cleaned_text,
         media_id=payload_cfg.get("media_id"),
         media_type=payload_cfg.get("media_type"),
-        auto_delete_after=payload_cfg.get("auto_delete_after")
+        auto_delete_after=payload_cfg.get("auto_delete_after"),
+        reply_markup=markup
     )
 
     if sent:
@@ -401,10 +471,7 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
 # 💀 MOTOR TÁCTICO: GHOST PURGE RESILIENTE
 # ==========================================
 async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
-    """
-    Escanea en tiempo real la comunidad y purga cuentas eliminadas/fantasma.
-    Usa el Centinela dedicado activo o ejecuta el fallback mediante el Bot de Aiogram.
-    """
+    """Escanea en tiempo real la comunidad y purga cuentas eliminadas/fantasma."""
     sentinel_data = active_sentinels.get(chat_id)
     client: Client = sentinel_data["client"] if sentinel_data else assistant_app
 
@@ -735,7 +802,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     new_call_id = raw_call.id
                     if not current_call or current_call.id != new_call_id:
                         call_start_time = asyncio.get_event_loop().time()
-                        # FASE 1 y 2: El Centinela envía el mensaje fijado de apertura
                         asyncio.create_task(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
                     current_call = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
                     permission_warned = False
@@ -746,7 +812,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
-            # Protocolo de reinicio de rutina preventivo cada 3.5h
+            # Protocolo de reinicio de rutina preventivo cada 3.5h (12600 seg)
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
@@ -778,6 +844,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                     try:
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
+                        asyncio.create_task(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
                     except Exception as create_err:
                         logger.warning(f"Aviso al reiniciar llamada: {create_err}")
 
@@ -867,14 +934,15 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             pass
                         continue
 
-                    is_authorized = (
+                    is_admin_or_owner = (
                         is_super_admin(u_id)
                         or u_id in SERVICE_ACCOUNT_IDS
                         or u_id == bot_client_id 
                         or u_id in cache_info['admins']
-                        or await is_whitelisted(u_id) 
-                        or await is_vip_mic_active(u_id, chat_id)
                     )
+                    
+                    is_vip = await is_vip_mic_active(u_id, chat_id) or await is_whitelisted(u_id)
+                    is_authorized = is_admin_or_owner or is_vip
 
                     # 1. Escudo Antinota (Pantalla no autorizada)
                     if not is_authorized and screen_shield_on and getattr(p, "presentation", None):
@@ -904,9 +972,25 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     else:
                         _screen_shield_flagged.pop((chat_id, u_id), None)
 
-                    if is_authorized:
+                    # 2. Modo Podcast: Ducking sobre participantes VIP cuando habla el anfitrión
+                    if is_vip and not is_admin_or_owner:
+                        vol = p.volume if getattr(p, "volume", None) is not None else 10000
+                        target_vip_vol = podcast_cfg["duck_volume"] if (podcast_cfg["status"] == 1 and host_is_speaking) else 10000
+                        if abs(vol - target_vip_vol) > 50:
+                            try:
+                                p_peer = await client.resolve_peer(u_id)
+                                await client.invoke(
+                                    EditGroupCallParticipant(call=current_call, participant=p_peer, muted=False, volume=target_vip_vol)
+                                )
+                            except Exception:
+                                pass
                         continue
 
+                    # Administradores conservan 100% de micrófono
+                    if is_admin_or_owner:
+                        continue
+
+                    # 3. Usuarios comunes no verificados: Atenuación acústica constante al 2%
                     vol = p.volume if getattr(p, "volume", None) is not None else 10000
                     is_muted = getattr(p, "muted", True)
 
@@ -916,14 +1000,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         noise_spike = _register_noise_strike(chat_id, u_id)
                     _last_mute_state[(chat_id, u_id)] = is_muted
 
-                    ducking_active = (podcast_cfg["status"] == 1 and host_is_speaking and not noise_spike)
-
                     if night_active:
                         desired_muted, desired_volume = True, 0
                     elif noise_spike:
                         desired_muted, desired_volume = True, 0
-                    elif ducking_active:
-                        desired_muted, desired_volume = False, podcast_cfg["duck_volume"]
                     else:
                         desired_muted, desired_volume = True, 200
 
@@ -931,7 +1011,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         noise_spike
                         or night_active
                         or (desired_muted and ((not is_muted) or vol > 200))
-                        or (not desired_muted and (is_muted or abs(vol - desired_volume) > 50))
                     )
 
                     if action_needed:
@@ -973,15 +1052,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                             text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_name),
                                             auto_delete_after=30
                                         )
-                                    elif ducking_active:
-                                        pct = round(podcast_cfg["duck_volume"] / 100)
-                                        await _dispatch_radar_notice(
-                                            chat_id=chat_id,
-                                            text=DUCK_TEXT.format(user_name=user_name, pct=pct),
-                                            auto_delete_after=30
-                                        )
                                     else:
-                                        # FASE 3 y 4: Notificación dinámica con auto-eliminación del mensaje anterior
                                         asyncio.create_task(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_name, lang="es"))
                                 except Exception:
                                     pass
@@ -1005,11 +1076,15 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
         await asyncio.sleep(3)
 
 
+# ==========================================
+# 🗓️ PROGRAMADOR AUTÓNOMO SEMANAL (VC SCHEDULER)
+# ==========================================
 async def vc_scheduler_loop():
-    logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado.")
+    """Bucle autónomo de supervisión de horarios de videochats con evaluación por ventana."""
+    logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
     while True:
         try:
-            now = datetime.now()
+            now = _get_group_now()
             current_day_str = str(now.isoweekday())
             current_time_str = now.strftime("%H:%M")
 
@@ -1031,20 +1106,30 @@ async def vc_scheduler_loop():
                 except Exception:
                     continue
 
-                if current_time_str == start_time and call_active == 0:
+                is_in_window = _is_time_in_window(current_time_str, start_time, end_time)
+
+                # Apertura programada
+                if is_in_window and call_active == 0:
                     try:
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
                         await update_vc_call_status(group_id, 1)
                         if _global_bot:
                             await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["start"], parse_mode="HTML")
+                            asyncio.create_task(_dispatch_pinned_vc_welcome(group_id, lang="es"))
                             try:
                                 await _dispatch_sentinel_payload(group_id, origin="apertura_programada")
                             except Exception as payload_err:
-                                logger.debug(f"Aviso despachando payload Ultra Pro en apertura programada {group_id}: {payload_err}")
+                                logger.debug(f"Aviso despachando payload Ultra Pro en apertura {group_id}: {payload_err}")
+                        logger.info(f"📡 [Apertura VC Programada] Sala abierta en comunidad {group_id}.")
                     except Exception as e:
-                        logger.error(f"Error abriendo videochat en grupo {group_id}: {e}")
+                        err_up = str(e).upper()
+                        if "ALREADY_STARTED" in err_up:
+                            await update_vc_call_status(group_id, 1)
+                        else:
+                            logger.error(f"Error abriendo videochat en grupo {group_id}: {e}")
 
-                elif current_time_str == end_time and call_active == 1:
+                # Cierre programado
+                elif not is_in_window and call_active == 1:
                     try:
                         full_chat_res = await client.invoke(GetFullChannel(channel=peer))
                         raw_call = full_chat_res.full_chat.call
@@ -1054,13 +1139,18 @@ async def vc_scheduler_loop():
                         await update_vc_call_status(group_id, 0)
                         if _global_bot:
                             await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["end"], parse_mode="HTML")
+                        logger.info(f"📡 [Cierre VC Programado] Sala concluida ordenadamente en comunidad {group_id}.")
                     except Exception as e:
-                        logger.error(f"Error cerrando videochat en grupo {group_id}: {e}")
+                        err_up = str(e).upper()
+                        if "CALL_ALREADY_ENDED" in err_up or "GROUPCALL_INVALID" in err_up:
+                            await update_vc_call_status(group_id, 0)
+                        else:
+                            logger.error(f"Error cerrando videochat en grupo {group_id}: {e}")
 
         except Exception as e:
             logger.error(f"Error en bucle de programación VC: {e}")
 
-        await asyncio.sleep(50)
+        await asyncio.sleep(40)
 
 
 async def _get_all_night_groups() -> list[int]:
@@ -1257,7 +1347,8 @@ async def radar_master_loop():
                                 continue
                             try:
                                 peer = await assistant_app.resolve_peer(chat_id)
-                                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, _default_my_id))
+                                bot_id = get_assistant_bot_id()
+                                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, bot_id))
                                 active_sentinels[chat_id] = {
                                     "client": assistant_app,
                                     "task": task,

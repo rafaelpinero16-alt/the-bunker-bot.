@@ -2,6 +2,7 @@ import os
 import inspect
 import asyncio
 import time
+import html
 import logging
 from aiogram import Router, F, Bot
 from aiogram.types import (
@@ -27,7 +28,7 @@ from assistant import (
     engage_podcast_ducking, disengage_podcast_ducking,
     engage_screen_shield, disengage_screen_shield,
     active_sentinels, register_or_update_sentinel, admin_caches,
-    assistant_app, _default_my_id, monitor_single_group
+    assistant_app, get_assistant_bot_id, monitor_single_group
 )
 
 logger = logging.getLogger("admin_group_handler")
@@ -76,8 +77,8 @@ async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
-async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 15):
-    """Auto-destrucción dual para mantener el chat limpio y sin contaminación visual."""
+async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 12):
+    """Auto-destrucción dual estricta para mantener el chat limpio y sin contaminación visual."""
     await asyncio.sleep(delay)
     try:
         await cmd_msg.delete()
@@ -94,7 +95,7 @@ async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 15):
 # ==========================================================
 TEXTS = {
     "en": {
-        "owner_only": "⛔ <b>Access Denied:</b> This command is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
+        "owner_only": "⛔ <b>Access Denied:</b> This protocol is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>The Bunker Ecosystem Synchronized</b>\n\n"
@@ -220,7 +221,7 @@ TEXTS = {
 async def resolve_target(message: Message, command: CommandObject, bot: Bot):
     """
     Identifica al objetivo por respuesta directa, mención @ o ID numérica,
-    generando la etiqueta de mención directa para el aviso público.
+    generando la etiqueta de mención directa con formato HTML protegido.
     """
     user_obj = None
     target_id = None
@@ -243,14 +244,14 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
                 target_id = chat_info.id
                 user_obj = chat_info
             except Exception:
-                return None, arg
+                return None, html.escape(arg)
 
     if user_obj:
         if getattr(user_obj, "username", None):
             tag = f"@{user_obj.username}"
         else:
             name = getattr(user_obj, "full_name", getattr(user_obj, "first_name", "Usuario"))
-            tag = f'<a href="tg://user?id={user_obj.id}">{name}</a>'
+            tag = f'<a href="tg://user?id={user_obj.id}">{html.escape(name)}</a>'
         return target_id, tag
     elif target_id:
         return target_id, f'<a href="tg://user?id={target_id}">ID: {target_id}</a>'
@@ -267,8 +268,9 @@ async def cmd_reload_group(message: Message, bot: Bot):
     Reconecta y resincroniza todo el ecosistema con la comunidad:
     1. Registra el grupo y asegura su aprobación en approved_groups.
     2. Purga y actualiza la caché de administradores (admin_caches).
-    3. Reconecta el Centinela MTProto (dedicado o maestro).
+    3. Reconecta el Centinela MTProto (dedicado o maestro) con ID verificado.
     4. Garantiza el estado activo del radar acústico (vc_enabled = 1).
+    5. Despacha aviso estético auto-eliminable a los 12 segundos.
     """
     if message.chat.type == "private": 
         return
@@ -319,7 +321,6 @@ async def cmd_reload_group(message: Message, bot: Bot):
             else:
                 sentinel_status = "Error en Sesión Dedicada ⚠️" if lang == "es" else "Dedicated Session Error ⚠️"
         elif assistant_app and assistant_app.is_connected:
-            # Reconectar mediante Centinela Maestro
             try:
                 peer = await assistant_app.resolve_peer(chat_id)
                 if chat_id in active_sentinels:
@@ -328,7 +329,8 @@ async def cmd_reload_group(message: Message, bot: Bot):
                         old_info["task"].cancel()
                     except Exception:
                         pass
-                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, _default_my_id))
+                master_bot_id = get_assistant_bot_id()
+                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, master_bot_id))
                 active_sentinels[chat_id] = {
                     "client": assistant_app,
                     "task": task,
@@ -363,7 +365,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
     )
     
     msg = await message.reply(report_text, reply_markup=kb, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 20))
+    asyncio.create_task(auto_delete_pair(message, msg, 12))
 
 
 # ==========================================================
@@ -398,7 +400,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
     ])
     
     msg = await message.answer(t["settings_title"].format(title=message.chat.title), reply_markup=kb, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 20))
+    asyncio.create_task(auto_delete_pair(message, msg, 15))
 
 
 # ==========================================================
@@ -430,7 +432,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     ])
     status_text = t["status_active"] if current_status == 1 else t["status_inactive"]
     msg = await message.answer(t["autolower_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 25))
+    asyncio.create_task(auto_delete_pair(message, msg, 20))
 
 
 @router.callback_query(F.data.startswith("gautolower_"))
@@ -491,7 +493,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_pod"] if current_status == 1 else t["status_inactive_pod"]
     msg = await message.answer(t["podcast_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 25))
+    asyncio.create_task(auto_delete_pair(message, msg, 20))
 
 
 @router.callback_query(F.data.startswith("gpodcast_"))
@@ -557,7 +559,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_shield"] if current_status == 1 else t["status_inactive_shield"]
     msg = await message.answer(t["shield_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 25))
+    asyncio.create_task(auto_delete_pair(message, msg, 20))
 
 
 @router.callback_query(F.data.startswith("gshield_"))
@@ -623,7 +625,7 @@ async def cmd_toggle_night(message: Message, bot: Bot):
         await deactivate_universal_night_mode(chat_id)
         msg = await message.reply(t["night_off_msg"], parse_mode="HTML")
 
-    asyncio.create_task(auto_delete_pair(message, msg, 15))
+    asyncio.create_task(auto_delete_pair(message, msg, 12))
 
 
 # ==========================================================
@@ -652,6 +654,14 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
         asyncio.create_task(auto_delete_pair(message, msg, 8))
         return
 
+    reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
+    if command and command.args:
+        args_parts = command.args.split(maxsplit=1)
+        if len(args_parts) > 1 and not args_parts[0].isdigit() and not args_parts[0].startswith("@"):
+            reason = command.args.strip()
+        elif len(args_parts) > 1:
+            reason = args_parts[1].strip()
+
     try:
         from handlers.groups import enforce_warn_ladder
         clean_username = target_tag.replace("@", "") if target_tag.startswith("@") else ""
@@ -662,20 +672,12 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             target_username=clean_username,
             target_mention=target_tag,
             reply_to=message,
-            reason="manual"
+            reason=reason
         )
         if outcome.get("status") in ("warned", "sanctioned", "immune"):
             return
     except Exception as e:
         logger.debug(f"Aviso ejecutando ladder de warns: {e}")
-
-    reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
-    if command and command.args:
-        args_parts = command.args.split(maxsplit=1)
-        if len(args_parts) > 1 and not args_parts[0].isdigit() and not args_parts[0].startswith("@"):
-            reason = command.args.strip()
-        elif len(args_parts) > 1:
-            reason = args_parts[1].strip()
 
     cfg = await get_warns_config(message.chat.id)
     limit = cfg.get("limit", 3)
@@ -718,7 +720,7 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             pass
         msg = await message.reply(t["warn_issued"].format(target_tag=target_tag, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
 
-    asyncio.create_task(auto_delete_pair(message, msg, 15))
+    asyncio.create_task(auto_delete_pair(message, msg, 12))
 
 
 @router.message(Command("resetwarns"))

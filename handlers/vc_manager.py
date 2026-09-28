@@ -13,7 +13,12 @@ from database.database import (
     get_community_live_telemetry,
     get_vc_monitor_status, set_vc_monitor_status
 )
-from assistant import set_participant_mic, build_vc_moderation_keyboard, VC_START_TEXTS, VC_MEMBER_JOIN_TEXTS
+from assistant import (
+    set_participant_mic, 
+    build_vc_moderation_keyboard, 
+    VC_START_TEXTS, 
+    VC_MEMBER_JOIN_TEXTS
+)
 
 logger = logging.getLogger("vc_manager_gateway")
 router = Router()
@@ -117,7 +122,7 @@ TEXTS = {
         "btn_pay_stars": "⭐ Get VIP Voice Pass ({price} Stars)",
         "micvip_info_alert": (
             "🎙️ MICVIP FOR THE BUNKER CHAT MEMBERS\n\n"
-            "• Price: 50 TELEGRAM STARS.\n\n"
+            "• Price: {price} TELEGRAM STARS.\n\n"
             "Description:\n"
             "This feature unlocks continuous 100% microphone volume for 24 hours while participating in our Voice Chat.\n\n"
             "Tap 'ACTIVATE MICVIP NOW' to complete your donation with Telegram Stars and get instant voice permission."
@@ -188,7 +193,7 @@ TEXTS = {
         "btn_pay_stars": "⭐ Obtener Pase VIP ({price} Stars)",
         "micvip_info_alert": (
             "🎙️ MICVIP PARA MIEMBROS DE THE BÚNKER CHAT\n\n"
-            "• Precio: 50 ESTRELLAS DE TELEGRAM.\n\n"
+            "• Precio: {price} ESTRELLAS DE TELEGRAM.\n\n"
             "Descripción:\n"
             "Permite el uso de micrófono al volumen máximo (100%) durante 24 horas continuas al participar en nuestro Videochat.\n\n"
             "Usa el botón 'ACTIVAR MICVIP AHORA' para enviar tu donación en Telegram Stars y desbloquear tus permisos al instante."
@@ -218,7 +223,7 @@ async def get_active_sentinel_label(group_id: int) -> str:
 
 
 def get_user_mention_html(user) -> str:
-    """Genera una mención válida en formato HTML."""
+    """Genera una mención válida en formato HTML con protección de caracteres."""
     if getattr(user, "username", None):
         return f"@{user.username}"
     name = getattr(user, "full_name", getattr(user, "first_name", "Usuario"))
@@ -355,9 +360,12 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
 async def cb_vcinfo_micvip(callback: CallbackQuery):
     """Abre en segundo plano la ventana emergente oficial con la información de MicVIP."""
     parts = callback.data.split("_")
+    chat_id = int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 0
     lang = parts[3] if len(parts) > 3 and parts[3] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
-    await callback.answer(t["micvip_info_alert"], show_alert=True)
+    price = (await get_mic_vip_price(chat_id)) or 50 if chat_id else 50
+    alert_text = t["micvip_info_alert"].format(price=price)
+    await callback.answer(alert_text, show_alert=True)
 
 
 @router.callback_query(F.data.startswith("vclang_toggle_"))
@@ -377,11 +385,10 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
     new_lang = parts[3] if parts[3] in ["es", "en"] else "es"
     bot_info = await bot.get_me()
     bot_username = bot_info.username or "thebunkerapp_bot"
+    price = await get_mic_vip_price(chat_id) or 50
 
-    # Comprobar si el mensaje es de bienvenida o de entrada de miembro
     current_text = callback.message.text or callback.message.caption or ""
     if "UN NUEVO MIEMBRO" in current_text.upper() or "A NEW MEMBER" in current_text.upper():
-        # Extraer mención
         lines = current_text.split("\n")
         user_line = next((l for l in lines if "@" in l or "volumen" in l or "volume" in l), "")
         user_ref = user_line.split(",")[0].replace("🔇", "").strip() or "Miembro"
@@ -390,11 +397,11 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
     else:
         new_text = VC_START_TEXTS.get(new_lang, VC_START_TEXTS["es"])
 
-    new_kb = build_vc_moderation_keyboard(chat_id, bot_username, new_lang)
+    new_kb = build_vc_moderation_keyboard(chat_id, bot_username, new_lang, price=price)
 
     try:
         await callback.message.edit_text(new_text, reply_markup=new_kb, parse_mode="HTML")
-        await callback.answer(f"Idioma cambiado a {'Español 🇪🇸' if new_lang == 'es' else 'English 🇬🇧'}")
+        await callback.answer(f"Idioma: {'Español 🇪🇸' if new_lang == 'es' else 'English 🇬🇧'}")
     except TelegramBadRequest:
         await callback.answer()
 
