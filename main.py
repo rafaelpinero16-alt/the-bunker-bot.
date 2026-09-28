@@ -84,7 +84,8 @@ from database.database import (
     mark_payment_processed,
     register_bot_clone,
     save_owner_session,
-    update_ghost_purge_scan_time
+    update_ghost_purge_scan_time,
+    get_channel_plans
 )
 from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
@@ -106,7 +107,9 @@ from handlers.user_private import (
 )
 from assistant import (
     start_voice_radar, 
-    close_all_sentinels
+    close_all_sentinels,
+    register_or_update_sentinel,
+    execute_ghost_purge
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -567,6 +570,23 @@ async def api_chat_dashboard(
                 "footer_metrics": {}
             }
 
+        # Inyectar parámetros del plan VIP para autorrellenar el Estudio de Canales
+        try:
+            plans = await get_channel_plans(numeric_id, only_active=True)
+            if plans:
+                first_plan = plans[0]
+                data["duration_days"] = first_plan[2]
+                data["stars_price"] = first_plan[3]
+                data["target_link"] = first_plan[9] or ""
+            else:
+                data.setdefault("duration_days", 30)
+                data.setdefault("stars_price", 150)
+                data.setdefault("target_link", "")
+        except Exception:
+            data.setdefault("duration_days", 30)
+            data.setdefault("stars_price", 150)
+            data.setdefault("target_link", "")
+
         if master_bot_instance:
             try:
                 chat_obj = await master_bot_instance.get_chat(numeric_id)
@@ -675,22 +695,25 @@ async def api_update_chat_settings(
                 "chat_id": chat_id
             }
 
-        # 2. Conexión de Centinela Acústico MTProto
+        # 2. Conexión y activación en vivo del Centinela Acústico MTProto
         elif action == "connect_sentinel":
             session_str = (payload.get("session_string") or "").strip()
             if not session_str:
                 raise HTTPException(status_code=400, detail="String Session no proporcionada.")
             
             await save_owner_session(user_id, numeric_id, session_str)
+            connected = await register_or_update_sentinel(user_id, numeric_id, session_str)
+            if not connected:
+                raise HTTPException(status_code=400, detail="No se pudo conectar la sesión MTProto. Verifica que la sesión sea válida.")
             return {
                 "status": "success",
                 "action": "connect_sentinel",
                 "chat_id": chat_id
             }
 
-        # 3. Purga Táctica de Cuentas Fantasma (Ghost Purge)
+        # 3. Purga Táctica Unificada de Cuentas Fantasma (Ghost Purge)
         elif action == "run_ghost_purge":
-            asyncio.create_task(run_ghost_purge_task(numeric_id))
+            asyncio.create_task(execute_ghost_purge(numeric_id, action="ban"))
             return {
                 "status": "success",
                 "action": "run_ghost_purge",
@@ -708,7 +731,6 @@ async def api_update_chat_settings(
     except Exception as e:
         logging.error(f"❌ [Settings API Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @api_router.get("/affiliates/me")
 async def api_affiliates(
@@ -730,38 +752,6 @@ async def run_fastapi_server():
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
     await server.serve()
-
-async def run_ghost_purge_task(chat_id: int):
-    """Ejecuta la purga de cuentas fantasma (perfiles eliminados) de forma asíncrona."""
-    if not master_bot_instance:
-        return
-    try:
-        await update_ghost_purge_scan_time(chat_id)
-        purged_count = 0
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id, full_name, username FROM chat_user_activity WHERE group_id = ?", (chat_id,))
-            tracked_users = cursor.fetchall()
-
-        for uid, fn, un in tracked_users:
-            try:
-                chat_member = await master_bot_instance.get_chat_member(chat_id, uid)
-                user = chat_member.user
-                is_deleted = False
-                if getattr(user, "is_deleted", False) or (user.first_name and "Deleted Account" in user.first_name):
-                    is_deleted = True
-                
-                if is_deleted and chat_member.status not in ("creator", "administrator"):
-                    await master_bot_instance.ban_chat_member(chat_id, uid)
-                    await master_bot_instance.unban_chat_member(chat_id, uid)
-                    purged_count += 1
-                    await asyncio.sleep(0.1)
-            except Exception:
-                continue
-
-        logging.info(f"💀 [Ghost Purge Finalizada]: {purged_count} cuentas fantasma eliminadas en chat {chat_id}.")
-    except Exception as ex:
-        logging.error(f"❌ [Error en Ghost Purge Task chat {chat_id}]: {ex}", exc_info=True)
 
 # ==========================================
 # ⚙️ GESTIÓN DE CALLBACKS Y CLONES DE AIOGRAM

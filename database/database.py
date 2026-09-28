@@ -189,6 +189,7 @@ def init_db():
                 PRIMARY KEY (user_id, group_id)
             )
         """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vip_mic_passes ON vip_mic_passes (user_id, group_id, expires_at)")
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_groups (
@@ -1388,13 +1389,17 @@ def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
         return True
 
 
-def grant_vip_mic(user_id: int, group_id: int):
+def grant_vip_mic(user_id: int, group_id: int, hours: int = 24):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(f"""
             INSERT INTO vip_mic_passes (user_id, group_id, expires_at) 
-            VALUES (?, ?, datetime('now', '+24 hours'))
-            ON CONFLICT(user_id, group_id) DO UPDATE SET expires_at = datetime('now', '+24 hours')
+            VALUES (?, ?, datetime('now', '+{hours} hours'))
+            ON CONFLICT(user_id, group_id) DO UPDATE SET 
+                expires_at = datetime(
+                    CASE WHEN expires_at > datetime('now') THEN expires_at ELSE datetime('now') END,
+                    '+{hours} hours'
+                )
         """, (user_id, group_id))
         conn.commit()
 
@@ -1402,7 +1407,10 @@ def grant_vip_mic(user_id: int, group_id: int):
 def is_vip_mic_active(user_id: int, group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM vip_mic_passes WHERE user_id = ? AND group_id = ? AND expires_at > datetime('now')", (user_id, group_id))
+        cursor.execute("""
+            SELECT 1 FROM vip_mic_passes 
+            WHERE user_id = ? AND group_id = ? AND expires_at > datetime('now')
+        """, (user_id, group_id))
         return cursor.fetchone() is not None
 
 
@@ -1514,6 +1522,8 @@ def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None)
                 (reason, user_id)
             )
         conn.commit()
+
+
 def get_vc_schedule(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2685,6 +2695,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_chat_top_users",
     "get_chat_admin_stats",
     "update_chat_operational_settings",
+    "mark_payment_processed",
     "create_web_session",
     "get_user_by_web_session"
 ]
