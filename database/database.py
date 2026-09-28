@@ -11,6 +11,16 @@ DB_PATH = "database/bot_data.db"
 # Thread-local storage para reutilización de conexiones por hilo bajo alta concurrencia
 _thread_local = threading.local()
 
+# ==========================================
+# 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
+# ==========================================
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
 
 @contextlib.contextmanager
 def get_db_connection():
@@ -759,9 +769,6 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
         conn.commit()
 
 
-# ==========================================
-# 💎 CONFIGURACIÓN Y TARIFAS DE MICVIP
-# ==========================================
 def get_mic_vip_price(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -785,11 +792,7 @@ def set_mic_vip_price(group_id: int, price: int):
         conn.commit()
 
 
-# ==========================================
-# 💎 CONFIGURACIÓN MICVIP EXTENDIDA (Tarifa, Tag y Copy Explicativo)
-# ==========================================
 def get_mic_vip_custom_config(group_id: int) -> dict:
-    """Devuelve precio, etiqueta y texto promocional personalizado para el MicVIP de la comunidad."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -799,7 +802,6 @@ def get_mic_vip_custom_config(group_id: int) -> dict:
             """, (group_id,))
             row = cursor.fetchone()
             if row:
-                # Priorizar tarifa personalizada si existe, luego la estándar, o caer en 50 por defecto
                 price_val = row[1] if (row[1] is not None and row[1] > 0) else (row[0] if (row[0] is not None and row[0] > 0) else 50)
                 return {
                     "price": price_val,
@@ -817,7 +819,6 @@ def set_mic_vip_custom_config(group_id: int, field: str, value):
         return
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Si actualizan el precio estándar o personalizado, sincronizamos ambos campos para evitar desvíos
         if field in ("mic_vip_price", "mic_vip_custom_price"):
             cursor.execute(f"""
                 INSERT INTO group_settings (group_id, mic_vip_price, mic_vip_custom_price) VALUES (?, ?, ?)
@@ -893,9 +894,6 @@ def set_vip_badge_title(group_id: int, title: str):
         conn.commit()
 
 
-# ==========================================
-# 🎤 GESTIÓN DE SPEAKERS Y COLA PRIORITARIA AMA
-# ==========================================
 def get_speaker_price(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -940,7 +938,6 @@ def get_speaker_queue(group_id: int) -> list:
 
 
 def get_user_speaker_position(group_id: int, user_id: int) -> int:
-    """Devuelve la posición en la fila del orador según el orden de prioridad y aporte en Stars."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1424,62 +1421,6 @@ def set_service_msgs_mode(group_id: int, status: int):
         conn.commit()
 
 
-# ==========================================
-# 💰 PROPINAS Y APORTES EN STARS (XTR)
-# ==========================================
-def get_tips_config(group_id: int) -> dict:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT tips_enabled, tips_amount, tips_target_channel FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            if row:
-                return {
-                    "enabled": row[0] if row[0] is not None else 0,
-                    "amount": row[1] if row[1] is not None else 10,
-                    "target_channel": row[2] if row[2] else ""
-                }
-        except sqlite3.OperationalError:
-            pass
-        return {"enabled": 0, "amount": 10, "target_channel": ""}
-
-
-def set_tips_config(group_id: int, field: str, value):
-    valid_fields = ["tips_enabled", "tips_amount", "tips_target_channel"]
-    if field not in valid_fields:
-        return
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
-        """, (group_id, value))
-        conn.commit()
-
-
-def record_group_tip(group_id: int, user_id: int, stars_amount: int, message: str = ""):
-    """Registra de forma persistente una propina voluntaria en Stars para el grupo o canal."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_tips (group_id, user_id, stars_amount, message)
-            VALUES (?, ?, ?, ?)
-        """, (group_id, user_id, stars_amount, message))
-        conn.commit()
-
-
-def get_group_total_tips(group_id: int) -> int:
-    """Calcula el total histórico de Stars recaudadas por propinas en la comunidad."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT SUM(stars_amount) FROM group_tips WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if (row and row[0]) else 0
-        except sqlite3.OperationalError:
-            return 0
-
-
 def add_to_whitelist(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1499,90 +1440,6 @@ def is_whitelisted(user_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM whitelist WHERE user_id = ?", (user_id,))
         return cursor.fetchone() is not None
-
-
-def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        if tier in ["pro", "ultra_pro"]:
-            cursor.execute(f"""
-                INSERT INTO approved_groups (group_id, tier, expires_at) 
-                VALUES (?, ?, datetime('now', '+{duration_days} days')) 
-                ON CONFLICT(group_id) DO UPDATE SET 
-                    tier = excluded.tier,
-                    expires_at = datetime('now', '+{duration_days} days')
-            """, (group_id, tier))
-        else:
-            cursor.execute("""
-                INSERT INTO approved_groups (group_id, tier, expires_at) 
-                VALUES (?, 'free', NULL) 
-                ON CONFLICT(group_id) DO UPDATE SET 
-                    tier = 'free',
-                    expires_at = NULL
-            """, (group_id,))
-        conn.commit()
-
-
-def is_group_approved(group_id: int) -> bool:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM approved_groups WHERE group_id = ?", (group_id,))
-        return cursor.fetchone() is not None
-
-
-def get_group_tier(group_id: int) -> str:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT tier, expires_at FROM approved_groups WHERE group_id = ?", (group_id,))
-        row = cursor.fetchone()
-        if not row:
-            return "free"
-        tier, expires_at = row
-        if expires_at:
-            cursor.execute("SELECT datetime('now') > ?", (expires_at,))
-            if cursor.fetchone()[0]:
-                cursor.execute("UPDATE approved_groups SET tier = 'free', expires_at = NULL WHERE group_id = ?", (group_id,))
-                conn.commit()
-                tier = "free"
-        return tier
-
-
-def get_user_global_tier(user_id: int) -> str:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT a.tier FROM approved_groups a
-            JOIN user_groups u ON a.group_id = u.group_id
-            WHERE u.user_id = ? AND (a.expires_at IS NULL OR a.expires_at > datetime('now'))
-        """, (user_id,))
-        rows = cursor.fetchall()
-        if not rows: return "free"
-        tiers = [r[0] for r in rows]
-        if "ultra_pro" in tiers: return "ultra_pro"
-        if "pro" in tiers: return "pro"
-        return "free"
-
-
-def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
-    tier = get_group_tier(group_id)
-    if tier in ["pro", "ultra_pro"]: 
-        return True
-        
-    today = datetime.now().strftime("%Y-%m-%d")
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM command_usage WHERE usage_date < date('now', '-7 days')")
-        cursor.execute("SELECT count FROM command_usage WHERE group_id = ? AND command = ? AND usage_date = ?", (group_id, command, today))
-        row = cursor.fetchone()
-        current_count = row[0] if row else 0
-        if current_count >= max_uses:
-            return False
-        if row:
-            cursor.execute("UPDATE command_usage SET count = count + 1 WHERE group_id = ? AND command = ? AND usage_date = ?", (group_id, command, today))
-        else:
-            cursor.execute("INSERT INTO command_usage (group_id, command, usage_date, count) VALUES (?, ?, ?, 1)", (group_id, command, today))
-        conn.commit()
-        return True
 
 
 def grant_vip_mic(user_id: int, group_id: int, hours: int = 24):
@@ -2653,21 +2510,6 @@ def get_user_subscribers_audit(user_id: int) -> list:
             }
             for r in rows
         ]
-
-
-def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
-    """Registra el pago de forma atómica. Devuelve False si ya fue procesado antes."""
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "INSERT INTO processed_payments (charge_id, user_id, payload) VALUES (?, ?, ?)",
-                (charge_id, user_id, payload)
-            )
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
 
 
 def _make_async(sync_fn):

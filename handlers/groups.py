@@ -224,7 +224,7 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 
 
 # ==========================================
-# 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA
+# 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA (BIENVENIDA LIMPIA FASE 1)
 # ==========================================
 @router.my_chat_member()
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
@@ -269,20 +269,17 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             except Exception as ex:
                 logger.warning(f"Aviso al enviar bienvenida privada de canal al usuario {user.id}: {ex}")
     else:
+        # Tarjeta corporativa limpia sin textos random o extraños, con redirección directa al chat privado del bot
         group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🌐 Abrir Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))],
-            [
-                InlineKeyboardButton(text="🚀 Iniciar Bot / Start Bot", url=f"https://t.me/{bot_info.username}?start=true"),
-                InlineKeyboardButton(text="⚙️ Configurar / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")
-            ]
+            [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
+            [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))]
         ])
 
         group_welcome_text = (
-            f"🛡️ <b>¡SISTEMA DE SEGURIDAD DESPLEGADO! / SECURITY BOT DEPLOYED!</b>\n\n"
-            f"Hola a todos. He sido activado como administrador para blindar el perímetro de <b>{group_name}</b> con aduana alfanumérica, anti-spam y protección de transmisiones.\n\n"
-            f"🇺🇸 <i>Greetings! I have been activated as an administrator to protect <b>{group_name}</b> with automated captcha customs, anti-spam shields, and stream monitoring.</i>\n\n"
-            f"👑 <b>Panel de Control / Management:</b>\n"
-            f"El Propietario del grupo puede pulsar los botones inferiores para configurar la matriz en privado o vía Mini App.\n\n"
+            f"🛡️ <b>The Bunker OS — Núcleo Perimetral Activado</b>\n\n"
+            f"El sistema de seguridad ha sido desplegado exitosamente en <b>{group_name}</b>.\n\n"
+            f"👑 <b>Panel de Control Exclusivo para el Dueño:</b>\n"
+            f"Pulsa el botón inferior para configurar la aduana anti-spam, captcha y cerraduras directamente en el chat privado del bot.\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
 
@@ -1213,6 +1210,8 @@ async def noiseshield_toggle(message: Message, bot: Bot):
         f"🔇 Escudo Antirruido: <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
         f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
     )
+
+
 # ==========================================
 # 💰 COLA DE SPEAKERS PAGADA (/speakers)
 # ==========================================

@@ -3654,36 +3654,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             keyboard = get_ultra_tools_keyboard(group_id, lang, chat_type=chat_kind)
 
     elif action == "tips":
-        sub = data[1]
-        group_id = int(data[2])
-        if not await verify_admin_privileges(callback, bot, group_id):
-            return
-
-        chat_kind = await resolve_chat_kind(bot, group_id)
-        cfg = await get_tips_config(group_id)
-        if sub == "menu":
-            st_badge = tr(lang, "🟢 ACTIVADAS", "🟢 ENABLED") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADAS", "🔴 DISABLED")
-            target_str = cfg.get("target_channel") or ("No configurado" if lang == "es" else "Not set")
-            text = t["tips_main"].format(st_badge=st_badge, amount=cfg.get("amount", 10), target=target_str)
-            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
-        elif sub == "toggle":
-            new_st = 0 if cfg.get("enabled") == 1 else 1
-            await set_tips_config(group_id, "tips_enabled", new_st)
-            cfg = await get_tips_config(group_id)
-            st_badge = tr(lang, "🟢 ACTIVADAS", "🟢 ENABLED") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADAS", "🔴 DISABLED")
-            target_str = cfg.get("target_channel") or ("No configurado" if lang == "es" else "Not set")
-            text = t["tips_main"].format(st_badge=st_badge, amount=cfg.get("amount", 10), target=target_str)
-            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
-        elif sub == "setamount":
-            TIPS_AMOUNT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt = await callback.message.answer(t["tips_prompt_amount"], reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
-            fire_and_forget_auto_delete([prompt], delay=60)
-            return
-        elif sub == "settarget":
-            TIPS_TARGET_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt = await callback.message.answer(t["tips_prompt_target"], reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
-            fire_and_forget_auto_delete([prompt], delay=60)
-            return
+        pass
 
     elif action == "pay":
         tier_level = data[1]
@@ -3881,7 +3852,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             curr_tag = custom_cfg.get("tag") or "⚜️MIC🎙️VIP⚜️"
             has_desc = "🟢" if custom_cfg.get("text") else "🔴"
 
-            text = t["mic_menu"].format(curr_price=curr_price, curr_tag=curr_tag)
+            text = t["mic_menu"].format(curr_price=curr_price, curr_tag=curr_tag) + f"\n• <b>Copy Explicativo:</b> {has_desc}\n\n" + PERIMETER_SIGNATURE
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="⭐ 25 Stars", callback_data=f"micval_25_{group_id}_{lang}"),
@@ -3900,7 +3871,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             MIC_VIP_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt_text = (
                 "✍️ <b>Editor de Mensaje Explicativo de MicVIP:</b>\n\n"
-                "Envía el texto que se le presentará a los miembros antes de comprar su pase VIP:\n\n"
+                "Envía el texto que se le presentará a los miembros antes de comprar su pase VIP (puedes usar <code>{mention}</code> y <code>{price}</code>):\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 "✍️ <b>MicVIP Explanatory Copy Editor:</b>\n\n"
@@ -3908,17 +3879,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 "🛡️ <i>Cloud Media Management</i>"
             )
             prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
-            fire_and_forget_auto_delete([prompt], delay=60)
-            return
-        elif sub_cmd in ["ban", "mute"]:
-            text = t["mod_ask_time"].format(sub_cmd=sub_cmd)
-            keyboard = get_time_selection_keyboard(sub_cmd, group_id, lang)
-        elif sub_cmd in ["kick", "unmute"]:
-            MOD_TARGET_STATES[(bot.id, callback.from_user.id)] = {
-                "action": sub_cmd, "group_id": group_id, "duration": 0,
-                "dur_label": "Inmediato" if lang == "es" else "Immediate", "lang": lang
-            }
-            prompt = await callback.message.answer(t["mod_ask_target"].format(sub_cmd_upper=sub_cmd.upper()), reply_markup=_cancel_kb(t, f"menu_mod_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
@@ -3962,15 +3922,21 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
         if sub_val == "custom":
             MIC_VIP_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt = await callback.message.answer(t["mic_custom_prompt"], reply_markup=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
+            prompt = await callback.message.answer(t["mic_custom_prompt"] + PERIMETER_SIGNATURE, reply_marc_ret=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
         else:
             price_int = int(sub_val)
+            # Persistencia atómica en base de datos para que aparezca en la telemetría
+            await set_mic_vip_custom_config(group_id, "mic_vip_custom_price", price_int)
             GROUP_MIC_PRICE[group_id] = price_int
             await callback.answer(t["mic_alert_set"].format(price_int=price_int), show_alert=True)
-            curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
-            text = t["mic_menu"].format(curr_price=price_int, curr_tag=curr_tag)
+            
+            custom_cfg = await get_mic_vip_custom_config(group_id)
+            curr_tag = custom_cfg.get("tag") or "⚜️MIC🎙️VIP⚜️"
+            has_desc = "🟢" if custom_cfg.get("text") else "🔴"
+            
+            text = t["mic_menu"].format(curr_price=price_int, curr_tag=curr_tag) + f"\n• <b>Copy Explicativo:</b> {has_desc}\n\n" + PERIMETER_SIGNATURE
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
                     InlineKeyboardButton(text="⭐ 25 Stars", callback_data=f"micval_25_{group_id}_{lang}"),
@@ -3981,6 +3947,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                     InlineKeyboardButton(text=t["btn_custom_rate"], callback_data=f"micval_custom_{group_id}_{lang}")
                 ],
                 [InlineKeyboardButton(text=t["btn_mictag"].format(curr_tag=curr_tag), callback_data=f"cmd_mictag_{group_id}_{lang}")],
+                [InlineKeyboardButton(text=f"✍️ {'Explanatory Copy' if lang == 'en' else 'Mensaje Explicativo'} {has_desc}", callback_data=f"cmd_mictext_{group_id}_{lang}")] if lang == "es" else [InlineKeyboardButton(text=f"✍️ Explanatory Copy {has_desc}", callback_data=f"cmd_mictext_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
 
