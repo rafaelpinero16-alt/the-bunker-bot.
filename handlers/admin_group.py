@@ -18,12 +18,16 @@ from database.database import (
     get_podcast_status, set_podcast_status,
     get_screen_shield_status, set_screen_shield_status,
     add_user_strike, get_user_strikes, reset_user_strikes, get_warns_config,
-    get_night_mode_config, activate_universal_night_mode, deactivate_universal_night_mode
+    get_night_mode_config, activate_universal_night_mode, deactivate_universal_night_mode,
+    approve_group, is_group_approved, get_group_tier, get_session_by_group,
+    set_vc_monitor_status, get_vc_monitor_status
 )
 from assistant import (
     set_participant_mic,
     engage_podcast_ducking, disengage_podcast_ducking,
-    engage_screen_shield, disengage_screen_shield
+    engage_screen_shield, disengage_screen_shield,
+    active_sentinels, register_or_update_sentinel, admin_caches,
+    assistant_app, _default_my_id, monitor_single_group
 )
 
 logger = logging.getLogger("admin_group_handler")
@@ -93,8 +97,13 @@ TEXTS = {
         "owner_only": "⛔ <b>Access Denied:</b> This command is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
-            "🔄 <b>Database synchronized.</b>\n"
-            "This community is now indexed and ready in your Private Command Center.\n\n"
+            "🔄 <b>The Bunker Ecosystem Synchronized</b>\n\n"
+            "• <b>Community:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
+            "• <b>License Tier:</b> <code>{tier}</code>\n"
+            "• <b>Acoustic Sentinel:</b> 🟢 <code>{sentinel_status}</code>\n"
+            "• <b>Live Voice Radar:</b> 🟢 <code>ACTIVE (24/7 Monitoring)</code>\n"
+            "• <b>Admin Permissions:</b> <code>Cache Refreshed 🔄</code>\n\n"
+            "<i>The community has been indexed, approved, and reconnected successfully to your Command Center.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "settings_title": (
@@ -147,8 +156,13 @@ TEXTS = {
         "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto o Rango de Administrador.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
-            "🔄 <b>Base de datos sincronizada.</b>\n"
-            "El grupo ahora está visible e indexado en tu panel de Configuración Privada.\n\n"
+            "🔄 <b>Ecosistema The Bunker Sincronizado</b>\n\n"
+            "• <b>Comunidad:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
+            "• <b>Nivel de Licencia:</b> <code>{tier}</code>\n"
+            "• <b>Centinela Acústico:</b> 🟢 <code>{sentinel_status}</code>\n"
+            "• <b>Radar de Voz:</b> 🟢 <code>ACTIVO (Supervisión 24/7)</code>\n"
+            "• <b>Permisos de Administrador:</b> <code>Caché Actualizado 🔄</code>\n\n"
+            "<i>El grupo ha sido indexado, aprobado y reconectado con éxito a tu Command Center.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "settings_title": (
@@ -245,32 +259,111 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
 
 
 # ==========================================================
-# 🔄 COMANDO DE RECARGA E INDEXACIÓN (/reload)
+# 🔄 COMANDO DE RECARGA, INDEXACIÓN Y RECONEXIÓN TOTAL (/reload)
 # ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """Indexa la comunidad en la base de datos para que el dueño la vea en privado."""
+    """
+    Reconecta y resincroniza todo el ecosistema con la comunidad:
+    1. Registra el grupo y asegura su aprobación en approved_groups.
+    2. Purga y actualiza la caché de administradores (admin_caches).
+    3. Reconecta el Centinela MTProto (dedicado o maestro).
+    4. Garantiza el estado activo del radar acústico (vc_enabled = 1).
+    """
     if message.chat.type == "private": 
         return
     
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    lang = get_lang(message.from_user.language_code)
+    t = TEXTS[lang]
+
+    if not await is_user_admin(bot, chat_id, user_id):
         try: 
             await message.delete()
         except Exception: 
             pass
         return
 
+    chat_title = message.chat.title or "Comunidad Blindada"
+    chat_type = message.chat.type
+
+    # 1. Registrar entorno en el padrón del creador
     await register_user_group(
-        user_id=message.from_user.id, 
-        group_id=message.chat.id, 
-        group_name=message.chat.title or "Comunidad",
-        chat_type=message.chat.type
+        user_id=user_id, 
+        group_id=chat_id, 
+        group_name=chat_title,
+        chat_type=chat_type
     )
-    lang = get_lang(message.from_user.language_code)
-    t = TEXTS[lang]
+
+    # 2. Asegurar aprobación e indexación en approved_groups
+    current_tier = await get_group_tier(chat_id) or "free"
+    if not await is_group_approved(chat_id):
+        await approve_group(chat_id, tier=current_tier)
+
+    # 3. Forzar supervisión de videochat activa
+    await set_vc_monitor_status(chat_id, 1)
+
+    # 4. Purgar caché de administradores para forzar re-lectura inmediata
+    admin_caches.pop(chat_id, None)
+
+    # 5. Reconexión en caliente del Centinela MTProto
+    sentinel_status = "Centinela Activo 🟢"
+    try:
+        session_row = await get_session_by_group(chat_id)
+        if session_row:
+            u_id, s_str, a_id, a_hash = session_row[0], session_row[1], session_row[2], session_row[3]
+            connected = await register_or_update_sentinel(u_id, chat_id, s_str, a_id, a_hash)
+            if connected:
+                sentinel_status = "Centinela Dedicado Reconectado 💎" if lang == "es" else "Dedicated Sentinel Reconnected 💎"
+            else:
+                sentinel_status = "Error en Sesión Dedicada ⚠️" if lang == "es" else "Dedicated Session Error ⚠️"
+        elif assistant_app and assistant_app.is_connected:
+            # Reconectar mediante Centinela Maestro
+            try:
+                peer = await assistant_app.resolve_peer(chat_id)
+                if chat_id in active_sentinels:
+                    old_info = active_sentinels.pop(chat_id)
+                    try:
+                        old_info["task"].cancel()
+                    except Exception:
+                        pass
+                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, _default_my_id))
+                active_sentinels[chat_id] = {
+                    "client": assistant_app,
+                    "task": task,
+                    "user_id": 0
+                }
+                sentinel_status = "Centinela Maestro Reconectado 🤖" if lang == "es" else "Master Sentinel Reconnected 🤖"
+            except Exception as master_err:
+                sentinel_status = f"Centinela Maestro Standby ({master_err})"
+        else:
+            sentinel_status = "Modo Pasivo (Sin Sesión MTProto)" if lang == "es" else "Passive Mode (No MTProto Session)"
+    except Exception as ex:
+        logger.error(f"❌ Error reconectando Centinela en reload ({chat_id}): {ex}")
+        sentinel_status = "Fallo en Reconexión ⚠️"
+
+    tier_label = current_tier.upper()
+    if tier_label == "PRO":
+        tier_label = "PRO ⭐"
+    elif tier_label in ["ULTRA_PRO", "ULTRAPRO"]:
+        tier_label = "ULTRA PRO 💎"
+    else:
+        tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_open_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+    ])
+
+    report_text = t["reload_success"].format(
+        title=chat_title,
+        chat_id=chat_id,
+        tier=tier_label,
+        sentinel_status=sentinel_status
+    )
     
-    msg = await message.reply(t["reload_success"], parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 10))
+    msg = await message.reply(report_text, reply_markup=kb, parse_mode="HTML")
+    asyncio.create_task(auto_delete_pair(message, msg, 20))
 
 
 # ==========================================================
