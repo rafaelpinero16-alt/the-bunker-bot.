@@ -249,6 +249,16 @@ def init_db():
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vc_schedules (
+                group_id INTEGER PRIMARY KEY,
+                days TEXT DEFAULT '1,2,3,4,5,6,7',
+                start_time TEXT DEFAULT '20:00',
+                end_time TEXT DEFAULT '23:00',
+                status INTEGER DEFAULT 0,
+                call_active INTEGER DEFAULT 0
+            )
+        """)
         try:
             cursor.execute("ALTER TABLE owner_sessions ADD COLUMN last_error TEXT")
         except sqlite3.OperationalError:
@@ -1737,6 +1747,49 @@ def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None)
             )
         conn.commit()
 
+def get_vc_schedule(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT days, start_time, end_time, status, call_active FROM vc_schedules WHERE group_id = ?", (group_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "days": row[0],
+                "start_time": row[1],
+                "end_time": row[2],
+                "status": row[3],
+                "call_active": row[4]
+            }
+        return {"days": "1,2,3,4,5,6,7", "start_time": "20:00", "end_time": "23:00", "status": 0, "call_active": 0}
+
+
+def set_vc_schedule(group_id: int, days: str, start_time: str, end_time: str, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO vc_schedules (group_id, days, start_time, end_time, status) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET 
+                days = excluded.days,
+                start_time = excluded.start_time,
+                end_time = excluded.end_time,
+                status = excluded.status
+        """, (group_id, days, start_time, end_time, status))
+        conn.commit()
+
+
+def update_vc_call_status(group_id: int, call_active: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE vc_schedules SET call_active = ? WHERE group_id = ?", (call_active, group_id))
+        conn.commit()
+
+
+def get_all_active_vc_schedules():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT group_id, days, start_time, end_time, status, call_active FROM vc_schedules WHERE status = 1")
+        return cursor.fetchall()
+
 
 def get_channel_settings(channel_id: int) -> dict:
     with get_db_connection() as conn:
@@ -2511,6 +2564,10 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "mark_payment_processed",
     "create_web_session",
     "get_user_by_web_session"
+    "get_vc_schedule",
+    "set_vc_schedule",
+    "update_vc_call_status",
+    "get_all_active_vc_schedules",
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
