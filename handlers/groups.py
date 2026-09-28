@@ -2,7 +2,8 @@
 groups.py — The Bunker OS (Aiogram 3.x)
 
 Núcleo de seguridad perimetral para grupos y supergrupos.
-Motor Híbrido: Detección MTProto + Padrón Local Bot API + Protección Total.
+Motor Híbrido: Detección MTProto + Padrón Local Bot API + Protección Total por Niveles (Free / PRO / ULTRA PRO).
+The Bunker Command OS © 2026 — Cloud Media Management
 """
 import time
 import string
@@ -30,14 +31,16 @@ from database.database import (
     get_antiflood_config, is_whitelisted, is_vip_mic_active, get_captcha_config,
     get_lock_status, get_warns_config, add_warning, ban_user,
     approve_group, register_user_group, get_blacklist,
-    get_session_by_group,
+    get_session_by_group, get_group_tier,
+    add_user_strike, get_user_strikes, reset_user_strikes,
     get_panic_status, activate_panic, deactivate_panic,
     get_screen_shield_status, set_screen_shield_status,
     set_podcast_duck_volume, set_noise_shield_status,
     get_speaker_price, set_speaker_price, add_to_speaker_queue,
     get_speaker_queue, pop_next_speaker, remove_from_speaker_queue, clear_speaker_queue,
     flag_userbot, is_userbot_flagged,
-    get_ghost_purge_config, update_ghost_purge_scan_time
+    get_ghost_purge_config, update_ghost_purge_scan_time,
+    get_service_msgs_mode
 )
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
@@ -712,7 +715,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
 
 
 # ==========================================
-# 🧹 PURGA DE MENSAJES DE SERVICIO
+# 🧹 PURGA Y LIMPIEZA DE MENSAJES DE SERVICIO
 # ==========================================
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.left_chat_member)
 async def purge_left_member(message: Message):
@@ -721,7 +724,8 @@ async def purge_left_member(message: Message):
         await registry_forget(message.chat.id, left_user.id)
 
     cfg = await get_captcha_config(message.chat.id)
-    if cfg.get("service_del") == 1:
+    srv_mode = await get_service_msgs_mode(message.chat.id)
+    if cfg.get("service_del") == 1 or srv_mode == 1:
         try: 
             await message.delete()
         except Exception: 
@@ -731,14 +735,13 @@ async def purge_left_member(message: Message):
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.pinned_message)
 async def purge_general_service_messages(message: Message):
     cfg = await get_captcha_config(message.chat.id)
-    if cfg.get("service_del") == 1:
+    srv_mode = await get_service_msgs_mode(message.chat.id)
+    if cfg.get("service_del") == 1 or srv_mode == 1:
         try: 
             await message.delete()
         except Exception: 
             pass
-
-
-# ==========================================
+        # ==========================================
 # 🧹 MOTOR HÍBRIDO DE GHOST PURGE (MTPROTO + BOT API)
 # ==========================================
 GHOST_DISPLAY_NAMES = {"deleted account", "cuenta eliminada"}
@@ -1560,31 +1563,31 @@ async def _acoustic_attenuate(
 
 
 # ==========================================
-# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS
+# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS POR NIVELES (FREE / PRO / ULTRA PRO)
 # ==========================================
 _REASON_TEXT = {
     "filter": (
-        "tu mensaje ha sido retirado por infringir las directivas comunitarias.",
-        "your message was removed for violating community guidelines. Strike logged."
+        "tu mensaje ha sido retirado por infringir las directivas perimetrales.",
+        "your message was removed for violating perimeter directives. Strike logged."
     ),
     "flood": (
         "por favor modera la velocidad de tus mensajes en el chat.",
         "please slow down your message frequency in the chat. Strike logged."
     ),
     "manual": (
-        "se ha registrado un strike por orden de la administración.",
-        "a strike was logged by the administration."
+        "se ha registrado una advertencia formal por orden de la administración.",
+        "a formal strike was logged by community administration."
     ),
     "command": (
-        "el uso de comandos está restringido en esta comunidad.",
-        "commands are restricted in this community. Strike logged."
+        "el uso de comandos públicos está restringido en esta comunidad.",
+        "public commands are restricted in this community. Strike logged."
     ),
 }
 
 _SANCTION_TEXT = {
     "mute": (
         "🔇", "Sanción Automática / Auto-Sanction",
-        "ha sido silenciado por reincidencia en faltas comunitarias.",
+        "ha sido silenciado en el chat y videochat por acumulación de faltas.",
         "User has been muted due to reaching the strike threshold."
     ),
     "kick": (
@@ -1593,8 +1596,8 @@ _SANCTION_TEXT = {
         "User has been kicked due to reaching the strike threshold."
     ),
     "ban": (
-        "🚫", "Sanción Definitiva / Final Sanction",
-        "ha sido bloqueado permanentemente del grupo por faltas graves.",
+        "🚫", "Bloqueo Definitivo / Permanent Ban",
+        "ha sido bloqueado permanentemente de la comunidad por faltas reiteradas.",
         "User has been permanently banned from the community."
     ),
 }
@@ -1602,26 +1605,74 @@ _SANCTION_TEXT = {
 WARN_ACTIONS = ("mute", "kick", "ban")
 
 
-async def _send_temp(bot: Bot, chat_id: int, text: str, ttl: int, reply_to: Optional[Message] = None) -> None:
+def _sync_get_warn_template(chat_id: int) -> dict:
+    """Lectura segura de plantillas extendidas de advertencia en SQLite sin fallos por esquemas."""
     try:
-        if reply_to is not None:
-            sent = await reply_to.answer(text, parse_mode="HTML")
-        else:
-            sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+        with _db_module.get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(group_settings)")
+            existing = {col[1] for col in cursor.fetchall()}
+            target = [c for c in ["warn_custom_text", "warn_custom_media_id", "warn_custom_media_type"] if c in existing]
+            if target:
+                cursor.execute(f"SELECT {', '.join(target)} FROM group_settings WHERE group_id = ?", (chat_id,))
+                row = cursor.fetchone()
+                if row:
+                    return {c: row[i] for i, c in enumerate(target)}
+    except Exception:
+        pass
+    return {}
+
+
+async def _get_extended_warn_config(chat_id: int) -> dict:
+    return await asyncio.to_thread(_sync_get_warn_template, chat_id)
+
+
+async def _send_temp(
+    bot: Bot, 
+    chat_id: int, 
+    text: str, 
+    ttl: int = 20, 
+    reply_to: Optional[Message] = None,
+    media_id: Optional[str] = None,
+    media_type: Optional[str] = None
+) -> None:
+    try:
+        sent = None
+        if media_id and media_type:
+            try:
+                if media_type == "photo":
+                    sent = await bot.send_photo(chat_id=chat_id, photo=media_id, caption=text, parse_mode="HTML")
+                elif media_type == "video":
+                    sent = await bot.send_video(chat_id=chat_id, video=media_id, caption=text, parse_mode="HTML")
+                elif media_type == "animation":
+                    sent = await bot.send_animation(chat_id=chat_id, animation=media_id, caption=text, parse_mode="HTML")
+            except Exception as media_err:
+                logger.debug(f"Fallo enviando multimedia temporal de advertencia ({media_err}); usando texto.")
+
+        if not sent:
+            if reply_to is not None:
+                sent = await reply_to.answer(text, parse_mode="HTML")
+            else:
+                sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+                
         _spawn(auto_delete_msg(sent, ttl))
     except Exception as e:
         logger.debug(f"No se pudo enviar aviso temporal en {chat_id}: {e}")
 
 
-async def _reset_warnings_safe(user_id: int) -> None:
-    if not RESET_WARNS_AFTER_SANCTION or _db_reset_warnings is None:
-        return
+async def _reset_warnings_safe(chat_id: int, user_id: int) -> None:
     try:
-        result = _db_reset_warnings(user_id)
-        if inspect.isawaitable(result):
-            await result
-    except Exception as e:
-        logger.debug(f"No se pudieron reiniciar los warns de {user_id}: {e}")
+        await reset_user_strikes(chat_id, user_id)
+    except Exception:
+        pass
+
+    if RESET_WARNS_AFTER_SANCTION and _db_reset_warnings is not None:
+        try:
+            res = _db_reset_warnings(user_id)
+            if inspect.isawaitable(res):
+                await res
+        except Exception as e:
+            logger.debug(f"No se pudieron reiniciar los warns globales de {user_id}: {e}")
 
 
 async def enforce_warn_ladder(
@@ -1634,37 +1685,86 @@ async def enforce_warn_ladder(
     reason: str = "filter",
     silent: bool = False
 ) -> dict:
+    """
+    Aplica una falta formal respetando la matriz de rangos y beneficios del plan:
+    - Free: Plantilla estándar bilingüe.
+    - PRO: Texto de advertencia personalizado por el creador.
+    - ULTRA PRO: Copy personalizado + Multimedia adjunta (foto/video/gif) y umbrales granulares.
+    """
     tier = await get_privilege_tier(bot, chat_id, target_id, target_username)
     if _tier_is_privileged(tier):
         return {"status": "immune", "tier": tier, "strikes": 0, "limit": 0, "action": None}
 
-    try:
-        strikes = int(await add_warning(target_id))
-        warns_cfg = await get_warns_config(chat_id)
-        limit = max(1, int(warns_cfg["limit"]))
-        action = str(warns_cfg["action"]).strip().lower()
-    except Exception as e:
-        logger.error(f"Error registrando strike de {target_id} en {chat_id}: {e}")
-        return {"status": "error", "tier": tier, "strikes": 0, "limit": 0, "action": None}
-
+    group_tier = (await get_group_tier(chat_id) or "free").lower()
+    warns_cfg = await get_warns_config(chat_id)
+    limit = max(1, int(warns_cfg.get("limit", 3)))
+    action = str(warns_cfg.get("action", "mute")).strip().lower()
     if action not in WARN_ACTIONS:
         action = "mute"
 
+    try:
+        strikes = await add_user_strike(chat_id, target_id, reason)
+    except Exception as e:
+        logger.error(f"Error registrando strike perimetral de {target_id} en {chat_id}: {e}")
+        strikes = int(await add_warning(target_id))
+
+    ext_cfg = await _get_extended_warn_config(chat_id)
+    custom_text = ext_cfg.get("warn_custom_text")
+    media_id = ext_cfg.get("warn_custom_media_id")
+    media_type = ext_cfg.get("warn_custom_media_type")
+
+    # CASO A: EL USUARIO AÚN NO ALCANZA EL LÍMITE PUNITIVO
     if strikes < limit:
         await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit)
 
         if not silent:
             es_txt, en_txt = _REASON_TEXT.get(reason, _REASON_TEXT["filter"])
-            await _send_temp(
-                bot, chat_id,
-                f"⚠️ <b>Aviso de Seguridad / Security Notice ({strikes}/{limit})</b>\n\n"
-                f"{target_mention}, {es_txt}\n"
-                f"🇺🇸 <i>Notice: {target_mention}, {en_txt}</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>",
-                ttl=20, reply_to=reply_to
-            )
+            
+            # 1. Nivel ULTRA PRO: Copy personalizado + Soporte Multimedia
+            if group_tier in ("ultra_pro", "ultra"):
+                if custom_text:
+                    body = custom_text.replace("{mention}", target_mention).replace("{user}", target_mention)\
+                                      .replace("{strikes}", str(strikes)).replace("{limit}", str(limit))\
+                                      .replace("{reason}", reason)
+                else:
+                    body = f"{target_mention}, has recibido una advertencia ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
+                    
+                notice = (
+                    f"⚠️ <b>Aviso Perimetral ULTRA PRO 💎 ({strikes}/{limit})</b>\n\n"
+                    f"{body}\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+                await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to, media_id=media_id, media_type=media_type)
+
+            # 2. Nivel PRO: Copy personalizado en texto
+            elif group_tier == "pro":
+                if custom_text:
+                    body = custom_text.replace("{mention}", target_mention).replace("{user}", target_mention)\
+                                      .replace("{strikes}", str(strikes)).replace("{limit}", str(limit))\
+                                      .replace("{reason}", reason)
+                else:
+                    body = f"{target_mention}, has recibido una falta formal ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
+
+                notice = (
+                    f"⚠️ <b>Aviso de Seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n"
+                    f"{body}\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+                await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to)
+
+            # 3. Nivel Free: Plantilla estándar bilingüe
+            else:
+                notice = (
+                    f"⚠️ <b>Aviso de Seguridad ({strikes}/{limit})</b>\n\n"
+                    f"{target_mention}, {es_txt}\n"
+                    f"🇺🇸 <i>Notice: {target_mention}, {en_txt}</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+                await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to)
+
         return {"status": "warned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
+    # CASO B: SE ALCANZÓ EL LÍMITE DE ADVERTENCIAS (APLICACIÓN DE CASTIGO)
     await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit, force_mute=True)
 
     try:
@@ -1683,21 +1783,25 @@ async def enforce_warn_ladder(
         logger.error(f"Error aplicando sanción '{action}' a {target_id} en {chat_id}: {e}")
         return {"status": "error", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
-    await _reset_warnings_safe(target_id)
+    await _reset_warnings_safe(chat_id, target_id)
 
     if action in ("kick", "ban"):
         await registry_forget(chat_id, target_id)
 
     if not silent:
         icon, title, es_txt, en_txt = _SANCTION_TEXT[action]
-        await _send_temp(
-            bot, chat_id,
-            f"{icon} <b>{title} ({strikes}/{limit})</b>\n\n"
+        badge = " 💎" if group_tier in ("ultra_pro", "ultra") else (" ⭐" if group_tier == "pro" else "")
+        sanction_notice = (
+            f"{icon} <b>{title}{badge} ({strikes}/{limit})</b>\n\n"
             f"{target_mention} {es_txt}\n"
+            f"• <b>Medida ejecutada:</b> <code>{action.upper()}</code>\n"
             f"🇺🇸 <i>{en_txt}</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>",
-            ttl=25, reply_to=reply_to
+            f"🛡️ <i>Cloud Media Management</i>"
         )
+        # En ULTRA PRO se acompaña la sanción con la multimedia si está configurada
+        use_media = media_id if group_tier in ("ultra_pro", "ultra") else None
+        use_type = media_type if group_tier in ("ultra_pro", "ultra") else None
+        await _send_temp(bot, chat_id, sanction_notice, ttl=25, reply_to=reply_to, media_id=use_media, media_type=use_type)
 
     return {"status": "sanctioned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
@@ -1726,6 +1830,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     if _tier_is_privileged(tier):
         return
 
+    # 1. Cerradura de Comandos
     if text_content.startswith("/") and await get_lock_status(group_id, "lock_commands") == 1:
         try:
             await message.delete()
@@ -1741,6 +1846,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     is_threat_detected = False
     lower_text = text_content.lower()
 
+    # 2. Cerraduras de Contenido
     if await get_lock_status(group_id, "lock_media") == 1 and (
         message.photo or message.video or message.document or 
         message.audio or message.voice or message.video_note or message.animation
@@ -1754,6 +1860,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     ):
         is_threat_detected = True
 
+    # 3. Lista Negra (Blacklist Alfanumérica)
     if not is_threat_detected:
         blacklist = await get_blacklist()
         for b_word in blacklist:
@@ -1761,6 +1868,7 @@ async def group_security_matrix(message: Message, bot: Bot):
                 is_threat_detected = True
                 break
 
+    # 4. Filtros Perimetrales Anti-Spam
     if not is_threat_detected:
         if await get_antispam_filter(group_id, "tg_links") == 1 and ("t.me/" in lower_text or "telegram.me/" in lower_text):
             is_threat_detected = True
@@ -1797,6 +1905,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     if is_edit:
         return
 
+    # 5. Escudo Anti-Flood
     af_cfg = await get_antiflood_config(group_id)
     max_msgs, time_window, af_action = af_cfg["msgs"], af_cfg["time"], af_cfg["action"]
 

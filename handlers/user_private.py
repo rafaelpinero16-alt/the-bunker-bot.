@@ -40,6 +40,7 @@ from database.database import (
     register_bot_clone, get_bot_clone, get_db_connection,
     save_owner_session, get_owner_session, revoke_owner_session,
     get_vc_schedule, set_vc_schedule,
+    get_mic_vip_custom_config, set_mic_vip_custom_config,
     # 🚨 ULTRA PRO — Panel de Élite & Módulos Corporativos
     get_panic_status, set_panic_status,
     get_shield_status, set_shield_status,
@@ -200,6 +201,9 @@ SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 CHAN_PLAN_STATES = {}
 AI_PROMPT_STATES = {}
+WARN_CUSTOM_TEXT_STATES = {}
+WARN_CUSTOM_MEDIA_STATES = {}
+MIC_VIP_TEXT_STATES = {}
 
 # 🧯 Registro central de TODOS los estados conversacionales: permite liberarlos en bloque (navegación, /start,
 # /cancel) y garantiza que ningún menú privado quede bloqueado por una conversación huérfana.
@@ -208,7 +212,7 @@ ALL_STATE_DICTS = (
     VC_SCHED_STATES, NIGHT_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES,
     PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES, TIPS_AMOUNT_STATES, TIPS_TARGET_STATES,
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
-    CHAN_PLAN_STATES, AI_PROMPT_STATES,
+    CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES
 )
 
 # ⏳ Caducidad de asistentes multi-paso (segundos) y enfriamiento del mensaje de "sin acción pendiente".
@@ -2202,21 +2206,52 @@ async def get_locks_keyboard(group_id: int, lang: str):
         [InlineKeyboardButton(text=f"{cmds_lbl} {commands}", callback_data=f"toglock_commands_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
+async def set_warn_custom_field(group_id: int, field: str, value: str | None):
+    """Guarda copy o multimedia personalizada de advertencias (PRO / ULTRA PRO)."""
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(group_settings)")
+            existing_cols = {row[1] for row in cursor.fetchall()}
+            if field not in existing_cols:
+                cursor.execute(f"ALTER TABLE group_settings ADD COLUMN {field} TEXT")
+            cursor.execute(f"UPDATE group_settings SET {field} = ? WHERE group_id = ?", (value, group_id))
+            conn.commit()
+    await asyncio.to_thread(_sync)
 
 
-async def get_warns_keyboard(group_id: int, lang: str):
+async def get_warn_custom_fields(group_id: int) -> dict:
+    """Lee el texto y multimedia personalizada de advertencias del grupo."""
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(group_settings)")
+            cols = {row[1] for row in cursor.fetchall()}
+            target = [c for c in ["warn_custom_text", "warn_custom_media_id", "warn_custom_media_type"] if c in cols]
+            if target:
+                cursor.execute(f"SELECT {', '.join(target)} FROM group_settings WHERE group_id = ?", (group_id,))
+                row = cursor.fetchone()
+                if row:
+                    return {c: row[i] for i, c in enumerate(target)}
+        return {}
+    return await asyncio.to_thread(_sync)
+
+
+async def get_warns_keyboard(group_id: int, lang: str, user_id: int = 0):
     """
-    Matriz granular de Advertencias (Strikes):
-    - Interruptores independientes por categoría de infracción (enlaces, lista negra, anti-flood).
-    - Selector cíclico de límite de faltas (3 / 4 / 5).
-    - Selector cíclico de castigo automático asignado (mute / kick / ban).
+    Matriz granular de Advertencias por Rangos:
+    - Free: Toggles base, límite y castigo.
+    - PRO: Desbloquea botón para editar texto de sanción.
+    - ULTRA PRO: Desbloquea botón para editar texto + botón para adjuntar multimedia (foto/video/gif).
     """
     t = TEXTS.get(lang, TEXTS["es"])
     cfg = await get_warns_config(group_id)
     limit = cfg["limit"]
     action = cfg["action"].upper()
 
-    # Interruptores por categoría — por defecto ACTIVADOS (🟢) si la config aún no los define.
+    tier = await get_effective_group_tier(group_id, user_id) if user_id else await get_group_tier(group_id)
+    tier = (tier or "free").lower()
+
     links_on = cfg.get("warn_links", 1) == 1
     blacklist_on = cfg.get("warn_blacklist", 1) == 1
     flood_on = cfg.get("warn_flood", 1) == 1
@@ -2225,23 +2260,42 @@ async def get_warns_keyboard(group_id: int, lang: str):
     blacklist_dot = "🟢" if blacklist_on else "🔴"
     flood_dot = "🟢" if flood_on else "🔴"
 
-    links_lbl = f"🔗 {'Warn by Forbidden Links' if lang == 'en' else 'Aviso por Enlaces Prohibidos'} {links_dot}"
-    blacklist_lbl = f"🚫 {'Warn by Blacklisted Words' if lang == 'en' else 'Aviso por Lista Negra'} {blacklist_dot}"
-    flood_lbl = f"🌊 {'Warn by Anti-Flood' if lang == 'en' else 'Aviso por Anti-Flood'} {flood_dot}"
+    links_lbl = f"🔗 {'Warn Forbidden Links' if lang == 'en' else 'Aviso Enlaces'} {links_dot}"
+    blacklist_lbl = f"🚫 {'Warn Blacklist' if lang == 'en' else 'Aviso Lista Negra'} {blacklist_dot}"
+    flood_lbl = f"🌊 {'Warn Anti-Flood' if lang == 'en' else 'Aviso Anti-Flood'} {flood_dot}"
 
-    limit_lbl = f"🔢 Strike Limit: {limit}" if lang == "en" else f"🔢 Límite: {limit} Faltas"
-    action_lbl = f"⚖️ Punishment: {action}" if lang == "en" else f"⚖️ Castigo: {action}"
+    limit_lbl = f"🔢 {'Limit' if lang == 'en' else 'Límite'}: {limit}"
+    action_lbl = f"⚖️ {'Action' if lang == 'en' else 'Castigo'}: {action}"
 
-    return InlineKeyboardMarkup(inline_keyboard=[
+    keyboard_rows = [
         [InlineKeyboardButton(text=links_lbl, callback_data=f"warnset_toglink_{group_id}_{lang}")],
         [InlineKeyboardButton(text=blacklist_lbl, callback_data=f"warnset_togblack_{group_id}_{lang}")],
         [InlineKeyboardButton(text=flood_lbl, callback_data=f"warnset_togflood_{group_id}_{lang}")],
         [
             InlineKeyboardButton(text=limit_lbl, callback_data=f"warnset_limit_{group_id}_{lang}"),
             InlineKeyboardButton(text=action_lbl, callback_data=f"warnset_action_{group_id}_{lang}")
-        ],
-        [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
-    ])
+        ]
+    ]
+
+    # Beneficios dinámicos PRO y ULTRA PRO
+    custom_cfg = await get_warn_custom_fields(group_id)
+    has_text = "🟢" if custom_cfg.get("warn_custom_text") else "🔴"
+    has_media = "🟢" if custom_cfg.get("warn_custom_media_id") else "🔴"
+
+    if tier in ("pro", "ultra_pro"):
+        txt_label = f"✍️ {'Edit Warn Text' if lang == 'en' else 'Editar Texto Aviso'} {has_text}"
+        keyboard_rows.append([InlineKeyboardButton(text=txt_label, callback_data=f"warnset_text_{group_id}_{lang}")])
+
+    if tier in ("ultra_pro", "ultra"):
+        med_label = f"🖼️ {'Attach Media' if lang == 'en' else 'Adjuntar Multimedia'} {has_media}"
+        ultra_row = [InlineKeyboardButton(text=med_label, callback_data=f"warnset_media_{group_id}_{lang}")]
+        if custom_cfg.get("warn_custom_media_id"):
+            del_label = "🗑️ Quitar Media" if lang == "es" else "🗑️ Remove Media"
+            ultra_row.append(InlineKeyboardButton(text=del_label, callback_data=f"warnset_delmedia_{group_id}_{lang}"))
+        keyboard_rows.append(ultra_row)
+
+    keyboard_rows.append([InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
 
 async def get_delmsgs_keyboard(group_id: int, user_id: int, lang: str):
@@ -2668,6 +2722,73 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
+    # 1b. COPY PERSONALIZADO DE ADVERTENCIAS (PRO / ULTRA PRO)
+    if (bot.id, user_id) in WARN_CUSTOM_TEXT_STATES:
+        w_data = WARN_CUSTOM_TEXT_STATES.pop((bot.id, user_id))
+        group_id = w_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"gset_warns_{group_id}_{lang}")]
+        ])
+        if text_input:
+            await set_warn_custom_field(group_id, "warn_custom_text", text_input[:1000])
+            resp = await message.answer(
+                "✅ <b>¡Mensaje de advertencia actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
+        else:
+            resp = await message.answer("⚠️ El mensaje no puede estar vacío.", reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
+    # 1c. MULTIMEDIA PERSONALIZADA DE ADVERTENCIAS (ULTRA PRO)
+    if (bot.id, user_id) in WARN_CUSTOM_MEDIA_STATES:
+        w_data = WARN_CUSTOM_MEDIA_STATES.pop((bot.id, user_id))
+        group_id = w_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"gset_warns_{group_id}_{lang}")]
+        ])
+        media_id = None
+        media_type = None
+        if message.photo:
+            media_id = message.photo[-1].file_id
+            media_type = "photo"
+        elif message.animation:
+            media_id = message.animation.file_id
+            media_type = "animation"
+        elif message.video:
+            media_id = message.video.file_id
+            media_type = "video"
+
+        if media_id and media_type:
+            await set_warn_custom_field(group_id, "warn_custom_media_id", media_id)
+            await set_warn_custom_field(group_id, "warn_custom_media_type", media_type)
+            resp = await message.answer(
+                "✅ <b>¡Multimedia asociada a advertencias guardada con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
+        else:
+            resp = await message.answer("⚠️ Envía una Foto, Video o GIF válido.", reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
+    # 1d. COPY EXPLICATIVO DE MICVIP (PRO / ULTRA PRO)
+    if (bot.id, user_id) in MIC_VIP_TEXT_STATES:
+        m_data = MIC_VIP_TEXT_STATES.pop((bot.id, user_id))
+        group_id = m_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"cmd_mic_{group_id}_{lang}")]
+        ])
+        if text_input:
+            await set_mic_vip_custom_config(group_id, "mic_vip_custom_text", text_input[:500])
+            resp = await message.answer(
+                "✅ <b>¡Descripción explicativa de MicVIP guardada con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
+        else:
+            resp = await message.answer("⚠️ El texto no puede estar vacío.", reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
     # 2. TOKEN BOTFATHER
     if (bot.id, user_id) in CLONE_STATES:
         state_data = CLONE_STATES.pop((bot.id, user_id))
@@ -2735,7 +2856,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
             resp = await message.answer(t["token_error"], reply_markup=back_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
         return
-
     # 3. CENTINELA TELÉFONO
     if (bot.id, user_id) in SENTINEL_PHONE_STATES:
         state_data = SENTINEL_PHONE_STATES.pop((bot.id, user_id))
@@ -3756,8 +3876,11 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
         elif sub_cmd == "mic":
-            curr_price = GROUP_MIC_PRICE.get(group_id, 50)
-            curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
+            custom_cfg = await get_mic_vip_custom_config(group_id)
+            curr_price = custom_cfg.get("price") or 50
+            curr_tag = custom_cfg.get("tag") or "⚜️MIC🎙️VIP⚜️"
+            has_desc = "🟢" if custom_cfg.get("text") else "🔴"
+
             text = t["mic_menu"].format(curr_price=curr_price, curr_tag=curr_tag)
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [
@@ -3769,16 +3892,22 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                     InlineKeyboardButton(text=t["btn_custom_rate"], callback_data=f"micval_custom_{group_id}_{lang}")
                 ],
                 [InlineKeyboardButton(text=t["btn_mictag"].format(curr_tag=curr_tag), callback_data=f"cmd_mictag_{group_id}_{lang}")],
+                [InlineKeyboardButton(text=f"✍️ {'Explanatory Copy' if lang == 'en' else 'Mensaje Explicativo'} {has_desc}", callback_data=f"cmd_mictext_{group_id}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
             ])
-        elif sub_cmd == "mictag":
-            tier = await get_effective_group_tier(group_id, callback.from_user.id)
-            if tier != "ultra_pro":
-                await callback.answer(t["tag_pro_req"], show_alert=True)
-                return
-            MIC_TAG_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            curr_tag = GROUP_VIP_TAG.get(group_id, "VIP 24/7")
-            prompt = await callback.message.answer(t["tag_menu_prompt"].format(curr_tag=curr_tag), reply_markup=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
+
+        elif sub_cmd == "mictext":
+            MIC_VIP_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "✍️ <b>Editor de Mensaje Explicativo de MicVIP:</b>\n\n"
+                "Envía el texto que se le presentará a los miembros antes de comprar su pase VIP:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "✍️ <b>MicVIP Explanatory Copy Editor:</b>\n\n"
+                "Send the text members will see before activating their VIP mic pass:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
         elif sub_cmd in ["ban", "mute"]:
@@ -3881,13 +4010,17 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
     elif action == "night":
         sub = data[1]
-        group_id = int(data[2])
+        if sub == "toggle":
+            new_st = int(data[2])
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+
         if not await verify_admin_privileges(callback, bot, group_id):
             return
 
         if sub == "menu" or sub == "toggle":
             if sub == "toggle":
-                new_st = int(data[3])
                 await set_night_mode_config(group_id, "night_mode_status", new_st)
 
             cfg = await get_night_mode_config(group_id)
@@ -3989,7 +4122,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             cfg = await get_warns_config(group_id)
             await safe_edit_text(callback,
                 t["warns_main_title"].format(limit=cfg["limit"], action=cfg["action"].upper()),
-                reply_markup=await get_warns_keyboard(group_id, lang),
+                reply_markup=await get_warns_keyboard(group_id, lang, user_id=callback.from_user.id),
                 parse_mode="HTML"
             )
         elif module == "delmsgs":
@@ -4121,7 +4254,63 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     elif action == "warnset":
         sub = data[1]
         cfg = await get_warns_config(group_id)
-        if sub == "limit":
+
+        if sub == "text":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier not in ("pro", "ultra_pro"):
+                await callback.answer("⭐ Requiere plan PRO o ULTRA PRO.", show_alert=True)
+                return
+            WARN_CUSTOM_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "✍️ <b>Editor de Copy de Advertencia (PRO / ULTRA PRO):</b>\n\n"
+                "Envía el mensaje que recibirá el infractor. Puedes usar variables:\n"
+                "• <code>{mention}</code> - Mención del usuario\n"
+                "• <code>{strikes}</code> - Número de falta actual\n"
+                "• <code>{limit}</code> - Límite de faltas\n"
+                "• <code>{reason}</code> - Motivo de la infracción\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "✍️ <b>Warning Message Editor (PRO / ULTRA PRO):</b>\n\n"
+                "Send the warning template. Supported variables:\n"
+                "• <code>{mention}</code>, <code>{strikes}</code>, <code>{limit}</code>, <code>{reason}</code>\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"gset_warns_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "media":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                await callback.answer("💎 Requiere plan ULTRA PRO.", show_alert=True)
+                return
+            WARN_CUSTOM_MEDIA_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "🖼️ <b>Adjuntar Multimedia a Sanciones (ULTRA PRO):</b>\n\n"
+                "Envía una Foto, Video o GIF que acompañará las advertencias y sanciones automáticas:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "🖼️ <b>Attach Warning Media (ULTRA PRO):</b>\n\n"
+                "Send a Photo, Video or GIF to accompany warning alerts:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"gset_warns_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "delmedia":
+            await set_warn_custom_field(group_id, "warn_custom_media_id", None)
+            await set_warn_custom_field(group_id, "warn_custom_media_type", None)
+            await callback.answer("🗑️ Multimedia retirada de las advertencias.", show_alert=True)
+            cfg = await get_warns_config(group_id)
+            await safe_edit_text(callback,
+                t["warns_main_title"].format(limit=cfg["limit"], action=cfg["action"].upper()),
+                reply_markup=await get_warns_keyboard(group_id, lang, user_id=callback.from_user.id),
+                parse_mode="HTML"
+            )
+            return
+
+        elif sub == "limit":
             limits = [3, 4, 5]
             curr_limit = cfg["limit"]
             new_limit = limits[(limits.index(curr_limit) + 1) % len(limits)] if curr_limit in limits else 3
@@ -4145,7 +4334,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         try:
             await safe_edit_text(callback,
                 t["warns_main_title"].format(limit=updated_cfg["limit"], action=updated_cfg["action"].upper()),
-                reply_markup=await get_warns_keyboard(group_id, lang),
+                reply_markup=await get_warns_keyboard(group_id, lang, user_id=callback.from_user.id),
                 parse_mode="HTML"
             )
         except TelegramBadRequest:
@@ -4182,21 +4371,127 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 parse_mode="HTML"
             )
         elif sub == "text":
-            tier_check = await get_effective_group_tier(group_id, callback.from_user.id)
-            if tier_check not in ["pro", "ultra_pro"]:
-                upsell_text = tr(lang, "⭐ <b>Aduana Captcha Pro</b>\n\nPersonalizar el mensaje requiere nivel PRO o ULTRA PRO.\n\n🛡️ <i>Cloud Media Management</i>", "⭐ <b>Captcha Checkpoint Pro</b>\n\nCustomizing the message requires the PRO or ULTRA PRO tier.\n\n🛡️ <i>Cloud Media Management</i>")
-                keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="⭐ PRO", callback_data=f"pay_pro_{group_id}_{lang}"),
-                        InlineKeyboardButton(text="💎 ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")
-                    ],
-                    [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gset_captcha_{group_id}_{lang}")]
-                ])
+            CAPTCHA_STATES[(bot.id, callback.from_user.id)] = group_id
+            prompt = await callback.message.answer(
+                tr(lang,
+                   "✍️ <b>Editor de Captcha</b>\n\nEnvía el mensaje que recibirá el usuario al ingresar:\n\n🛡️ <i>Cloud Media Management</i>",
+                   "✍️ <b>Captcha Editor</b>\n\nSend the message users will receive when they join:\n\n🛡️ <i>Cloud Media Management</i>"),
+                reply_markup=_cancel_kb(t, f"gset_captcha_{group_id}_{lang}"), parse_mode="HTML"
+            )
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+        elif sub == "srvdel":
+            cfg = await get_captcha_config(group_id)
+            await set_captcha_config(group_id, "captcha_service_del", 0 if cfg["service_del"] == 1 else 1)
+            cfg_updated = await get_captcha_config(group_id)
+
+            if callback.message.text and ("Service" in callback.message.text or "Purga" in callback.message.text or "Purge" in callback.message.text or "Centro" in callback.message.text):
+                tier = await get_effective_group_tier(group_id, callback.from_user.id)
+                quota_desc = (tr(lang, "3 purgas de servicio diarias (Plan Básico)", "3 daily service purges (Free Plan)") if tier == "free" else tr(lang, "Purga automatizada ilimitada (PRO / ULTRA)", "Unlimited automated purge (PRO / ULTRA)"))
                 try:
-                    await safe_edit_text(callback, upsell_text, reply_markup=keyboard, parse_mode="HTML")
+                    await safe_edit_text(callback,
+                        t["delmsgs_main_title"].format(tier_display=tier.upper(), quota_desc=quota_desc),
+                        reply_markup=await get_delmsgs_keyboard(group_id, callback.from_user.id, lang),
+                        parse_mode="HTML"
+                    )
                 except TelegramBadRequest:
                     pass
+            else:
+                st_text = "🟢" if cfg_updated["status"] == 1 else "🔴"
+                mode_text = "🟢" if cfg_updated["mode"] == 1 else "🔴"
+                try:
+                    await safe_edit_text(callback,
+                        t["captcha_main_title"].format(status_text=st_text, mode_text=mode_text, time_text=str(cfg_updated["time"]), action_text=cfg_updated["action"].upper()),
+                        reply_markup=await get_captcha_keyboard(group_id, lang),
+                        parse_mode="HTML"
+                    )
+                except TelegramBadRequest:
+                    pass
+
+    elif action == "togcap" or action == "togmode":
+        if action == "togcap":
+            await set_captcha_status(group_id, 1 if data[1] == "on" else 0)
+        else:
+            await set_captcha_config(group_id, "captcha_mode", 1 if data[1] == "on" else 0)
+
+        cfg = await get_captcha_config(group_id)
+        st_text = "🟢" if cfg["status"] == 1 else "🔴"
+        mode_text = "🟢" if cfg["mode"] == 1 else "🔴"
+        try:
+            await safe_edit_text(callback,
+                t["captcha_main_title"].format(status_text=st_text, mode_text=mode_text, time_text=str(cfg["time"]), action_text=cfg["action"].upper()),
+                reply_markup=await get_captcha_keyboard(group_id, lang),
+                parse_mode="HTML"
+            )
+        except TelegramBadRequest:
+            pass
+
+    elif action == "cap_set":
+        sub = data[2]
+        if sub == "time":
+            prompt = "⏱️ <b>Configuración de Tiempo Límite</b>" if lang == "es" else "⏱️ <b>Time Limit Configuration</b>"
+            await safe_edit_text(callback, prompt, reply_markup=get_captcha_time_keyboard(group_id, lang), parse_mode="HTML")
+        elif sub == "action":
+            cfg = await get_captcha_config(group_id)
+            await safe_edit_text(callback,
+                t["captcha_action_title"].format(mode_name=cfg["action"].upper()),
+                reply_markup=await get_captcha_action_keyboard(group_id, lang),
+                parse_mode="HTML"
+            )
+        elif sub == "text":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier not in ("pro", "ultra_pro"):
+                await callback.answer("⭐ Requiere plan PRO o ULTRA PRO.", show_alert=True)
                 return
+            WARN_CUSTOM_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "✍️ <b>Editor de Copy de Advertencia (PRO / ULTRA PRO):</b>\n\n"
+                "Envía el mensaje que recibirá el infractor. Puedes usar variables:\n"
+                "• <code>{mention}</code> - Mención del usuario\n"
+                "• <code>{strikes}</code> - Número de falta actual\n"
+                "• <code>{limit}</code> - Límite de faltas\n"
+                "• <code>{reason}</code> - Motivo de la infracción\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "✍️ <b>Warning Message Editor (PRO / ULTRA PRO):</b>\n\n"
+                "Send the warning template. Supported variables:\n"
+                "• <code>{mention}</code>, <code>{strikes}</code>, <code>{limit}</code>, <code>{reason}</code>\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"gset_warns_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "media":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                await callback.answer("💎 Requiere plan ULTRA PRO.", show_alert=True)
+                return
+            WARN_CUSTOM_MEDIA_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "🖼️ <b>Adjuntar Multimedia a Sanciones (ULTRA PRO):</b>\n\n"
+                "Envía una Foto, Video o GIF que acompañará las advertencias y sanciones automáticas:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "🖼️ <b>Attach Warning Media (ULTRA PRO):</b>\n\n"
+                "Send a Photo, Video or GIF to accompany warning alerts:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"gset_warns_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "delmedia":
+            await set_warn_custom_field(group_id, "warn_custom_media_id", None)
+            await set_warn_custom_field(group_id, "warn_custom_media_type", None)
+            await callback.answer("🗑️ Multimedia retirada de las advertencias.", show_alert=True)
+            cfg = await get_warns_config(group_id)
+            await safe_edit_text(callback,
+                t["warns_main_title"].format(limit=cfg["limit"], action=cfg["action"].upper()),
+                reply_markup=await get_warns_keyboard(group_id, lang, user_id=callback.from_user.id),
+                parse_mode="HTML"
+            )
+            return
 
             CAPTCHA_STATES[(bot.id, callback.from_user.id)] = group_id
             prompt = await callback.message.answer(
