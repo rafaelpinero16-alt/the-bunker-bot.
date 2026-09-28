@@ -167,15 +167,18 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pmt_vip_ok": (
-            "🎙️ <b>VIP Microphone Pass Activated!</b>\n\n"
-            "Voice unlocked. Mic volume dialed straight to <b>100%</b> by the Voice Sentinel.\n"
-            "You have exactly <b>24 hours</b> of continuous, unrestricted live transmission.\n\n"
+            "🎙️ <b>¡MICVIP Pass Activated Successfully!</b>\n\n"
+            "• Voice permission unlocked at <b>100% volume</b>.\n"
+            "• Validity: <b>24 continuous hours</b>.\n"
+            "• The Sentinel will no longer dial your mic down to 2%.\n\n"
+            "💡 <b>Instructions:</b> Rejoin the Voice Chat or unmute your mic. You can now speak freely without acoustic attenuation.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_add_master": "🤖 Add Master Sentinel (@Alphacentinel)",
         "btn_setup_clone": "🧬 Setup Clone & Dedicated Sentinel",
         "btn_join_channel": "🚀 Join Secure Channel",
         "btn_view_target": "🔗 Access VIP Target / Resource",
+        "btn_return_vc": "🎙️ Return to Voice Chat",
         "err_inv": "⚠️ An error occurred while generating the invoice. Please try again.",
         "err_link": "⚠️ Invalid activation link or expired parameters.",
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
@@ -230,15 +233,18 @@ TEXTS = {
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pmt_vip_ok": (
-            "🎙️ <b>¡Pase VIP de Micrófono Activado!</b>\n\n"
-            "Voz liberada. Volumen configurado al <b>100%</b> por el Centinela de Voz.\n"
-            "Cuentas con exactamente <b>24 horas</b> de transmisión continua sin atenuación.\n\n"
+            "🎙️ <b>¡Pase VIP de Micrófono Activado con Éxito!</b>\n\n"
+            "• Tu micrófono ha sido desbloqueado al <b>100% de volumen</b>.\n"
+            "• Vigencia: <b>24 horas continuas</b>.\n"
+            "• El Centinela ya no atenuará tu audio al 2%.\n\n"
+            "💡 <b>Instrucciones:</b> Vuelve al videochat o activa tu micrófono en el grupo. Ya puedes participar y hablar sin restricciones acústicas.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_add_master": "🤖 Añadir Centinela Maestro (@Alphacentinel)",
         "btn_setup_clone": "🧬 Configurar Clon & Centinela Propio",
         "btn_join_channel": "🚀 Entrar al Canal Seguro",
         "btn_view_target": "🔗 Ver Destino / Canal VIP",
+        "btn_return_vc": "🎙️ Volver al Videochat",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
         "err_link": "⚠️ Enlace de facturación no válido, sin entorno asociado o expirado.",
         "private_only": "⚠️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
@@ -414,9 +420,8 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             media_type = target_plan.get("media_type")
             target_link = target_plan.get("target_link")
 
+            # Texto limpio sin URLs expuestas
             caption = promo_text.strip() if promo_text and promo_text.strip() else f"💎 <b>{plan_name}</b>\n\n{duration_days} días — {stars_price} ⭐"
-            if target_link:
-                caption += f"\n\n🔗 <b>Destino VIP:</b> <code>{target_link}</code>" if lang == "es" else f"\n\n🔗 <b>VIP Target:</b> <code>{target_link}</code>"
 
             if media_id and media_type:
                 try:
@@ -439,10 +444,16 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
 
             prices = [LabeledPrice(label=title, amount=stars_price)]
-            markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)],
-                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
-            ])
+            
+            kb_rows = [
+                [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)]
+            ]
+            if target_link:
+                target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
+                kb_rows.append([InlineKeyboardButton(text=t["btn_view_target"], url=target_url)])
+
+            kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
             await bot.send_invoice(
                 chat_id=message.chat.id,
@@ -493,7 +504,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             logger.error(f"Error generando factura de Micrófono VIP: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
         return
-    # ==========================================
+
+
+# ==========================================
 # ⚡ DESPACHO DE FACTURAS DESDE BOTONES INLINE (inv_)
 # ==========================================
 @router.callback_query(F.data.startswith("inv_"))
@@ -621,7 +634,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para suscripción: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 2: MEMBRESÍAS DE CANAL, ENLACES DE 1 USO Y ENTREGA DE DESTINO VIP
+    # CASO 2: MEMBRESÍAS DE CANAL Y ENTREGA EXCLUSIVA POR BOTONES
     elif payload.startswith("chan_sub_"):
         try:
             parts = payload.split("_")
@@ -651,19 +664,14 @@ async def process_successful_payment(message: Message, bot: Bot):
                 invite_link=invite_link
             )
 
+            # Botones interactivos limpios
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
             ]
             
-            target_extra = ""
             if target_link:
                 target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
                 kb_rows.append([InlineKeyboardButton(text=t["btn_view_target"], url=target_url)])
-                target_extra = (
-                    f"\n• <b>Destino VIP Adicional:</b> <a href='{target_url}'>{target_link}</a>"
-                    if lang == "es" else
-                    f"\n• <b>Additional VIP Resource:</b> <a href='{target_url}'>{target_link}</a>"
-                )
 
             join_markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
             welcome_extra = f"\n\n💬 <i>{custom_welcome}</i>" if custom_welcome else ""
@@ -673,14 +681,14 @@ async def process_successful_payment(message: Message, bot: Bot):
                 f"• Pago procesado: <b>{stars_paid} Stars (XTR)</b>\n"
                 f"• Período de vigencia: <b>{duration_days} días</b>\n"
                 f"• Tu <b>enlace criptográfico de un solo uso</b> está listo (se quemará automáticamente al unirte):\n\n"
-                f"🔗 <a href='{invite_link}'>Entrar al Canal Seguro</a>{target_extra}{welcome_extra}\n\n"
+                f"Usa los botones interactivos abajo para ingresar:{welcome_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 f"💎 <b>Channel Membership Activated Successfully!</b>\n\n"
                 f"• Payment processed: <b>{stars_paid} Stars (XTR)</b>\n"
                 f"• Validity period: <b>{duration_days} days</b>\n"
                 f"• Your <b>single-use cryptographic invite link</b> is ready (burns automatically upon joining):\n\n"
-                f"🔗 <a href='{invite_link}'>Join Secure Channel</a>{target_extra}{welcome_extra}\n\n"
+                f"Use the interactive buttons below to join:{welcome_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
@@ -693,7 +701,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para membresía de canal: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 3: PASES VIP DE MICRÓFONO (24 HORAS)
+    # CASO 3: PASES VIP DE MICRÓFONO (24 HORAS CON INSTRUCCIONES CLARAS)
     elif payload.startswith("vip_mic_"):
         try:
             chat_id = int(payload.split("_")[2])
@@ -727,10 +735,19 @@ async def process_successful_payment(message: Message, bot: Bot):
             except Exception as admin_err:
                 logger.warning(f"Error general al asignar título VIP de micrófono: {admin_err}")
             
-            markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
-                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
-            ])
+            # Botones para volver al grupo y ver estado en Mini App
+            kb_rows = []
+            try:
+                chat_info = await bot.get_chat(chat_id)
+                if chat_info.username:
+                    kb_rows.append([InlineKeyboardButton(text=t["btn_return_vc"], url=f"https://t.me/{chat_info.username}")])
+            except Exception:
+                pass
+
+            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))])
+            kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+
+            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
             await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             logger.error(f"Error procesando la entrega del pase VIP de micrófono (Iniciando reembolso automático): {e}")
