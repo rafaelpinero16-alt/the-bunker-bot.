@@ -4,6 +4,7 @@ import random
 import os
 import time
 import json
+import html
 from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client
@@ -117,6 +118,10 @@ SENTINEL_PAYLOAD_MIN_GAP_SECONDS = 60
 _sentinel_launch_locks = {}
 _sentinel_launch_semaphore = asyncio.Semaphore(4)
 
+# Control perimetral de mensajes de videochat
+_pinned_vc_messages = {}
+_last_vc_notice = {}
+
 
 def _get_launch_lock(group_id: int) -> asyncio.Lock:
     lock = _sentinel_launch_locks.get(group_id)
@@ -187,29 +192,34 @@ GHOST_PURGE_ALERT_TEXT = (
     "🛡️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
 )
 
-RADAR_TEXTS = {
-    "combined": (
-        "🔇 <b>The Bunker Bot: Atenuación Acústica Activa (AutoLower)</b>\n\n"
-        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> por no contar con un pase de voz o autorización activa en la sala.\n\n"
-        "💡 <b>¿Quieres hablar sin restricciones?</b>\n"
-        "Para subir tu volumen al 100% y hablar libremente durante 24 horas continuas en la transmisión, adquiere tu <b>Pase VIP de Micrófono</b> usando el comando <code>/micvip</code> en este chat.\n\n"
-        "🇺🇸 <b>AutoLower Acoustic Shield Active:</b>\n"
-        "<i>{user_name}’s mic volume got dialed down to <b>2%</b> because you're rolling without an active voice pass. Want to speak freely for 24 hours? Grab your <b>VIP Mic Pass</b> typing <code>/micvip</code> right here!</i>\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    ),
+# Textos oficiales bilingües de inicio y moderación dinámica
+VC_START_TEXTS = {
     "es": (
-        "🔇 <b>The Bunker Bot: Atenuación Acústica Activa (AutoLower)</b>\n\n"
-        "El volumen de <b>{user_name}</b> ha sido reducido automáticamente al <b>2%</b> por no contar con pase VIP ni autorización en la sala.\n\n"
-        "💡 <b>¿Quieres hablar sin restricciones?</b>\n"
-        "Para subir tu volumen al 100% y hablar libremente durante 24 horas continuas, adquiere tu <b>Pase VIP de Micrófono</b> usando el comando <code>/micvip</code>.\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
+        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
+        "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
+        "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
+        "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓"
     ),
     "en": (
-        "🔇 <b>The Bunker Bot: AutoLower Acoustic Shield Active</b>\n\n"
-        "<b>{user_name}</b>’s mic volume got automatically dialed down to <b>2%</b> because you're rolling without an active voice pass in the live stream.\n\n"
-        "💡 <b>Want to speak freely?</b>\n"
-        "To boost your volume straight back up to 100% for a full 24 hours, grab your <b>VIP Mic Pass</b> typing <code>/micvip</code>!\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
+        "THE VOICE CHAT FOR ⚜️🔐The Búnker Chat🔐⚜️ HAS STARTED! EVERYONE IS WELCOME TO JOIN 🔥🐽💨🚀\n\n"
+        "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
+        "⚜️ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
+        "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓"
+    )
+}
+
+VC_MEMBER_JOIN_TEXTS = {
+    "es": (
+        "UN NUEVO MIEMBRO SE HA UNIDO AL VC DE THE BÚNKER CHAT.\n\n"
+        "🔇 {user_name}, el volumen de tu micrófono se ha establecido por defecto a un máximo del 2%.\n\n"
+        "¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y ACTIVAR EL VOLUMEN DE TU MICRÓFONO AL 100% DE CAPACIDAD?\n\n"
+        "Usa los siguientes botones para obtener tu ⚜️MIC🎙️VIP⚜️"
+    ),
+    "en": (
+        "A NEW MEMBER HAS JOINED THE BÚNKER CHAT VC.\n\n"
+        "🔇 {user_name}, your microphone volume has been set to a maximum of 2% by default.\n\n"
+        "DO YOU WANT TO BECOME A VIP MEMBER AND UNLOCK YOUR MICROPHONE VOLUME AT 100% CAPACITY?\n\n"
+        "Use the buttons below to get your ⚜️MIC🎙️VIP⚜️"
     )
 }
 
@@ -235,6 +245,70 @@ VC_SCHED_MESSAGES = {
         "🛡️ <i>Cloud Media Management</i>"
     )
 }
+
+
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es") -> InlineKeyboardMarkup:
+    """Construye la botonera bilingüe interactiva con deep-link de cobro nativo en Stars."""
+    btn1_text = "🎙️ MICVIP - 50 STARS ⭐"
+    btn2_text = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
+    btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
+    next_lang = "en" if lang == "es" else "es"
+    
+    pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=btn1_text, callback_data=f"vcinfo_micvip_{chat_id}_{lang}")],
+        [InlineKeyboardButton(text=btn2_text, url=pay_url)],
+        [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
+    ])
+
+
+async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
+    """Fase 1 y 2: Despacha y fija el mensaje de bienvenida y activación VIP del VC."""
+    if not _global_bot:
+        return
+    try:
+        bot_info = await _global_bot.get_me()
+        bot_username = bot_info.username or "thebunkerapp_bot"
+        text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang)
+
+        sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
+        if sent:
+            try:
+                await _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, both_sides=True)
+            except Exception:
+                pass
+            _pinned_vc_messages[chat_id] = sent.message_id
+            logger.info(f"📌 [VideoChat Moderation] Mensaje de bienvenida fijado en comunidad {chat_id}.")
+    except Exception as e:
+        logger.warning(f"Aviso al despachar y fijar bienvenida de VC en {chat_id}: {e}")
+
+
+async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
+    """Fase 3 y 4: Publica el aviso de atenuación al 2% auto-eliminando el aviso anterior."""
+    if not _global_bot:
+        return
+    try:
+        # Borrar mensaje anterior si existe en el registro
+        last_id = _last_vc_notice.get(chat_id)
+        if last_id:
+            try:
+                await _global_bot.delete_message(chat_id=chat_id, message_id=last_id)
+            except Exception:
+                pass
+
+        bot_info = await _global_bot.get_me()
+        bot_username = bot_info.username or "thebunkerapp_bot"
+        template = VC_MEMBER_JOIN_TEXTS.get(lang, VC_MEMBER_JOIN_TEXTS["es"])
+        text = template.format(user_name=user_name)
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang)
+
+        sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
+        if sent:
+            _last_vc_notice[chat_id] = sent.message_id
+    except Exception as e:
+        logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
 
 
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
@@ -280,14 +354,6 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
         asyncio.create_task(_watchdog(sent))
 
     return sent
-
-
-def _resolve_autolower_text(custom_text: str, user_name: str) -> str:
-    template = custom_text if custom_text else RADAR_TEXTS["combined"]
-    try:
-        return template.format(user_name=user_name)
-    except (KeyError, IndexError):
-        return template
 
 
 def _resolve_reset_text(custom_text: str) -> str:
@@ -374,7 +440,6 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
         except Exception as e:
             logger.warning(f"Aviso en Ghost Purge MTProto para {chat_id}, activando fallback: {e}")
 
-    # Fallback de contingencia mediante Aiogram Bot
     if _global_bot:
         try:
             await update_ghost_purge_scan_time(chat_id)
@@ -520,6 +585,8 @@ async def cancel_phone_auth(user_id: int):
                 await client.disconnect()
             except Exception:
                 pass
+
+
 def _register_forbidden_strike(chat_id: int, action: str):
     strikes = _forbidden_strikes.get(chat_id, 0) + 1
     if strikes >= FORBIDDEN_STRIKE_LIMIT:
@@ -668,6 +735,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     new_call_id = raw_call.id
                     if not current_call or current_call.id != new_call_id:
                         call_start_time = asyncio.get_event_loop().time()
+                        # FASE 1 y 2: El Centinela envía el mensaje fijado de apertura
+                        asyncio.create_task(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
                     current_call = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
                     permission_warned = False
                 else:
@@ -893,7 +962,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                         if u_id not in alerted_users and not night_active:
                             alerted_users.add(u_id)
-                            user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
+                            raw_u = user_obj.username if (user_obj and getattr(user_obj, "username", None)) else ""
+                            user_name = f"@{raw_u}" if raw_u else (html.escape(user_obj.first_name) if user_obj and getattr(user_obj, "first_name", None) else f"ID {u_id}")
+
                             if _global_bot:
                                 try:
                                     if noise_spike:
@@ -910,15 +981,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                             auto_delete_after=30
                                         )
                                     else:
-                                        radar_cfg = await get_radar_config(chat_id)
-                                        autolower_text = _resolve_autolower_text(radar_cfg.get("autolower_text"), user_name)
-                                        await _dispatch_radar_notice(
-                                            chat_id=chat_id,
-                                            text=autolower_text,
-                                            media_id=radar_cfg.get("autolower_media_id"),
-                                            media_type=radar_cfg.get("autolower_media_type"),
-                                            auto_delete_after=40
-                                        )
+                                        # FASE 3 y 4: Notificación dinámica con auto-eliminación del mensaje anterior
+                                        asyncio.create_task(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_name, lang="es"))
                                 except Exception:
                                     pass
 

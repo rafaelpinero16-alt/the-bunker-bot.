@@ -13,7 +13,7 @@ from database.database import (
     get_community_live_telemetry,
     get_vc_monitor_status, set_vc_monitor_status
 )
-from assistant import set_participant_mic
+from assistant import set_participant_mic, build_vc_moderation_keyboard, VC_START_TEXTS, VC_MEMBER_JOIN_TEXTS
 
 logger = logging.getLogger("vc_manager_gateway")
 router = Router()
@@ -114,7 +114,14 @@ TEXTS = {
             "👤 {mention}, tap below to unlock the mic:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "btn_pay_stars": "⭐ Get VIP Voice Pass ({price} Stars)"
+        "btn_pay_stars": "⭐ Get VIP Voice Pass ({price} Stars)",
+        "micvip_info_alert": (
+            "🎙️ MICVIP FOR THE BUNKER CHAT MEMBERS\n\n"
+            "• Price: 50 TELEGRAM STARS.\n\n"
+            "Description:\n"
+            "This feature unlocks continuous 100% microphone volume for 24 hours while participating in our Voice Chat.\n\n"
+            "Tap 'ACTIVATE MICVIP NOW' to complete your donation with Telegram Stars and get instant voice permission."
+        )
     },
     "es": {
         "owner_only": "⛔ <b>Acceso Denegado:</b> Este protocolo está reservado exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -178,7 +185,14 @@ TEXTS = {
             "👤 {mention}, haz clic abajo para activar tu micrófono:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "btn_pay_stars": "⭐ Obtener Pase VIP ({price} Stars)"
+        "btn_pay_stars": "⭐ Obtener Pase VIP ({price} Stars)",
+        "micvip_info_alert": (
+            "🎙️ MICVIP PARA MIEMBROS DE THE BÚNKER CHAT\n\n"
+            "• Precio: 50 ESTRELLAS DE TELEGRAM.\n\n"
+            "Descripción:\n"
+            "Permite el uso de micrófono al volumen máximo (100%) durante 24 horas continuas al participar en nuestro Videochat.\n\n"
+            "Usa el botón 'ACTIVAR MICVIP AHORA' para enviar tu donación en Telegram Stars y desbloquear tus permisos al instante."
+        )
     }
 }
 
@@ -332,6 +346,57 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
             asyncio.create_task(auto_delete_msg(temp_msg, 12))
         except Exception:
             pass
+
+
+# ==========================================
+# 💎 CALLBACKS TÁCTICOS DE MODERACIÓN VIDEOCHAT
+# ==========================================
+@router.callback_query(F.data.startswith("vcinfo_micvip_"))
+async def cb_vcinfo_micvip(callback: CallbackQuery):
+    """Abre en segundo plano la ventana emergente oficial con la información de MicVIP."""
+    parts = callback.data.split("_")
+    lang = parts[3] if len(parts) > 3 and parts[3] in ["es", "en"] else "es"
+    t = TEXTS.get(lang, TEXTS["es"])
+    await callback.answer(t["micvip_info_alert"], show_alert=True)
+
+
+@router.callback_query(F.data.startswith("vclang_toggle_"))
+async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
+    """Alterna el idioma del panel (mensaje fijado o de entrada) sin crear nuevos mensajes."""
+    parts = callback.data.split("_")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+
+    try:
+        chat_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+
+    new_lang = parts[3] if parts[3] in ["es", "en"] else "es"
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username or "thebunkerapp_bot"
+
+    # Comprobar si el mensaje es de bienvenida o de entrada de miembro
+    current_text = callback.message.text or callback.message.caption or ""
+    if "UN NUEVO MIEMBRO" in current_text.upper() or "A NEW MEMBER" in current_text.upper():
+        # Extraer mención
+        lines = current_text.split("\n")
+        user_line = next((l for l in lines if "@" in l or "volumen" in l or "volume" in l), "")
+        user_ref = user_line.split(",")[0].replace("🔇", "").strip() or "Miembro"
+        text_template = VC_MEMBER_JOIN_TEXTS.get(new_lang, VC_MEMBER_JOIN_TEXTS["es"])
+        new_text = text_template.format(user_name=user_ref)
+    else:
+        new_text = VC_START_TEXTS.get(new_lang, VC_START_TEXTS["es"])
+
+    new_kb = build_vc_moderation_keyboard(chat_id, bot_username, new_lang)
+
+    try:
+        await callback.message.edit_text(new_text, reply_markup=new_kb, parse_mode="HTML")
+        await callback.answer(f"Idioma cambiado a {'Español 🇪🇸' if new_lang == 'es' else 'English 🇬🇧'}")
+    except TelegramBadRequest:
+        await callback.answer()
 
 
 # ==========================================
