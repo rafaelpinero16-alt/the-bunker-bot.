@@ -1,15 +1,29 @@
+"""
+ecosystem.py — The Bunker OS (Aiogram 3.x)
+
+Módulo de telemetría del ecosistema, workers perimetrales en segundo plano,
+auditor de membresías de canales y anunciador programado de videollamadas (Fase 4).
+The Bunker Command OS © 2026 — Cloud Media Management
+"""
 import os
 import asyncio
 import logging
+import time
+from datetime import datetime
 from aiogram import Router, F, Bot
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, 
+    CallbackQuery, WebAppInfo
+)
 from aiogram.filters import Command
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+import database.database as _db_module
 from database.database import (
     get_group_tier, 
     get_autolower_status, 
     get_session_by_group,
     is_group_approved,
+    get_all_active_vc_schedules,
     get_due_channel_plan_broadcasts,
     mark_channel_plan_broadcasted,
     disable_channel_plan_broadcast,
@@ -19,18 +33,18 @@ from database.database import (
     update_subscription_status,
     get_channel_settings,
     get_channel_plans,
-    get_channel_live_telemetry
+    get_channel_live_telemetry,
+    get_db_connection
 )
 
 logger = logging.getLogger("ecosystem_handler")
 router = Router()
 
-# ==========================================
-# 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
-# ==========================================
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
 
 def is_super_admin(user_id: int) -> bool:
@@ -40,6 +54,16 @@ def is_super_admin(user_id: int) -> bool:
 def get_lang(lang_code: str) -> str:
     """Detecta el idioma del operador para renderizar la respuesta correspondiente."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
+
+
+def _get_now_time():
+    """Retorna la fecha y hora actual en la zona comunitaria (América/Bogotá)."""
+    tz_str = os.getenv("BOT_TIMEZONE", "America/Bogota")
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(tz_str))
+    except Exception:
+        return datetime.now()
 
 
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -65,7 +89,7 @@ async def get_active_sentinel_label(group_id: int, lang: str = "es") -> str:
 
 
 async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 30):
-    """Auto-destrucción dual para mantener el chat grupal limpio y sin clutter."""
+    """Auto-destrucción dual para mantener el chat grupal limpio y sin contaminación."""
     await asyncio.sleep(delay)
     try: 
         await msg1.delete()
@@ -94,6 +118,7 @@ TEXTS = {
         ),
         "admin_only": "⛔ <b>Access Denied:</b> Only community administrators can view radar telemetry.\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_refresh": "🔄 Refresh Telemetry",
+        "btn_miniapp": "🌐 Mini App Command Center",
         "btn_back_panel": "🔙 Back to Ecosystem",
         "btn_close_panel": "🗑️ Close Radar",
         "refreshed": "Telemetry updated 🔄"
@@ -111,6 +136,7 @@ TEXTS = {
         ),
         "admin_only": "⛔ <b>Acceso Denegado:</b> Solo los administradores pueden consultar la telemetría del radar.\n\n🛡️ <i>Cloud Media Management</i>",
         "btn_refresh": "🔄 Refrescar Telemetría",
+        "btn_miniapp": "🌐 Abrir Command Center",
         "btn_back_panel": "🔙 Volver al Ecosistema",
         "btn_close_panel": "🗑️ Cerrar Radar",
         "refreshed": "Telemetría actualizada 🔄"
@@ -119,10 +145,11 @@ TEXTS = {
 
 
 def build_radar_markup(chat_id: int, lang: str, in_private: bool = False) -> InlineKeyboardMarkup:
-    """Construye el teclado del radar garantizando botones de retorno y actualización."""
+    """Construye el teclado del radar con acceso a la Mini App y botón de actualización."""
     t = TEXTS.get(lang, TEXTS["es"])
     rows = [
-        [InlineKeyboardButton(text=t["btn_refresh"], callback_data=f"refresh_status_{chat_id}_{lang}_{1 if in_private else 0}")]
+        [InlineKeyboardButton(text=t["btn_refresh"], callback_data=f"refresh_status_{chat_id}_{lang}_{1 if in_private else 0}")],
+        [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
     ]
     if in_private:
         rows.append([
@@ -142,7 +169,7 @@ def build_radar_markup(chat_id: int, lang: str, in_private: bool = False) -> Inl
 async def cmd_radar_telemetry(message: Message, bot: Bot):
     """Permite auditar el estado del radar y centinela directamente vía comando."""
     lang = get_lang(message.from_user.language_code)
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS[lang]
 
     if message.chat.type != "private":
         if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
@@ -158,6 +185,13 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
     except Exception:
         tier = "FREE"
 
+    if tier == "PRO":
+        tier_label = "PRO ⭐"
+    elif tier in ("ULTRA_PRO", "ULTRAPRO"):
+        tier_label = "ULTRA PRO 💎"
+    else:
+        tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
+
     try:
         autolower_status = await get_autolower_status(chat_id)
     except Exception:
@@ -165,13 +199,13 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
 
     sentinel_label = await get_active_sentinel_label(chat_id, lang)
 
-    al_status = "🟢 ACTIVO" if autolower_status == 1 else "🔴 INACTIVO"
+    al_status = "🟢 ACTIVO (2%)" if autolower_status == 1 else "🔴 INACTIVO"
     if lang == "en":
-        al_status = "🟢 ACTIVE" if autolower_status == 1 else "🔴 INACTIVE"
+        al_status = "🟢 ACTIVE (2%)" if autolower_status == 1 else "🔴 INACTIVE"
 
     status_text = t["status_title"] + t["status_body"].format(
         chat_id=chat_id,
-        tier=tier,
+        tier=tier_label,
         autolower=al_status,
         sentinel_name=sentinel_label
     )
@@ -189,7 +223,7 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
 # ==========================================================
 @router.callback_query(F.data.startswith("refresh_status_"))
 async def cb_refresh_status(callback: CallbackQuery):
-    """Refresca la telemetría conservando la navegación intacta."""
+    """Refresca la telemetría en vivo conservando la navegación intacta."""
     data_parts = callback.data.split("_")
     if len(data_parts) < 4:
         await callback.answer()
@@ -207,6 +241,13 @@ async def cb_refresh_status(callback: CallbackQuery):
     except Exception:
         tier = "FREE"
 
+    if tier == "PRO":
+        tier_label = "PRO ⭐"
+    elif tier in ("ULTRA_PRO", "ULTRAPRO"):
+        tier_label = "ULTRA PRO 💎"
+    else:
+        tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
+
     try:
         autolower_status = await get_autolower_status(chat_id)
     except Exception:
@@ -214,15 +255,15 @@ async def cb_refresh_status(callback: CallbackQuery):
 
     sentinel_label = await get_active_sentinel_label(chat_id, lang)
 
-    al_status = "🟢 ACTIVO" if autolower_status == 1 else "🔴 INACTIVO"
+    al_status = "🟢 ACTIVO (2%)" if autolower_status == 1 else "🔴 INACTIVO"
     if lang == "en":
-        al_status = "🟢 ACTIVE" if autolower_status == 1 else "🔴 INACTIVE"
+        al_status = "🟢 ACTIVE (2%)" if autolower_status == 1 else "🔴 INACTIVE"
 
     updated_tag = " (Updated)\n\n" if lang == "en" else " (Actualizado)\n\n"
     status_text = t["status_title"].replace("\n\n", updated_tag)
     status_text += t["status_body"].format(
         chat_id=chat_id, 
-        tier=tier, 
+        tier=tier_label, 
         autolower=al_status,
         sentinel_name=sentinel_label
     )
@@ -252,6 +293,13 @@ async def cb_open_radar_private(callback: CallbackQuery):
     except Exception:
         tier = "FREE"
 
+    if tier == "PRO":
+        tier_label = "PRO ⭐"
+    elif tier in ("ULTRA_PRO", "ULTRAPRO"):
+        tier_label = "ULTRA PRO 💎"
+    else:
+        tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
+
     try:
         autolower_status = await get_autolower_status(chat_id)
     except Exception:
@@ -259,13 +307,13 @@ async def cb_open_radar_private(callback: CallbackQuery):
 
     sentinel_label = await get_active_sentinel_label(chat_id, lang)
 
-    al_status = "🟢 ACTIVO" if autolower_status == 1 else "🔴 INACTIVO"
+    al_status = "🟢 ACTIVO (2%)" if autolower_status == 1 else "🔴 INACTIVO"
     if lang == "en":
-        al_status = "🟢 ACTIVE" if autolower_status == 1 else "🔴 INACTIVE"
+        al_status = "🟢 ACTIVE (2%)" if autolower_status == 1 else "🔴 INACTIVE"
 
     status_text = t["status_title"] + t["status_body"].format(
         chat_id=chat_id, 
-        tier=tier, 
+        tier=tier_label, 
         autolower=al_status,
         sentinel_name=sentinel_label
     )
@@ -285,6 +333,150 @@ async def cb_close_panel(callback: CallbackQuery):
         await callback.message.delete()
     except Exception:
         pass
+
+
+# ==========================================================
+# 📢 FASE 4: ANUNCIADOR DE VIDEOLLAMADAS (PRO / ULTRA PRO)
+# ==========================================================
+def _sync_get_announcement_data(group_id: int) -> dict:
+    """Consulta la configuración de anuncios programados de la comunidad."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vc_announcements (
+                group_id INTEGER PRIMARY KEY,
+                announcement_text TEXT,
+                media_id TEXT,
+                media_type TEXT,
+                minutes_before INTEGER DEFAULT 15,
+                last_announced_date TEXT,
+                status INTEGER DEFAULT 1
+            )
+        """)
+        cursor.execute("""
+            SELECT announcement_text, media_id, media_type, minutes_before, last_announced_date, status 
+            FROM vc_announcements WHERE group_id = ?
+        """, (group_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "text": row[0],
+                "media_id": row[1],
+                "media_type": row[2],
+                "minutes_before": row[3] or 15,
+                "last_announced_date": row[4],
+                "status": row[5]
+            }
+        return {"text": None, "media_id": None, "media_type": None, "minutes_before": 15, "last_announced_date": None, "status": 1}
+
+
+def _sync_mark_vc_announced(group_id: int, date_str: str):
+    """Registra la fecha del último anuncio emitido para evitar duplicidad."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO vc_announcements (group_id, last_announced_date, status)
+            VALUES (?, ?, 1)
+            ON CONFLICT(group_id) DO UPDATE SET last_announced_date = excluded.last_announced_date
+        """, (group_id, date_str))
+        conn.commit()
+
+
+async def start_meeting_announcement_worker(bot: Bot):
+    """
+    Worker perimetral en segundo plano (Fase 4):
+    Para grupos PRO y ULTRA PRO, evalúa el inicio del videochat semanal y despacha
+    un mensaje de precalentamiento con reglas, banner multimedia y botón inline.
+    """
+    logger.info("📢 [Meeting Announcer Worker]: Sistema de anuncios previos de VC iniciado.")
+    while True:
+        try:
+            now = _get_now_time()
+            today_weekday = str(now.isoweekday())
+            today_date_str = now.strftime("%Y-%m-%d")
+            current_total_minutes = now.hour * 60 + now.minute
+
+            schedules = await get_all_active_vc_schedules()
+            for row in schedules:
+                group_id, days_allowed, start_time, end_time, status, call_active = row[0], row[1], row[2], row[3], row[4], row[5]
+
+                if not days_allowed or today_weekday not in [d.strip() for d in days_allowed.split(",")]:
+                    continue
+
+                tier = (await get_group_tier(group_id) or "free").lower()
+                if tier not in ("pro", "ultra_pro", "ultra"):
+                    continue
+
+                ann_cfg = await asyncio.to_thread(_sync_get_announcement_data, group_id)
+                if ann_cfg.get("status") == 0:
+                    continue
+
+                if ann_cfg.get("last_announced_date") == today_date_str:
+                    continue
+
+                try:
+                    start_h, start_m = (int(x) for x in start_time.split(":"))
+                    start_total_minutes = start_h * 60 + start_m
+                except Exception:
+                    continue
+
+                mins_before = ann_cfg.get("minutes_before", 15)
+                diff_minutes = start_total_minutes - current_total_minutes
+
+                # Si estamos dentro de la ventana de anticipación previa al inicio
+                if 0 <= diff_minutes <= mins_before and call_active == 0:
+                    custom_text = ann_cfg.get("text")
+                    media_id = ann_cfg.get("media_id")
+                    media_type = ann_cfg.get("media_type")
+
+                    try:
+                        chat_info = await bot.get_chat(group_id)
+                        chat_title = chat_info.title or "la comunidad"
+                        chat_user = chat_info.username
+                    except Exception:
+                        chat_title = "la comunidad"
+                        chat_user = None
+
+                    default_body = (
+                        f"📡 <b>Próxima Reunión / Live en Vivo — {chat_title}</b>\n\n"
+                        f"⏰ La sala de videochat dará inicio en aproximadamente <b>{diff_minutes} minutos</b>.\n\n"
+                        "• 🎙️ <i>Prepara tu micrófono y verifica tu conexión.</i>\n"
+                        "• 🔇 <i>Por directiva perimetral, los micrófonos estarán al 2% para participantes no verificados.</i>\n"
+                        "• 💎 <i>Los miembros con pase MicVIP conservarán voz prioritaria al 100%.</i>\n\n"
+                        "🛡️ <i>Cloud Media Management</i>"
+                    )
+
+                    body = custom_text if custom_text else default_body
+
+                    # Botonera interactiva sin URLs en texto plano
+                    join_btn = (
+                        InlineKeyboardButton(text="🎙️ Abrir Sala / Videochat", url=f"https://t.me/{chat_user}")
+                        if chat_user else
+                        InlineKeyboardButton(text="🌐 Mini App Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))
+                    )
+                    markup = InlineKeyboardMarkup(inline_keyboard=[[join_btn]])
+
+                    try:
+                        if media_id and media_type == "photo":
+                            await bot.send_photo(chat_id=group_id, photo=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
+                        elif media_id and media_type == "video":
+                            await bot.send_video(chat_id=group_id, video=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
+                        elif media_id and media_type == "animation":
+                            await bot.send_animation(chat_id=group_id, animation=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
+                        else:
+                            await bot.send_message(chat_id=group_id, text=body, reply_markup=markup, parse_mode="HTML")
+
+                        await asyncio.to_thread(_sync_mark_vc_announced, group_id, today_date_str)
+                        logger.info(f"📢 [Meeting Announcer] Aviso de VC despachado con éxito en {group_id} ({diff_minutes}m antes).")
+                    except (TelegramForbiddenError, TelegramBadRequest) as p_err:
+                        logger.warning(f"Aviso al despachar anuncio de reunión en {group_id}: {p_err}")
+                    except TelegramRetryAfter as retry_err:
+                        await asyncio.sleep(retry_err.retry_after + 1)
+
+        except Exception as ex:
+            logger.error(f"❌ [Meeting Announcer Error]: {ex}")
+
+        await asyncio.sleep(45)
 
 
 # ==========================================================
@@ -310,7 +502,8 @@ async def start_subscription_watchdog_worker(bot: Bot):
                             "⚠️ <b>Aviso de Renovación VIP — The Bunker Command OS</b>\n\n"
                             f"Tu acceso al canal VIP expira el: <code>{exp_at}</code>.\n"
                             f"Dispones de <b>{grace_days} días</b> de gracia antes del Auto-Kick automático.\n\n"
-                            "Renueva tu membresía con Telegram Stars para mantener tu acceso sin interrupciones."
+                            "Renueva tu membresía con Telegram Stars para mantener tu acceso sin interrupciones.\n\n"
+                            "🛡️ <i>Cloud Media Management</i>"
                         )
                         kb = InlineKeyboardMarkup(inline_keyboard=[
                             [InlineKeyboardButton(text="⭐ Renovar Acceso VIP", url=f"https://t.me/{bot_username}?start=sub_pro")]
@@ -318,8 +511,10 @@ async def start_subscription_watchdog_worker(bot: Bot):
                         await bot.send_message(chat_id=u_id, text=warn_text, reply_markup=kb, parse_mode="HTML")
                         await mark_subscription_warned(ch_id, u_id)
                         logger.info(f"📢 [Watchdog] Alerta enviada a usuario {u_id} (Canal {ch_id}).")
-                    except TelegramForbiddenError:
+                    except (TelegramForbiddenError, TelegramBadRequest):
                         await mark_subscription_warned(ch_id, u_id)
+                    except TelegramRetryAfter as rate_err:
+                        await asyncio.sleep(rate_err.retry_after + 1)
                     except Exception as warn_err:
                         logger.warning(f"⚠️ [Watchdog] Fallo al alertar usuario {u_id}: {warn_err}")
                         await mark_subscription_warned(ch_id, u_id)
@@ -339,11 +534,14 @@ async def start_subscription_watchdog_worker(bot: Bot):
                                 kick_msg = (
                                     "🔒 <b>Acceso VIP Finalizado</b>\n\n"
                                     "Tu período de suscripción y los días de gracia han concluido. "
-                                    "Has sido removido del canal VIP. Puedes reactivar tu pase adquiriendo un plan en cualquier momento."
+                                    "Has sido removido del canal VIP. Puedes reactivar tu pase adquiriendo un plan en cualquier momento.\n\n"
+                                    "🛡️ <i>Cloud Media Management</i>"
                                 )
                                 await bot.send_message(chat_id=u_id, text=kick_msg, parse_mode="HTML")
                             except Exception:
                                 pass
+                        except TelegramRetryAfter as rate_err:
+                            await asyncio.sleep(rate_err.retry_after + 1)
                         except Exception as kick_err:
                             logger.error(f"❌ [Watchdog Auto-Kick Error] Fallo al remover usuario {u_id} en canal {ch_id}: {kick_err}")
                     else:
@@ -362,8 +560,10 @@ async def start_channel_broadcast_worker(bot: Bot):
     """
     Worker perimetral en segundo plano: evalúa continuamente los planes de membresía 
     con difusión recurrente activa y publica los anuncios con botones inline limpios.
+    Inicia simultáneamente el Watchdog de membresías y el Anunciador de Videollamadas.
     """
     asyncio.create_task(start_subscription_watchdog_worker(bot))
+    asyncio.create_task(start_meeting_announcement_worker(bot))
     logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
     
     while True:
@@ -394,10 +594,9 @@ async def start_channel_broadcast_worker(bot: Bot):
 
                     pay_link = f"https://t.me/{bot_username}?start=chanplan_{plan_id}_{channel_id}"
 
-                    # Texto limpio sin URL cruda
-                    caption = promo_text.strip() if promo_text else f"💎 <b>{plan_name}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR"
+                    caption = promo_text.strip() if promo_text else f"💎 <b>{plan_name}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR\n\n🛡️ <i>Cloud Media Management</i>"
 
-                    # Botones inline interactivos
+                    # Botones interactivos limpios (cero links en texto plano)
                     kb_rows = [
                         [InlineKeyboardButton(text=f"⭐ Adquirir por {stars_price} Stars", url=pay_link)]
                     ]
@@ -423,6 +622,8 @@ async def start_channel_broadcast_worker(bot: Bot):
                     except (TelegramForbiddenError, TelegramBadRequest) as perm_err:
                         logger.warning(f"⚠️ [Broadcast Worker] Permiso denegado en chat {target_chat}. Difusión pausada para plan {plan_id}: {perm_err}")
                         await disable_channel_plan_broadcast(plan_id)
+                    except TelegramRetryAfter as rate_err:
+                        await asyncio.sleep(rate_err.retry_after + 1)
                     except Exception as send_err:
                         logger.error(f"❌ [Broadcast Worker] Error publicando plan {plan_id} en chat {target_chat}: {send_err}")
 
