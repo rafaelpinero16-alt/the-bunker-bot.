@@ -121,6 +121,9 @@ def init_db():
             ("lock_links", "INTEGER DEFAULT 0"),
             ("lock_commands", "INTEGER DEFAULT 0"),
             ("mic_vip_price", "INTEGER DEFAULT 50"),
+            ("mic_vip_custom_price", "INTEGER DEFAULT 50"),
+            ("mic_vip_custom_tag", "TEXT DEFAULT '⚜️MIC🎙️VIP⚜️'"),
+            ("mic_vip_custom_text", "TEXT"),
             ("free_badge_status", "INTEGER DEFAULT 0"),
             ("free_badge_title", "TEXT DEFAULT 'VIP Free 🎙️'"),
             ("vip_mic_badge_title", "TEXT DEFAULT 'Pase VIP 24h 🎙️'"),
@@ -303,6 +306,18 @@ def init_db():
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS group_tips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                user_id INTEGER,
+                stars_amount INTEGER,
+                message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_tips ON group_tips (group_id, user_id)")
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS flagged_userbots (
@@ -744,6 +759,9 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
         conn.commit()
 
 
+# ==========================================
+# 💎 CONFIGURACIÓN Y TARIFAS DE MICVIP
+# ==========================================
 def get_mic_vip_price(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -759,9 +777,45 @@ def set_mic_vip_price(group_id: int, price: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO group_settings (group_id, mic_vip_price) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET mic_vip_price = excluded.mic_vip_price
-        """, (group_id, price))
+            INSERT INTO group_settings (group_id, mic_vip_price, mic_vip_custom_price) VALUES (?, ?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET 
+                mic_vip_price = excluded.mic_vip_price,
+                mic_vip_custom_price = excluded.mic_vip_custom_price
+        """, (group_id, price, price))
+        conn.commit()
+
+
+def get_mic_vip_custom_config(group_id: int) -> dict:
+    """Devuelve precio, etiqueta y texto promocional personalizado para el MicVIP de la comunidad."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT mic_vip_price, mic_vip_custom_tag, mic_vip_custom_text
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "price": row[0] if (row[0] is not None and row[0] > 0) else 50,
+                    "tag": row[1] if row[1] else "⚜️MIC🎙️VIP⚜️",
+                    "text": row[2] if row[2] else ""
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"price": 50, "tag": "⚜️MIC🎙️VIP⚜️", "text": ""}
+
+
+def set_mic_vip_custom_config(group_id: int, field: str, value):
+    valid_fields = ["mic_vip_price", "mic_vip_custom_price", "mic_vip_custom_tag", "mic_vip_custom_text"]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
         conn.commit()
 
 
@@ -815,6 +869,101 @@ def set_vip_badge_title(group_id: int, title: str):
             INSERT INTO group_settings (group_id, vip_mic_badge_title) VALUES (?, ?) 
             ON CONFLICT(group_id) DO UPDATE SET vip_mic_badge_title = excluded.vip_mic_badge_title
         """, (group_id, clean_title))
+        conn.commit()
+
+
+# ==========================================
+# 🎤 GESTIÓN DE SPEAKERS Y COLA PRIORITARIA AMA
+# ==========================================
+def get_speaker_price(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT speaker_queue_price FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 25
+        except sqlite3.OperationalError:
+            return 25
+
+
+def set_speaker_price(group_id: int, price: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, speaker_queue_price) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET speaker_queue_price = excluded.speaker_queue_price
+        """, (group_id, price))
+        conn.commit()
+
+
+def add_to_speaker_queue(group_id: int, user_id: int, full_name: str, username: str, stars_paid: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO speaker_queue (group_id, user_id, full_name, username, stars_paid, status)
+            VALUES (?, ?, ?, ?, ?, 'waiting')
+        """, (group_id, user_id, full_name, username, stars_paid))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_speaker_queue(group_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, user_id, full_name, username, stars_paid, created_at FROM speaker_queue
+            WHERE group_id = ? AND status = 'waiting'
+            ORDER BY stars_paid DESC, created_at ASC
+        """, (group_id,))
+        return cursor.fetchall()
+
+
+def get_user_speaker_position(group_id: int, user_id: int) -> int:
+    """Devuelve la posición en la fila del orador según el orden de prioridad y aporte en Stars."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id FROM speaker_queue
+            WHERE group_id = ? AND status = 'waiting'
+            ORDER BY stars_paid DESC, created_at ASC
+        """, (group_id,))
+        rows = cursor.fetchall()
+        for idx, (uid,) in enumerate(rows, start=1):
+            if uid == user_id:
+                return idx
+        return 0
+
+
+def pop_next_speaker(group_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, user_id, full_name, username, stars_paid FROM speaker_queue
+            WHERE group_id = ? AND status = 'waiting'
+            ORDER BY stars_paid DESC, created_at ASC LIMIT 1
+        """, (group_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        cursor.execute("UPDATE speaker_queue SET status = 'done' WHERE id = ?", (row[0],))
+        conn.commit()
+        return row
+
+
+def remove_from_speaker_queue(group_id: int, user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM speaker_queue WHERE group_id = ? AND user_id = ? AND status = 'waiting'",
+            (group_id, user_id)
+        )
+        conn.commit()
+
+
+def clear_speaker_queue(group_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
         conn.commit()
 
 
@@ -1254,6 +1403,9 @@ def set_service_msgs_mode(group_id: int, status: int):
         conn.commit()
 
 
+# ==========================================
+# 💰 PROPINAS Y APORTES EN STARS (XTR)
+# ==========================================
 def get_tips_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1282,6 +1434,29 @@ def set_tips_config(group_id: int, field: str, value):
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
+
+
+def record_group_tip(group_id: int, user_id: int, stars_amount: int, message: str = ""):
+    """Registra de forma persistente una propina voluntaria en Stars para el grupo o canal."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_tips (group_id, user_id, stars_amount, message)
+            VALUES (?, ?, ?, ?)
+        """, (group_id, user_id, stars_amount, message))
+        conn.commit()
+
+
+def get_group_total_tips(group_id: int) -> int:
+    """Calcula el total histórico de Stars recaudadas por propinas en la comunidad."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT SUM(stars_amount) FROM group_tips WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if (row and row[0]) else 0
+        except sqlite3.OperationalError:
+            return 0
 
 
 def add_to_whitelist(user_id: int):
@@ -1765,82 +1940,6 @@ def set_noise_shield_status(group_id: int, status: int):
             INSERT INTO group_settings (group_id, noise_shield_status) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET noise_shield_status = excluded.noise_shield_status
         """, (group_id, status))
-        conn.commit()
-
-
-def get_speaker_price(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT speaker_queue_price FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 25
-        except sqlite3.OperationalError:
-            return 25
-
-
-def set_speaker_price(group_id: int, price: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, speaker_queue_price) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET speaker_queue_price = excluded.speaker_queue_price
-        """, (group_id, price))
-        conn.commit()
-
-
-def add_to_speaker_queue(group_id: int, user_id: int, full_name: str, username: str, stars_paid: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO speaker_queue (group_id, user_id, full_name, username, stars_paid, status)
-            VALUES (?, ?, ?, ?, ?, 'waiting')
-        """, (group_id, user_id, full_name, username, stars_paid))
-        conn.commit()
-        return cursor.lastrowid
-
-
-def get_speaker_queue(group_id: int) -> list:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, user_id, full_name, username, stars_paid, created_at FROM speaker_queue
-            WHERE group_id = ? AND status = 'waiting'
-            ORDER BY stars_paid DESC, created_at ASC
-        """, (group_id,))
-        return cursor.fetchall()
-
-
-def pop_next_speaker(group_id: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT id, user_id, full_name, username, stars_paid FROM speaker_queue
-            WHERE group_id = ? AND status = 'waiting'
-            ORDER BY stars_paid DESC, created_at ASC LIMIT 1
-        """, (group_id,))
-        row = cursor.fetchone()
-        if not row:
-            return None
-        cursor.execute("UPDATE speaker_queue SET status = 'done' WHERE id = ?", (row[0],))
-        conn.commit()
-        return row
-
-
-def remove_from_speaker_queue(group_id: int, user_id: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM speaker_queue WHERE group_id = ? AND user_id = ? AND status = 'waiting'",
-            (group_id, user_id)
-        )
-        conn.commit()
-
-
-def clear_speaker_queue(group_id: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
         conn.commit()
 
 
@@ -2587,6 +2686,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_lock_status",
     "get_mic_vip_price",
     "set_mic_vip_price",
+    "get_mic_vip_custom_config",
+    "set_mic_vip_custom_config",
     "get_free_badge_config",
     "set_free_badge_config",
     "get_vip_badge_title",
@@ -2618,6 +2719,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_service_msgs_mode",
     "get_tips_config",
     "set_tips_config",
+    "record_group_tip",
+    "get_group_total_tips",
     "add_to_whitelist",
     "remove_from_whitelist",
     "is_whitelisted",
@@ -2661,6 +2764,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_speaker_price",
     "add_to_speaker_queue",
     "get_speaker_queue",
+    "get_user_speaker_position",
     "pop_next_speaker",
     "remove_from_speaker_queue",
     "clear_speaker_queue",

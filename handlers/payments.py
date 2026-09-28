@@ -11,9 +11,10 @@ from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from database.database import (
     approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
-    get_vip_badge_title, get_channel_plans, get_channel_plan, 
-    record_channel_subscription, get_channel_settings,
-    mark_payment_processed
+    get_mic_vip_custom_config, get_vip_badge_title, get_channel_plans, 
+    get_channel_plan, record_channel_subscription, get_channel_settings,
+    mark_payment_processed, get_speaker_price, add_to_speaker_queue,
+    get_user_speaker_position, get_tips_config, record_group_tip
 )
 from assistant import set_participant_mic
 from handlers.user_private import is_clone_bot, get_master_bot_username
@@ -39,6 +40,8 @@ def is_super_admin(user_id: int) -> bool:
 PRICE_PRO_STARS = 300          # 300 Stars Telegram (~$3.00 USD)
 PRICE_ULTRAPRO_STARS = 600     # 600 Stars Telegram (~$6.00 USD)
 DEFAULT_PRICE_VIP_MIC = 50     # Tarifa base en Stars para pase 24h
+DEFAULT_PRICE_SPEAKER = 25     # Tarifa base turno prioritario AMA
+DEFAULT_TIP_AMOUNT = 10        # Tarifa sugerida de propina
 
 # Pasarelas de Pago Oficiales - Cloud Media Management
 PAYPAL_LINK = "https://paypal.me/Felipecosmic"
@@ -150,6 +153,10 @@ TEXTS = {
         "inv_ultra_d": "All PRO features + Bot Clone architecture + Dedicated Voice Sentinel + Weekly VC Scheduler (100% Stars yours).",
         "inv_vip_t": "VIP Mic Pass (24h)",
         "inv_vip_d": "Unrestricted 100% voice transmission privileges for 24 hours in community voice chats.",
+        "inv_speaker_t": "Priority Speaker Mic Turn (AMA)",
+        "inv_speaker_d": "Priority placement in the voice room speaker queue with uninterrupted mic privilege.",
+        "inv_tip_t": "Community Stars Tip (XTR)",
+        "inv_tip_d": "Voluntary Telegram Stars donation directly supporting the community and creators.",
         
         "pmt_ok_pro": (
             "🎉 <b>Payment Confirmed! PRO Plan Active</b>\n\n"
@@ -174,11 +181,25 @@ TEXTS = {
             "💡 <b>Instructions:</b> Rejoin the Voice Chat or unmute your mic. You can now speak freely without acoustic attenuation.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
+        "pmt_speaker_ok": (
+            "🎙️ <b>Speaker Priority Turn Secured!</b>\n\n"
+            "• Position in Queue: <b>#{position}</b>\n"
+            "• Contribution: <b>{stars} Stars (XTR)</b>\n"
+            "• The Sentinel has queued your spot. When the host calls next or triggers <code>/speakers next</code>, your mic will be open.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "pmt_tip_ok": (
+            "🌟 <b>Tip Received! Thank You!</b>\n\n"
+            "• Contribution: <b>{stars} Stars (XTR)</b>\n"
+            "• Your support has been registered in the community treasury.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
         "btn_add_master": "🤖 Add Master Sentinel (@Alphacentinel)",
         "btn_setup_clone": "🧬 Setup Clone & Dedicated Sentinel",
         "btn_join_channel": "🚀 Join Secure Channel",
         "btn_view_target": "🔗 Access VIP Target / Resource",
         "btn_return_vc": "🎙️ Return to Voice Chat",
+        "btn_return_group": "👥 Back to Community",
         "err_inv": "⚠️ An error occurred while generating the invoice. Please try again.",
         "err_link": "⚠️ Invalid activation link or expired parameters.",
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
@@ -216,6 +237,10 @@ TEXTS = {
         "inv_ultra_d": "Todo PRO + Arquitectura Bot Clone + Centinela Dedicado Propio + Programador VC Semanal (100% Stars para ti).",
         "inv_vip_t": "Pase VIP Micrófono (24h)",
         "inv_vip_d": "Privilegios de voz continua al 100% de volumen por 24 horas en salas de voz y videochats.",
+        "inv_speaker_t": "Turno Prioritario de Micrófono (AMA)",
+        "inv_speaker_d": "Prioridad en la cola de oradores del videochat con micrófono abierto según tu turno.",
+        "inv_tip_t": "Propina Stars para la Comunidad",
+        "inv_tip_d": "Aporte voluntario en Telegram Stars en apoyo directo a la comunidad y a sus creadores.",
         
         "pmt_ok_pro": (
             "🎉 <b>¡Pago Confirmado! Plan PRO Activado</b>\n\n"
@@ -240,11 +265,25 @@ TEXTS = {
             "💡 <b>Instrucciones:</b> Vuelve al videochat o activa tu micrófono en el grupo. Ya puedes participar y hablar sin restricciones acústicas.\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
+        "pmt_speaker_ok": (
+            "🎙️ <b>¡Turno de Orador Asegurado en la Cola!</b>\n\n"
+            "• Posición actual en fila: <b>#{position}</b>\n"
+            "• Aporte: <b>{stars} Stars (XTR)</b>\n"
+            "• El Centinela ha registrado tu turno. Cuando el anfitrión de la llamada despache <code>/speakers next</code>, se te otorgará el micrófono.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "pmt_tip_ok": (
+            "🌟 <b>¡Propina Recibida con Éxito!</b>\n\n"
+            "• Aporte procesado: <b>{stars} Stars (XTR)</b>\n"
+            "• Tu apoyo ha quedado asentado en la tesorería de la comunidad. ¡Muchas gracias!\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
         "btn_add_master": "🤖 Añadir Centinela Maestro (@Alphacentinel)",
         "btn_setup_clone": "🧬 Configurar Clon & Centinela Propio",
         "btn_join_channel": "🚀 Entrar al Canal Seguro",
         "btn_view_target": "🔗 Ver Destino / Canal VIP",
         "btn_return_vc": "🎙️ Volver al Videochat",
+        "btn_return_group": "👥 Volver al Grupo",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
         "err_link": "⚠️ Enlace de facturación no válido, sin entorno asociado o expirado.",
         "private_only": "⚠️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
@@ -319,9 +358,9 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
 
 
 # ==========================================
-# 🔗 ENRUTAMIENTO UNIFICADO DE DEEP LINKS (/start sub_, vipmic_, chanplan_)
+# 🔗 ENRUTAMIENTO UNIFICADO DE DEEP LINKS (/start sub_, vipmic_, chanplan_, speaker_, tip_)
 # ==========================================
-@router.message(Command("start"), F.text.regexp(r"^/start\s+(sub_|vipmic_|chanplan_)"))
+@router.message(Command("start"), F.text.regexp(r"^/start\s+(sub_|vipmic_|chanplan_|speaker_|tip_)"))
 async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type != "private":
         return
@@ -330,6 +369,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     t = TEXTS[lang]
     args = command.args or ""
 
+    # 1. SUSCRIPCIONES DE COMUNIDAD
     if args.startswith("sub_"):
         if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
             redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
@@ -397,6 +437,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             await message.answer(t["err_inv"], parse_mode="HTML")
         return
 
+    # 2. MEMBRESÍAS DE CANAL
     elif args.startswith("chanplan_"):
         try:
             parts = args.split("_")
@@ -420,7 +461,6 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             media_type = target_plan.get("media_type")
             target_link = target_plan.get("target_link")
 
-            # Texto limpio sin URLs expuestas
             caption = promo_text.strip() if promo_text and promo_text.strip() else f"💎 <b>{plan_name}</b>\n\n{duration_days} días — {stars_price} ⭐"
 
             if media_id and media_type:
@@ -470,6 +510,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             await message.answer(t["err_inv"], parse_mode="HTML")
         return
 
+    # 3. PASES VIP DE MICRÓFONO PERSONALIZADOS
     elif args.startswith("vipmic_"):
         try:
             chat_id = int(args.split("_")[1])
@@ -477,12 +518,14 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
 
-            title = t["inv_vip_t"]
-            desc = t["inv_vip_d"]
+            custom_cfg = await get_mic_vip_custom_config(chat_id)
+            final_price = custom_cfg.get("price") or DEFAULT_PRICE_VIP_MIC
+            tag = custom_cfg.get("tag") or "Pase VIP 24h"
+            custom_desc = custom_cfg.get("text")
+
+            title = f"MicVIP: {tag}"[:32]
+            desc = custom_desc[:255] if custom_desc else t["inv_vip_d"]
             payload = f"vip_mic_{chat_id}"
-            
-            dynamic_price = await get_mic_vip_price(chat_id)
-            final_price = dynamic_price if dynamic_price and dynamic_price > 0 else DEFAULT_PRICE_VIP_MIC
             
             prices = [LabeledPrice(label=title, amount=final_price)]
             markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -502,6 +545,79 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             )
         except Exception as e:
             logger.error(f"Error generando factura de Micrófono VIP: {e}")
+            await message.answer(t["err_link"], parse_mode="HTML")
+        return
+
+    # 4. COLA DE SPEAKERS AMA (PRIORIDAD DE MICRÓFONO EN VIDEOCHAT)
+    elif args.startswith("speaker_"):
+        try:
+            chat_id = int(args.split("_")[1])
+            if chat_id >= 0:
+                await message.answer(t["err_link"], parse_mode="HTML")
+                return
+
+            speaker_price = await get_speaker_price(chat_id) or DEFAULT_PRICE_SPEAKER
+            title = t["inv_speaker_t"][:32]
+            desc = t["inv_speaker_d"]
+            payload = f"speaker_{chat_id}"
+
+            prices = [LabeledPrice(label=title, amount=speaker_price)]
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({speaker_price} XTR)", pay=True)],
+                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            ])
+
+            await bot.send_invoice(
+                chat_id=message.chat.id,
+                title=title,
+                description=desc,
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=prices,
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Error generando factura de Speaker Priority: {e}")
+            await message.answer(t["err_link"], parse_mode="HTML")
+        return
+
+    # 5. MOTOR DE PROPINAS STARS (TIPS ENGINE)
+    elif args.startswith("tip_"):
+        try:
+            parts = args.split("_")
+            chat_id = int(parts[1])
+            tip_amount = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+
+            if chat_id >= 0:
+                await message.answer(t["err_link"], parse_mode="HTML")
+                return
+
+            tips_cfg = await get_tips_config(chat_id)
+            final_tip = tip_amount if tip_amount > 0 else (tips_cfg.get("amount") or DEFAULT_TIP_AMOUNT)
+
+            title = t["inv_tip_t"][:32]
+            desc = t["inv_tip_d"]
+            payload = f"tip_{chat_id}_{final_tip}"
+
+            prices = [LabeledPrice(label=title, amount=final_tip)]
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"⭐ Donar {final_tip} Stars", pay=True)],
+                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+            ])
+
+            await bot.send_invoice(
+                chat_id=message.chat.id,
+                title=title,
+                description=desc,
+                payload=payload,
+                provider_token="",
+                currency="XTR",
+                prices=prices,
+                reply_markup=markup
+            )
+        except Exception as e:
+            logger.error(f"Error generando factura de propina: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
         return
 
@@ -538,11 +654,18 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
             title = t["inv_pro_t"]
             desc = t["inv_pro_d"]
             payload = f"sub_pro_{chat_id}"
-        else:
+        elif plan == "ultra":
             price = PRICE_ULTRAPRO_STARS
             title = t["inv_ultra_t"]
             desc = t["inv_ultra_d"]
             payload = f"sub_ultra_{chat_id}"
+        elif plan == "speaker":
+            price = await get_speaker_price(chat_id) or DEFAULT_PRICE_SPEAKER
+            title = t["inv_speaker_t"]
+            desc = t["inv_speaker_d"]
+            payload = f"speaker_{chat_id}"
+        else:
+            return
 
         _, back_cb = await resolve_chat_context(bot, chat_id)
         prices = [LabeledPrice(label=title, amount=price)]
@@ -570,7 +693,7 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
 # ==========================================
 # 🛡️ VALIDACIÓN DE PRE-CHECKOUT FILTRADA
 # ==========================================
-@router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
+@router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_)"))
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     await pre_checkout_query.answer(ok=True)
 
@@ -578,7 +701,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 # ==========================================
 # 💎 PROCESADOR DE PAGO EXITOSO CON CONTROL DE IDEMPOTENCIA
 # ==========================================
-@router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_)"))
+@router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_)"))
 async def process_successful_payment(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
@@ -664,7 +787,6 @@ async def process_successful_payment(message: Message, bot: Bot):
                 invite_link=invite_link
             )
 
-            # Botones interactivos limpios
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
             ]
@@ -701,7 +823,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para membresía de canal: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
 
-    # CASO 3: PASES VIP DE MICRÓFONO (24 HORAS CON INSTRUCCIONES CLARAS)
+    # CASO 3: PASES VIP DE MICRÓFONO PERSONALIZADOS (24 HORAS)
     elif payload.startswith("vip_mic_"):
         try:
             chat_id = int(payload.split("_")[2])
@@ -719,7 +841,8 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.warning(f"Aviso Centinela al restaurar volumen de pase VIP: {radar_err}")
             
             try:
-                badge_title = await get_vip_badge_title(chat_id)
+                custom_cfg = await get_mic_vip_custom_config(chat_id)
+                badge_title = custom_cfg.get("tag") or await get_vip_badge_title(chat_id)
 
                 await bot.promote_chat_member(
                     chat_id=chat_id, user_id=user_id,
@@ -728,14 +851,13 @@ async def process_successful_payment(message: Message, bot: Bot):
                     can_promote_members=False, can_manage_video_chats=False
                 )
                 await bot.set_chat_administrator_custom_title(
-                    chat_id=chat_id, user_id=user_id, custom_title=badge_title
+                    chat_id=chat_id, user_id=user_id, custom_title=badge_title[:16]
                 )
             except TelegramBadRequest as admin_err:
-                logger.warning(f"Aviso al asignar título VIP (verificar permisos de promoción del bot): {admin_err}")
+                logger.warning(f"Aviso al asignar título VIP: {admin_err}")
             except Exception as admin_err:
                 logger.warning(f"Error general al asignar título VIP de micrófono: {admin_err}")
             
-            # Botones para volver al grupo y ver estado en Mini App
             kb_rows = []
             try:
                 chat_info = await bot.get_chat(chat_id)
@@ -755,4 +877,68 @@ async def process_successful_payment(message: Message, bot: Bot):
                 await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
             except Exception as ref_err:
                 logger.error(f"Error crítico al ejecutar reembolso de Stars para pase VIP: {ref_err}")
+            await message.answer(t["err_inv"], parse_mode="HTML")
+
+    # CASO 4: COLA DE SPEAKERS AMA
+    elif payload.startswith("speaker_"):
+        try:
+            chat_id = int(payload.split("_")[1])
+            stars_paid = message.successful_payment.total_amount
+            full_name = message.from_user.full_name or "Usuario"
+            username = message.from_user.username or ""
+
+            await add_to_speaker_queue(chat_id, user_id, full_name, username, stars_paid)
+            position = await get_user_speaker_position(chat_id, user_id)
+
+            kb_rows = []
+            try:
+                chat_info = await bot.get_chat(chat_id)
+                if chat_info.username:
+                    kb_rows.append([InlineKeyboardButton(text=t["btn_return_vc"], url=f"https://t.me/{chat_info.username}")])
+            except Exception:
+                pass
+
+            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))])
+            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+            confirm_text = t["pmt_speaker_ok"].format(position=position, stars=stars_paid)
+            await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
+            logger.info(f"🎙️ [Speaker Encolado]: Usuario {user_id} en posición #{position} para grupo {chat_id} ({stars_paid} Stars).")
+        except Exception as e:
+            logger.error(f"Error procesando turno de speaker (Iniciando reembolso automático): {e}")
+            try:
+                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+            except Exception as ref_err:
+                logger.error(f"Error crítico al ejecutar reembolso de Stars para speaker: {ref_err}")
+            await message.answer(t["err_inv"], parse_mode="HTML")
+
+    # CASO 5: PROPINAS STARS (TIPS ENGINE)
+    elif payload.startswith("tip_"):
+        try:
+            parts = payload.split("_")
+            chat_id = int(parts[1])
+            stars_paid = message.successful_payment.total_amount
+
+            await record_group_tip(chat_id, user_id, stars_paid)
+
+            kb_rows = []
+            try:
+                chat_info = await bot.get_chat(chat_id)
+                if chat_info.username:
+                    kb_rows.append([InlineKeyboardButton(text=t["btn_return_group"], url=f"https://t.me/{chat_info.username}")])
+            except Exception:
+                pass
+
+            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))])
+            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+            confirm_text = t["pmt_tip_ok"].format(stars=stars_paid)
+            await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
+            logger.info(f"🌟 [Propina Procesada]: Usuario {user_id} donó {stars_paid} Stars a la comunidad {chat_id}.")
+        except Exception as e:
+            logger.error(f"Error procesando propina (Iniciando reembolso automático): {e}")
+            try:
+                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+            except Exception as ref_err:
+                logger.error(f"Error crítico al ejecutar reembolso de Stars para propina: {ref_err}")
             await message.answer(t["err_inv"], parse_mode="HTML")
