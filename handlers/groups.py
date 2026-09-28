@@ -27,7 +27,7 @@ from aiogram.types import (
 import database.database as _db_module
 from database.database import (
     get_antispam_filter, get_antispam_delete,
-    get_antiflood_config, is_whitelisted, get_captcha_config,
+    get_antiflood_config, is_whitelisted, is_vip_mic_active, get_captcha_config,
     get_lock_status, get_warns_config, add_warning, ban_user,
     approve_group, register_user_group, get_blacklist,
     get_session_by_group,
@@ -139,7 +139,8 @@ async def _message_author_is_admin(bot: Bot, message: Message) -> bool:
 # ==========================================
 # 🎚️ MATRIZ DE RANGOS — AUTOLOWER SELECTIVO & INMUNIDADES
 # ==========================================
-IMMUNE_TIERS = frozenset({"architect", "service", "sentinel", "owner", "admin", "whitelisted", "unknown"})
+SECURITY_MATRIX_IMMUNE_TIERS = frozenset({"architect", "service", "sentinel", "owner", "admin", "whitelisted"})
+AUTOLOWER_IMMUNE_TIERS = frozenset({"architect", "service", "sentinel", "owner", "admin", "whitelisted", "vip_mic"})
 
 
 async def get_privilege_tier(bot: Bot, group_id: int, user_id: int, username: str = "") -> str:
@@ -164,6 +165,12 @@ async def get_privilege_tier(bot: Bot, group_id: int, user_id: int, username: st
     except Exception as e:
         logger.warning(f"No se pudo consultar la whitelist para {user_id}: {e}")
 
+    try:
+        if await is_vip_mic_active(user_id, group_id):
+            return "vip_mic"
+    except Exception as e:
+        logger.debug(f"Aviso consultando pase MicVIP para {user_id}: {e}")
+
     if status is None:
         return "unknown"
 
@@ -171,12 +178,12 @@ async def get_privilege_tier(bot: Bot, group_id: int, user_id: int, username: st
 
 
 def _tier_is_privileged(tier: str) -> bool:
-    return tier in IMMUNE_TIERS
+    return tier in SECURITY_MATRIX_IMMUNE_TIERS
 
 
 async def _autolower_can_mute(bot: Bot, group_id: int, user_id: int, username: str = "") -> bool:
     tier = await get_privilege_tier(bot, group_id, user_id, username)
-    return not _tier_is_privileged(tier)
+    return tier not in AUTOLOWER_IMMUNE_TIERS
 
 
 FLOOD_CACHE = {}
@@ -729,7 +736,9 @@ async def purge_general_service_messages(message: Message):
             await message.delete()
         except Exception: 
             pass
-        # ==========================================
+
+
+# ==========================================
 # 🧹 MOTOR HÍBRIDO DE GHOST PURGE (MTPROTO + BOT API)
 # ==========================================
 GHOST_DISPLAY_NAMES = {"deleted account", "cuenta eliminada"}
