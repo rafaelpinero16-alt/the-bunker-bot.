@@ -270,7 +270,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
     2. Purga y actualiza la caché de administradores (admin_caches).
     3. Reconecta el Centinela MTProto (dedicado o maestro) con ID verificado.
     4. Garantiza el estado activo del radar acústico (vc_enabled = 1).
-    5. Despacha aviso estético auto-eliminable a los 12 segundos.
+    5. Despacha aviso estético con marca de agua y auto-eliminación a los 12 segundos.
     """
     if message.chat.type == "private": 
         return
@@ -362,12 +362,10 @@ async def cmd_reload_group(message: Message, bot: Bot):
         chat_id=chat_id,
         tier=tier_label,
         sentinel_status=sentinel_status
-    )
+    ) + "\n\n🛡️ <i>Cloud Media Management</i>"
     
     msg = await message.reply(report_text, reply_markup=kb, parse_mode="HTML")
     asyncio.create_task(auto_delete_pair(message, msg, 12))
-
-
 # ==========================================================
 # ⚙️ COMANDO DE ENLACE A CONFIGURACIÓN Y MATRIX (/settings, /matrix)
 # ==========================================================
