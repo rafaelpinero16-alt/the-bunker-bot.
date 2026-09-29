@@ -313,7 +313,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
         f"🛡️ <i>Cloud Media Management</i>",
         reply_markup=kb, parse_mode="HTML"
     )
-    _spawn(auto_delete_msg(resp, 45))
+    
     try:
         await message.delete()
     except Exception:
