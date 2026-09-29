@@ -266,6 +266,8 @@ GROUP_DUCK_LEVEL = {}
 GROUP_SPEAKER_PRICE = {}
 TIPS_AMOUNT_STATES = {}
 TIPS_TARGET_STATES = {}
+TIPS_TEXT_STATES = {}
+TIPS_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_TEXT_STATES = {}
 SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
@@ -280,7 +282,8 @@ MIC_VIP_TEXT_STATES = {}
 ALL_STATE_DICTS = (
     CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES,
     VC_SCHED_STATES, NIGHT_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES,
-    PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES, TIPS_AMOUNT_STATES, TIPS_TARGET_STATES,
+    PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES, TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, TIPS_TEXT_STATES,
+    TIPS_MEDIA_STATES,
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES
 )
@@ -2108,6 +2111,37 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
         [InlineKeyboardButton(text=f"📊 {'Telemetría e Historial' if lang == 'es' else 'Telemetry & History'}", callback_data=f"tips_telemetry_{group_id}_{lang}")]
     ]
 
+    # PRO y ULTRA PRO: Botones para personalizar copy y multimedia de propinas
+    if tier in ("pro", "ultra_pro"):
+        rows.append([InlineKeyboardButton(text="✍️ " + ("Editar Texto Propinas" if lang == "es" else "Edit Tip Text"), callback_data=f"tips_settext_{group_id}_{lang}")])
+    if tier == "ultra_pro":
+        rows.append([InlineKeyboardButton(text="🖼️ " + ("Multimedia de Propinas" if lang == "es" else "Tip Media"), callback_data=f"tips_setmedia_{group_id}_{lang}")])
+
+    if targets:
+        broadcast_label = "📢 Enviar Publicación / Broadcast Tips" if lang == "es" else "📢 Broadcast Tips"
+        rows.append([InlineKeyboardButton(text=broadcast_label, callback_data=f"tips_broadcast_{group_id}_{lang}")])
+
+    # Renderizar cada canal destino uno detrás de otro con opción de activar/desactivar y borrar
+    for t_id, t_val, t_active in targets:
+        status_badge = "🟢" if t_active == 1 else "🔴"
+        rows.append([
+            InlineKeyboardButton(text=f"📢 {t_val[:16]}", callback_data="noop"),
+            InlineKeyboardButton(text=status_badge, callback_data=f"tips_toggletarget_{t_id}_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🗑️", callback_data=f"tips_deltarget_{t_id}_{group_id}_{lang}")
+        ])
+
+    if len(targets) < limit:
+        add_lbl = f"➕ {'Añadir Canal Destino' if lang == 'es' else 'Add Target'} ({len(targets)}/{limit})"
+        rows.append([InlineKeyboardButton(text=add_lbl, callback_data=f"tips_addtarget_{group_id}_{lang}")])
+
+    back_btn = (
+        InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
+        if chat_type == "c" else
+        InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")
+    )
+    rows.append([back_btn])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
     # Si hay canales destino configurados, habilitar el botón de difusión de propinas
     if targets:
         broadcast_label = "📢 Enviar Publicación / Broadcast Tips" if lang == "es" else "📢 Broadcast Tips"
@@ -2629,7 +2663,6 @@ async def cmd_login(message: Message, bot: Bot):
     user_id = message.from_user.id
     lang = user_lang(message.from_user)
     
-    # Generar token temporal de 5 minutos en la base de datos
     token = await create_web_session(user_id)
     login_url = f"{WEBAPP_URL.rstrip('/')}/?token={token}"
     
@@ -2674,8 +2707,7 @@ async def cb_noop(callback: CallbackQuery):
 async def handle_channel_shared(message: Message, bot: Bot):
     """
     Sincronización Activa de Canales: recibe el canal elegido en el selector nativo de Telegram,
-    verifica EN VIVO los permisos del bot y la propiedad del usuario, y lo registra al instante
-    (sin necesidad de volver a agregar el bot tras un reinicio del servidor).
+    verifica EN VIVO los permisos del bot y la propiedad del usuario, y lo registra al instante.
     """
     user = message.from_user
     lang = user_lang(user)
@@ -2736,6 +2768,17 @@ async def handle_channel_shared(message: Message, bot: Bot):
             fire_and_forget_auto_delete([resp], delay=60)
             return
 
+    CHAT_KIND_CACHE[channel_id] = "c"
+    CHANNEL_SYNC_CACHE.setdefault(user.id, {})[channel_id] = title
+    await registry_upsert_channel(user.id, channel_id, title)
+    logging.info(f"✅ [Sync Canales] user={user.id} sincronizó channel={channel_id} ('{title}').")
+
+    ok_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_open_studio"], callback_data=f"cpanel_{channel_id}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_sync_channels"], callback_data=f"menu_chsync_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")]
+    ])
+    await message.answer(t["chsync_ok"].format(title=html.escape(title or str(channel_id))), reply_markup=ok_kb, parse_mode="HTML")
     CHAT_KIND_CACHE[channel_id] = "c"
     CHANNEL_SYNC_CACHE.setdefault(user.id, {})[channel_id] = title
     await registry_upsert_channel(user.id, channel_id, title)
@@ -3270,15 +3313,66 @@ async def handle_private_inputs(message: Message, bot: Bot):
     if (bot.id, user_id) in TIPS_TARGET_STATES:
         st_data = TIPS_TARGET_STATES.pop((bot.id, user_id))
         group_id = st_data["group_id"]
+        clean_target = text_input.replace("https://t.me/", "").replace("t.me/", "").strip()
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"tips_menu_{group_id}_{lang}")]
         ])
-        clean_target = text_input.replace("https://t.me/", "").replace("t.me/", "").strip()
         if clean_target:
             await add_group_tip_target(group_id, clean_target)
-            resp = await message.answer(t["tips_updated"], reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(
+                "✅ <b>¡Canal destino añadido con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
         else:
             resp = await message.answer(t["tips_target_err"], reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+    # 11b. EDITAR TEXTO DE PROPINAS (PRO / ULTRA PRO)
+    if (bot.id, user_id) in TIPS_TEXT_STATES:
+        st_data = TIPS_TEXT_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"tips_menu_{group_id}_{lang}")]
+        ])
+        if text_input:
+            await set_tips_config(group_id, "tips_custom_text", text_input[:1000])
+            resp = await message.answer(
+                "✅ <b>¡Texto de propinas actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
+        else:
+            resp = await message.answer("⚠️ El texto no puede estar vacío.", reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
+    # 11c. ADJUNTAR MULTIMEDIA A PROPINAS (ULTRA PRO)
+    if (bot.id, user_id) in TIPS_MEDIA_STATES:
+        st_data = TIPS_MEDIA_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"tips_menu_{group_id}_{lang}")]
+        ])
+        media_id = None
+        media_type = None
+        if message.photo:
+            media_id = message.photo[-1].file_id
+            media_type = "photo"
+        elif message.animation:
+            media_id = message.animation.file_id
+            media_type = "animation"
+        elif message.video:
+            media_id = message.video.file_id
+            media_type = "video"
+
+        if media_id and media_type:
+            await set_tips_config(group_id, "tips_media_id", media_id)
+            await set_tips_config(group_id, "tips_media_type", media_type)
+            resp = await message.answer(
+                "✅ <b>¡Multimedia de propinas guardada con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
+        else:
+            resp = await message.answer("⚠️ Envía una Foto, Video o GIF válido.", reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
