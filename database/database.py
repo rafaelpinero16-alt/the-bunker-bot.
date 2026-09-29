@@ -1632,7 +1632,6 @@ def revoke_vip_mic(user_id: int, group_id: int):
         cursor.execute("DELETE FROM vip_mic_passes WHERE user_id = ? AND group_id = ?", (user_id, group_id))
         conn.commit()
 
-
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1780,6 +1779,27 @@ def get_all_active_vc_schedules():
         return cursor.fetchall()
 
 
+def get_panic_status(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
+
+def set_panic_status(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, panic_active) VALUES (?, ?) 
+            ON CONFLICT(group_id) DO UPDATE SET panic_active = excluded.panic_active
+        """, (group_id, status))
+        conn.commit()
+
+
 def get_screen_shield_status(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1789,6 +1809,7 @@ def get_screen_shield_status(group_id: int) -> int:
             return row[0] if row and row[0] is not None else 1
         except sqlite3.OperationalError:
             return 1
+
 
 def set_screen_shield_status(group_id: int, status: int):
     with get_db_connection() as conn:
@@ -1806,6 +1827,241 @@ def get_shield_status(group_id: int) -> int:
 
 def set_shield_status(group_id: int, status: int):
     set_screen_shield_status(group_id, status)
+
+
+def get_podcast_status(group_id: int) -> int:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("SELECT podcast_mode_status FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            return row[0] if row and row[0] is not None else 0
+        except sqlite3.OperationalError:
+            return 0
+
+
+def set_podcast_status(group_id: int, status: int):
+    set_podcast_mode(group_id, status)
+
+
+def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
+        row = cursor.fetchone()
+        if row and row[0] == 1:
+            return False
+
+        cursor.execute("""
+            SELECT lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+                   antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action
+            FROM group_settings WHERE group_id = ?
+        """, (group_id,))
+        prev = cursor.fetchone()
+        prev = prev or (0, 0, 0, 0, 1, 60, 0, 0, 10, 15, 'kick')
+
+        cursor.execute("""
+            INSERT INTO panic_snapshots (
+                group_id, lock_media, lock_links, lock_stickers, captcha_status, captcha_mode,
+                captcha_time, antispam, antispam_delete, antiflood_msgs, antiflood_time,
+                antiflood_action, chat_permissions_json, activated_by, activated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id) DO UPDATE SET
+                lock_media = excluded.lock_media, lock_links = excluded.lock_links,
+                lock_stickers = excluded.lock_stickers, captcha_status = excluded.captcha_status,
+                captcha_mode = excluded.captcha_mode, captcha_time = excluded.captcha_time,
+                antispam = excluded.antispam, antispam_delete = excluded.antispam_delete,
+                antiflood_msgs = excluded.antiflood_msgs, antiflood_time = excluded.antiflood_time,
+                antiflood_action = excluded.antiflood_action,
+                chat_permissions_json = excluded.chat_permissions_json,
+                activated_by = excluded.activated_by, activated_at = CURRENT_TIMESTAMP
+        """, (group_id, *prev, chat_permissions_json, activated_by))
+
+        cursor.execute("""
+            INSERT INTO group_settings (
+                group_id, panic_active, lock_media, lock_links, lock_stickers,
+                captcha_status, captcha_mode, captcha_time,
+                antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action
+            ) VALUES (?, 1, 1, 1, 1, 1, 1, 30, 1, 1, 3, 10, 'mute')
+            ON CONFLICT(group_id) DO UPDATE SET
+                panic_active = 1, lock_media = 1, lock_links = 1, lock_stickers = 1,
+                captcha_status = 1, captcha_mode = 1, captcha_time = 30,
+                antispam = 1, antispam_delete = 1, antiflood_msgs = 3, antiflood_time = 10,
+                antiflood_action = 'mute'
+        """, (group_id,))
+        conn.commit()
+        return True
+
+
+def deactivate_panic(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+                   antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action,
+                   chat_permissions_json
+            FROM panic_snapshots WHERE group_id = ?
+        """, (group_id,))
+        snap = cursor.fetchone()
+
+        if snap:
+            (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+             antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action,
+             chat_permissions_json) = snap
+        else:
+            (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+             antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action,
+             chat_permissions_json) = (0, 0, 0, 0, 1, 60, 0, 0, 10, 15, 'kick', None)
+
+        cursor.execute("""
+            UPDATE group_settings SET
+                panic_active = 0, lock_media = ?, lock_links = ?, lock_stickers = ?,
+                captcha_status = ?, captcha_mode = ?, captcha_time = ?,
+                antispam = ?, antispam_delete = ?, antiflood_msgs = ?, antiflood_time = ?,
+                antiflood_action = ?
+            WHERE group_id = ?
+        """, (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
+              antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action, group_id))
+        cursor.execute("DELETE FROM panic_snapshots WHERE group_id = ?", (group_id,))
+        conn.commit()
+
+        return {"chat_permissions_json": chat_permissions_json}
+
+
+def get_podcast_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT podcast_mode_status, podcast_duck_volume, noise_shield_status FROM group_settings WHERE group_id = ?",
+                (group_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "status": row[0] if row[0] is not None else 0,
+                    "duck_volume": row[1] if row[1] is not None else 500,
+                    "noise_shield": row[2] if row[2] is not None else 1
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"status": 0, "duck_volume": 500, "noise_shield": 1}
+
+
+def set_podcast_mode(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, podcast_mode_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET podcast_mode_status = excluded.podcast_mode_status
+        """, (group_id, status))
+        conn.commit()
+
+
+def set_podcast_duck_volume(group_id: int, volume: int):
+    volume = max(0, min(10000, volume))
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, podcast_duck_volume) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET podcast_duck_volume = excluded.podcast_duck_volume
+        """, (group_id, volume))
+        conn.commit()
+
+
+def set_noise_shield_status(group_id: int, status: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO group_settings (group_id, noise_shield_status) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET noise_shield_status = excluded.noise_shield_status
+        """, (group_id, status))
+        conn.commit()
+
+
+def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso de Userbot"):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO flagged_userbots (user_id, group_id, reason, flagged_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(user_id, group_id) DO UPDATE SET
+                reason = excluded.reason,
+                flagged_at = CURRENT_TIMESTAMP
+        """, (user_id, group_id, reason))
+        conn.commit()
+
+
+def is_userbot_flagged(user_id: int, group_id: int) -> bool:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+        return cursor.fetchone() is not None
+
+
+def purge_flagged_userbot_record(user_id: int, group_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
+        conn.commit()
+
+
+def get_community_live_telemetry(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM vip_mic_passes WHERE group_id = ? AND expires_at > datetime('now')", (group_id,))
+        vip_active = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM speaker_queue WHERE group_id = ? AND status = 'waiting'", (group_id,))
+        speakers_in_queue = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT panic_active, screen_shield_status, podcast_mode_status, autolower, night_mode_status 
+            FROM group_settings WHERE group_id = ?
+        """, (group_id,))
+        row = cursor.fetchone() or (0, 1, 0, 1, 0)
+
+        cursor.execute("SELECT status FROM bot_clones WHERE group_id = ? AND status = 'active'", (group_id,))
+        clone_row = cursor.fetchone()
+
+        cursor.execute("SELECT status FROM owner_sessions WHERE group_id = ? AND status = 'active'", (group_id,))
+        session_row = cursor.fetchone()
+
+        return {
+            "vip_passes_active": vip_active,
+            "speakers_in_queue": speakers_in_queue,
+            "panic_active": row[0],
+            "shield_status": row[1],
+            "podcast_status": row[2],
+            "autolower_status": row[3],
+            "night_mode_status": row[4],
+            "has_active_clone": clone_row is not None,
+            "has_active_sentinel": session_row is not None
+        }
+
+
+def get_channel_live_telemetry(channel_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM channel_subscriptions 
+            WHERE channel_id = ? AND status = 'active' AND expires_at > datetime('now')
+        """, (channel_id,))
+        active_subs = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM channel_plans WHERE channel_id = ? AND status = 'active'", (channel_id,))
+        active_plans = cursor.fetchone()[0]
+
+        cursor.execute("SELECT tips_enabled, tips_amount, tips_target_channel FROM group_settings WHERE group_id = ?", (channel_id,))
+        tips_row = cursor.fetchone() or (0, 10, "")
+
+        return {
+            "active_subscribers": active_subs,
+            "active_plans": active_plans,
+            "tips_enabled": tips_row[0],
+            "tips_amount": tips_row[1],
+            "tips_target": tips_row[2]
+        }
 
 
 def get_channel_settings(channel_id: int) -> dict:
@@ -2067,6 +2323,57 @@ def get_channel_subscription(channel_id: int, user_id: int) -> dict:
                 "is_expired": bool(row[8])
             }
         return None
+
+
+def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT s.channel_id, s.user_id, s.expires_at, s.stars_paid, c.grace_days
+            FROM channel_subscriptions s
+            JOIN channel_settings c ON s.channel_id = c.channel_id
+            WHERE s.status = 'active'
+              AND s.expires_at > datetime('now')
+              AND s.expires_at <= datetime('now', '+{hours_ahead} hours')
+              AND (s.last_warned_at IS NULL OR s.last_warned_at < datetime('now', '-20 hours'))
+        """)
+        return cursor.fetchall()
+
+
+def get_expired_channel_subscriptions() -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.channel_id, s.user_id, s.expires_at, c.grace_days, c.auto_kick
+            FROM channel_subscriptions s
+            JOIN channel_settings c ON s.channel_id = c.channel_id
+            WHERE s.status IN ('active', 'grace')
+              AND datetime('now') > datetime(s.expires_at, '+' || c.grace_days || ' days')
+        """)
+        return cursor.fetchall()
+
+
+def mark_subscription_warned(channel_id: int, user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE channel_subscriptions SET last_warned_at = CURRENT_TIMESTAMP
+            WHERE channel_id = ? AND user_id = ?
+        """, (channel_id, user_id))
+        conn.commit()
+
+
+def update_subscription_status(channel_id: int, user_id: int, status: str):
+    valid_statuses = ["active", "grace", "expired", "kicked"]
+    if status not in valid_statuses:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE channel_subscriptions SET status = ?
+            WHERE channel_id = ? AND user_id = ?
+        """, (status, channel_id, user_id))
+        conn.commit()
 
 
 def get_active_subscribers_count(channel_id: int) -> int:
@@ -2511,7 +2818,16 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_due_channel_plan_broadcasts",
     "record_channel_subscription",
     "get_channel_subscription",
+    "get_expiring_channel_subscriptions",
+    "get_expired_channel_subscriptions",
+    "mark_subscription_warned",
+    "update_subscription_status",
     "get_active_subscribers_count",
+    "flag_userbot",
+    "is_userbot_flagged",
+    "purge_flagged_userbot_record",
+    "get_user_global_stats",
+    "get_user_subscribers_audit",
     "record_chat_activity",
     "get_chat_dashboard_data",
     "get_chat_timeseries_stats",
