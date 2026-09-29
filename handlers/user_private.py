@@ -48,6 +48,7 @@ from database.database import (
     get_service_msgs_mode, set_service_msgs_mode,
     get_tips_config, set_tips_config,
     get_sentinel_payload_config, set_sentinel_payload_config,
+    get_community_live_telemetry, set_vip_badge_title,
     # 💎 Módulos de Canales & Membresías
     get_channel_plans, get_active_subscribers_count,
     create_channel_plan, delete_channel_plan,
@@ -3108,6 +3109,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if text_input.isdigit() and int(text_input) > 0:
             price_val = int(text_input)
             GROUP_MIC_PRICE[group_id] = price_val
+            await set_mic_vip_custom_config(group_id, "mic_vip_custom_price", price_val)
             resp = await message.answer(t["mic_updated"].format(group_id=group_id, price_val=price_val), reply_markup=back_kb, parse_mode="HTML")
         else:
             resp = await message.answer(t["mic_err"], reply_markup=back_kb, parse_mode="HTML")
@@ -3122,6 +3124,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
         ])
         if 1 <= len(text_input) <= 16:
             GROUP_VIP_TAG[group_id] = text_input
+            await set_vip_badge_title(group_id, text_input)
+            await set_mic_vip_custom_config(group_id, "mic_vip_custom_tag", text_input)
             resp = await message.answer(t["tag_updated"].format(group_id=group_id, text_input=text_input), reply_markup=back_kb, parse_mode="HTML")
         else:
             resp = await message.answer(t["tag_err"], reply_markup=back_kb, parse_mode="HTML")
@@ -3509,7 +3513,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
     F.data.startswith("cmd_") | F.data.startswith("pay_") | F.data.startswith("time_") |
     F.data.startswith("clone_") | F.data.startswith("alset_") | F.data.startswith("micval_") |
     F.data.startswith("reg_") | F.data.startswith("vcsched_") | F.data.startswith("tips_") |
-    F.data.startswith("night_")
+    F.data.startswith("night_") | F.data.startswith("radar_")
 )
 async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     # 🧹 Toda navegación libera las conversaciones pendientes (evita menús privados bloqueados tras reinicios).
@@ -3653,8 +3657,96 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             text = t["ultra_tools_main"].format(group_name=g_name)
             keyboard = get_ultra_tools_keyboard(group_id, lang, chat_type=chat_kind)
 
+    elif action == "radar":
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+        
+        telemetry = await get_community_live_telemetry(group_id)
+        try:
+            g_name = html.escape((await bot.get_chat(group_id)).title or "")
+        except Exception:
+            g_name = "Comunidad" if lang == "es" else "Community"
+
+        st_panic = "🚨 ACTIVO" if telemetry["panic_active"] else "🟢 Inactivo"
+        st_shield = "🟢 Blindado" if telemetry["shield_status"] else "🔴 Desactivado"
+        st_podcast = "🟢 Activo" if telemetry["podcast_status"] else "🔴 Inactivo"
+        st_autolower = "🟢 Activo (2%)" if telemetry["autolower_status"] else "🔴 Desactivado"
+        st_night = "🟢 Activo" if telemetry["night_mode_status"] else "🔴 Inactivo"
+        st_clone = "🟢 Operativo" if telemetry["has_active_clone"] else "🔴 No configurado"
+        st_sentinel = "🟢 Conectado" if telemetry["has_active_sentinel"] else "🔴 Desconectado"
+
+        text = (
+            f"📡 <b>Radar & Telemetría en Vivo — {g_name}</b>\n\n"
+            f"• 🎙️ <b>Pases VIP Activos:</b> <code>{telemetry['vip_passes_active']}</code>\n"
+            f"• ⏳ <b>Speakers en Cola:</b> <code>{telemetry['speakers_in_queue']}</code>\n\n"
+            f"<b>Perímetro Defensivo:</b>\n"
+            f"• 🚨 <b>Botón de Pánico:</b> {st_panic}\n"
+            f"• 🎥 <b>Escudo Antinota:</b> {st_shield}\n"
+            f"• 🎙️ <b>Modo Podcast:</b> {st_podcast}\n"
+            f"• ⚙️ <b>AutoLower (2%):</b> {st_autolower}\n"
+            f"• 🌙 <b>Modo Nocturno:</b> {st_night}\n\n"
+            f"<b>Infraestructura Propia:</b>\n"
+            f"• 🧬 <b>Bot Clon:</b> {st_clone}\n"
+            f"• 🎙️ <b>Centinela MTProto:</b> {st_sentinel}\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            f"📡 <b>Live Ecosystem Radar — {g_name}</b>\n\n"
+            f"• 🎙️ <b>Active VIP Passes:</b> <code>{telemetry['vip_passes_active']}</code>\n"
+            f"• ⏳ <b>Speakers in Queue:</b> <code>{telemetry['speakers_in_queue']}</code>\n\n"
+            f"<b>Perimeter Security:</b>\n"
+            f"• 🚨 <b>Panic Button:</b> {st_panic}\n"
+            f"• 🎥 <b>Screen-Share Shield:</b> {st_shield}\n"
+            f"• 🎙️ <b>Podcast Mode:</b> {st_podcast}\n"
+            f"• ⚙️ <b>AutoLower (2%):</b> {st_autolower}\n"
+            f"• 🌙 <b>Night Mode:</b> {st_night}\n\n"
+            f"<b>Private Infrastructure:</b>\n"
+            f"• 🧬 <b>Bot Clone:</b> {st_clone}\n"
+            f"• 🎙️ <b>MTProto Sentinel:</b> {st_sentinel}\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 " + ("Actualizar Telemetría" if lang == "es" else "Refresh"), callback_data=f"radar_eco_{group_id}_{lang}")],
+            [InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")]
+        ])
+
     elif action == "tips":
-        pass
+        sub = data[1]
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+
+        chat_kind = await resolve_chat_kind(bot, group_id)
+        cfg = await get_tips_config(group_id)
+
+        if sub == "menu":
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            amount = cfg.get("amount", 10)
+            target = cfg.get("target_channel") or ("No asignado" if lang == "es" else "Not set")
+            text = t["tips_main"].format(st_badge=st_badge, amount=amount, target=target) + PERIMETER_SIGNATURE
+            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+
+        elif sub == "toggle":
+            new_st = 0 if cfg.get("enabled") == 1 else 1
+            await set_tips_config(group_id, "tips_enabled", new_st)
+            cfg = await get_tips_config(group_id)
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            amount = cfg.get("amount", 10)
+            target = cfg.get("target_channel") or ("No asignado" if lang == "es" else "Not set")
+            text = t["tips_main"].format(st_badge=st_badge, amount=amount, target=target) + PERIMETER_SIGNATURE
+            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+
+        elif sub == "setamount":
+            TIPS_AMOUNT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt = await callback.message.answer(t["tips_prompt_amount"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "settarget":
+            TIPS_TARGET_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt = await callback.message.answer(t["tips_prompt_target"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
 
     elif action == "pay":
         tier_level = data[1]
@@ -3882,6 +3974,20 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
+        elif sub_cmd == "mictag":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                await callback.answer(t["tag_pro_req"], show_alert=True)
+                return
+            MIC_TAG_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt = await callback.message.answer(
+                t["tag_menu_prompt"] + PERIMETER_SIGNATURE,
+                reply_markup=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"),
+                parse_mode="HTML"
+            )
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
     elif action == "reg":
         sub = data[1]
         group_id = int(data[2])
@@ -3922,7 +4028,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
         if sub_val == "custom":
             MIC_VIP_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt = await callback.message.answer(t["mic_custom_prompt"] + PERIMETER_SIGNATURE, reply_marc_ret=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
+            prompt = await callback.message.answer(t["mic_custom_prompt"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"cmd_mic_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
         else:
@@ -4339,11 +4445,19 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             )
         elif sub == "text":
             CAPTCHA_STATES[(bot.id, callback.from_user.id)] = group_id
+            prompt_text = (
+                "✍️ <b>Editor de Mensaje de Captcha:</b>\n\n"
+                "Envía el texto que recibirá el usuario al ingresar a la comunidad:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "✍️ <b>Captcha Message Editor:</b>\n\n"
+                "Send the message users will receive upon entry:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
             prompt = await callback.message.answer(
-                tr(lang,
-                   "✍️ <b>Editor de Captcha</b>\n\nEnvía el mensaje que recibirá el usuario al ingresar:\n\n🛡️ <i>Cloud Media Management</i>",
-                   "✍️ <b>Captcha Editor</b>\n\nSend the message users will receive when they join:\n\n🛡️ <i>Cloud Media Management</i>"),
-                reply_markup=_cancel_kb(t, f"gset_captcha_{group_id}_{lang}"), parse_mode="HTML"
+                prompt_text,
+                reply_markup=_cancel_kb(t, f"gset_captcha_{group_id}_{lang}"),
+                parse_mode="HTML"
             )
             fire_and_forget_auto_delete([prompt], delay=60)
             return
@@ -4352,7 +4466,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             await set_captcha_config(group_id, "captcha_service_del", 0 if cfg["service_del"] == 1 else 1)
             cfg_updated = await get_captcha_config(group_id)
 
-            if callback.message.text and ("Service" in callback.message.text or "Purga" in callback.message.text or "Purge" in callback.message.text or "Centro" in callback.message.text):
+            if callback.message.text and any(w in callback.message.text for w in ("Service", "Purga", "Purge", "Centro")):
                 tier = await get_effective_group_tier(group_id, callback.from_user.id)
                 quota_desc = (tr(lang, "3 purgas de servicio diarias (Plan Básico)", "3 daily service purges (Free Plan)") if tier == "free" else tr(lang, "Purga automatizada ilimitada (PRO / ULTRA)", "Unlimited automated purge (PRO / ULTRA)"))
                 try:
@@ -4375,11 +4489,13 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 except TelegramBadRequest:
                     pass
 
-    elif action == "togcap" or action == "togmode":
-        if action == "togcap":
-            await set_captcha_status(group_id, 1 if data[1] == "on" else 0)
-        else:
-            await set_captcha_config(group_id, "captcha_mode", 1 if data[1] == "on" else 0)
+    elif action == "capval":
+        sub_type = data[1]
+        val = data[2]
+        if sub_type == "time":
+            await set_captcha_config(group_id, "captcha_time", int(val))
+        elif sub_type == "action":
+            await set_captcha_config(group_id, "captcha_action", val)
 
         cfg = await get_captcha_config(group_id)
         st_text = "🟢" if cfg["status"] == 1 else "🔴"
@@ -4393,108 +4509,38 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         except TelegramBadRequest:
             pass
 
-    elif action == "cap_set":
-        sub = data[2]
-        if sub == "time":
-            prompt = "⏱️ <b>Configuración de Tiempo Límite</b>" if lang == "es" else "⏱️ <b>Time Limit Configuration</b>"
-            await safe_edit_text(callback, prompt, reply_markup=get_captcha_time_keyboard(group_id, lang), parse_mode="HTML")
-        elif sub == "action":
-            cfg = await get_captcha_config(group_id)
-            await safe_edit_text(callback,
-                t["captcha_action_title"].format(mode_name=cfg["action"].upper()),
-                reply_markup=await get_captcha_action_keyboard(group_id, lang),
-                parse_mode="HTML"
-            )
-        elif sub == "text":
-            tier = await get_effective_group_tier(group_id, callback.from_user.id)
-            if tier not in ("pro", "ultra_pro"):
-                await callback.answer("⭐ Requiere plan PRO o ULTRA PRO.", show_alert=True)
-                return
-            WARN_CUSTOM_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt_text = (
-                "✍️ <b>Editor de Copy de Advertencia (PRO / ULTRA PRO):</b>\n\n"
-                "Envía el mensaje que recibirá el infractor. Puedes usar variables:\n"
-                "• <code>{mention}</code> - Mención del usuario\n"
-                "• <code>{strikes}</code> - Número de falta actual\n"
-                "• <code>{limit}</code> - Límite de faltas\n"
-                "• <code>{reason}</code> - Motivo de la infracción\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                "✍️ <b>Warning Message Editor (PRO / ULTRA PRO):</b>\n\n"
-                "Send the warning template. Supported variables:\n"
-                "• <code>{mention}</code>, <code>{strikes}</code>, <code>{limit}</code>, <code>{reason}</code>\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            )
-            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"gset_warns_{group_id}_{lang}"), parse_mode="HTML")
-            fire_and_forget_auto_delete([prompt], delay=60)
-            return
+    elif action == "afset":
+        sub_mode = data[1]
+        prompt = f"<b>{t['af_msgs']}</b>\n{tr(lang, 'Selecciona el límite:', 'Select the limit:')}" + PERIMETER_SIGNATURE
+        await safe_edit_text(callback, prompt, reply_markup=get_antiflood_number_keyboard(group_id, lang, sub_mode), parse_mode="HTML")
 
-        elif sub == "media":
-            tier = await get_effective_group_tier(group_id, callback.from_user.id)
-            if tier != "ultra_pro":
-                await callback.answer("💎 Requiere plan ULTRA PRO.", show_alert=True)
-                return
-            WARN_CUSTOM_MEDIA_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-            prompt_text = (
-                "🖼️ <b>Adjuntar Multimedia a Sanciones (ULTRA PRO):</b>\n\n"
-                "Envía una Foto, Video o GIF que acompañará las advertencias y sanciones automáticas:\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                "🖼️ <b>Attach Warning Media (ULTRA PRO):</b>\n\n"
-                "Send a Photo, Video or GIF to accompany warning alerts:\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            )
-            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"gset_warns_{group_id}_{lang}"), parse_mode="HTML")
-            fire_and_forget_auto_delete([prompt], delay=60)
-            return
+    elif action == "afval":
+        sub_mode = data[1]
+        val = int(data[2])
+        await set_antiflood_config(group_id, "antiflood_msgs" if sub_mode == "msgs" else "antiflood_time", val)
+        cfg = await get_antiflood_config(group_id)
+        delete_st = "🟢" if cfg["delete"] == 1 else "🔴"
+        await safe_edit_text(callback,
+            t["antiflood_main_title"].format(msgs=cfg["msgs"], time=cfg["time"], action=cfg["action"].upper(), delete_st=delete_st),
+            reply_markup=get_antiflood_keyboard(group_id, lang, cfg),
+            parse_mode="HTML"
+        )
 
-        elif sub == "delmedia":
-            await set_warn_custom_field(group_id, "warn_custom_media_id", None)
-            await set_warn_custom_field(group_id, "warn_custom_media_type", None)
-            await callback.answer("🗑️ Multimedia retirada de las advertencias.", show_alert=True)
-            cfg = await get_warns_config(group_id)
-            await safe_edit_text(callback,
-                t["warns_main_title"].format(limit=cfg["limit"], action=cfg["action"].upper()),
-                reply_markup=await get_warns_keyboard(group_id, lang, user_id=callback.from_user.id),
-                parse_mode="HTML"
-            )
-            return
+    elif action == "afact":
+        sub_act = data[1]
+        if sub_act == "togdel":
+            cfg = await get_antiflood_config(group_id)
+            await set_antiflood_config(group_id, "antiflood_delete", 0 if cfg["delete"] == 1 else 1)
+        else:
+            await set_antiflood_config(group_id, "antiflood_action", sub_act)
 
-            CAPTCHA_STATES[(bot.id, callback.from_user.id)] = group_id
-            prompt = await callback.message.answer(
-                tr(lang,
-                   "✍️ <b>Editor de Captcha</b>\n\nEnvía el mensaje que recibirá el usuario al ingresar:\n\n🛡️ <i>Cloud Media Management</i>",
-                   "✍️ <b>Captcha Editor</b>\n\nSend the message users will receive when they join:\n\n🛡️ <i>Cloud Media Management</i>"),
-                reply_markup=_cancel_kb(t, f"gset_captcha_{group_id}_{lang}"), parse_mode="HTML"
-            )
-            fire_and_forget_auto_delete([prompt], delay=60)
-        elif sub == "srvdel":
-            cfg = await get_captcha_config(group_id)
-            await set_captcha_config(group_id, "captcha_service_del", 0 if cfg["service_del"] == 1 else 1)
-            cfg_updated = await get_captcha_config(group_id)
-
-            if callback.message.text and ("Service" in callback.message.text or "Purga" in callback.message.text or "Purge" in callback.message.text or "Centro" in callback.message.text):
-                tier = await get_effective_group_tier(group_id, callback.from_user.id)
-                quota_desc = (tr(lang, "3 purgas de servicio diarias (Plan Básico)", "3 daily service purges (Free Plan)") if tier == "free" else tr(lang, "Purga automatizada ilimitada (PRO / ULTRA)", "Unlimited automated purge (PRO / ULTRA)"))
-                try:
-                    await safe_edit_text(callback,
-                        t["delmsgs_main_title"].format(tier_display=tier.upper(), quota_desc=quota_desc),
-                        reply_markup=await get_delmsgs_keyboard(group_id, callback.from_user.id, lang),
-                        parse_mode="HTML"
-                    )
-                except TelegramBadRequest:
-                    pass
-            else:
-                st_text = "🟢" if cfg_updated["status"] == 1 else "🔴"
-                mode_text = "🟢" if cfg_updated["mode"] == 1 else "🔴"
-                try:
-                    await safe_edit_text(callback,
-                        t["captcha_main_title"].format(status_text=st_text, mode_text=mode_text, time_text=str(cfg_updated["time"]), action_text=cfg_updated["action"].upper()),
-                        reply_markup=await get_captcha_keyboard(group_id, lang),
-                        parse_mode="HTML"
-                    )
-                except TelegramBadRequest:
-                    pass
+        cfg = await get_antiflood_config(group_id)
+        delete_st = "🟢" if cfg["delete"] == 1 else "🔴"
+        await safe_edit_text(callback,
+            t["antiflood_main_title"].format(msgs=cfg["msgs"], time=cfg["time"], action=cfg["action"].upper(), delete_st=delete_st),
+            reply_markup=get_antiflood_keyboard(group_id, lang, cfg),
+            parse_mode="HTML"
+        )
 
     elif action == "capval":
         sub_type = data[1]
@@ -5036,24 +5082,6 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         )
         fire_and_forget_auto_delete([resp], delay=60)
         return
-
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
-
-        await _finalize_and_preview_channel_plan(
-            bot=bot,
-            chat_id=callback.from_user.id,
-            channel_id=channel_id,
-            lang=lang,
-            name=st_data["name"],
-            days=st_data["days"],
-            price=st_data["price"],
-            promo_text=st_data.get("promo", ""),
-            media_id=None,
-            media_type=None
-        )
 
     elif sub == "del":
         plans = await get_channel_plans(channel_id, only_active=True)
