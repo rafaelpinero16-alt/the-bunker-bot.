@@ -217,6 +217,16 @@ def init_db():
                 PRIMARY KEY (user_id, group_id)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS group_tip_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER,
+                target_value TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(group_id, target_value)
+            )
+        """)
+
 
         try:
             cursor.execute("ALTER TABLE user_groups ADD COLUMN chat_type TEXT DEFAULT 'supergroup'")
@@ -1478,6 +1488,26 @@ def get_group_total_tips(group_id: int) -> int:
             return row[0] if (row and row[0]) else 0
         except sqlite3.OperationalError:
             return 0
+
+def get_group_tip_targets(group_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, target_value FROM group_tip_targets WHERE group_id = ?", (group_id,))
+        return cursor.fetchall()
+
+
+def add_group_tip_target(group_id: int, target_value: str):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO group_tip_targets (group_id, target_value) VALUES (?, ?)", (group_id, target_value))
+        conn.commit()
+
+
+def delete_group_tip_target(group_id: int, target_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM group_tip_targets WHERE id = ? AND group_id = ?", (target_id, group_id))
+        conn.commit()        
 
 
 def add_to_whitelist(user_id: int):
@@ -2756,6 +2786,9 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "set_tips_config",
     "record_group_tip",
     "get_group_total_tips",
+    "get_group_tip_targets",
+    "add_group_tip_target",
+    "delete_group_tip_target",
     "add_to_whitelist",
     "remove_from_whitelist",
     "is_whitelisted",

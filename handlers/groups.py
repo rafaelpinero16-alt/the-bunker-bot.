@@ -15,6 +15,7 @@ import sqlite3
 import inspect
 import logging
 import contextlib
+import html
 from typing import Optional
 
 from aiogram import Router, F, Bot
@@ -994,6 +995,43 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     finally:
         _GHOST_PURGE_RUNNING.discard(group_id)
 
+@router.message(Command("reload"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_reload_group(message: Message, bot: Bot):
+    """Fuerza la recarga del perímetro, sincroniza la comunidad en la base de datos y muestra la tarjeta de acceso."""
+    group_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    username = message.from_user.username or ""
+
+    if user_id and not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
+        warn = await message.answer("⛔ El comando /reload es exclusivo para administradores.", parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, 8))
+        return
+
+    chat = message.chat
+    group_name = chat.title or "Comunidad"
+    
+    # Sincronización atómica inmediata
+    await approve_group(group_id, tier=await get_group_tier(group_id))
+    await register_user_group(user_id or 8269470905, group_id, group_name, chat_type="supergroup")
+
+    bot_info = await bot.get_me()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
+        [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))]
+    ])
+
+    resp = await message.answer(
+        f"🔄 <b>Perímetro Recargado y Sincronizado</b>\n\n"
+        f"• <b>Comunidad:</b> {html.escape(group_name)}\n"
+        f"• <b>Estado:</b> Conexión activa y reflejada 🟢\n\n"
+        f"🛡️ <i>Cloud Media Management</i>",
+        reply_markup=kb, parse_mode="HTML"
+    )
+    _spawn(auto_delete_msg(resp, 35))
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 # ==========================================
 # 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)

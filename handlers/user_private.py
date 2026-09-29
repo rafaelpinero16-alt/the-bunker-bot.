@@ -46,7 +46,7 @@ from database.database import (
     get_shield_status, set_shield_status,
     get_podcast_status, set_podcast_status,
     get_service_msgs_mode, set_service_msgs_mode,
-    get_tips_config, set_tips_config,
+    get_tips_config, set_tips_config, get_group_tip_targets,
     get_sentinel_payload_config, set_sentinel_payload_config,
     get_community_live_telemetry, set_vip_badge_title,
     # 💎 Módulos de Canales & Membresías
@@ -105,6 +105,52 @@ def fire_and_forget_auto_delete(messages: list, delay: int = 60):
                 except Exception:
                     pass
     asyncio.create_task(_del_task())
+
+
+async def get_group_total_tips(group_id: int) -> int:
+    """Return the confirmed Stars total for a group, tolerating older DB schemas."""
+    def _sync() -> int:
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+                tables = [row[0] for row in cursor.fetchall()]
+                for table in tables:
+                    if not any(token in table.lower() for token in ("tip", "star", "donat")):
+                        continue
+                    cursor.execute(f'PRAGMA table_info("{table.replace(chr(34), chr(34) * 2)}")')
+                    columns = {row[1].lower(): row[1] for row in cursor.fetchall()}
+                    group_col = next((columns[name] for name in ("group_id", "chat_id") if name in columns), None)
+                    amount_col = next((columns[name] for name in ("amount", "stars", "total_amount", "star_amount") if name in columns), None)
+                    if not group_col or not amount_col:
+                        continue
+                    where = f'"{group_col.replace(chr(34), chr(34) * 2)}" = ?'
+                    if "status" in columns:
+                        where += f' AND LOWER(CAST("{columns["status"]}" AS TEXT)) IN (\'paid\', \'confirmed\', \'completed\', \'successful\', \'success\')'
+                    cursor.execute(
+                        f'SELECT COALESCE(SUM("{amount_col.replace(chr(34), chr(34) * 2)}"), 0) FROM "{table.replace(chr(34), chr(34) * 2)}" WHERE {where}',
+                        (group_id,),
+                    )
+                    return int(cursor.fetchone()[0] or 0)
+        except Exception:
+            logging.exception("Unable to calculate group tips total")
+        return 0
+
+    return await asyncio.to_thread(_sync)
+
+
+async def delete_group_tip_target(group_id: int, target_id: int) -> None:
+    """Remove one tips destination belonging to the specified group."""
+    def _sync() -> None:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM group_tip_targets WHERE id = ? AND group_id = ?",
+                (target_id, group_id),
+            )
+            conn.commit()
+
+    await asyncio.to_thread(_sync)
 
 
 # ==========================================
@@ -2021,29 +2067,42 @@ def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict, chat_type
     ])
 
 
-def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g"):
+async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     st = cfg.get("enabled", 0)
     amount = cfg.get("amount", 10)
-    target = cfg.get("target_channel") or ("No asignado" if lang == "es" else "Not set")
+    targets = await get_group_tip_targets(group_id)
 
     st_label = f"⭐ {'Propinas: 🟢' if st == 1 else 'Propinas: 🔴'}"
     amt_label = f"💰 {amount} Stars"
-    target_label = f"📢 {target[:15]}"
 
-    # 🧭 Blindaje contextual: un canal jamás debe caer en el panel general de grupos (menu_eco).
+    tier = await get_effective_group_tier(group_id, 0) # o user_id si se pasa como contexto
+    limit = 1 if tier == "free" else (3 if tier == "pro" else 10)
+
+    rows = [
+        [InlineKeyboardButton(text=st_label, callback_data=f"tips_toggle_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"{'Monto Sugerido' if lang == 'es' else 'Suggested'}: {amt_label}", callback_data=f"tips_setamount_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"📊 {'Telemetría e Historial' if lang == 'es' else 'Telemetry & History'}", callback_data=f"tips_telemetry_{group_id}_{lang}")]
+    ]
+
+    # Renderizar destinos guardados con botón de eliminar al lado
+    for t_id, t_val in targets:
+        rows.append([
+            InlineKeyboardButton(text=f"📢 {t_val[:20]}", callback_data="noop"),
+            InlineKeyboardButton(text="🗑️", callback_data=f"tips_deltarget_{t_id}_{group_id}_{lang}")
+        ])
+
+    if len(targets) < limit:
+        add_lbl = f"➕ {'Añadir Canal Destino' if lang == 'es' else 'Add Target'} ({len(targets)}/{limit})"
+        rows.append([InlineKeyboardButton(text=add_lbl, callback_data=f"tips_addtarget_{group_id}_{lang}")])
+
     back_btn = (
         InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
         if chat_type == "c" else
         InlineKeyboardButton(text=t["btn_back_eco"], callback_data=f"menu_eco_{group_id}_{lang}")
     )
-
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=st_label, callback_data=f"tips_toggle_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=f"{'Monto Sugerido' if lang == 'es' else 'Suggested'}: {amt_label}", callback_data=f"tips_setamount_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=f"{'Canal Destino' if lang == 'es' else 'Target'}: {target_label}", callback_data=f"tips_settarget_{group_id}_{lang}")],
-        [back_btn]
-    ])
+    rows.append([back_btn])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat_type: str = "g"):
@@ -3722,9 +3781,25 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if sub == "menu":
             st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
             amount = cfg.get("amount", 10)
-            target = cfg.get("target_channel") or ("No asignado" if lang == "es" else "Not set")
-            text = t["tips_main"].format(st_badge=st_badge, amount=amount, target=target) + PERIMETER_SIGNATURE
-            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+            total_stars = await get_group_total_tips(group_id)
+            text = (
+                f"⭐ <b>Propinas y Donaciones con Telegram Stars</b>\n\n"
+                f"• <b>Estado:</b> {st_badge}\n"
+                f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
+                f"• <b>Status:</b> {st_badge}\n"
+                f"• <b>Suggested Amount:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Total Collected:</b> <code>{total_stars} ⭐</code>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+            try:
+                await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
 
         elif sub == "toggle":
             new_st = 0 if cfg.get("enabled") == 1 else 1
@@ -3732,9 +3807,25 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             cfg = await get_tips_config(group_id)
             st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
             amount = cfg.get("amount", 10)
-            target = cfg.get("target_channel") or ("No asignado" if lang == "es" else "Not set")
-            text = t["tips_main"].format(st_badge=st_badge, amount=amount, target=target) + PERIMETER_SIGNATURE
-            keyboard = get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+            total_stars = await get_group_total_tips(group_id)
+            text = (
+                f"⭐ <b>Propinas y Donaciones con Telegram Stars</b>\n\n"
+                f"• <b>Estado:</b> {st_badge}\n"
+                f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
+                f"• <b>Status:</b> {st_badge}\n"
+                f"• <b>Suggested Amount:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Total Collected:</b> <code>{total_stars} ⭐</code>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+            try:
+                await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
 
         elif sub == "setamount":
             TIPS_AMOUNT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
@@ -3742,10 +3833,65 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
-        elif sub == "settarget":
+        elif sub == "addtarget":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            limit = 1 if tier == "free" else (3 if tier == "pro" else 10)
+            targets = await get_group_tip_targets(group_id)
+            if len(targets) >= limit:
+                await callback.answer(f"⚠️ Límite de canales destino alcanzado para tu nivel ({len(targets)}/{limit})." if lang == "es" else f"⚠️ Target channel limit reached for your tier ({len(targets)}/{limit}).", show_alert=True)
+                return
             TIPS_TARGET_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(t["tips_prompt_target"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "deltarget":
+            target_id = int(data[2])
+            await delete_group_tip_target(group_id, target_id)
+            await callback.answer("🗑️ Canal destino eliminado." if lang == "es" else "🗑️ Target channel deleted.", show_alert=False)
+            cfg = await get_tips_config(group_id)
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            amount = cfg.get("amount", 10)
+            total_stars = await get_group_total_tips(group_id)
+            text = (
+                f"⭐ <b>Propinas y Donaciones con Telegram Stars</b>\n\n"
+                f"• <b>Estado:</b> {st_badge}\n"
+                f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
+                f"• <b>Status:</b> {st_badge}\n"
+                f"• <b>Suggested Amount:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Total Collected:</b> <code>{total_stars} ⭐</code>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+            try:
+                await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
+
+        elif sub == "telemetry":
+            total_stars = await get_group_total_tips(group_id)
+            targets_count = len(await get_group_tip_targets(group_id))
+            telemetry_text = (
+                f"📊 <b>Telemetría de Propinas & Donaciones</b>\n\n"
+                f"• 💰 <b>Total Recaudado:</b> <code>{total_stars} Stars (XTR)</code>\n"
+                f"• 📢 <b>Canales Vinculados:</b> <code>{targets_count}</code>\n\n"
+                f"<i>Las propinas se acreditan en tiempo real al confirmar cada pago en Stars.</i>\n\n"
+                f"🛡️️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"📊 <b>Tips & Donations Telemetry</b>\n\n"
+                f"• 💰 <b>Total Collected:</b> <code>{total_stars} Stars (XTR)</code>\n"
+                f"• 📢 <b>Linked Channels:</b> <code>{targets_count}</code>\n\n"
+                f"<i>Tips are credited in real time upon confirming each Stars payment.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"tips_menu_{group_id}_{lang}")]
+            ])
+            await safe_edit_text(callback, telemetry_text, reply_markup=kb, parse_mode="HTML")
             return
 
     elif action == "pay":
@@ -3762,7 +3908,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         chat_kind = await resolve_chat_kind(bot, group_id)
         text = t[f"pay_{tier_level}_title"].format(group_name=g_name)
         keyboard = get_payment_keyboard(group_id, lang, tier_level=tier_level, chat_type=chat_kind)
-
     elif action == "vcsched":
         sub = data[1]
         group_id = int(data[2])
