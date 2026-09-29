@@ -153,6 +153,29 @@ async def delete_group_tip_target(group_id: int, target_id: int) -> None:
     await asyncio.to_thread(_sync)
 
 
+async def add_group_tip_target(group_id: int, target: str) -> None:
+    """Add a tips destination to the database."""
+    def _sync() -> None:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(group_tip_targets)")
+            columns = {row[1] for row in cursor.fetchall()}
+            target_column = next(
+                (name for name in ("target", "target_username", "username", "chat_id") if name in columns),
+                None,
+            )
+            if target_column is None:
+                raise RuntimeError("group_tip_targets has no supported target column")
+            quoted_column = '"' + target_column.replace('"', '""') + '"'
+            cursor.execute(
+                f"INSERT INTO group_tip_targets (group_id, {quoted_column}) VALUES (?, ?)",
+                (group_id, target),
+            )
+            conn.commit()
+
+    await asyncio.to_thread(_sync)
+
+
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
 # ==========================================
@@ -2076,7 +2099,7 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
     st_label = f"⭐ {'Propinas: 🟢' if st == 1 else 'Propinas: 🔴'}"
     amt_label = f"💰 {amount} Stars"
 
-    tier = await get_effective_group_tier(group_id, 0) # o user_id si se pasa como contexto
+    tier = await get_effective_group_tier(group_id, 0)
     limit = 1 if tier == "free" else (3 if tier == "pro" else 10)
 
     rows = [
@@ -2084,6 +2107,11 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
         [InlineKeyboardButton(text=f"{'Monto Sugerido' if lang == 'es' else 'Suggested'}: {amt_label}", callback_data=f"tips_setamount_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"📊 {'Telemetría e Historial' if lang == 'es' else 'Telemetry & History'}", callback_data=f"tips_telemetry_{group_id}_{lang}")]
     ]
+
+    # Si hay canales destino configurados, habilitar el botón de difusión de propinas
+    if targets:
+        broadcast_label = "📢 Enviar Publicación / Broadcast Tips" if lang == "es" else "📢 Broadcast Tips"
+        rows.append([InlineKeyboardButton(text=broadcast_label, callback_data=f"tips_broadcast_{group_id}_{lang}")])
 
     # Renderizar destinos guardados con botón de eliminar al lado
     for t_id, t_val in targets:
@@ -3247,7 +3275,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         ])
         clean_target = text_input.replace("https://t.me/", "").replace("t.me/", "").strip()
         if clean_target:
-            await set_tips_config(group_id, "tips_target_channel", clean_target)
+            await add_group_tip_target(group_id, clean_target)
             resp = await message.answer(t["tips_updated"], reply_markup=back_kb, parse_mode="HTML")
         else:
             resp = await message.answer(t["tips_target_err"], reply_markup=back_kb, parse_mode="HTML")
@@ -3787,7 +3815,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 f"• <b>Estado:</b> {st_badge}\n"
                 f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
                 f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
+                f"🛡️️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
                 f"• <b>Status:</b> {st_badge}\n"
@@ -3872,6 +3900,72 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             except TelegramBadRequest:
                 pass
 
+        elif sub == "broadcast":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            targets = await get_group_tip_targets(group_id)
+            if not targets:
+                await callback.answer("⚠️ No hay canales destino configurados." if lang == "es" else "⚠️ No target channels configured.", show_alert=True)
+                return
+
+            cfg_tips = await get_tips_config(group_id)
+            suggested_amt = cfg_tips.get("amount", 10)
+
+            if tier == "ultra_pro":
+                pub_text = (
+                    f"⭐ <b>¡Apoya a la comunidad con Telegram Stars! (ULTRA)</b>\n\n"
+                    f"Puedes enviar aportes voluntarios sugeridos de <code>{suggested_amt} Stars</code> para potenciar nuestras transmisiones y desarrollo.\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+            elif tier == "pro":
+                pub_text = (
+                    f"⭐ <b>Apoya nuestro contenido con Stars (PRO)</b>\n\n"
+                    f"Tu colaboración con <code>{suggested_amt} Stars</code> nos ayuda a mantener el espacio activo.\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+            else:
+                pub_text = (
+                    f"⭐ <b>Propinas y Donaciones (Free)</b>\n\n"
+                    f"Colabora con la comunidad enviando Stars.\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+
+            sent_count = 0
+            for _, t_val in targets:
+                try:
+                    target_chat = int(t_val) if t_val.lstrip("-").isdigit() else f"@{t_val.lstrip('@')}"
+                    await bot.send_message(chat_id=target_chat, text=pub_text, parse_mode="HTML")
+                    sent_count += 1
+                except Exception as ex:
+                    logging.warning(f"⚠️ [Tips Broadcast] No se pudo enviar al canal {t_val}: {ex}")
+
+            await callback.answer(
+                f"✅ Publicación enviada a {sent_count} canal(es) destino." if lang == "es" else f"✅ Broadcast sent to {sent_count} channel(s).",
+                show_alert=True
+            )
+            return
+
+        elif sub == "telemetry":
+            total_stars = await get_group_total_tips(group_id)
+            targets_count = len(await get_group_tip_targets(group_id))
+            telemetry_text = (
+                f"📊 <b>Telemetría de Propinas & Donaciones</b>\n\n"
+                f"• 💰 <b>Total Recaudado:</b> <code>{total_stars} Stars (XTR)</code>\n"
+                f"• 📢 <b>Canales Vinculados:</b> <code>{targets_count}</code>\n\n"
+                f"<i>Las propinas se acreditan en tiempo real al confirmar cada pago en Stars.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"📊 <b>Tips & Donations Telemetry</b>\n\n"
+                f"• 💰 <b>Total Collected:</b> <code>{total_stars} Stars (XTR)</code>\n"
+                f"• 📢 <b>Linked Channels:</b> <code>{targets_count}</code>\n\n"
+                f"<i>Tips are credited in real time upon confirming each Stars payment.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"tips_menu_{group_id}_{lang}")]
+            ])
+            await safe_edit_text(callback, telemetry_text, reply_markup=kb, parse_mode="HTML")
+            return
+        
         elif sub == "telemetry":
             total_stars = await get_group_total_tips(group_id)
             targets_count = len(await get_group_tip_targets(group_id))
