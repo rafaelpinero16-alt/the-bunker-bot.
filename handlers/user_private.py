@@ -154,22 +154,67 @@ async def delete_group_tip_target(group_id: int, target_id: int) -> None:
 
 
 async def add_group_tip_target(group_id: int, target: str) -> None:
-    """Add a tips destination to the database."""
+    """Add a tips destination to the database safely with schema detection."""
     def _sync() -> None:
         with get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(group_tip_targets)")
             columns = {row[1] for row in cursor.fetchall()}
+            
+            # Detección flexible de la columna de destino
             target_column = next(
-                (name for name in ("target", "target_username", "username", "chat_id") if name in columns),
-                None,
+                (name for name in ("target_value", "target", "target_username", "username", "chat_id") if name in columns),
+                "target_value",
             )
-            if target_column is None:
-                raise RuntimeError("group_tip_targets has no supported target column")
             quoted_column = '"' + target_column.replace('"', '""') + '"'
+            
+            # Detección de columna de estado activo para inicializarla en 1
+            active_col = next((name for name in ("is_active", "active", "enabled", "status") if name in columns), None)
+            
+            if active_col:
+                quoted_active = '"' + active_col.replace('"', '""') + '"'
+                cursor.execute(
+                    f"INSERT OR IGNORE INTO group_tip_targets (group_id, {quoted_column}, {quoted_active}) VALUES (?, ?, 1)",
+                    (group_id, target),
+                )
+            else:
+                cursor.execute(
+                    f"INSERT OR IGNORE INTO group_tip_targets (group_id, {quoted_column}) VALUES (?, ?)",
+                    (group_id, target),
+                )
+            conn.commit()
+
+    await asyncio.to_thread(_sync)
+
+
+async def toggle_group_tip_target(group_id: int, target_id: int) -> None:
+    """Toggle the enabled/active state of a tips target belonging to the given group."""
+    def _sync() -> None:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(group_tip_targets)")
+            columns = {row[1].lower(): row[1] for row in cursor.fetchall()}
+            
+            active_col = next((columns[name] for name in ("is_active", "active", "enabled", "status") if name in columns), None)
+            if active_col is None:
+                return
+                
+            quoted_col = '"' + active_col.replace('"', '""') + '"'
             cursor.execute(
-                f"INSERT INTO group_tip_targets (group_id, {quoted_column}) VALUES (?, ?)",
-                (group_id, target),
+                f'SELECT {quoted_col} FROM group_tip_targets WHERE id = ? AND group_id = ?',
+                (target_id, group_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return
+                
+            current = row[0]
+            current_flag = str(current).strip().lower() in {"1", "true", "yes", "active", "enabled"}
+            new_value = 0 if current_flag else 1
+            
+            cursor.execute(
+                f'UPDATE group_tip_targets SET {quoted_col} = ? WHERE id = ? AND group_id = ?',
+                (new_value, target_id, group_id),
             )
             conn.commit()
 
@@ -283,7 +328,7 @@ ALL_STATE_DICTS = (
     CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES,
     VC_SCHED_STATES, NIGHT_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES,
     PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES, TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, TIPS_TEXT_STATES,
-    TIPS_MEDIA_STATES,
+    TIPS_MEDIA_STATES, 
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES
 )
@@ -2117,6 +2162,7 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
     if tier == "ultra_pro":
         rows.append([InlineKeyboardButton(text="🖼️ " + ("Multimedia de Propinas" if lang == "es" else "Tip Media"), callback_data=f"tips_setmedia_{group_id}_{lang}")])
 
+    # Si hay canales destino configurados, habilitar el botón de difusión de propinas
     if targets:
         broadcast_label = "📢 Enviar Publicación / Broadcast Tips" if lang == "es" else "📢 Broadcast Tips"
         rows.append([InlineKeyboardButton(text=broadcast_label, callback_data=f"tips_broadcast_{group_id}_{lang}")])
@@ -2125,7 +2171,7 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
     for t_id, t_val, t_active in targets:
         status_badge = "🟢" if t_active == 1 else "🔴"
         rows.append([
-            InlineKeyboardButton(text=f"📢 {t_val[:16]}", callback_data="noop"),
+            InlineKeyboardButton(text=f"📢 {str(t_val)[:16]}", callback_data="noop"),
             InlineKeyboardButton(text=status_badge, callback_data=f"tips_toggletarget_{t_id}_{group_id}_{lang}"),
             InlineKeyboardButton(text="🗑️", callback_data=f"tips_deltarget_{t_id}_{group_id}_{lang}")
         ])
@@ -3320,13 +3366,14 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if clean_target:
             await add_group_tip_target(group_id, clean_target)
             resp = await message.answer(
-                "✅ <b>¡Canal destino añadido con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                "✅ <b>¡Canal destino añadido y registrado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
                 reply_markup=back_kb, parse_mode="HTML"
             )
         else:
             resp = await message.answer(t["tips_target_err"], reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
+
     # 11b. EDITAR TEXTO DE PROPINAS (PRO / ULTRA PRO)
     if (bot.id, user_id) in TIPS_TEXT_STATES:
         st_data = TIPS_TEXT_STATES.pop((bot.id, user_id))
@@ -3909,12 +3956,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 f"• <b>Estado:</b> {st_badge}\n"
                 f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
                 f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
-                f"🛡️️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
-                f"• <b>Status:</b> {st_badge}\n"
-                f"• <b>Suggested Amount:</b> <code>{amount} Stars</code>\n"
-                f"• <b>Total Collected:</b> <code>{total_stars} ⭐</code>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
@@ -3936,12 +3977,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
                 f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
-                f"• <b>Status:</b> {st_badge}\n"
-                f"• <b>Suggested Amount:</b> <code>{amount} Stars</code>\n"
-                f"• <b>Total Collected:</b> <code>{total_stars} ⭐</code>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
             )
             keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
             try:
@@ -3952,6 +3987,44 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         elif sub == "setamount":
             TIPS_AMOUNT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(t["tips_prompt_amount"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "settext":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier not in ("pro", "ultra_pro"):
+                await callback.answer("⭐ Requiere plan PRO o ULTRA PRO.", show_alert=True)
+                return
+            TIPS_TEXT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "✍️ <b>Editor de Mensaje de Propinas (PRO / ULTRA):</b>\n\n"
+                "Envía el texto que acompañará la publicación de propinas:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "✍️ <b>Tip Message Editor (PRO / ULTRA):</b>\n\n"
+                "Send the text to accompany the tip broadcast:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
+
+        elif sub == "setmedia":
+            tier = await get_effective_group_tier(group_id, callback.from_user.id)
+            if tier != "ultra_pro":
+                await callback.answer("💎 Requiere nivel ULTRA PRO.", show_alert=True)
+                return
+            TIPS_MEDIA_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt_text = (
+                "🖼️ <b>Adjuntar Multimedia a Propinas (ULTRA PRO):</b>\n\n"
+                "Envía una Foto, Video o GIF que se publicará junto con las propinas:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                "🖼️ <b>Attach Tip Media (ULTRA PRO):</b>\n\n"
+                "Send a Photo, Video or GIF to publish along with tips:\n\n"
+                "🛡️ <i>Cloud Media Management</i>"
+            )
+            prompt = await callback.message.answer(prompt_text, reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
@@ -3981,11 +4054,26 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
                 f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                f"⭐ <b>Telegram Stars Tips & Donations</b>\n\n"
-                f"• <b>Status:</b> {st_badge}\n"
-                f"• <b>Suggested Amount:</b> <code>{amount} Stars</code>\n"
-                f"• <b>Total Collected:</b> <code>{total_stars} ⭐</code>\n\n"
+            )
+            keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
+            try:
+                await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
+            except TelegramBadRequest:
+                pass
+
+        elif sub == "toggletarget":
+            target_id = int(data[2])
+            await toggle_group_tip_target(group_id, target_id)
+            await callback.answer("⚙️ Estado del canal actualizado.", show_alert=False)
+            cfg = await get_tips_config(group_id)
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            amount = cfg.get("amount", 10)
+            total_stars = await get_group_total_tips(group_id)
+            text = (
+                f"⭐ <b>Propinas y Donaciones con Telegram Stars</b>\n\n"
+                f"• <b>Estado:</b> {st_badge}\n"
+                f"• <b>Monto Sugerido:</b> <code>{amount} Stars</code>\n"
+                f"• <b>Recaudación Total:</b> <code>{total_stars} ⭐</code>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             keyboard = await get_tips_keyboard(group_id, lang, cfg, chat_type=chat_kind)
@@ -3997,45 +4085,46 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         elif sub == "broadcast":
             tier = await get_effective_group_tier(group_id, callback.from_user.id)
             targets = await get_group_tip_targets(group_id)
-            if not targets:
-                await callback.answer("⚠️ No hay canales destino configurados." if lang == "es" else "⚠️ No target channels configured.", show_alert=True)
+            active_targets = [t_val for _, t_val, t_active in targets if t_active == 1]
+            if not active_targets:
+                await callback.answer("⚠️ No hay canales activos habilitados para difusión." if lang == "es" else "⚠️ No active channels enabled for broadcast.", show_alert=True)
                 return
 
             cfg_tips = await get_tips_config(group_id)
             suggested_amt = cfg_tips.get("amount", 10)
+            custom_text = cfg_tips.get("tips_custom_text")
+            media_id = cfg_tips.get("tips_media_id")
+            media_type = cfg_tips.get("tips_media_type")
 
-            if tier == "ultra_pro":
-                pub_text = (
-                    f"⭐ <b>¡Apoya a la comunidad con Telegram Stars! (ULTRA)</b>\n\n"
-                    f"Puedes enviar aportes voluntarios sugeridos de <code>{suggested_amt} Stars</code> para potenciar nuestras transmisiones y desarrollo.\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                )
-            elif tier == "pro":
-                pub_text = (
-                    f"⭐ <b>Apoya nuestro contenido con Stars (PRO)</b>\n\n"
-                    f"Tu colaboración con <code>{suggested_amt} Stars</code> nos ayuda a mantener el espacio activo.\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                )
+            if tier in ("pro", "ultra_pro") and custom_text:
+                pub_text = custom_text.replace("{amount}", str(suggested_amt))
             else:
                 pub_text = (
-                    f"⭐ <b>Propinas y Donaciones (Free)</b>\n\n"
-                    f"Colabora con la comunidad enviando Stars.\n\n"
+                    f"⭐ <b>¡Apoya a la comunidad con Telegram Stars!</b>\n\n"
+                    f"Puedes enviar aportes voluntarios sugeridos de <code>{suggested_amt} Stars</code> para potenciar nuestras transmisiones y desarrollo.\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 )
 
             sent_count = 0
-            for _, t_val in targets:
+            for t_val in active_targets:
                 try:
                     target_chat = int(t_val) if t_val.lstrip("-").isdigit() else f"@{t_val.lstrip('@')}"
-                    await bot.send_message(chat_id=target_chat, text=pub_text, parse_mode="HTML")
+                    if tier == "ultra_pro" and media_id and media_type:
+                        if media_type == "photo":
+                            await bot.send_photo(chat_id=target_chat, photo=media_id, caption=pub_text, parse_mode="HTML")
+                        elif media_type == "video":
+                            await bot.send_video(chat_id=target_chat, video=media_id, caption=pub_text, parse_mode="HTML")
+                        elif media_type == "animation":
+                            await bot.send_animation(chat_id=target_chat, animation=media_id, caption=pub_text, parse_mode="HTML")
+                        else:
+                            await bot.send_message(chat_id=target_chat, text=pub_text, parse_mode="HTML")
+                    else:
+                        await bot.send_message(chat_id=target_chat, text=pub_text, parse_mode="HTML")
                     sent_count += 1
                 except Exception as ex:
                     logging.warning(f"⚠️ [Tips Broadcast] No se pudo enviar al canal {t_val}: {ex}")
 
-            await callback.answer(
-                f"✅ Publicación enviada a {sent_count} canal(es) destino." if lang == "es" else f"✅ Broadcast sent to {sent_count} channel(s).",
-                show_alert=True
-            )
+            await callback.answer(f"✅ Publicación enviada a {sent_count} canal(es) activo(s)." if lang == "es" else f"✅ Broadcast sent to {sent_count} active channel(s).", show_alert=True)
             return
 
         elif sub == "telemetry":
@@ -4046,12 +4135,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 f"• 💰 <b>Total Recaudado:</b> <code>{total_stars} Stars (XTR)</code>\n"
                 f"• 📢 <b>Canales Vinculados:</b> <code>{targets_count}</code>\n\n"
                 f"<i>Las propinas se acreditan en tiempo real al confirmar cada pago en Stars.</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                f"📊 <b>Tips & Donations Telemetry</b>\n\n"
-                f"• 💰 <b>Total Collected:</b> <code>{total_stars} Stars (XTR)</code>\n"
-                f"• 📢 <b>Linked Channels:</b> <code>{targets_count}</code>\n\n"
-                f"<i>Tips are credited in real time upon confirming each Stars payment.</i>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
