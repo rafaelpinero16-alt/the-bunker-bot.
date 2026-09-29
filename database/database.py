@@ -1492,14 +1492,21 @@ def get_group_total_tips(group_id: int) -> int:
 def get_group_tip_targets(group_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, target_value FROM group_tip_targets WHERE group_id = ?", (group_id,))
+        cursor.execute("SELECT id, target_value, is_active FROM group_tip_targets WHERE group_id = ?", (group_id,))
         return cursor.fetchall()
 
 
 def add_group_tip_target(group_id: int, target_value: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO group_tip_targets (group_id, target_value) VALUES (?, ?)", (group_id, target_value))
+        cursor.execute("INSERT OR IGNORE INTO group_tip_targets (group_id, target_value, is_active) VALUES (?, ?, 1)", (group_id, target_value))
+        conn.commit()
+
+
+def toggle_group_tip_target(group_id: int, target_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE group_tip_targets SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = ? AND group_id = ?", (target_id, group_id))
         conn.commit()
 
 
