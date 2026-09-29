@@ -4122,7 +4122,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                         await bot.send_message(chat_id=target_chat, text=pub_text, parse_mode="HTML")
                     sent_count += 1
                 except Exception as ex:
-                    logging.warning(f"⚠️ [Tips Broadcast] No se pudo enviar al canal {t_val}: {ex}")
+                    logging.warning(f"⚠️️ [Tips Broadcast] No se pudo enviar al canal {t_val}: {ex}")
 
             await callback.answer(f"✅ Publicación enviada a {sent_count} canal(es) activo(s)." if lang == "es" else f"✅ Broadcast sent to {sent_count} active channel(s).", show_alert=True)
             return
@@ -4135,28 +4135,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 f"• 💰 <b>Total Recaudado:</b> <code>{total_stars} Stars (XTR)</code>\n"
                 f"• 📢 <b>Canales Vinculados:</b> <code>{targets_count}</code>\n\n"
                 f"<i>Las propinas se acreditan en tiempo real al confirmar cada pago en Stars.</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            )
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"tips_menu_{group_id}_{lang}")]
-            ])
-            await safe_edit_text(callback, telemetry_text, reply_markup=kb, parse_mode="HTML")
-            return
-        
-        elif sub == "telemetry":
-            total_stars = await get_group_total_tips(group_id)
-            targets_count = len(await get_group_tip_targets(group_id))
-            telemetry_text = (
-                f"📊 <b>Telemetría de Propinas & Donaciones</b>\n\n"
-                f"• 💰 <b>Total Recaudado:</b> <code>{total_stars} Stars (XTR)</code>\n"
-                f"• 📢 <b>Canales Vinculados:</b> <code>{targets_count}</code>\n\n"
-                f"<i>Las propinas se acreditan en tiempo real al confirmar cada pago en Stars.</i>\n\n"
-                f"🛡️️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                f"📊 <b>Tips & Donations Telemetry</b>\n\n"
-                f"• 💰 <b>Total Collected:</b> <code>{total_stars} Stars (XTR)</code>\n"
-                f"• 📢 <b>Linked Channels:</b> <code>{targets_count}</code>\n\n"
-                f"<i>Tips are credited in real time upon confirming each Stars payment.</i>\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[

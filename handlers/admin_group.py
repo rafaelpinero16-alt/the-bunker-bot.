@@ -77,6 +77,15 @@ async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
         return False
 
 
+async def auto_delete_msg(msg: Message, delay: int = 12):
+    """Auto-destrucción simple de un mensaje de respuesta."""
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
 async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 12):
     """Auto-destrucción dual estricta para mantener el chat limpio y sin contaminación visual."""
     await asyncio.sleep(delay)
@@ -88,6 +97,9 @@ async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 12):
         await bot_msg.delete()
     except Exception:
         pass
+
+
+_spawn = asyncio.create_task
 
 
 # ==========================================================
@@ -264,14 +276,7 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
 # ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """
-    Reconecta y resincroniza todo el ecosistema con la comunidad:
-    1. Registra el grupo y asegura su aprobación en approved_groups.
-    2. Purga y actualiza la caché de administradores (admin_caches).
-    3. Reconecta el Centinela MTProto (dedicado o maestro) con ID verificado.
-    4. Garantiza el estado activo del radar acústico (vc_enabled = 1).
-    5. Despacha aviso estético con marca de agua y auto-eliminación a los 12 segundos.
-    """
+    """Fuerza la recarga del perímetro, sincroniza la comunidad en la base de datos y muestra la tarjeta de acceso."""
     if message.chat.type == "private": 
         return
     
@@ -287,8 +292,32 @@ async def cmd_reload_group(message: Message, bot: Bot):
             pass
         return
 
-    chat_title = message.chat.title or "Comunidad Blindada"
+    chat_title = message.chat.title or "Comunidad"
     chat_type = message.chat.type
+
+    # Sincronización atómica inmediata en base de datos
+    await approve_group(chat_id, tier=await get_group_tier(chat_id))
+    await register_user_group(user_id, chat_id, chat_title, chat_type=chat_type)
+    await set_vc_monitor_status(chat_id, 1)
+
+    bot_info = await bot.get_me()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
+        [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+    ])
+
+    resp = await message.answer(
+        f"🔄 <b>Perímetro Recargado y Sincronizado</b>\n\n"
+        f"• <b>Comunidad:</b> {html.escape(chat_title)}\n"
+        f"• <b>Estado:</b> Conexión activa y reflejada 🟢\n\n"
+        f"🛡️ <i>Cloud Media Management</i>",
+        reply_markup=kb, parse_mode="HTML"
+    )
+    _spawn(auto_delete_msg(resp, 45))
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
     # 1. Registrar entorno en el padrón del creador
     await register_user_group(
