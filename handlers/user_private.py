@@ -3262,18 +3262,6 @@ async def handle_channel_shared(message: Message, bot: Bot):
         [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")]
     ])
     await message.answer(t["chsync_ok"].format(title=html.escape(title or str(channel_id))), reply_markup=ok_kb, parse_mode="HTML")
-    CHAT_KIND_CACHE[channel_id] = "c"
-    CHANNEL_SYNC_CACHE.setdefault(user.id, {})[channel_id] = title
-    await registry_upsert_channel(user.id, channel_id, title)
-    logging.info(f"✅ [Sync Canales] user={user.id} sincronizó channel={channel_id} ('{title}').")
-
-    ok_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_open_studio"], callback_data=f"cpanel_{channel_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_sync_channels"], callback_data=f"menu_chsync_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")]
-    ])
-    await message.answer(t["chsync_ok"].format(title=html.escape(title or str(channel_id))), reply_markup=ok_kb, parse_mode="HTML")
-
 
 @router.message(F.chat.type == "private")
 async def handle_private_inputs(message: Message, bot: Bot):
@@ -3779,8 +3767,6 @@ async def handle_private_inputs(message: Message, bot: Bot):
         return
 
         # 11. PROPINAS EN STARS (TIPS) — FLUJOS CONVERSACIONALES
-    # Cada flujo conserva su estado ante una entrada inválida (el usuario puede reintentar o pulsar Cancelar)
-    # y solo lo libera al completarse con éxito.
     tips_key = (bot.id, user_id)
 
     # 11a. MONTO SUGERIDO
@@ -3792,18 +3778,18 @@ async def handle_private_inputs(message: Message, bot: Bot):
             resp = await message.answer(t["tips_updated"], reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
         else:
             resp = await message.answer(
-                f"{t['tips_amount_err']} (1 - {TIPS_MAX_AMOUNT})",
+                f"{t['tips_amount_err'].replace(PERIMETER_SIGNATURE, '')} (1 - {TIPS_MAX_AMOUNT})" + PERIMETER_SIGNATURE,
                 reply_markup=_cancel_kb(t, f"tips_menu_{group_id}_{lang}"), parse_mode="HTML"
             )
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # 11b. AÑADIR CANAL DESTINO (valida licencia, formato, permisos del bot y titularidad; registra en group_tip_targets)
+    # 11b. AÑADIR CANAL DESTINO
     if tips_key in TIPS_TARGET_STATES:
         group_id = TIPS_TARGET_STATES[tips_key]["group_id"]
         cancel_kb = _cancel_kb(t, f"tips_menu_{group_id}_{lang}")
         back_kb = _tips_back_kb(t, group_id, lang)
-        tier = str(await get_effective_group_tier(group_id, user_id)).strip().lower()
+        tier = _tips_tier(await get_effective_group_tier(group_id, user_id))
         limit = _tips_limit(tier)
         targets_before = await _tips_get_targets(group_id)
 
@@ -3825,7 +3811,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                         await add_group_tip_target(group_id, info["value"])
                         saved = len(await _tips_get_targets(group_id)) > len(targets_before)
                     except Exception as ex:
-                        logging.error(f"❌ [Tips] No se pudo registrar el canal {info['value']} en group={group_id}: {ex}")
+                        logging.error(f"❌ [Tips] Error registrando canal {info['value']} en group={group_id}: {ex}")
                         saved = False
                     if saved:
                         resp = await message.answer(
@@ -3845,7 +3831,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
     if tips_key in TIPS_TEXT_STATES:
         group_id = TIPS_TEXT_STATES[tips_key]["group_id"]
         cancel_kb = _cancel_kb(t, f"tips_menu_{group_id}_{lang}")
-        tier = str(await get_effective_group_tier(group_id, user_id)).strip().lower()
+        tier = _tips_tier(await get_effective_group_tier(group_id, user_id))
         plain = (message.text or message.caption or "").strip()
 
         if tier not in ("pro", "ultra_pro"):
@@ -3856,32 +3842,27 @@ async def handle_private_inputs(message: Message, bot: Bot):
             resp = await message.answer(tr(lang, "⚠️ Envía el mensaje como <b>texto</b>; no puede estar vacío.", "⚠️ Send the message as <b>text</b>; it cannot be empty.") + PERIMETER_SIGNATURE,
                                         reply_markup=cancel_kb, parse_mode="HTML")
         elif len(plain) > TIPS_TEXT_MAX_LEN:
-            resp = await message.answer(tr(lang, f"⚠️ El texto excede {TIPS_TEXT_MAX_LEN} caracteres ({len(plain)}). Acórtalo e inténtalo de nuevo.",
-                                           f"⚠️ The text exceeds {TIPS_TEXT_MAX_LEN} characters ({len(plain)}). Shorten it and try again.") + PERIMETER_SIGNATURE,
+            resp = await message.answer(tr(lang, f"⚠️ El texto excede {TIPS_TEXT_MAX_LEN} caracteres ({len(plain)}). Acórtalo.",
+                                           f"⚠️ The text exceeds {TIPS_TEXT_MAX_LEN} characters ({len(plain)}). Shorten it.") + PERIMETER_SIGNATURE,
                                         reply_markup=cancel_kb, parse_mode="HTML")
         else:
             TIPS_TEXT_STATES.pop(tips_key, None)
             try:
-                # html_text conserva el formato (negritas, enlaces...) y escapa correctamente los símbolos < > &
                 await set_tips_config(group_id, "tips_custom_text", message.html_text.strip())
                 resp = await message.answer(
                     tr(lang, "✅ <b>¡Texto de propinas actualizado con éxito!</b>", "✅ <b>Tips text updated successfully!</b>") + PERIMETER_SIGNATURE,
                     reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML"
                 )
             except Exception as ex:
-                logging.error(f"❌ [Tips] No se pudo guardar el texto en group={group_id}: {ex}")
-                resp = await message.answer(
-                    tr(lang, "⚠️ No se pudo guardar la multimedia de propinas. Inténtalo de nuevo.",
-                       "⚠️ Could not save the tips media. Please try again.") + PERIMETER_SIGNATURE,
-                    reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML"
-                )
+                logging.error(f"❌ [Tips] Error guardando texto en group={group_id}: {ex}")
+                resp = await message.answer(tips_target_error_text(lang, "save_failed"), reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
     # 11d. ADJUNTAR MULTIMEDIA A PROPINAS (EXCLUSIVO ULTRA PRO)
     if tips_key in TIPS_MEDIA_STATES:
         group_id = TIPS_MEDIA_STATES[tips_key]["group_id"]
-        tier = str(await get_effective_group_tier(group_id, user_id)).strip().lower()
+        tier = _tips_tier(await get_effective_group_tier(group_id, user_id))
         media_id = media_type = None
         if message.photo:
             media_id, media_type = message.photo[-1].file_id, "photo"
@@ -3907,11 +3888,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
                     reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML"
                 )
             except Exception as ex:
-                logging.error(f"❌ [Tips] No se pudo guardar la multimedia en group={group_id}: {ex}")
-                resp = await message.answer(
-                    tr(lang, "⚠️ No se pudo guardar la multimedia de propinas.", "⚠️ Could not save the tips media.") + PERIMETER_SIGNATURE,
-                    reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML"
-                )
+                logging.error(f"❌ [Tips] Error guardando multimedia en group={group_id}: {ex}")
+                resp = await message.answer(tips_target_error_text(lang, "save_failed"), reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -4447,43 +4425,35 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         viewer_id = callback.from_user.id
         chat_kind = await resolve_chat_kind(bot, group_id)
         cfg = await get_tips_config(group_id) or {}
-        tier = await get_effective_group_tier(group_id, viewer_id)
+        tier = _tips_tier(await get_effective_group_tier(group_id, viewer_id))
         back_ctx = f"tips_menu_{group_id}_{lang}"
 
-        # ── Navegación y acciones que re-dibujan el panel ──
         if sub in ("menu", "toggle", "toggletarget", "deltarget"):
-            if sub == "toggle":                                    # 1. Toggle del módulo
+            if sub == "toggle":
                 new_st = 0 if _tips_is_on(cfg) else 1
                 await set_tips_config(group_id, "tips_enabled", new_st)
                 await callback.answer(tr(lang, "🟢 Propinas activadas", "🟢 Tips enabled") if new_st else tr(lang, "🔴 Propinas desactivadas", "🔴 Tips disabled"))
-            elif sub == "toggletarget":                            # 7. 🟢/🔴 por canal
+            elif sub == "toggletarget":
                 await toggle_group_tip_target(group_id, target_id)
                 await callback.answer(tr(lang, "⚙️ Estado del canal actualizado.", "⚙️ Channel status updated."))
-            elif sub == "deltarget":                               # 7. 🗑️ por canal
+            elif sub == "deltarget":
                 await delete_group_tip_target(group_id, target_id)
                 await callback.answer(tr(lang, "🗑️ Canal destino eliminado.", "🗑️ Target channel removed."))
             else:
                 await callback.answer()
-            
-            # Corrección: build_tips_panel devuelve la tupla (text, keyboard) correctamente
-            text, keyboard = await build_tips_panel(group_id, lang, chat_kind, viewer_id)
-            try:
-                await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
-            except TelegramBadRequest:
-                pass
 
-        # ── 2. Monto sugerido ──
+            text, keyboard = await build_tips_panel(group_id, lang, chat_kind, viewer_id)
+
         elif sub == "setamount":
             await callback.answer()
             TIPS_AMOUNT_STATES[(bot.id, viewer_id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(
-                f"{t['tips_prompt_amount']}\n<i>{tr(lang, 'Número entero entre', 'Whole number between')} 1 - {_tips_limit(tier)}</i>" + PERIMETER_SIGNATURE,
+                f"{t['tips_prompt_amount'].replace(PERIMETER_SIGNATURE, '')}\n<i>{tr(lang, 'Número entero entre', 'Whole number between')} 1 - {TIPS_MAX_AMOUNT}</i>" + PERIMETER_SIGNATURE,
                 reply_markup=_cancel_kb(t, back_ctx), parse_mode="HTML"
             )
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
-        # ── 4. Editor de texto (PRO / ULTRA PRO) ──
         elif sub == "settext":
             if tier not in ("pro", "ultra_pro"):
                 await callback.answer(tr(lang, "⭐ Requiere plan PRO o ULTRA PRO.", "⭐ Requires a PRO or ULTRA PRO plan."), show_alert=True)
@@ -4501,7 +4471,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
-        # ── 5. Editor de multimedia (exclusivo ULTRA PRO) ──
         elif sub == "setmedia":
             if tier != "ultra_pro":
                 await callback.answer(tr(lang, "💎 Requiere nivel ULTRA PRO.", "💎 Requires ULTRA PRO tier."), show_alert=True)
@@ -4517,40 +4486,31 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
-        # ── 6. Añadir canal destino (límite de licencia: Free 1 · Pro 3 · Ultra Pro 10) ──
         elif sub == "addtarget":
             limit = _tips_limit(tier)
-            current = len(await get_group_tip_targets(group_id))
+            current = len(await _tips_get_targets(group_id))
             if current >= limit:
-                await callback.answer(
-                    tr(
-                        lang,
-                        f"⚠️ Has alcanzado el límite de canales de destino ({current}/{limit}) para tu nivel.",
-                        f"⚠️ You have reached the destination channel limit ({current}/{limit}) for your tier.",
-                    ),
-                    show_alert=True,
-                )
+                await callback.answer(tips_target_error_text(lang, "limit", n=current, limit=limit).replace(PERIMETER_SIGNATURE, ""), show_alert=True)
                 return
             await callback.answer()
             TIPS_TARGET_STATES[(bot.id, viewer_id)] = {"group_id": group_id, "lang": lang}
             prompt = await callback.message.answer(
-                f"{t['tips_prompt_target']}\n<i>{tr(lang, 'El bot debe ser administrador del canal y tú también.', 'The bot must be an administrator of the channel, and so must you.')}</i>"
+                f"{t['tips_prompt_target'].replace(PERIMETER_SIGNATURE, '')}\n<i>{tr(lang, 'El bot debe ser administrador del canal.', 'The bot must be an administrator of the channel.')}</i>"
                 f"\n<code>{current}/{limit}</code>" + PERIMETER_SIGNATURE,
                 reply_markup=_cancel_kb(t, back_ctx), parse_mode="HTML"
             )
             fire_and_forget_auto_delete([prompt], delay=60)
             return
 
-        # ── 8. Motor de difusión (canales con is_active == 1) ──
         elif sub == "broadcast":
             if not _tips_is_on(cfg):
                 await callback.answer(tr(lang, "⚠️ Activa el módulo de propinas antes de publicar.", "⚠️ Enable the tips module before broadcasting."), show_alert=True)
                 return
-            active_targets = [v for _, v, active in await get_group_tip_targets(group_id) if active]
+            active_targets = [v for _, v, active in await _tips_get_targets(group_id) if active]
             if not active_targets:
                 await callback.answer(tr(lang, "⚠️ No hay canales activos habilitados para difusión.", "⚠️ No active channels enabled for broadcast."), show_alert=True)
                 return
-            skipped = max(0, len(active_targets) - _tips_limit(tier))   # p. ej. tras bajar de licencia
+            skipped = max(0, len(active_targets) - _tips_limit(tier))
             active_targets = active_targets[:_tips_limit(tier)]
             wait = int(TIPS_BROADCAST_COOLDOWN - (time.time() - _TIPS_LAST_BROADCAST.get(group_id, 0)))
             if wait > 0:
@@ -4561,7 +4521,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
             sent, failed = await dispatch_tips_broadcast(bot, tier, cfg, lang, active_targets)
             if sent == 0:
-                _TIPS_LAST_BROADCAST.pop(group_id, None)     # nada salió: permite reintentar de inmediato
+                _TIPS_LAST_BROADCAST.pop(group_id, None)
             report = tr(lang,
                         f"📡 <b>Difusión de propinas finalizada</b>\n\n✅ Enviados: <code>{sent}</code>\n❌ Fallidos: <code>{len(failed)}</code>",
                         f"📡 <b>Tips broadcast finished</b>\n\n✅ Sent: <code>{sent}</code>\n❌ Failed: <code>{len(failed)}</code>")
@@ -4572,22 +4532,14 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 report += "\n" + "\n".join(f"• <code>{html.escape(v)}</code>" for v in failed[:10])
                 report += tr(lang, "\n\n<i>Verifica que el bot siga siendo administrador con permiso para publicar.</i>",
                              "\n\n<i>Check that the bot is still an administrator with permission to post.</i>")
-            resp = await bot.send_message(
-                chat_id=viewer_id,
-                text=report + PERIMETER_SIGNATURE,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=back_ctx)]
-                ]),
-                parse_mode="HTML",
-            )
+            resp = await bot.send_message(chat_id=viewer_id, text=report + PERIMETER_SIGNATURE, reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
             fire_and_forget_auto_delete([resp], delay=60)
             return
 
-        # ── 3. Telemetría e historial ──
         elif sub == "telemetry":
             await callback.answer()
             total_stars = await get_group_total_tips(group_id)
-            targets = await get_group_tip_targets(group_id)
+            targets = await _tips_get_targets(group_id)
             channels_txt = "\n".join(f"{'🟢' if active else '🔴'} <code>{html.escape(v)}</code>" for _, v, active in targets) \
                 or tr(lang, "<i>Sin canales vinculados</i>", "<i>No linked channels</i>")
             text = (

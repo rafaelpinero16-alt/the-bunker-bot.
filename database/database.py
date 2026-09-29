@@ -158,6 +158,9 @@ def init_db():
             ("tips_enabled", "INTEGER DEFAULT 0"),
             ("tips_amount", "INTEGER DEFAULT 10"),
             ("tips_target_channel", "TEXT"),
+            ("tips_custom_text", "TEXT"),
+            ("tips_media_id", "TEXT"),
+            ("tips_media_type", "TEXT"),
             ("sentinel_payload_enabled", "INTEGER DEFAULT 0"),
             ("sentinel_payload_text", "TEXT"),
             ("sentinel_payload_media_id", "TEXT"),
@@ -1443,21 +1446,34 @@ def get_tips_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
-            cursor.execute("SELECT tips_enabled, tips_amount, tips_target_channel FROM group_settings WHERE group_id = ?", (group_id,))
+            cursor.execute("""
+                SELECT tips_enabled, tips_amount, tips_target_channel,
+                       tips_custom_text, tips_media_id, tips_media_type
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
                     "enabled": row[0] if row[0] is not None else 0,
                     "amount": row[1] if row[1] is not None else 10,
-                    "target_channel": row[2] if row[2] else ""
+                    "target_channel": row[2] if row[2] else "",
+                    "tips_custom_text": row[3] if row[3] else None,
+                    "tips_media_id": row[4] if row[4] else None,
+                    "tips_media_type": row[5] if row[5] else None,
                 }
         except sqlite3.OperationalError:
             pass
-        return {"enabled": 0, "amount": 10, "target_channel": ""}
+        return {
+            "enabled": 0, "amount": 10, "target_channel": "",
+            "tips_custom_text": None, "tips_media_id": None, "tips_media_type": None
+        }
 
 
 def set_tips_config(group_id: int, field: str, value):
-    valid_fields = ["tips_enabled", "tips_amount", "tips_target_channel"]
+    valid_fields = [
+        "tips_enabled", "tips_amount", "tips_target_channel",
+        "tips_custom_text", "tips_media_id", "tips_media_type"
+    ]
     if field not in valid_fields:
         return
     with get_db_connection() as conn:
