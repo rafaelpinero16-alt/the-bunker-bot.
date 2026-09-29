@@ -2795,6 +2795,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_group_total_tips",
     "get_group_tip_targets",
     "add_group_tip_target",
+    "toggle_group_tip_target",
+    "delete_group_tip_target",
     "delete_group_tip_target",
     "add_to_whitelist",
     "remove_from_whitelist",

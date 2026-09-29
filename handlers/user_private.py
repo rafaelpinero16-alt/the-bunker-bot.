@@ -3940,7 +3940,14 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
     elif action == "tips":
         sub = data[1]
-        group_id = int(data[2])
+        
+        # Corrección del índice de argumentos según el subcomando
+        if sub in ("deltarget", "toggletarget"):
+            target_id = int(data[2])
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+
         if not await verify_admin_privileges(callback, bot, group_id):
             return
 
@@ -4041,9 +4048,8 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
 
         elif sub == "deltarget":
-            target_id = int(data[2])
             await delete_group_tip_target(group_id, target_id)
-            await callback.answer("🗑️ Canal destino eliminado." if lang == "es" else "🗑️ Target channel deleted.", show_alert=False)
+            await callback.answer("🗑️ Canal destino eliminado.", show_alert=False)
             cfg = await get_tips_config(group_id)
             st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if cfg.get("enabled") == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
             amount = cfg.get("amount", 10)
@@ -4062,7 +4068,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 pass
 
         elif sub == "toggletarget":
-            target_id = int(data[2])
             await toggle_group_tip_target(group_id, target_id)
             await callback.answer("⚙️ Estado del canal actualizado.", show_alert=False)
             cfg = await get_tips_config(group_id)
@@ -4122,7 +4127,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                         await bot.send_message(chat_id=target_chat, text=pub_text, parse_mode="HTML")
                     sent_count += 1
                 except Exception as ex:
-                    logging.warning(f"⚠️️ [Tips Broadcast] No se pudo enviar al canal {t_val}: {ex}")
+                    logging.warning(f"⚠️ [Tips Broadcast] No se pudo enviar al canal {t_val}: {ex}")
 
             await callback.answer(f"✅ Publicación enviada a {sent_count} canal(es) activo(s)." if lang == "es" else f"✅ Broadcast sent to {sent_count} active channel(s).", show_alert=True)
             return
