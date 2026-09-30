@@ -94,7 +94,7 @@ ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
 
 # 🎬 Video de bienvenida (/start). Ruta relativa a la raíz del proyecto; sobreescribible por entorno.
-WELCOME_VIDEO_PATH = os.getenv("WELCOME_VIDEO_PATH", "assets/bunker_intro.gif")
+WELCOME_VIDEO_PATH = os.getenv("WELCOME_VIDEO_PATH", "assets/bunker_intro.")
 
 # file_id de Telegram por bot: tras el primer envío se almacena en caché.
 _WELCOME_VIDEO_FILE_IDS: dict = {}
@@ -4367,48 +4367,101 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         elif target == "settings":
             active_groups = await get_active_user_groups(bot, callback.from_user.id)
             keyboard = get_groups_keyboard(active_groups, lang)
-            image_path = "assets/centrodecomando.jfif" if lang == "es" else "assets/commandcenter.jfif"
             
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-                
-            try:
-                await bot.send_photo(
-                    chat_id=callback.from_user.id,
-                    photo=FSInputFile(image_path),
-                    reply_markup=keyboard
-                )
-            except Exception as ex:
-                logging.warning(f"⚠️ [Settings] No se pudo enviar la foto, usando texto de respaldo: {ex}")
+            # 🖼️ Selección de tarjeta gráfica según idioma (ES / EN)
+            img_name = "centrodecomando.jfif" if lang == "es" else "commandcenter.jfif"
+            img_candidates = [
+                os.path.join("assets", img_name),
+                img_name
+            ]
+            img_path = next((p for p in img_candidates if os.path.isfile(p)), None)
+
+            photo_sent = False
+            if img_path:
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    pass
+                try:
+                    await bot.send_photo(
+                        chat_id=callback.from_user.id,
+                        photo=FSInputFile(img_path),
+                        reply_markup=keyboard
+                    )
+                    photo_sent = True
+                except Exception as ex:
+                    logging.warning(f"⚠️ [Settings] Error enviando imagen, usando texto: {ex}")
+
+            # Respaldo seguro si la imagen no existe o falla el envío
+            if not photo_sent:
                 text = t["settings_main"]
-                await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=keyboard, parse_mode="HTML")
+                try:
+                    await bot.send_message(
+                        chat_id=callback.from_user.id,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                except Exception as ex:
+                    logging.error(f"❌ [Settings] Error en fallback de texto: {ex}")
             return
 
         elif target == "chsettings":
-            # 🔄 Sincronización Activa: verifica permisos en vivo y lista los canales de inmediato (aun tras un reinicio).
+            # 🔄 Sincronización Activa: verifica permisos en vivo y lista los canales de inmediato
             active_channels = await get_active_user_channels(bot, callback.from_user.id)
             keyboard = get_channels_keyboard(active_channels, lang)
             
-            # 📌 Ruta corregida con el punto exacto: setting.channels.jfif
-            image_path = "assets/setting.channels.jfif"
-            
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-                
-            try:
-                await bot.send_photo(
-                    chat_id=callback.from_user.id,
-                    photo=FSInputFile(image_path),
-                    reply_markup=keyboard
-                )
-            except Exception as ex:
-                logging.warning(f"⚠️ [Channel Settings] No se pudo enviar la foto, usando texto de respaldo: {ex}")
+            # 🖼️ Detección tolerante de la imagen (soporta con punto o con guion bajo)
+            img_candidates = [
+                os.path.join("assets", "setting.channels.jfif"),
+                os.path.join("assets", "setting_channels.jfif"),
+                "setting.channels.jfif",
+                "setting_channels.jfif"
+            ]
+            img_path = next((p for p in img_candidates if os.path.isfile(p)), None)
+
+            photo_sent = False
+            if img_path:
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    pass
+                try:
+                    await bot.send_photo(
+                        chat_id=callback.from_user.id,
+                        photo=FSInputFile(img_path),
+                        reply_markup=keyboard
+                    )
+                    photo_sent = True
+                except Exception as ex:
+                    logging.warning(f"⚠️ [Channel Settings] Error enviando imagen, usando texto: {ex}")
+
+            # Respaldo seguro si la imagen no existe o falla el envío
+            if not photo_sent:
                 text = t["chsettings_main"] if active_channels else t["chsettings_main_empty"]
-                await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=keyboard, parse_mode="HTML")
+                try:
+                    await bot.send_message(
+                        chat_id=callback.from_user.id,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode="HTML"
+                    )
+                except Exception as ex:
+                    logging.error(f"❌ [Channel Settings] Error en fallback de texto: {ex}")
+            return
+
+        elif target == "chsync":
+            # Selector nativo de Telegram: el usuario elige su canal y se registra en el acto
+            try:
+                await callback.message.answer(t["chsync_prompt"], reply_markup=build_channel_request_keyboard(lang), parse_mode="HTML")
+            except Exception as ex:
+                logging.error(f"❌ [Sync Canales] No se pudo abrir el selector de canales: {ex}")
+            return
+            # Selector nativo de Telegram: el usuario elige su canal y se registra en el acto (sin re-agregar el bot).
+            try:
+                await callback.message.answer(t["chsync_prompt"], reply_markup=build_channel_request_keyboard(lang), parse_mode="HTML")
+            except Exception as ex:
+                logging.error(f"❌ [Sync Canales] No se pudo abrir el selector de canales: {ex}")
             return
         elif target == "support":
             text, keyboard = t["support_main"], get_support_keyboard(lang)
