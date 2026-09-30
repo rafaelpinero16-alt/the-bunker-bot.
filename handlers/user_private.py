@@ -20,7 +20,7 @@ from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, ChatPermissions,
     ReplyKeyboardMarkup, KeyboardButton, KeyboardButtonRequestChat,
-    ReplyKeyboardRemove, FSInputFile
+    ReplyKeyboardRemove, FSInputFile, InputMediaPhoto
 )
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.filters import Command, CommandStart, CommandObject
@@ -92,6 +92,107 @@ router.callback_query.middleware(CallbackAutoAnswerMiddleware())
 
 ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
+
+# ------------------------------------------
+# 🖼️ TARJETAS GRÁFICAS (carpeta raíz /assets) — reemplazan bloques de texto por imágenes.
+# Si una imagen no existe o Telegram rechaza el envío, el flujo cae al texto original (nada se rompe).
+# ------------------------------------------
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSET_DIRS = [
+    "assets",                                                   # relativo al directorio de ejecución
+    os.path.join(_BASE_DIR, "assets"),                          # junto a este archivo
+    os.path.join(os.path.dirname(_BASE_DIR), "assets"),         # raíz del proyecto (si este archivo está en una subcarpeta)
+]
+
+# clave de tarjeta -> {idioma: nombre de archivo en assets/}
+CARD_IMAGES = {
+    "welcome":       {"es": "bienvenida.jfif",          "en": "welcome.jfif"},
+    "settings":      {"es": "centrodecomando.jfif",     "en": "commandcenter.jfif"},
+    "info_how":      {"es": "informacion.jfif",         "en": "information.jfif"},
+    "info_groups":   {"es": "gruposyperimetro.jfif",    "en": "groupsandperimeter.jfif"},
+    "info_channels": {"es": "canales_lives.jfif",       "en": "channels_lives.jfif"},
+    "pay_pro":       {"es": "pro_es.jfif",              "en": "pro_en.jfif"},
+    # ⚠️ Nombres de ultra_pro_* asignados según el CONTENIDO de cada imagen (subscrib = ES, subscrip = EN).
+    "pay_ultra":     {"es": "ultra_pro_subscrib.jfif",  "en": "ultra_pro_subscrip.jfif"},
+    "sentinel":      {"es": "config_centinela.jfif",    "en": "setting_centinel.jfif"},
+}
+
+# file_id de Telegram por bot (los clones tienen otro bot.id => otra caché): evita re-subir 2 MB por cada clic.
+_CARD_FILE_IDS: dict = {}
+
+
+def _find_asset(filename: str):
+    for d in ASSET_DIRS:
+        path = os.path.join(d, filename)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _card_media(bot: Bot, filename: str, path: str):
+    cached = _CARD_FILE_IDS.get((bot.id, filename))
+    # Se renombra a .jpg al subir: Telegram identifica por contenido, pero así evitamos rechazos por la extensión .jfif
+    return cached or FSInputFile(path, filename=os.path.splitext(filename)[0] + ".jpg")
+
+
+def _remember_card(bot: Bot, filename: str, msg) -> None:
+    try:
+        if msg is not None and getattr(msg, "photo", None):
+            _CARD_FILE_IDS[(bot.id, filename)] = msg.photo[-1].file_id
+    except Exception:
+        pass
+
+
+async def render_card(bot: Bot, chat_id: int, card_key: str, lang: str, keyboard=None,
+                      caption: str = None, old_message=None) -> bool:
+    """
+    Muestra la tarjeta gráfica `card_key` en el idioma `lang` con su teclado.
+    - Si el mensaje anterior ya es una foto -> lo edita en sitio (sin parpadeo).
+    - Si era texto -> envía la foto y luego borra el mensaje anterior.
+    Devuelve False si no fue posible (el llamador debe usar su texto de siempre).
+    `caption` es opcional: úsalo solo para datos dinámicos (máx. 1024 caracteres).
+    """
+    names = CARD_IMAGES.get(card_key) or {}
+    filename = names.get(lang) or names.get("es")
+    path = _find_asset(filename) if filename else None
+    if not path:
+        logging.warning(f"⚠️ [Card] Imagen '{filename}' no encontrada en {ASSET_DIRS}; se usa texto.")
+        return False
+    if caption and len(caption) > 1024:
+        logging.warning(f"⚠️ [Card] Caption de '{card_key}' supera 1024 caracteres; se usa texto.")
+        return False
+
+    for _attempt in range(2):  # 2do intento: si el file_id en caché falló, se re-sube desde disco
+        media = _card_media(bot, filename, path)
+        try:
+            if old_message is not None and getattr(old_message, "photo", None):
+                try:
+                    res = await old_message.edit_media(
+                        InputMediaPhoto(media=media, caption=caption, parse_mode="HTML"),
+                        reply_markup=keyboard,
+                    )
+                    _remember_card(bot, filename, res if not isinstance(res, bool) else None)
+                    return True
+                except TelegramBadRequest as e:
+                    if "message is not modified" in str(e).lower():
+                        return True
+                    raise
+            sent = await bot.send_photo(
+                chat_id=chat_id, photo=media, caption=caption,
+                reply_markup=keyboard, parse_mode="HTML",
+            )
+            _remember_card(bot, filename, sent)
+            if old_message is not None and hasattr(old_message, "delete"):
+                try:
+                    await old_message.delete()
+                except Exception:
+                    pass
+            return True
+        except Exception as ex:
+            _CARD_FILE_IDS.pop((bot.id, filename), None)
+            logging.warning(f"⚠️ [Card] Falló el envío de '{filename}' (intento {_attempt + 1}): {ex}")
+    return False
+
 
 # 🎬 Video de bienvenida (/start). Ruta relativa a la raíz del proyecto; sobreescribible por entorno.
 WELCOME_VIDEO_PATH = os.getenv("WELCOME_VIDEO_PATH", "assets/bunker_intro.gif")
@@ -2169,6 +2270,9 @@ async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str 
     name = html.escape(user.full_name) if user else "Comandante"
     text = t["welcome"].format(name=name)
     keyboard = get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot))
+    # 🖼️ Prioridad: tarjeta gráfica (assets) -> video de bienvenida -> texto
+    if await render_card(bot, chat_id, "welcome", lang, keyboard):
+        return
     if await _send_welcome_video(bot, chat_id, text, keyboard):
         return
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode="HTML")
@@ -4301,11 +4405,14 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
     text = ""
     keyboard = None
+    card_key = None      # 🖼️ clave de CARD_IMAGES: si existe la imagen, reemplaza al texto
+    card_caption = None  # caption opcional (solo para datos dinámicos)
 
     if action == "lang":
         lang = data[1]
         text = TEXTS.get(lang, TEXTS["es"])["welcome"].format(name=callback.from_user.full_name)
         keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
+        card_key = "welcome"
 
     elif action == "langpanel":
         group_id = int(data[1])
@@ -4364,6 +4471,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         if target == "main":
             text = t["welcome"].format(name=callback.from_user.full_name)
             keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
+            card_key = "welcome"
         elif target == "settings":
             active_groups = await get_active_user_groups(bot, callback.from_user.id)
             keyboard = get_groups_keyboard(active_groups, lang)
@@ -4411,7 +4519,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             active_channels = await get_active_user_channels(bot, callback.from_user.id)
             keyboard = get_channels_keyboard(active_channels, lang)
             
-            # 🖼️ Detección tolerante de la imagen (soporta con punto o con guion bajo)
+            # 🖼 Detección tolerante de la imagen (soporta con punto o con guion bajo)
             img_candidates = [
                 os.path.join("assets", "setting.channels.jfif"),
                 os.path.join("assets", "setting_channels.jfif"),
@@ -4457,12 +4565,6 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             except Exception as ex:
                 logging.error(f"❌ [Sync Canales] No se pudo abrir el selector de canales: {ex}")
             return
-            # Selector nativo de Telegram: el usuario elige su canal y se registra en el acto (sin re-agregar el bot).
-            try:
-                await callback.message.answer(t["chsync_prompt"], reply_markup=build_channel_request_keyboard(lang), parse_mode="HTML")
-            except Exception as ex:
-                logging.error(f"❌ [Sync Canales] No se pudo abrir el selector de canales: {ex}")
-            return
         elif target == "support":
             text, keyboard = t["support_main"], get_support_keyboard(lang)
         elif target == "info":
@@ -4474,6 +4576,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text="💰 " + ("Monetización Stars" if lang == "es" else "Stars Monetization"), callback_data=f"menu_infomod_monetization_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
+            card_key = "info_how"
         elif target == "infomod":
             mod_name = data[2] if len(data) > 2 else "groups"
             mod_text_key = f"info_mod_{mod_name}"
@@ -4483,6 +4586,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text="🔙 Volver a Guías" if lang == "es" else "🔙 Back to Guides", callback_data=f"menu_infohow_{lang}")],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
+            card_key = {"groups": "info_groups", "channels": "info_channels"}.get(mod_name)
         elif target == "id":
             user, tier_db = callback.from_user, await get_user_global_tier(callback.from_user.id)
             if is_super_admin(user.id):
@@ -4731,6 +4835,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         chat_kind = await resolve_chat_kind(bot, group_id)
         text = t[f"pay_{tier_level}_title"].format(group_name=g_name)
         keyboard = get_payment_keyboard(group_id, lang, tier_level=tier_level, chat_type=chat_kind)
+        card_key = f"pay_{tier_level}"
     elif action == "vcsched":
         sub = data[1]
         group_id = int(data[2])
@@ -4826,6 +4931,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             sentinel_status = tr(lang, "Conectado 🟢", "Connected 🟢") if session_info else tr(lang, "No Configurado 🔴", "Not Configured 🔴")
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
+            card_key, card_caption = "sentinel", text
         elif sub == "discbot":
             clone_info = await get_bot_clone(callback.from_user.id, group_id)
             if clone_info and clone_info[0]:
@@ -4844,6 +4950,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             sentinel_status = tr(lang, "Conectado 🟢", "Connected 🟢") if session_info else tr(lang, "No Configurado 🔴", "Not Configured 🔴")
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=tr(lang, "Desconectado 🔴", "Disconnected 🔴"), sentinel_status=sentinel_status)
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
+            card_key, card_caption = "sentinel", text
         elif sub == "discsentinel":
             await disconnect_sentinel(group_id)
             await revoke_owner_session(callback.from_user.id, group_id)
@@ -4858,6 +4965,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             status = tr(lang, "Operativo 🟢", "Active 🟢") if has_clone else tr(lang, "No Configurado 🔴", "Not Configured 🔴")
             text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=tr(lang, "Desconectado 🔴", "Disconnected 🔴"))
             keyboard = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
+            card_key, card_caption = "sentinel", text
 
     elif action == "cmd":
         sub_cmd = data[1]
@@ -5082,6 +5190,10 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
 
     if text and keyboard:
+        # 🖼️ Si la vista tiene tarjeta gráfica y la imagen está disponible, reemplaza al texto
+        if card_key and await render_card(bot, callback.from_user.id, card_key, lang, keyboard,
+                                          caption=card_caption, old_message=callback.message):
+            return
         try:
             await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
         except TelegramBadRequest:
@@ -5202,11 +5314,11 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             sentinel_status = tr(lang, "Conectado 🟢", "Connected 🟢") if session_info else tr(lang, "No Configurado 🔴", "Not Configured 🔴")
             chat_kind = await resolve_chat_kind(bot, group_id)
 
-            await safe_edit_text(callback,
-                t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status),
-                reply_markup=await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind),
-                parse_mode="HTML"
-            )
+            clone_text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
+            clone_kb = await get_clone_keyboard(group_id, callback.from_user.id, lang, chat_type=chat_kind)
+            if not await render_card(bot, callback.from_user.id, "sentinel", lang, clone_kb,
+                                     caption=clone_text, old_message=callback.message):
+                await safe_edit_text(callback, clone_text, reply_markup=clone_kb, parse_mode="HTML")
 
 
     elif action == "astog":
