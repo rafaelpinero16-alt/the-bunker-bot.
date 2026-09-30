@@ -276,7 +276,7 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
 # ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """Fuerza la recarga del perímetro, sincroniza la comunidad en la base de datos y muestra la tarjeta de acceso."""
+    """Fuerza la recarga del perímetro y deja la tarjeta permanente de administración en el grupo."""
     if message.chat.type == "private": 
         return
     
@@ -295,25 +295,55 @@ async def cmd_reload_group(message: Message, bot: Bot):
     chat_title = message.chat.title or "Comunidad"
     chat_type = message.chat.type
 
-    # Sincronización atómica inmediata en base de datos
+    # 1. Sincronización atómica en base de datos
     await approve_group(chat_id, tier=await get_group_tier(chat_id))
     await register_user_group(user_id, chat_id, chat_title, chat_type=chat_type)
     await set_vc_monitor_status(chat_id, 1)
 
+    # 2. Purgar caché de administradores
+    admin_caches.pop(chat_id, None)
+
+    # 3. Reconexión del Centinela
+    sentinel_status = "Centinela Activo 🟢"
+    try:
+        session_row = await get_session_by_group(chat_id)
+        if session_row:
+            u_id, s_str, a_id, a_hash = session_row[0], session_row[1], session_row[2], session_row[3]
+            connected = await register_or_update_sentinel(u_id, chat_id, s_str, a_id, a_hash)
+            sentinel_status = "Centinela Dedicado Reconectado 💎" if connected else "Error en Sesión Dedicada ⚠️"
+        elif assistant_app and assistant_app.is_connected:
+            sentinel_status = "Centinela Maestro Standby 🤖"
+        else:
+            sentinel_status = "Modo Pasivo (Sin Sesión MTProto)"
+    except Exception as ex:
+        logger.error(f"❌ Error reconectando Centinela en reload ({chat_id}): {ex}")
+        sentinel_status = "Fallo en Reconexión ⚠️"
+
+    current_tier = await get_group_tier(chat_id) or "free"
+    tier_label = current_tier.upper()
+    if tier_label == "PRO":
+        tier_label = "PRO ⭐"
+    elif tier_label in ["ULTRA_PRO", "ULTRAPRO"]:
+        tier_label = "ULTRA PRO 💎"
+    else:
+        tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
+
     bot_info = await bot.get_me()
+    
+    # En grupos usamos url= estándar para evitar el error BUTTON_TYPE_INVALID
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
-        [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+        [InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={chat_id}")]
     ])
 
-    resp = await message.answer(
-        f"🔄 <b>Perímetro Recargado y Sincronizado</b>\n\n"
-        f"• <b>Comunidad:</b> {html.escape(chat_title)}\n"
-        f"• <b>Estado:</b> Conexión activa y reflejada 🟢\n\n"
-        f"🛡️ <i>Cloud Media Management</i>",
-        reply_markup=kb, parse_mode="HTML"
+    report_text = t["reload_success"].format(
+        title=chat_title,
+        chat_id=chat_id,
+        tier=tier_label,
+        sentinel_status=sentinel_status
     )
     
+    await message.reply(report_text, reply_markup=kb, parse_mode="HTML")
     try:
         await message.delete()
     except Exception:

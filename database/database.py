@@ -190,7 +190,7 @@ def init_db():
             try:
                 cursor.execute(f"ALTER TABLE group_settings ADD COLUMN {col_name} {col_def}")
             except sqlite3.OperationalError:
-                pass 
+                pass
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS command_usage (
@@ -225,14 +225,13 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER,
                 target_value TEXT,
+                is_active INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(group_id, target_value)
             )
         """)
-
-
         try:
-            cursor.execute("ALTER TABLE user_groups ADD COLUMN chat_type TEXT DEFAULT 'supergroup'")
+            cursor.execute("ALTER TABLE group_tip_targets ADD COLUMN is_active INTEGER DEFAULT 1")
         except sqlite3.OperationalError:
             pass
 
@@ -2813,7 +2812,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "add_group_tip_target",
     "toggle_group_tip_target",
     "delete_group_tip_target",
-    "delete_group_tip_target",
+    "add_to_whitelist",
     "tips_enabled", "INTEGER DEFAULT 0",
     "tips_amount", "INTEGER DEFAULT 10",
     "tips_target_channel", "TEXT",
