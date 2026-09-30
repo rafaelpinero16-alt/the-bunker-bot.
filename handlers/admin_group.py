@@ -1,3 +1,7 @@
+"""
+admin_group.py — Gestor de comandos y administración de grupos en The Bunker OS (Aiogram 3.x)
+Cloud Media Management © 2026
+"""
 import os
 import inspect
 import asyncio
@@ -99,16 +103,13 @@ async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 12):
         pass
 
 
-_spawn = asyncio.create_task
-
-
 # ==========================================================
 # 🌐 DICCIONARIO BILINGÜE (MENSAJES DE SERVICIO Y ALERTAS)
 # ==========================================================
 TEXTS = {
     "en": {
         "owner_only": "⛔ <b>Access Denied:</b> This protocol is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>The Bunker Ecosystem Synchronized</b>\n\n"
             "• <b>Community:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
@@ -137,7 +138,7 @@ TEXTS = {
         "status_active": "🟢 ACTIVE (Mics dialed down to 2% for unverified users)",
         "status_inactive": "🔴 DEACTIVATED (Open Mics at 100%)",
         "podcast_panel": (
-            "🎙️ <b>Radar Console: Podcast Mode (Ducking)</b>\n\n"
+            "🎙️️ <b>Radar Console: Podcast Mode (Ducking)</b>\n\n"
             "• <b>Active State:</b> {status}\n\n"
             "Select an action to change dynamic audio ducking:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -276,7 +277,7 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
 # ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """Fuerza la recarga del perímetro y deja la tarjeta permanente de administración en el grupo."""
+    """Fuerza la recarga del perímetro y deja la tarjeta permanente de administración en el grupo (estilo GroupHelp)."""
     if message.chat.type == "private": 
         return
     
@@ -295,61 +296,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
     chat_title = message.chat.title or "Comunidad"
     chat_type = message.chat.type
 
-    # 1. Sincronización atómica en base de datos
-    await approve_group(chat_id, tier=await get_group_tier(chat_id))
-    await register_user_group(user_id, chat_id, chat_title, chat_type=chat_type)
-    await set_vc_monitor_status(chat_id, 1)
-
-    # 2. Purgar caché de administradores
-    admin_caches.pop(chat_id, None)
-
-    # 3. Reconexión del Centinela
-    sentinel_status = "Centinela Activo 🟢"
-    try:
-        session_row = await get_session_by_group(chat_id)
-        if session_row:
-            u_id, s_str, a_id, a_hash = session_row[0], session_row[1], session_row[2], session_row[3]
-            connected = await register_or_update_sentinel(u_id, chat_id, s_str, a_id, a_hash)
-            sentinel_status = "Centinela Dedicado Reconectado 💎" if connected else "Error en Sesión Dedicada ⚠️"
-        elif assistant_app and assistant_app.is_connected:
-            sentinel_status = "Centinela Maestro Standby 🤖"
-        else:
-            sentinel_status = "Modo Pasivo (Sin Sesión MTProto)"
-    except Exception as ex:
-        logger.error(f"❌ Error reconectando Centinela en reload ({chat_id}): {ex}")
-        sentinel_status = "Fallo en Reconexión ⚠️"
-
-    current_tier = await get_group_tier(chat_id) or "free"
-    tier_label = current_tier.upper()
-    if tier_label == "PRO":
-        tier_label = "PRO ⭐"
-    elif tier_label in ["ULTRA_PRO", "ULTRAPRO"]:
-        tier_label = "ULTRA PRO 💎"
-    else:
-        tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
-
-    bot_info = await bot.get_me()
-    
-    # En grupos usamos url= estándar para evitar el error BUTTON_TYPE_INVALID
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
-        [InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={chat_id}")]
-    ])
-
-    report_text = t["reload_success"].format(
-        title=chat_title,
-        chat_id=chat_id,
-        tier=tier_label,
-        sentinel_status=sentinel_status
-    )
-    
-    await message.reply(report_text, reply_markup=kb, parse_mode="HTML")
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-    # 1. Registrar entorno en el padrón del creador
+    # 1. Registrar entorno en el padrón del creador / usuario admin
     await register_user_group(
         user_id=user_id, 
         group_id=chat_id, 
@@ -369,7 +316,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
     admin_caches.pop(chat_id, None)
 
     # 5. Reconexión en caliente del Centinela MTProto
-    sentinel_status = "Centinela Activo 🟢"
+    sentinel_status = "Centinela Activo 🟢" if lang == "es" else "Active Sentinel 🟢"
     try:
         session_row = await get_session_by_group(chat_id)
         if session_row:
@@ -412,19 +359,29 @@ async def cmd_reload_group(message: Message, bot: Bot):
     else:
         tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
 
+    bot_info = await bot.get_me()
+    
+    # Teclado inline seguro para grupos (usando URL estándar para evitar BUTTON_TYPE_INVALID)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_open_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+        [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
+        [InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={chat_id}")]
     ])
 
     report_text = t["reload_success"].format(
-        title=chat_title,
+        title=html.escape(chat_title),
         chat_id=chat_id,
         tier=tier_label,
         sentinel_status=sentinel_status
-    ) + "\n\n🛡️ <i>Cloud Media Management</i>"
+    )
     
-    msg = await message.reply(report_text, reply_markup=kb, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    # Envío seguro mediante message.answer (evita 'message to be replied not found' al borrar el comando)
+    await message.answer(report_text, reply_markup=kb, parse_mode="HTML")
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
 # ==========================================================
 # ⚙️ COMANDO DE ENLACE A CONFIGURACIÓN Y MATRIX (/settings, /matrix)
 # ==========================================================
@@ -456,7 +413,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{message.chat.id}")]
     ])
     
-    msg = await message.answer(t["settings_title"].format(title=message.chat.title), reply_markup=kb, parse_mode="HTML")
+    msg = await message.answer(t["settings_title"].format(title=html.escape(message.chat.title or "Comunidad")), reply_markup=kb, parse_mode="HTML")
     asyncio.create_task(auto_delete_pair(message, msg, 15))
 
 
