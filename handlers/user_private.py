@@ -4366,18 +4366,41 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
         elif target == "settings":
             active_groups = await get_active_user_groups(bot, callback.from_user.id)
-            text, keyboard = t["settings_main"], get_groups_keyboard(active_groups, lang)
+            keyboard = get_groups_keyboard(active_groups, lang)
+            
+            # Selecciona la imagen según el idioma (Español o Inglés)
+            image_path = "assets/centrodecomando.jfif" if lang == "es" else "assets/commandcenter.jfif"
+            
+            try:
+                await callback.message.delete()
+            except Exception:
+                pass
+                
+            await bot.send_photo(
+                chat_id=callback.from_user.id,
+                photo=FSInputFile(image_path),
+                reply_markup=keyboard
+            )
+            return
+
         elif target == "chsettings":
             # 🔄 Sincronización Activa: verifica permisos en vivo y lista los canales de inmediato (aun tras un reinicio).
             active_channels = await get_active_user_channels(bot, callback.from_user.id)
-            text = t["chsettings_main"] if active_channels else t["chsettings_main_empty"]
             keyboard = get_channels_keyboard(active_channels, lang)
-        elif target == "chsync":
-            # Selector nativo de Telegram: el usuario elige su canal y se registra en el acto (sin re-agregar el bot).
+            
+            # Imagen de estudio de canales
+            image_path = "assets/setting_channels.jfif"
+            
             try:
-                await callback.message.answer(t["chsync_prompt"], reply_markup=build_channel_request_keyboard(lang), parse_mode="HTML")
-            except Exception as ex:
-                logging.error(f"❌ [Sync Canales] No se pudo abrir el selector de canales: {ex}")
+                await callback.message.delete()
+            except Exception:
+                pass
+                
+            await bot.send_photo(
+                chat_id=callback.from_user.id,
+                photo=FSInputFile(image_path),
+                reply_markup=keyboard
+            )
             return
         elif target == "support":
             text, keyboard = t["support_main"], get_support_keyboard(lang)
