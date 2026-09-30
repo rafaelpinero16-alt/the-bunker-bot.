@@ -94,7 +94,7 @@ ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
 
 # 🎬 Video de bienvenida (/start). Ruta relativa a la raíz del proyecto; sobreescribible por entorno.
-WELCOME_VIDEO_PATH = os.getenv("WELCOME_VIDEO_PATH", "assets/bunker_intro.mp4")
+WELCOME_VIDEO_PATH = os.getenv("WELCOME_VIDEO_PATH", "assets/bunker_intro.gif")
 
 # file_id de Telegram por bot: tras el primer envío se almacena en caché.
 _WELCOME_VIDEO_FILE_IDS: dict = {}
