@@ -88,7 +88,7 @@ DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
 DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
 if not DEFAULT_API_ID or not DEFAULT_API_HASH:
-    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
+    logger.warning("⚠️️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -153,7 +153,6 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
 
 
 def _get_group_now(tz_name: str = None) -> datetime:
-    """Devuelve la fecha/hora actual calibrada con la zona horaria del bot o comunidad."""
     tz_str = tz_name or os.getenv("BOT_TIMEZONE", "America/Bogota")
     try:
         from zoneinfo import ZoneInfo
@@ -163,7 +162,6 @@ def _get_group_now(tz_name: str = None) -> datetime:
 
 
 def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
-    """Evalúa si una hora HH:MM se encuentra dentro de un intervalo (soporta cambio de medianoche)."""
     if start_hm <= end_hm:
         return start_hm <= current_hm < end_hm
     else:
@@ -172,10 +170,6 @@ def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
 
 def _extract_urls_to_markup(text: str, custom_btn_text: str = None, 
                             custom_btn_url: str = None) -> tuple[str, InlineKeyboardMarkup | None]:
-    """
-    Higieniza el texto eliminando enlaces en texto plano y generando una
-    botonera inline interactiva limpia para el payload de la comunidad.
-    """
     buttons = []
     
     if custom_btn_url:
@@ -260,7 +254,7 @@ VC_START_TEXTS = {
     "en": (
         "THE VOICE CHAT FOR ⚜️🔐The Búnker Chat🔐⚜️ HAS STARTED! EVERYONE IS WELCOME TO JOIN 🔥🐽💨🚀\n\n"
         "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
-        "⚜️ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
+        "⚜️️ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
         "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     )
@@ -294,7 +288,7 @@ VC_SCHED_MESSAGES = {
     "start": (
         "📡 <b>Apertura Programada — The Bunker</b>\n\n"
         "El videochat de la comunidad ha sido abierto automáticamente según el cronograma ULTRA PRO.\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
+        "🛡️️ <i>Cloud Media Management</i>"
     ),
     "end": (
         "📡 <b>Cierre Programado — The Bunker</b>\n\n"
@@ -305,7 +299,6 @@ VC_SCHED_MESSAGES = {
 
 
 def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50) -> InlineKeyboardMarkup:
-    """Construye la botonera bilingüe interactiva con precio dinámico en Stars y deep-link nativo."""
     btn1_text = f"🎙️ MICVIP - {price} STARS ⭐"
     btn2_text = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
     btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
@@ -344,10 +337,11 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Fase 3 y 4: Publica el aviso de atenuación al 2% auto-eliminando el aviso anterior."""
+    """Fase 3 y 4: Publica el aviso de atenuación al 2% auto-eliminando de inmediato el aviso anterior."""
     if not _global_bot:
         return
     try:
+        # Borra el aviso anterior de inmediato para evitar carga visual en el chat
         last_id = _last_vc_notice.get(chat_id)
         if last_id:
             try:
@@ -384,7 +378,6 @@ async def _is_night_active(chat_id: int) -> tuple[bool, str]:
 async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
                                   media_type: str = None, auto_delete_after: int = None,
                                   reply_markup: InlineKeyboardMarkup = None):
-    """Despachador multimedia enriquecido con soporte de botonera inline e higienización de enlaces."""
     if not _global_bot:
         return None
 
@@ -465,11 +458,7 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     return sent
 
 
-# ==========================================
-# 💀 MOTOR TÁCTICO: GHOST PURGE RESILIENTE
-# ==========================================
 async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
-    """Escanea en tiempo real la comunidad y purga cuentas eliminadas/fantasma."""
     sentinel_data = active_sentinels.get(chat_id)
     client: Client = sentinel_data["client"] if sentinel_data else assistant_app
 
@@ -535,9 +524,6 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
     return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}
 
 
-# ==========================================
-# 📱 FLUJO DE AUTENTICACIÓN POR TELÉFONO / SESIÓN
-# ==========================================
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
     await cancel_phone_auth(user_id)
     clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
@@ -1069,7 +1055,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
 
 async def vc_scheduler_loop():
-    """Bucle autónomo de supervisión de horarios de videochats con evaluación por ventana."""
     logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
     while True:
         try:
@@ -1369,7 +1354,7 @@ async def pending_auth_cleanup_loop():
 async def init_assistant_master():
     global _default_my_id
     if assistant_app is None:
-        logger.warning("⚠️ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
+        logger.warning("⚠️️ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
     else:
         try:
             if not assistant_app.is_connected:
@@ -1384,7 +1369,7 @@ async def init_assistant_master():
             if "AUTH_KEY_DUPLICATED" in err_msg or "406" in err_msg:
                 logger.warning("⚠️ [MASTER_SESSION Clave Duplicada] Telegram detectó uso simultáneo. El maestro continuará en reposo sin afectar a los centinelas dedicados.")
             else:
-                logger.warning(f"⚠️ [Aviso Centinela Maestro]: {e}")
+                logger.warning(f"⚠️️ [Aviso Centinela Maestro]: {e}")
 
     await load_all_sentinels()
     asyncio.create_task(radar_master_loop())
@@ -1409,9 +1394,6 @@ async def close_all_sentinels():
             pass
 
 
-# ==========================================================
-# 🎛️ CONTROLADORES DE LLAMADA EXPORTADOS PARA HANDLERS
-# ==========================================================
 async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: int = 10000) -> bool:
     sentinel_data = active_sentinels.get(chat_id)
     client = sentinel_data["client"] if sentinel_data else assistant_app
@@ -1442,25 +1424,21 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
 
 
 async def engage_screen_shield(group_id: int):
-    """Activa el Escudo Antinota y persiste el estado en la base de datos."""
     await set_screen_shield_status(group_id, 1)
     logger.info(f"🎥 [Escudo Antinota] Activado y persistido para el grupo {group_id}")
 
 
 async def disengage_screen_shield(group_id: int):
-    """Desactiva el Escudo Antinota y persiste el estado en la base de datos."""
     await set_screen_shield_status(group_id, 0)
     logger.info(f"🎥 [Escudo Antinota] Desactivado y persistido para el grupo {group_id}")
 
 
 async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
-    """Activa el Modo Podcast y fija el nivel de atenuación en la base de datos."""
     await set_podcast_mode(group_id, 1)
     await set_podcast_duck_volume(group_id, duck_level * 100)
     logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
 
 
 async def disengage_podcast_ducking(group_id: int):
-    """Desactiva el Modo Podcast y persiste el cambio en la base de datos."""
     await set_podcast_mode(group_id, 0)
     logger.info(f"🎙️ [Modo Podcast] Ducking desactivado y persistido en el grupo {group_id}")
