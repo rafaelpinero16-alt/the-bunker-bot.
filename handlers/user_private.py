@@ -2874,28 +2874,39 @@ def build_tips_publication(tier: str, cfg: dict, lang: str):
     return text, media_id, media_type
 
 
-async def _tips_send_one(bot: Bot, chat, text: str, media_id, media_type) -> None:
+async def _tips_send_one(bot: Bot, chat, text: str, media_id, media_type, reply_markup=None) -> None:
     """Envía una publicación; si la multimedia falla (p. ej. file_id de otro bot), degrada a solo texto."""
     sender = _TIPS_MEDIA_SENDERS.get(media_type)
     if media_id and sender:
         method, arg = sender
         try:
-            await getattr(bot, method)(chat_id=chat, caption=text, parse_mode="HTML", **{arg: media_id})
+            await getattr(bot, method)(chat_id=chat, caption=text, reply_markup=reply_markup, parse_mode="HTML", **{arg: media_id})
             return
         except TelegramBadRequest as ex:
             logging.warning(f"⚠️ [Tips Broadcast] Multimedia rechazada en {chat}, se envía solo texto: {ex}")
-    await bot.send_message(chat_id=chat, text=text, parse_mode="HTML")
+    await bot.send_message(chat_id=chat, text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
-async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, active_targets: list):
-    """Despacha la publicación a los canales activos. Devuelve (enviados:int, fallidos:list[str])."""
+async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, active_targets: list, group_id: int = 0):
+    """Despacha la publicación a los canales activos con botón inline de Stars. Devuelve (enviados:int, fallidos:list[str])."""
     text, media_id, media_type = build_tips_publication(tier, cfg, lang)
+    
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username or "BunkerBot"
+    
+    # 🌟 Construcción del botón inline interactivo para enviar la propina con Stars
+    tip_btn_label = tr(lang, "⭐ Enviar Propina en Stars", "⭐ Send Stars Tip")
+    tip_url = f"https://t.me/{bot_username}?start=tip_{group_id}" if group_id else f"https://t.me/{bot_username}?start=true"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=tip_btn_label, url=tip_url)]
+    ])
+
     sent, failed = 0, []
     for value in active_targets:
         chat = int(value) if _TIPS_NUMERIC_ID_RE.match(value) else "@" + value.lstrip("@")
         for attempt in (1, 2):
             try:
-                await _tips_send_one(bot, chat, text, media_id, media_type)
+                await _tips_send_one(bot, chat, text, media_id, media_type, reply_markup=keyboard)
                 sent += 1
                 break
             except TelegramRetryAfter as ex:
@@ -2909,7 +2920,6 @@ async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, act
                 break
         await asyncio.sleep(0.05)
     return sent, failed
-
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
@@ -4809,7 +4819,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             _TIPS_LAST_BROADCAST[group_id] = time.time()
             await callback.answer(tr(lang, "📡 Publicando en los canales activos...", "📡 Broadcasting to active channels..."))
 
-            sent, failed = await dispatch_tips_broadcast(bot, tier, cfg, lang, active_targets)
+            sent, failed = await dispatch_tips_broadcast(bot, tier, cfg, lang, active_targets, group_id=group_id)
             if sent == 0:
                 _TIPS_LAST_BROADCAST.pop(group_id, None)
             report = tr(lang,
