@@ -20,7 +20,7 @@ from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, ChatPermissions,
     ReplyKeyboardMarkup, KeyboardButton, KeyboardButtonRequestChat,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove, FSInputFile
 )
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.filters import Command, CommandStart, CommandObject
@@ -92,6 +92,11 @@ router.callback_query.middleware(CallbackAutoAnswerMiddleware())
 
 ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
+
+# 🎬 Video de bienvenida (/start). Ruta relativa a la raíz del proyecto (igual que DB_PATH); sobreescribible por entorno.
+WELCOME_VIDEO_PATH = os.getenv("WELCOME_VIDEO_PATH", "assets/THE_BUNKER.mp4")
+# file_id de Telegram por bot: tras el primer envío no se vuelve a subir el archivo. Cada token/clon tiene sus propios file_id.
+_WELCOME_VIDEO_FILE_IDS: dict = {}
 TIPS_TEXT_MAX_LEN = 4000
 # Maximum amount accepted for a single tip, matching the six-digit input format.
 TIPS_MAX_AMOUNT = 999999
@@ -2081,18 +2086,45 @@ def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _send_welcome_video(bot: Bot, chat_id: int, caption: str, keyboard) -> bool:
+    """Envía la bienvenida como video + caption + botones. Devuelve False si no fue posible (el llamador usa texto)."""
+    if len(caption) > 1024:  # límite de Telegram para captions
+        logging.warning("⚠️ [Welcome] Caption > 1024 caracteres; se envía la bienvenida solo como texto.")
+        return False
+    cached_id = _WELCOME_VIDEO_FILE_IDS.get(bot.id)
+    if not cached_id and not os.path.isfile(WELCOME_VIDEO_PATH):
+        logging.warning(f"⚠️ [Welcome] Video no encontrado en '{WELCOME_VIDEO_PATH}'; se envía solo texto.")
+        return False
+    try:
+        msg = await bot.send_video(
+            chat_id=chat_id,
+            video=cached_id or FSInputFile(WELCOME_VIDEO_PATH),
+            caption=caption,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            supports_streaming=True,
+            width=1280, height=720, duration=10,
+        )
+        if not cached_id and getattr(msg, "video", None):
+            _WELCOME_VIDEO_FILE_IDS[bot.id] = msg.video.file_id
+        return True
+    except Exception as ex:
+        _WELCOME_VIDEO_FILE_IDS.pop(bot.id, None)  # file_id inválido o fallo de subida: se reintenta desde disco
+        logging.warning(f"⚠️ [Welcome] Falló el envío del video, se usa texto: {ex}")
+        return False
+
+
 async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str = None) -> None:
     if not bot_username:
         bot_username = (await bot.get_me()).username or "BunkerBot"
     lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
     t = TEXTS.get(lang, TEXTS["es"])
-    name = user.full_name if user else "Comandante"
-    await bot.send_message(
-        chat_id=chat_id,
-        text=t["welcome"].format(name=name),
-        reply_markup=get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot)),
-        parse_mode="HTML"
-    )
+    name = html.escape(user.full_name) if user else "Comandante"
+    text = t["welcome"].format(name=name)
+    keyboard = get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot))
+    if await _send_welcome_video(bot, chat_id, text, keyboard):
+        return
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard, parse_mode="HTML")
 
 
 def get_simple_back_keyboard(lang: str, target: str = "main"):
