@@ -2334,8 +2334,8 @@ def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict, chat_type
 # ⭐ MÓDULO DE PROPINAS Y DONACIONES (TELEGRAM STARS) — NÚCLEO
 # ==========================================================================================
 TIPS_TARGET_LIMITS = {"free": 1, "pro": 3, "ultra_pro": 10}   # Canales destino por licencia
-TIPS_MAX_AMOUNT = 10000          # Tope de cordura del monto sugerido (ajustable, no es una regla de Telegram)
-TIPS_TEXT_MAX_LEN = 1000         # Margen bajo el límite de 1024 caracteres de un caption con multimedia
+TIPS_TEXT_MAX_LEN = 4000
+TIPS_MAX_AMOUNT = 999999         # Margen bajo el límite de 1024 caracteres de un caption con multimedia
 TIPS_BROADCAST_COOLDOWN = 30     # Segundos de enfriamiento por grupo (anti doble-clic / anti-flood)
 _TIPS_LAST_BROADCAST: dict = {}
 _TIPS_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
@@ -2424,11 +2424,6 @@ def build_tips_panel_text(lang: str, cfg: dict, tier: str, total_stars: int, tar
 
 
 async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g", viewer_id: int = 0, targets: list = None):
-    """
-    Teclado del módulo de propinas.
-    viewer_id: quien abre el panel (permite que los Arquitectos vean el nivel ULTRA PRO automático).
-    targets: lista ya normalizada (opcional) para evitar una segunda consulta a la BD.
-    """
     t = TEXTS.get(lang, TEXTS["es"])
     tier = _tips_tier(await get_effective_group_tier(group_id, viewer_id))
     limit = _tips_limit(tier)
@@ -2449,7 +2444,7 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
         [InlineKeyboardButton(text=f"📊 {tr(lang, 'Telemetría e Historial', 'Telemetry & History')}", callback_data=f"tips_telemetry_{group_id}_{lang}")],
     ]
 
-    # 4. Texto personalizado (PRO / ULTRA PRO) — Free ve el candado como muro de pago
+    # 4. Texto personalizado (PRO / ULTRA PRO)
     if tier in ("pro", "ultra_pro"):
         rows.append([InlineKeyboardButton(text=f"✍️ {tr(lang, 'Editar Texto Propinas', 'Edit Tip Text')} {'✅' if has_text else '⬜'}", callback_data=f"tips_settext_{group_id}_{lang}")])
     else:
@@ -2461,11 +2456,11 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
     else:
         rows.append([InlineKeyboardButton(text=f"🔒 {tr(lang, 'Multimedia (ULTRA PRO)', 'Media (ULTRA PRO)')}", callback_data=f"tips_setmedia_{group_id}_{lang}")])
 
-    # 8. Motor de difusión (solo si existe al menos un canal vinculado)
+    # 8. Motor de difusión
     if targets:
         rows.append([InlineKeyboardButton(text=f"📢 {tr(lang, 'Enviar Publicación', 'Broadcast Tips')} ({active_n})", callback_data=f"tips_broadcast_{group_id}_{lang}")])
 
-    # 7. Botonera en cascada: una fila por canal → [alias] [🟢/🔴] [🗑️]
+    # 7. Botonera en cascada: [alias] [🟢/🔴] [🗑️]
     for t_id, t_val, t_active in targets:
         rows.append([
             InlineKeyboardButton(text=f"📢 {t_val[:20]}", callback_data="noop"),
@@ -2473,7 +2468,7 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
             InlineKeyboardButton(text="🗑️", callback_data=f"tips_deltarget_{t_id}_{group_id}_{lang}"),
         ])
 
-    # 6. Añadir canal destino (o candado si se alcanzó el límite de la licencia)
+    # 6. Añadir canal destino
     if len(targets) < limit:
         rows.append([InlineKeyboardButton(text=f"➕ {tr(lang, 'Añadir Canal Destino', 'Add Target')} ({len(targets)}/{limit})", callback_data=f"tips_addtarget_{group_id}_{lang}")])
     else:
@@ -2489,7 +2484,6 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
 
 
 async def build_tips_panel(group_id: int, lang: str, chat_kind: str, viewer_id: int):
-    """Compone (texto, teclado) del panel principal leyendo la BD en tiempo real."""
     cfg = await get_tips_config(group_id) or {}
     tier = _tips_tier(await get_effective_group_tier(group_id, viewer_id))
     targets = await _tips_get_targets(group_id)
@@ -3766,7 +3760,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-        # 11. PROPINAS EN STARS (TIPS) — FLUJOS CONVERSACIONALES
+    # 11. PROPINAS EN STARS (TIPS) — FLUJOS CONVERSACIONALES
     tips_key = (bot.id, user_id)
 
     # 11a. MONTO SUGERIDO
