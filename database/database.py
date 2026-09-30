@@ -217,9 +217,15 @@ def init_db():
                 user_id INTEGER, 
                 group_id INTEGER, 
                 group_name TEXT,
+                chat_type TEXT DEFAULT 'supergroup',
                 PRIMARY KEY (user_id, group_id)
             )
         """)
+        try:
+            cursor.execute("ALTER TABLE user_groups ADD COLUMN chat_type TEXT DEFAULT 'supergroup'")
+        except sqlite3.OperationalError:
+            pass
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS group_tip_targets (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2812,13 +2818,6 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "add_group_tip_target",
     "toggle_group_tip_target",
     "delete_group_tip_target",
-    "add_to_whitelist",
-    "tips_enabled", "INTEGER DEFAULT 0",
-    "tips_amount", "INTEGER DEFAULT 10",
-    "tips_target_channel", "TEXT",
-    "tips_custom_text", "TEXT",
-    "tips_media_id", "TEXT",
-    "tips_media_type", "TEXT",
     "add_to_whitelist",
     "remove_from_whitelist",
     "is_whitelisted",
