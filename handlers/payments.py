@@ -8,6 +8,7 @@ The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
 import asyncio
+import html
 import logging
 import time
 from aiogram import Router, F, Bot
@@ -929,6 +930,19 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             await record_group_tip(chat_id, user_id, stars_paid)
 
+            # 💖 Despacho del mensaje de gratitud oficial del Búnker
+            try:
+                from .user_private import send_tip_thanks
+                await send_tip_thanks(
+                    bot=bot,
+                    user_id=user_id,
+                    stars=stars_paid,
+                    group_id=chat_id,
+                    lang=lang
+                )
+            except Exception as thanks_err:
+                logger.warning(f"⚠️️ [Tips Thanks] Error enviando mensaje de agradecimiento a {user_id}: {thanks_err}")
+
             kb_rows = []
             try:
                 chat_info = await bot.get_chat(chat_id)
@@ -942,6 +956,21 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             confirm_text = t["pmt_tip_ok"].format(stars=stars_paid)
             await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
+            
+            # Anuncio opcional en la comunidad
+            if chat_id:
+                try:
+                    buyer_name = html.escape(message.from_user.full_name)
+                    public_notice = (
+                        f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> acaba de enviar una propina "
+                        f"de <b>{stars_paid} Stars (XTR)</b>. ¡Gracias por respaldar el proyecto!\n\n"
+                        f"🛡️ <i>Cloud Media Management</i>"
+                    )
+                    pub_msg = await bot.send_message(chat_id=chat_id, text=public_notice, parse_mode="HTML")
+                    asyncio.create_task(auto_delete_pair(pub_msg, pub_msg, delay=45))
+                except Exception:
+                    pass
+
             logger.info(f"🌟 [Propina Procesada]: Usuario {user_id} donó {stars_paid} Stars a la comunidad {chat_id}.")
         except Exception as e:
             logger.error(f"Error procesando propina (Iniciando reembolso automático): {e}")
