@@ -1112,30 +1112,35 @@ def set_radar_config(group_id: int, field: str, value):
 
 @db_async
 def get_sentinel_service_messages_config(group_id: int) -> dict:
-    """Lee la configuración de mensajes de servicio personalizados del Centinela."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
                 SELECT vc_join_custom_text, vc_join_custom_media_id, vc_join_custom_media_type,
-                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type
+                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type,
+                       mic_vip_custom_text, mic_vip_custom_media_id, mic_vip_custom_media_type
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
                     "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2],
-                    "reset_text": row[3], "reset_media_id": row[4], "reset_media_type": row[5]
+                    "reset_text": row[3], "reset_media_id": row[4], "reset_media_type": row[5],
+                    "micvip_text": row[6], "micvip_media_id": row[7], "micvip_media_type": row[8]
                 }
         except sqlite3.OperationalError:
             pass
-        return {"vc_text": None, "vc_media_id": None, "vc_media_type": None, "reset_text": None, "reset_media_id": None, "reset_media_type": None}
+        return {
+            "vc_text": None, "vc_media_id": None, "vc_media_type": None,
+            "reset_text": None, "reset_media_id": None, "reset_media_type": None,
+            "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None
+        }
 
-@db_async
 def set_sentinel_service_message(group_id: int, field: str, value):
     valid = [
         "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
-        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"
+        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type",
+        "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type"
     ]
     if field not in valid:
         return

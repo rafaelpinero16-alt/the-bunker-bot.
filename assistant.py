@@ -316,8 +316,8 @@ VC_SCHED_MESSAGES = {
 }
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50) -> InlineKeyboardMarkup:
-    btn1_text = f"🎙️ MICVIP - {price} STARS ⭐"
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_micvip_btn: str = None) -> InlineKeyboardMarkup:
+    btn1_text = custom_micvip_btn if custom_micvip_btn else f"🎙️ MICVIP - {price} STARS ⭐"
     btn2_text = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
     btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
     next_lang = "en" if lang == "es" else "es"
