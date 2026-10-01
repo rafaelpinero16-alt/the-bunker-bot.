@@ -1095,6 +1095,7 @@ def set_radar_config(group_id: int, field: str, value):
 
 
 def get_sentinel_service_messages_config(group_id: int) -> dict:
+    """Lee la configuración de mensajes de servicio personalizados del Centinela (VC y Optimización)."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -1113,6 +1114,7 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
             pass
         return {"vc_text": None, "vc_media_id": None, "vc_media_type": None, "reset_text": None, "reset_media_id": None, "reset_media_type": None}
 
+
 def set_sentinel_service_message(group_id: int, field: str, value):
     valid = ["vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
              "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"]
@@ -1126,76 +1128,66 @@ def set_sentinel_service_message(group_id: int, field: str, value):
         """, (group_id, value))
         conn.commit()
 
-def set_sentinel_payload_config(group_id: int, field: str, value):
-    valid_fields = [
-        "sentinel_payload_enabled", "sentinel_payload_text", 
-        "sentinel_payload_media_id", "sentinel_payload_media_type", 
-        "sentinel_payload_auto_delete"
-    ]
-    if field not in valid_fields:
-        return
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
-        """, (group_id, value))
-        conn.commit()
 
-
-def get_ai_sentinel_config(group_id: int) -> dict:
+def get_sentinel_payload_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT ai_guardian_status, ai_copilot_status, ai_custom_prompt
+                SELECT sentinel_payload_enabled, sentinel_payload_text, sentinel_payload_media_id,
+                       sentinel_payload_media_type, sentinel_payload_auto_delete
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
-                    "guardian_status": row[0] if row[0] is not None else 0,
-                    "copilot_status": row[1] if row[1] is not None else 0,
-                    "custom_prompt": row[2] if row[2] is not None else ""
+                    "enabled": row[0] if row[0] is not None else 0,
+                    "text": row[1] if row[1] is not None else None,
+                    "media_id": row[2] if row[2] is not None else None,
+                    "media_type": row[3] if row[3] is not None else None,
+                    "auto_delete_after": row[4] if row[4] is not None else None
                 }
         except sqlite3.OperationalError:
             pass
-        return {"guardian_status": 0, "copilot_status": 0, "custom_prompt": ""}
-
-
-def set_ai_sentinel_config(group_id: int, field: str, value):
-    valid_fields = ["ai_guardian_status", "ai_copilot_status", "ai_custom_prompt"]
-    if field not in valid_fields:
-        return
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
-        """, (group_id, value))
-        conn.commit()
-
+        return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
 
 def get_ghost_purge_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT purge_action, purge_last_free_scan, purge_schedule_status, purge_schedule_time, purge_schedule_days
+                SELECT purge_action, purge_last_free_scan, purge_schedule_status,
+                       purge_schedule_time, purge_schedule_days
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
-                    "action": row[0] if row[0] else "ban",
-                    "last_free_scan": row[1],
+                    "action": row[0] if row[0] is not None else "delete",
+                    "purge_action": row[0] if row[0] is not None else "delete",
+                    "last_free_scan": row[1] if row[1] is not None else None,
+                    "purge_last_free_scan": row[1] if row[1] is not None else None,
                     "schedule_status": row[2] if row[2] is not None else 0,
-                    "schedule_time": row[3] if row[3] else "03:00",
-                    "schedule_days": row[4] if row[4] else "1,2,3,4,5,6,7"
+                    "purge_schedule_status": row[2] if row[2] is not None else 0,
+                    "schedule_time": row[3] if row[3] is not None else "00:00",
+                    "purge_schedule_time": row[3] if row[3] is not None else "00:00",
+                    "schedule_days": row[4] if row[4] is not None else [],
+                    "purge_schedule_days": row[4] if row[4] is not None else []
                 }
         except sqlite3.OperationalError:
             pass
-        return {"action": "ban", "last_free_scan": None, "schedule_status": 0, "schedule_time": "03:00", "schedule_days": "1,2,3,4,5,6,7"}
+    return {
+        "action": "delete",
+        "purge_action": "delete",
+        "last_free_scan": None,
+        "purge_last_free_scan": None,
+        "schedule_status": 0,
+        "purge_schedule_status": 0,
+        "schedule_time": "00:00",
+        "purge_schedule_time": "00:00",
+        "schedule_days": [],
+        "purge_schedule_days": []
+    }
 
 
 def set_ghost_purge_config(group_id: int, field: str, value):
