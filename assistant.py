@@ -316,8 +316,8 @@ VC_SCHED_MESSAGES = {
 }
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es") -> InlineKeyboardMarkup:
-    """Teclado simplificado: solo incluye el botón de activación VIP y el selector de idioma."""
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_micvip_btn: str = None) -> InlineKeyboardMarkup:
+    """Teclado simplificado para el aviso de VC: botón limpio de activación VIP y selector de idioma."""
     btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
     btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
     next_lang = "en" if lang == "es" else "es"
@@ -339,7 +339,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
         text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang=lang, price=price)
 
         sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
         if sent:
@@ -356,19 +356,19 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 _vc_notice_locks = {}
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con debounce y garantía de visualización."""
+    """Publica el aviso de atenuación al 2% con debounce y garantía de visualización de 30 segundos."""
     if not _global_bot:
         return
 
-    # 1. Debounce por chat: evita que ráfagas de eventos borren el mensaje al instante
+    # 1. Debounce por chat para evitar saturación de eventos
     now = time.time()
     last_time = _vc_notice_locks.get(chat_id, 0)
-    if now - last_time < 5:  # Si ya se envió un aviso hace menos de 5s, no saturar
+    if now - last_time < 3:
         return
     _vc_notice_locks[chat_id] = now
 
     try:
-        # Borra el aviso anterior SOLO si ya transcurrieron al menos 10 segundos
+        # Borra el aviso anterior si aún existe para no duplicar en el chat
         last_id = _last_vc_notice.get(chat_id)
         if last_id:
             try:
@@ -380,12 +380,10 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
 
-        # 2. Inmunidad de Arquitecto / Plan efectivo garantizado
-        tier = (await get_group_tier(chat_id) or "free").lower()
+        # 2. Carga de configuración del Centinela
         svc_cfg = await get_sentinel_service_messages_config(chat_id)
         custom_text = svc_cfg.get("vc_text")
         
-        # Permitir custom_text si existe configuración guardada (sin bloquear por free si eres admin)
         if custom_text:
             text = custom_text.replace("{user_name}", user_name).replace("{name}", user_name)
         else:
@@ -393,16 +391,17 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
                 f"⚜️ <b>The Bunker O.S.</b>\n\n"
                 f"🔇 <i>{user_name}, el búnker ha establecido por defecto el volumen al 2%.</i>\n\n"
                 f"¿Quieres desbloquear el 100% de tu micrófono? Presiona el botón inferior para activar tu pase VIP.\n\n"
-                f"🛡️️ <i>Cloud Media Management</i>"
+                f"🛡️ <i>Cloud Media Management</i>"
             )
 
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang=lang, price=price)
         media_id = svc_cfg.get("vc_media_id")
         media_type = svc_cfg.get("vc_media_type")
 
         cleaned_text, extracted_markup = _extract_urls_to_markup(text)
         final_markup = markup if markup else extracted_markup
 
+        sent = None
         if media_id and media_type == "photo":
             sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         elif media_id and media_type == "video":
@@ -415,7 +414,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
             
-            # Auto-destrucción controlada: permanece visible exactamente 30 segundos
+            # Auto-destrucción: permanece visible en el chat exactamente 30 segundos
             async def _auto_del_notice(target_msg):
                 await asyncio.sleep(30)
                 try:
@@ -428,7 +427,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
             
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-
 async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
     tier = (await get_group_tier(chat_id) or "free").lower()
     svc_cfg = await get_sentinel_service_messages_config(chat_id)
