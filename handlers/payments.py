@@ -602,8 +602,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
 
-            tips_cfg = await get_tips_config(chat_id)
-            final_tip = tip_amount if tip_amount > 0 else (tips_cfg.get("amount") or DEFAULT_TIP_AMOUNT)
+            tips_cfg = await get_tips_config(chat_id) or {}
+            cfg_amount = tips_cfg.get("amount") or tips_cfg.get("tips_amount")   # el panel guarda "tips_amount"
+            final_tip = tip_amount if tip_amount > 0 else (int(cfg_amount) if cfg_amount else DEFAULT_TIP_AMOUNT)
 
             title = t["inv_tip_t"][:32]
             desc = t["inv_tip_d"]
