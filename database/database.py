@@ -1151,6 +1151,38 @@ def get_sentinel_payload_config(group_id: int) -> dict:
             pass
         return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
 
+
+def get_ai_sentinel_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT ai_guardian_status, ai_copilot_status, ai_custom_prompt
+                FROM group_settings WHERE group_id = ?
+            """, (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "guardian_status": row[0] if row[0] is not None else 0,
+                    "copilot_status": row[1] if row[1] is not None else 0,
+                    "custom_prompt": row[2] if row[2] is not None else ""
+                }
+        except sqlite3.OperationalError:
+            pass
+        return {"guardian_status": 0, "copilot_status": 0, "custom_prompt": ""}
+
+
+def set_ai_sentinel_config(group_id: int, field: str, value):
+    valid_fields = ["ai_guardian_status", "ai_copilot_status", "ai_custom_prompt"]
+    if field not in valid_fields:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
 def get_ghost_purge_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2917,8 +2949,10 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "mark_payment_processed",
     "create_web_session",
     "get_user_by_web_session",
-    "get_sentinel_service_messages_config"
-    "set_sentinel_service_message"
+    "get_sentinel_service_messages_config",
+    "set_sentinel_service_message",
+    "get_ai_sentinel_config",
+    "set_ai_sentinel_config"
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
