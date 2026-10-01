@@ -163,6 +163,22 @@ def _get_group_now(tz_name: str = None) -> datetime:
         return datetime.now()
 
 
+async def _is_night_active(chat_id: int) -> tuple[bool, str]:
+    """Retorna si el modo nocturno está activo y el estado asociado del grupo."""
+    try:
+        cfg = await get_night_mode_config(chat_id)
+        if not cfg or cfg.get("status") != 1:
+            return False, "disabled"
+
+        start_str = cfg.get("start", "22:00")
+        end_str = cfg.get("end", "06:00")
+        in_night = is_night_mode_time(start_str, end_str)
+        return in_night, "night" if in_night else "day"
+    except Exception as e:
+        logger.debug(f"Aviso consultando modo nocturno para {chat_id}: {e}")
+        return False, "error"
+
+
 def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
     if start_hm <= end_hm:
         return start_hm <= current_hm < end_hm
@@ -399,30 +415,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
             
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-    try:
-        if media_id and media_type == "video":
-            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        elif media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        else:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-    except Exception as e:
-        logger.warning(f"Aviso al despachar notificación del Centinela en {chat_id}: {e}")
-        try:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        except Exception:
-            return None
-
-    if auto_delete_after and sent:
-        async def _watchdog(m):
-            await asyncio.sleep(auto_delete_after)
-            try:
-                await m.delete()
-            except Exception:
-                pass
-        asyncio.create_task(_watchdog(sent))
+        return None
 
     return sent
 
@@ -438,6 +431,66 @@ async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
     media_id = svc_cfg.get("reset_media_id") if tier == "ultra_pro" else None
     media_type = svc_cfg.get("reset_media_type") if tier == "ultra_pro" else None
     return text, media_id, media_type
+
+
+async def _dispatch_radar_notice(
+    chat_id: int,
+    text: str,
+    media_id: str | None = None,
+    media_type: str | None = None,
+    auto_delete_after: int | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    """Envía un aviso del Radar Acústico en Telegram con apoyo multimedia opcional."""
+    if not _global_bot:
+        return None
+
+    try:
+        if media_id and media_type == "photo":
+            sent = await _global_bot.send_photo(
+                chat_id=chat_id,
+                photo=media_id,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        elif media_id and media_type == "video":
+            sent = await _global_bot.send_video(
+                chat_id=chat_id,
+                video=media_id,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        elif media_id and media_type == "animation":
+            sent = await _global_bot.send_animation(
+                chat_id=chat_id,
+                animation=media_id,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        else:
+            sent = await _global_bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+
+        if sent and auto_delete_after:
+            async def _auto_delete_notice(msg):
+                await asyncio.sleep(auto_delete_after)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_auto_delete_notice(sent))
+
+        return sent
+    except Exception as e:
+        logger.warning(f"Aviso despachando radar notice en {chat_id}: {e}")
+        return None
 
 
 async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
