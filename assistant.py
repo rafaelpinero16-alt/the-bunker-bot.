@@ -316,18 +316,16 @@ VC_SCHED_MESSAGES = {
 }
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_micvip_btn: str = None) -> InlineKeyboardMarkup:
-    # 🌟 Si hay texto personalizado para el botón MicVIP, se usa; de lo contrario, muestra el estándar por defecto
-    btn1_text = custom_micvip_btn if custom_micvip_btn else f"🎙️ MICVIP - {price} STARS ⭐"
-    btn2_text = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es") -> InlineKeyboardMarkup:
+    """Teclado simplificado: solo incluye el botón de activación VIP y el selector de idioma."""
+    btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
     btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
     next_lang = "en" if lang == "es" else "es"
     
     pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=btn1_text, callback_data=f"vcinfo_micvip_{chat_id}_{lang}")],
-        [InlineKeyboardButton(text=btn2_text, url=pay_url)],
+        [InlineKeyboardButton(text=btn_activate, url=pay_url)],
         [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
     ])
 

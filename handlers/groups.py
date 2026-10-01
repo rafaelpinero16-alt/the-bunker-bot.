@@ -270,7 +270,6 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             except Exception as ex:
                 logger.warning(f"Aviso al enviar bienvenida privada de canal al usuario {user.id}: {ex}")
     else:
-        # Tarjeta corporativa limpia sin textos random o extraños, con redirección directa al chat privado del bot
         group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
             [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))]
@@ -281,7 +280,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             f"El sistema de seguridad ha sido desplegado exitosamente en <b>{group_name}</b>.\n\n"
             f"👑 <b>Panel de Control Exclusivo para el Dueño:</b>\n"
             f"Pulsa el botón inferior para configurar la aduana anti-spam, captcha y cerraduras directamente en el chat privado del bot.\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
+            f"🛡️️ <i>Cloud Media Management</i>"
         )
 
         try:
@@ -666,7 +665,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                     f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
                     f"🔓 Tu acceso ha sido liberado para participar en <b>{group_title}</b>.\n\n"
                     f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
+                    f"🛡️️ <i>Cloud Media Management</i>"
                 ),
                 parse_mode="HTML"
             )
@@ -730,8 +729,22 @@ async def purge_left_member(message: Message):
             pass
 
 
-@router.message(F.chat.type.in_({"group", "supergroup"}), F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.pinned_message)
+@router.message(
+    F.chat.type.in_({"group", "supergroup"}),
+    F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.pinned_message
+)
 async def purge_general_service_messages(message: Message):
+    """
+    Purga instantánea de avisos grises nativos de Telegram.
+    Los avisos de videochat se eliminan directamente para mantener la sala limpia sin basura visual.
+    """
+    if message.video_chat_started or message.video_chat_ended or message.video_chat_participants_invited:
+        try:
+            await message.delete()
+            return
+        except Exception:
+            pass
+
     cfg = await get_captcha_config(message.chat.id)
     srv_mode = await get_service_msgs_mode(message.chat.id)
     if cfg.get("service_del") == 1 or srv_mode == 1:
@@ -842,7 +855,6 @@ async def _edit_status(status_msg: Message, text: str) -> None:
 
 
 async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
-    """Motor de respaldo completo por Bot API sobre el padrón local de SQLite."""
     added_by_sentinel = await _bootstrap_registry_from_sentinel(group_id)
     registered = await registry_members(group_id)
     candidates = registered[:GHOST_SCAN_MAX_MEMBERS]
@@ -978,7 +990,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
             f"• <b>Motor Utilizado:</b> <code>{engine_name}</code>",
             f"• 👻 <b>Fantasmas Detectados:</b> <b>{found}</b>",
             f"• 💀 <b>Fantasmas Depurados:</b> <b>{purged}</b>",
-            f"• ⚖️ <b>Acción Aplicada:</b> <code>{action.upper()}</code>",
+            f"• ⚖️️ <b>Acción Aplicada:</b> <code>{action.upper()}</code>",
             "",
             "🛡️ <i>Cloud Media Management</i>"
         ]
@@ -995,6 +1007,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     finally:
         _GHOST_PURGE_RUNNING.discard(group_id)
 
+
 @router.message(Command("reload"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_reload_group(message: Message, bot: Bot):
     """Fuerza la recarga del perímetro, sincroniza la comunidad en la base de datos y muestra la tarjeta de acceso."""
@@ -1010,7 +1023,6 @@ async def cmd_reload_group(message: Message, bot: Bot):
     chat = message.chat
     group_name = chat.title or "Comunidad"
     
-    # Sincronización atómica inmediata
     await approve_group(group_id, tier=await get_group_tier(group_id))
     await register_user_group(user_id or 8269470905, group_id, group_name, chat_type="supergroup")
 
@@ -1033,8 +1045,9 @@ async def cmd_reload_group(message: Message, bot: Bot):
     except Exception:
         pass
 
+
 # ==========================================
-# 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
+# 🛡️️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
 # ==========================================
 _FULL_PERMISSION_FIELDS = [
     "can_send_messages", "can_send_audios", "can_send_documents", "can_send_photos",
@@ -1600,7 +1613,7 @@ async def _acoustic_attenuate(
 
 
 # ==========================================
-# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS POR NIVELES (FREE / PRO / ULTRA PRO)
+# ⚖️️ ESCALA CENTRALIZADA DE ADVERTENCIAS POR NIVELES (FREE / PRO / ULTRA PRO)
 # ==========================================
 _REASON_TEXT = {
     "filter": (
@@ -1643,7 +1656,6 @@ WARN_ACTIONS = ("mute", "kick", "ban")
 
 
 def _sync_get_warn_template(chat_id: int) -> dict:
-    """Lectura segura de plantillas extendidas de advertencia en SQLite sin fallos por esquemas."""
     try:
         with _db_module.get_db_connection() as conn:
             cursor = conn.cursor()
@@ -1722,12 +1734,6 @@ async def enforce_warn_ladder(
     reason: str = "filter",
     silent: bool = False
 ) -> dict:
-    """
-    Aplica una falta formal respetando la matriz de rangos y beneficios del plan:
-    - Free: Plantilla estándar bilingüe.
-    - PRO: Texto de advertencia personalizado por el creador.
-    - ULTRA PRO: Copy personalizado + Multimedia adjunta (foto/video/gif) y umbrales granulares.
-    """
     tier = await get_privilege_tier(bot, chat_id, target_id, target_username)
     if _tier_is_privileged(tier):
         return {"status": "immune", "tier": tier, "strikes": 0, "limit": 0, "action": None}
@@ -1757,7 +1763,6 @@ async def enforce_warn_ladder(
         if not silent:
             es_txt, en_txt = _REASON_TEXT.get(reason, _REASON_TEXT["filter"])
             
-            # 1. Nivel ULTRA PRO: Copy personalizado + Soporte Multimedia
             if group_tier in ("ultra_pro", "ultra"):
                 if custom_text:
                     body = custom_text.replace("{mention}", target_mention).replace("{user}", target_mention)\
@@ -1773,7 +1778,6 @@ async def enforce_warn_ladder(
                 )
                 await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to, media_id=media_id, media_type=media_type)
 
-            # 2. Nivel PRO: Copy personalizado en texto
             elif group_tier == "pro":
                 if custom_text:
                     body = custom_text.replace("{mention}", target_mention).replace("{user}", target_mention)\
@@ -1783,13 +1787,12 @@ async def enforce_warn_ladder(
                     body = f"{target_mention}, has recibido una falta formal ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
 
                 notice = (
-                    f"⚠️ <b>Aviso de Seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n"
+                    f"⚠️️ <b>Aviso de Seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n"
                     f"{body}\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 )
                 await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to)
 
-            # 3. Nivel Free: Plantilla estándar bilingüe
             else:
                 notice = (
                     f"⚠️ <b>Aviso de Seguridad ({strikes}/{limit})</b>\n\n"
