@@ -9,7 +9,9 @@ import sqlite3
 import os
 import contextlib
 import threading
-from datetime import datetime, time
+import logging
+import re
+from datetime import datetime
 
 DB_PATH = "database/bot_data.db"
 
@@ -45,6 +47,58 @@ def get_db_connection():
     except Exception:
         conn.rollback()
         raise
+
+
+logger = logging.getLogger("database")
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def db_async(fn):
+    """Ejecuta la función SQLite síncrona en un hilo. La versión síncrona queda en `fn.sync` para usos internos."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    wrapper.sync = fn
+    return wrapper
+
+
+def _ident(name: str) -> str:
+    """Valida un nombre de columna/tabla antes de interpolarlo en SQL."""
+    if not _IDENT_RE.match(name):
+        raise ValueError(f"Identificador SQL no permitido: {name!r}")
+    return name
+
+
+def _ensure_columns(cursor, table: str, columns) -> None:
+    """Migración idempotente: añade solo las columnas que aún no existen."""
+    existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({_ident(table)})")}
+    for col_name, col_def in columns:
+        if col_name not in existing:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {_ident(col_name)} {col_def}")
+
+
+def _upsert_setting(group_id: int, column: str, value) -> None:
+    """Guarda una columna de group_settings (crea la fila si no existe)."""
+    column = _ident(column)
+    with get_db_connection() as conn:
+        conn.execute(
+            f"INSERT INTO group_settings (group_id, {column}) VALUES (?, ?) "
+            f"ON CONFLICT(group_id) DO UPDATE SET {column} = excluded.{column}",
+            (group_id, value),
+        )
+        conn.commit()
+
+
+def _get_setting(group_id: int, column: str, default=0):
+    """Lee una columna de group_settings; devuelve `default` si falta la fila, el valor es NULL o la columna no existe."""
+    column = _ident(column)
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute(f"SELECT {column} FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        except sqlite3.OperationalError:
+            return default
+    return row[0] if row and row[0] is not None else default
 
 
 def init_db():
@@ -189,11 +243,7 @@ def init_db():
             ("active_modules_count", "INTEGER DEFAULT 11")
         ]
 
-        for col_name, col_def in settings_columns:
-            try:
-                cursor.execute(f"ALTER TABLE group_settings ADD COLUMN {col_name} {col_def}")
-            except sqlite3.OperationalError:
-                pass
+        _ensure_columns(cursor, "group_settings", settings_columns)
         
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS command_usage (
@@ -224,10 +274,7 @@ def init_db():
                 PRIMARY KEY (user_id, group_id)
             )
         """)
-        try:
-            cursor.execute("ALTER TABLE user_groups ADD COLUMN chat_type TEXT DEFAULT 'supergroup'")
-        except sqlite3.OperationalError:
-            pass
+        _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS group_tip_targets (
@@ -239,10 +286,7 @@ def init_db():
                 UNIQUE(group_id, target_value)
             )
         """)
-        try:
-            cursor.execute("ALTER TABLE group_tip_targets ADD COLUMN is_active INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass
+        _ensure_columns(cursor, "group_tip_targets", [("is_active", "INTEGER DEFAULT 1")])
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS bot_clones (
@@ -281,10 +325,7 @@ def init_db():
             )
         """)
 
-        try:
-            cursor.execute("ALTER TABLE owner_sessions ADD COLUMN last_error TEXT")
-        except sqlite3.OperationalError:
-            pass
+        _ensure_columns(cursor, "owner_sessions", [("last_error", "TEXT")])
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS panic_snapshots (
@@ -405,11 +446,7 @@ def init_db():
             ("next_broadcast_at", "TIMESTAMP"),
             ("broadcast_enabled", "INTEGER DEFAULT 0")
         ]
-        for col_name, col_def in channel_plan_cols:
-            try:
-                cursor.execute(f"ALTER TABLE channel_plans ADD COLUMN {col_name} {col_def}")
-            except sqlite3.OperationalError:
-                pass
+        _ensure_columns(cursor, "channel_plans", channel_plan_cols)
 
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_channel_plans_broadcast "
@@ -496,11 +533,11 @@ def init_default_blacklist():
     ]
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        for word in banned_words:
-            cursor.execute("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", (word.lower().strip(),))
+        cursor.executemany("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", [(w.lower().strip(),) for w in banned_words])
         conn.commit()
 
 
+@db_async
 def get_or_create_user(user_id: int, username: str, full_name: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -517,6 +554,7 @@ def get_or_create_user(user_id: int, username: str, full_name: str):
             return None, 0, 0
 
 
+@db_async
 def update_user_topic(user_id: int, topic_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -524,6 +562,7 @@ def update_user_topic(user_id: int, topic_id: int):
         conn.commit()
 
 
+@db_async
 def get_user_by_topic(topic_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -532,6 +571,7 @@ def get_user_by_topic(topic_id: int):
         return row[0] if row else None
 
 
+@db_async
 def add_warning(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -541,6 +581,7 @@ def add_warning(user_id: int):
         return cursor.fetchone()[0]
 
 
+@db_async
 def reset_warnings(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -548,6 +589,7 @@ def reset_warnings(user_id: int):
         conn.commit()
 
 
+@db_async
 def ban_user(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -555,6 +597,7 @@ def ban_user(user_id: int):
         conn.commit()
 
 
+@db_async
 def get_blacklist():
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -562,6 +605,7 @@ def get_blacklist():
         return [row[0] for row in cursor.fetchall()]
 
 
+@db_async
 def add_to_blacklist(word: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -569,6 +613,7 @@ def add_to_blacklist(word: str):
         conn.commit()
 
 
+@db_async
 def remove_from_blacklist(word: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -576,6 +621,7 @@ def remove_from_blacklist(word: str):
         conn.commit()
 
 
+@db_async
 def register_user_group(user_id: int, group_id: int, group_name: str, chat_type: str = "supergroup"):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -589,6 +635,7 @@ def register_user_group(user_id: int, group_id: int, group_name: str, chat_type:
         conn.commit()
 
 
+@db_async
 def get_user_groups(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -599,6 +646,7 @@ def get_user_groups(user_id: int) -> list:
         return cursor.fetchall()
 
 
+@db_async
 def get_user_channels(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -609,66 +657,37 @@ def get_user_channels(user_id: int) -> list:
         return cursor.fetchall()
 
 
+@db_async
 def set_autolower_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, autolower) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET autolower = excluded.autolower
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "autolower", status)
 
 
+@db_async
 def get_autolower_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT autolower FROM group_settings WHERE group_id = ?", (group_id,))
-        row = cursor.fetchone()
-        return row[0] if row else 1
+    return _get_setting(group_id, "autolower", 1)
 
 
+@db_async
 def set_antispam_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, antispam) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET antispam = excluded.antispam
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "antispam", status)
 
 
+@db_async
 def get_antispam_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT antispam FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row else 0
-        except sqlite3.OperationalError:
-            return 0
+    return _get_setting(group_id, "antispam", 0)
 
 
+@db_async
 def set_captcha_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, captcha_status) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET captcha_status = excluded.captcha_status
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "captcha_status", status)
 
 
+@db_async
 def get_captcha_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT captcha_status FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 0
-        except sqlite3.OperationalError:
-            return 0
+    return _get_setting(group_id, "captcha_status", 0)
 
 
+@db_async
 def get_captcha_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -692,6 +711,7 @@ def get_captcha_config(group_id: int) -> dict:
         return {"status": 0, "mode": 1, "time": 60, "action": "kick", "text": "", "service_del": 1}
 
 
+@db_async
 def set_captcha_config(group_id: int, field: str, value):
     valid_fields = ["captcha_mode", "captcha_time", "captcha_action", "captcha_text", "captcha_service_del"]
     if field not in valid_fields: return
@@ -704,6 +724,7 @@ def set_captcha_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def get_warns_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -726,6 +747,7 @@ def get_warns_config(group_id: int) -> dict:
         return {"limit": 3, "action": "mute", "warn_links": 1, "warn_blacklist": 1, "warn_flood": 1}
 
 
+@db_async
 def set_warns_config(group_id: int, field: str, value):
     valid_fields = ["warns_limit", "warns_action", "warn_links", "warn_blacklist", "warn_flood"]
     if field not in valid_fields: return
@@ -738,6 +760,7 @@ def set_warns_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def add_user_strike(group_id: int, user_id: int, reason: str = "Infracción de reglas") -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -755,6 +778,7 @@ def add_user_strike(group_id: int, user_id: int, reason: str = "Infracción de r
         return row[0] if row else 1
 
 
+@db_async
 def get_user_strikes(group_id: int, user_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -763,6 +787,7 @@ def get_user_strikes(group_id: int, user_id: int) -> int:
         return row[0] if row else 0
 
 
+@db_async
 def reset_user_strikes(group_id: int, user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -770,6 +795,7 @@ def reset_user_strikes(group_id: int, user_id: int):
         conn.commit()
 
 
+@db_async
 def get_lock_status(group_id: int, lock_name: str) -> int:
     valid_locks = ["lock_media", "lock_stickers", "lock_links", "lock_commands"]
     if lock_name not in valid_locks: return 0
@@ -783,6 +809,7 @@ def get_lock_status(group_id: int, lock_name: str) -> int:
             return 0
 
 
+@db_async
 def set_lock_status(group_id: int, lock_name: str, status: int):
     valid_locks = ["lock_media", "lock_stickers", "lock_links", "lock_commands"]
     if lock_name not in valid_locks: return
@@ -795,17 +822,12 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
         conn.commit()
 
 
+@db_async
 def get_mic_vip_price(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT mic_vip_price FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 50
-        except sqlite3.OperationalError:
-            return 50
+    return _get_setting(group_id, "mic_vip_price", 50)
 
 
+@db_async
 def set_mic_vip_price(group_id: int, price: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -818,6 +840,7 @@ def set_mic_vip_price(group_id: int, price: int):
         conn.commit()
 
 
+@db_async
 def get_mic_vip_custom_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -839,6 +862,7 @@ def get_mic_vip_custom_config(group_id: int) -> dict:
         return {"price": 50, "tag": "⚜️MIC🎙️VIP⚜️", "text": ""}
 
 
+@db_async
 def set_mic_vip_custom_config(group_id: int, field: str, value):
     valid_fields = ["mic_vip_price", "mic_vip_custom_price", "mic_vip_custom_tag", "mic_vip_custom_text"]
     if field not in valid_fields:
@@ -860,6 +884,7 @@ def set_mic_vip_custom_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def get_free_badge_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -876,6 +901,7 @@ def get_free_badge_config(group_id: int) -> dict:
         return {"status": 0, "title": "VIP Free 🎙️"}
 
 
+@db_async
 def set_free_badge_config(group_id: int, field: str, value):
     if field not in ["free_badge_status", "free_badge_title"]: 
         return
@@ -888,6 +914,7 @@ def set_free_badge_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def get_vip_badge_title(group_id: int) -> str:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -905,6 +932,7 @@ def get_vip_badge_title(group_id: int) -> str:
     return title[:16]
 
 
+@db_async
 def set_vip_badge_title(group_id: int, title: str):
     clean_title = (title or "").strip()[:16]
     if not clean_title:
@@ -920,27 +948,17 @@ def set_vip_badge_title(group_id: int, title: str):
         conn.commit()
 
 
+@db_async
 def get_speaker_price(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT speaker_queue_price FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 25
-        except sqlite3.OperationalError:
-            return 25
+    return _get_setting(group_id, "speaker_queue_price", 25)
 
 
+@db_async
 def set_speaker_price(group_id: int, price: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, speaker_queue_price) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET speaker_queue_price = excluded.speaker_queue_price
-        """, (group_id, price))
-        conn.commit()
+    _upsert_setting(group_id, "speaker_queue_price", price)
 
 
+@db_async
 def add_to_speaker_queue(group_id: int, user_id: int, full_name: str, username: str, stars_paid: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -952,6 +970,7 @@ def add_to_speaker_queue(group_id: int, user_id: int, full_name: str, username: 
         return cursor.lastrowid
 
 
+@db_async
 def get_speaker_queue(group_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -963,6 +982,7 @@ def get_speaker_queue(group_id: int) -> list:
         return cursor.fetchall()
 
 
+@db_async
 def get_user_speaker_position(group_id: int, user_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -978,6 +998,7 @@ def get_user_speaker_position(group_id: int, user_id: int) -> int:
         return 0
 
 
+@db_async
 def pop_next_speaker(group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -994,6 +1015,7 @@ def pop_next_speaker(group_id: int):
         return row
 
 
+@db_async
 def remove_from_speaker_queue(group_id: int, user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1004,6 +1026,7 @@ def remove_from_speaker_queue(group_id: int, user_id: int):
         conn.commit()
 
 
+@db_async
 def clear_speaker_queue(group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1011,27 +1034,17 @@ def clear_speaker_queue(group_id: int):
         conn.commit()
 
 
+@db_async
 def get_vc_monitor_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT vc_enabled FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 1
-        except sqlite3.OperationalError:
-            return 1
+    return _get_setting(group_id, "vc_enabled", 1)
 
 
+@db_async
 def set_vc_monitor_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, vc_enabled) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET vc_enabled = excluded.vc_enabled
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "vc_enabled", status)
 
 
+@db_async
 def create_web_session(user_id: int) -> str:
     import secrets
     token = secrets.token_urlsafe(32)
@@ -1045,6 +1058,7 @@ def create_web_session(user_id: int) -> str:
     return token
 
 
+@db_async
 def get_user_by_web_session(token: str) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1066,6 +1080,7 @@ _RADAR_CONFIG_FIELDS = {
 }
 
 
+@db_async
 def get_radar_config(group_id: int) -> dict:
     cols = list(_RADAR_CONFIG_FIELDS.values())
     with get_db_connection() as conn:
@@ -1081,6 +1096,7 @@ def get_radar_config(group_id: int) -> dict:
     return {key: row[i] for i, key in enumerate(_RADAR_CONFIG_FIELDS)}
 
 
+@db_async
 def set_radar_config(group_id: int, field: str, value):
     col_name = _RADAR_CONFIG_FIELDS.get(field)
     if not col_name:
@@ -1094,6 +1110,7 @@ def set_radar_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def get_sentinel_service_messages_config(group_id: int) -> dict:
     """Lee la configuración de mensajes de servicio personalizados del Centinela (VC y Optimización)."""
     with get_db_connection() as conn:
@@ -1115,6 +1132,7 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
         return {"vc_text": None, "vc_media_id": None, "vc_media_type": None, "reset_text": None, "reset_media_id": None, "reset_media_type": None}
 
 
+@db_async
 def set_sentinel_service_message(group_id: int, field: str, value):
     valid = ["vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
              "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"]
@@ -1129,6 +1147,7 @@ def set_sentinel_service_message(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def get_sentinel_payload_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1151,38 +1170,43 @@ def get_sentinel_payload_config(group_id: int) -> dict:
             pass
         return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
 
+_SENTINEL_PAYLOAD_FIELDS = {
+    "sentinel_payload_enabled", "sentinel_payload_text", "sentinel_payload_media_id",
+    "sentinel_payload_media_type", "sentinel_payload_auto_delete",
+}
 
+
+@db_async
+def set_sentinel_payload_config(group_id: int, field: str, value):
+    """Guarda un campo del payload multimedia del Centinela (lista blanca de columnas)."""
+    if field not in _SENTINEL_PAYLOAD_FIELDS:
+        raise ValueError(f"Campo de payload no permitido: {field!r}")
+    _upsert_setting(group_id, field, value)
+
+
+_AI_SENTINEL_FIELDS = {"ai_guardian_status", "ai_copilot_status", "ai_custom_prompt"}
+
+
+@db_async
 def get_ai_sentinel_config(group_id: int) -> dict:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT ai_guardian_status, ai_copilot_status, ai_custom_prompt
-                FROM group_settings WHERE group_id = ?
-            """, (group_id,))
-            row = cursor.fetchone()
-            if row:
-                return {
-                    "guardian_status": row[0] if row[0] is not None else 0,
-                    "copilot_status": row[1] if row[1] is not None else 0,
-                    "custom_prompt": row[2] if row[2] is not None else ""
-                }
-        except sqlite3.OperationalError:
-            pass
-        return {"guardian_status": 0, "copilot_status": 0, "custom_prompt": ""}
+    """Configuración del Centinela de IA (ULTRA): guardián, copiloto y prompt personalizado."""
+    return {
+        "guardian_status": _get_setting(group_id, "ai_guardian_status", 0),
+        "copilot_status": _get_setting(group_id, "ai_copilot_status", 0),
+        "custom_prompt": _get_setting(group_id, "ai_custom_prompt", "") or "",
+    }
 
 
+@db_async
 def set_ai_sentinel_config(group_id: int, field: str, value):
-    valid_fields = ["ai_guardian_status", "ai_copilot_status", "ai_custom_prompt"]
-    if field not in valid_fields:
-        return
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
-        """, (group_id, value))
-        conn.commit()
+    """Guarda un campo del Centinela de IA (lista blanca de columnas)."""
+    if field not in _AI_SENTINEL_FIELDS:
+        raise ValueError(f"Campo de IA no permitido: {field!r}")
+    _upsert_setting(group_id, field, value)
+
+
+
+@db_async
 def get_ghost_purge_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1222,6 +1246,7 @@ def get_ghost_purge_config(group_id: int) -> dict:
     }
 
 
+@db_async
 def set_ghost_purge_config(group_id: int, field: str, value):
     valid_fields = ["purge_action", "purge_last_free_scan", "purge_schedule_status", "purge_schedule_time", "purge_schedule_days"]
     if field not in valid_fields:
@@ -1235,8 +1260,9 @@ def set_ghost_purge_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def check_can_free_purge(group_id: int) -> bool:
-    cfg = get_ghost_purge_config(group_id)
+    cfg = get_ghost_purge_config.sync(group_id)
     last_scan = cfg.get("last_free_scan")
     if not last_scan:
         return True
@@ -1250,6 +1276,7 @@ def check_can_free_purge(group_id: int) -> bool:
         return True
 
 
+@db_async
 def update_ghost_purge_scan_time(group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1260,6 +1287,7 @@ def update_ghost_purge_scan_time(group_id: int):
         conn.commit()
 
 
+@db_async
 def get_all_active_purge_schedules() -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1270,6 +1298,7 @@ def get_all_active_purge_schedules() -> list:
             return []
 
 
+@db_async
 def get_night_mode_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1291,6 +1320,7 @@ def get_night_mode_config(group_id: int) -> dict:
         return {"status": 0, "start": "22:00", "end": "06:00", "action": "lock_universal"}
 
 
+@db_async
 def set_night_mode_config(group_id: int, field: str, value):
     valid_fields = ["night_mode_status", "night_mode_start", "night_mode_end", "night_action"]
     if field not in valid_fields:
@@ -1304,6 +1334,7 @@ def set_night_mode_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def activate_universal_night_mode(group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1338,6 +1369,7 @@ def activate_universal_night_mode(group_id: int) -> bool:
         return True
 
 
+@db_async
 def deactivate_universal_night_mode(group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1381,6 +1413,7 @@ VALID_FILTERS = {
 }
 
 
+@db_async
 def get_antispam_filter(group_id: int, filter_name: str) -> int:
     if filter_name not in VALID_FILTERS:
         return 0
@@ -1395,6 +1428,7 @@ def get_antispam_filter(group_id: int, filter_name: str) -> int:
             return 0
 
 
+@db_async
 def set_antispam_filter(group_id: int, filter_name: str, status: int):
     if filter_name not in VALID_FILTERS:
         return
@@ -1408,27 +1442,17 @@ def set_antispam_filter(group_id: int, filter_name: str, status: int):
         conn.commit()
 
 
+@db_async
 def get_antispam_delete(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT antispam_delete FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 0
-        except sqlite3.OperationalError:
-            return 0
+    return _get_setting(group_id, "antispam_delete", 0)
 
 
+@db_async
 def set_antispam_delete(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, antispam_delete) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET antispam_delete = excluded.antispam_delete
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "antispam_delete", status)
 
 
+@db_async
 def get_antiflood_config(group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1447,6 +1471,7 @@ def get_antiflood_config(group_id: int):
         return {"msgs": 10, "time": 15, "action": "kick", "delete": 1}
 
 
+@db_async
 def set_antiflood_config(group_id: int, field: str, value):
     valid_fields = ["antiflood_msgs", "antiflood_time", "antiflood_action", "antiflood_delete"]
     if field not in valid_fields: return
@@ -1459,30 +1484,20 @@ def set_antiflood_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def get_service_msgs_mode(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT service_msgs_mode FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 1
-        except sqlite3.OperationalError:
-            return 1
+    return _get_setting(group_id, "service_msgs_mode", 1)
 
 
+@db_async
 def set_service_msgs_mode(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, service_msgs_mode) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET service_msgs_mode = excluded.service_msgs_mode
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "service_msgs_mode", status)
 
 
 # ==========================================
 # 💰 PROPINAS Y APORTES EN STARS (XTR)
 # ==========================================
+@db_async
 def get_tips_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1510,6 +1525,7 @@ def get_tips_config(group_id: int) -> dict:
         }
 
 
+@db_async
 def set_tips_config(group_id: int, field: str, value):
     valid_fields = [
         "tips_enabled", "tips_amount", "tips_target_channel",
@@ -1526,6 +1542,7 @@ def set_tips_config(group_id: int, field: str, value):
         conn.commit()
 
 
+@db_async
 def record_group_tip(group_id: int, user_id: int, stars_amount: int, message: str = ""):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1536,6 +1553,7 @@ def record_group_tip(group_id: int, user_id: int, stars_amount: int, message: st
         conn.commit()
 
 
+@db_async
 def get_group_total_tips(group_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1546,6 +1564,7 @@ def get_group_total_tips(group_id: int) -> int:
         except sqlite3.OperationalError:
             return 0
 
+@db_async
 def get_group_tip_targets(group_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1553,6 +1572,7 @@ def get_group_tip_targets(group_id: int) -> list:
         return cursor.fetchall()
 
 
+@db_async
 def add_group_tip_target(group_id: int, target_value: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1560,6 +1580,7 @@ def add_group_tip_target(group_id: int, target_value: str):
         conn.commit()
 
 
+@db_async
 def toggle_group_tip_target(group_id: int, target_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1567,6 +1588,7 @@ def toggle_group_tip_target(group_id: int, target_id: int):
         conn.commit()
 
 
+@db_async
 def delete_group_tip_target(group_id: int, target_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1574,6 +1596,7 @@ def delete_group_tip_target(group_id: int, target_id: int):
         conn.commit()        
 
 
+@db_async
 def add_to_whitelist(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1581,6 +1604,7 @@ def add_to_whitelist(user_id: int):
         conn.commit()
 
 
+@db_async
 def remove_from_whitelist(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1588,6 +1612,7 @@ def remove_from_whitelist(user_id: int):
         conn.commit()
 
 
+@db_async
 def is_whitelisted(user_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1595,6 +1620,7 @@ def is_whitelisted(user_id: int) -> bool:
         return cursor.fetchone() is not None
 
 
+@db_async
 def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1617,6 +1643,7 @@ def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
         conn.commit()
 
 
+@db_async
 def is_group_approved(group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1624,6 +1651,7 @@ def is_group_approved(group_id: int) -> bool:
         return cursor.fetchone() is not None
 
 
+@db_async
 def get_group_tier(group_id: int) -> str:
     if is_super_admin(group_id):  # Safeguard fallback
         return "ultra_pro"
@@ -1652,6 +1680,7 @@ def get_group_tier(group_id: int) -> str:
         return tier
 
 
+@db_async
 def get_user_global_tier(user_id: int) -> str:
     if is_super_admin(user_id):
         return "ultra_pro"
@@ -1673,8 +1702,9 @@ def get_user_global_tier(user_id: int) -> str:
         return "free"
 
 
+@db_async
 def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
-    tier = get_group_tier(group_id)
+    tier = get_group_tier.sync(group_id)
     if tier in ["pro", "ultra_pro"]: 
         return True
         
@@ -1695,6 +1725,7 @@ def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
         return True
 
 
+@db_async
 def grant_vip_mic(user_id: int, group_id: int, hours: int = 24):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1710,6 +1741,7 @@ def grant_vip_mic(user_id: int, group_id: int, hours: int = 24):
         conn.commit()
 
 
+@db_async
 def is_vip_mic_active(user_id: int, group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1720,12 +1752,14 @@ def is_vip_mic_active(user_id: int, group_id: int) -> bool:
         return cursor.fetchone() is not None
 
 
+@db_async
 def revoke_vip_mic(user_id: int, group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM vip_mic_passes WHERE user_id = ? AND group_id = ?", (user_id, group_id))
         conn.commit()
 
+@db_async
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1744,6 +1778,7 @@ def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username
         conn.commit()
 
 
+@db_async
 def get_bot_clone(user_id: int, group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1751,6 +1786,7 @@ def get_bot_clone(user_id: int, group_id: int):
         return cursor.fetchone()
 
 
+@db_async
 def revoke_bot_clone(user_id: int, group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1758,6 +1794,7 @@ def revoke_bot_clone(user_id: int, group_id: int):
         conn.commit()
 
 
+@db_async
 def get_all_active_clones():
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1765,6 +1802,7 @@ def get_all_active_clones():
         return cursor.fetchall()
 
 
+@db_async
 def get_all_active_clone_tokens() -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1772,6 +1810,7 @@ def get_all_active_clone_tokens() -> list:
         return [row[0] for row in cursor.fetchall() if row[0]]
 
 
+@db_async
 def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: str = None, api_id: int = None, api_hash: str = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1789,6 +1828,7 @@ def save_owner_session(user_id: int, group_id: int, session_string: str, phone_n
         conn.commit()
 
 
+@db_async
 def get_owner_session(user_id: int, group_id: int = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1799,6 +1839,7 @@ def get_owner_session(user_id: int, group_id: int = None):
         return cursor.fetchone()
 
 
+@db_async
 def get_session_by_group(group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1806,6 +1847,7 @@ def get_session_by_group(group_id: int):
         return cursor.fetchone()
 
 
+@db_async
 def get_all_active_sessions():
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1813,6 +1855,7 @@ def get_all_active_sessions():
         return cursor.fetchall()
 
 
+@db_async
 def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1829,6 +1872,7 @@ def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None)
         conn.commit()
 
 
+@db_async
 def get_vc_schedule(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1845,6 +1889,7 @@ def get_vc_schedule(group_id: int) -> dict:
         return {"days": "1,2,3,4,5,6,7", "start_time": "20:00", "end_time": "23:00", "status": 0, "call_active": 0}
 
 
+@db_async
 def set_vc_schedule(group_id: int, days: str, start_time: str, end_time: str, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1859,6 +1904,7 @@ def set_vc_schedule(group_id: int, days: str, start_time: str, end_time: str, st
         conn.commit()
 
 
+@db_async
 def update_vc_call_status(group_id: int, call_active: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1866,6 +1912,7 @@ def update_vc_call_status(group_id: int, call_active: int):
         conn.commit()
 
 
+@db_async
 def get_all_active_vc_schedules():
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1873,71 +1920,47 @@ def get_all_active_vc_schedules():
         return cursor.fetchall()
 
 
+@db_async
 def get_panic_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 0
-        except sqlite3.OperationalError:
-            return 0
+    return _get_setting(group_id, "panic_active", 0)
 
 
+@db_async
 def set_panic_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, panic_active) VALUES (?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET panic_active = excluded.panic_active
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "panic_active", status)
 
 
+@db_async
 def get_screen_shield_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT screen_shield_status FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 1
-        except sqlite3.OperationalError:
-            return 1
+    return _get_setting(group_id, "screen_shield_status", 1)
 
 
+@db_async
 def set_screen_shield_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, screen_shield_status) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET screen_shield_status = excluded.screen_shield_status
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "screen_shield_status", status)
 
 
+@db_async
 def get_shield_status(group_id: int) -> int:
-    return get_screen_shield_status(group_id)
+    return get_screen_shield_status.sync(group_id)
 
 
+@db_async
 def set_shield_status(group_id: int, status: int):
-    set_screen_shield_status(group_id, status)
+    set_screen_shield_status.sync(group_id, status)
 
 
+@db_async
 def get_podcast_status(group_id: int) -> int:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT podcast_mode_status FROM group_settings WHERE group_id = ?", (group_id,))
-            row = cursor.fetchone()
-            return row[0] if row and row[0] is not None else 0
-        except sqlite3.OperationalError:
-            return 0
+    return _get_setting(group_id, "podcast_mode_status", 0)
 
 
+@db_async
 def set_podcast_status(group_id: int, status: int):
-    set_podcast_mode(group_id, status)
+    set_podcast_mode.sync(group_id, status)
 
 
+@db_async
 def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1987,6 +2010,7 @@ def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str 
         return True
 
 
+@db_async
 def deactivate_panic(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2022,6 +2046,7 @@ def deactivate_panic(group_id: int) -> dict:
         return {"chat_permissions_json": chat_permissions_json}
 
 
+@db_async
 def get_podcast_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2042,16 +2067,12 @@ def get_podcast_config(group_id: int) -> dict:
         return {"status": 0, "duck_volume": 500, "noise_shield": 1}
 
 
+@db_async
 def set_podcast_mode(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, podcast_mode_status) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET podcast_mode_status = excluded.podcast_mode_status
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "podcast_mode_status", status)
 
 
+@db_async
 def set_podcast_duck_volume(group_id: int, volume: int):
     volume = max(0, min(10000, volume))
     with get_db_connection() as conn:
@@ -2063,16 +2084,12 @@ def set_podcast_duck_volume(group_id: int, volume: int):
         conn.commit()
 
 
+@db_async
 def set_noise_shield_status(group_id: int, status: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO group_settings (group_id, noise_shield_status) VALUES (?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET noise_shield_status = excluded.noise_shield_status
-        """, (group_id, status))
-        conn.commit()
+    _upsert_setting(group_id, "noise_shield_status", status)
 
 
+@db_async
 def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso de Userbot"):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2086,6 +2103,7 @@ def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso 
         conn.commit()
 
 
+@db_async
 def is_userbot_flagged(user_id: int, group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2093,6 +2111,7 @@ def is_userbot_flagged(user_id: int, group_id: int) -> bool:
         return cursor.fetchone() is not None
 
 
+@db_async
 def purge_flagged_userbot_record(user_id: int, group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2100,6 +2119,7 @@ def purge_flagged_userbot_record(user_id: int, group_id: int):
         conn.commit()
 
 
+@db_async
 def get_community_live_telemetry(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2134,6 +2154,7 @@ def get_community_live_telemetry(group_id: int) -> dict:
         }
 
 
+@db_async
 def get_channel_live_telemetry(channel_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2158,6 +2179,7 @@ def get_channel_live_telemetry(channel_id: int) -> dict:
         }
 
 
+@db_async
 def get_channel_settings(channel_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2180,6 +2202,7 @@ def get_channel_settings(channel_id: int) -> dict:
         return {"sub_price": 0, "grace_days": 1, "auto_kick": 1, "notify_renewal": 1, "custom_welcome": ""}
 
 
+@db_async
 def set_channel_settings(channel_id: int, field: str, value):
     valid_fields = ["sub_price", "grace_days", "auto_kick", "notify_renewal", "custom_welcome"]
     if field not in valid_fields:
@@ -2200,6 +2223,7 @@ def _sanitize_target_link(target_link: str = None) -> str:
     return clean if clean else None
 
 
+@db_async
 def create_channel_plan(
     channel_id: int, 
     plan_name: str, 
@@ -2226,6 +2250,7 @@ def create_channel_plan(
         return cursor.lastrowid
 
 
+@db_async
 def get_channel_plan(plan_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2257,6 +2282,7 @@ def get_channel_plan(plan_id: int) -> dict:
         return None
 
 
+@db_async
 def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2279,6 +2305,7 @@ def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
         return cursor.fetchall()
 
 
+@db_async
 def set_channel_plan_status(plan_id: int, status: str):
     if status not in ["active", "archived"]:
         return
@@ -2287,6 +2314,7 @@ def set_channel_plan_status(plan_id: int, status: str):
         cursor.execute("UPDATE channel_plans SET status = ? WHERE plan_id = ?", (status, plan_id))
         conn.commit()
 
+@db_async
 def toggle_channel_plan_status(plan_id: int) -> str:
     """Alterna el estado del plan de membresía entre 'active' y 'paused'."""
     with get_db_connection() as conn:
@@ -2301,6 +2329,7 @@ def toggle_channel_plan_status(plan_id: int) -> str:
         return new_status        
 
 
+@db_async
 def delete_channel_plan(plan_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2308,6 +2337,7 @@ def delete_channel_plan(plan_id: int):
         conn.commit()
 
 
+@db_async
 def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int) -> bool:
     if not isinstance(interval_hours, int) or interval_hours <= 0:
         return False
@@ -2325,6 +2355,7 @@ def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours
         return cursor.rowcount > 0
 
 
+@db_async
 def disable_channel_plan_broadcast(plan_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2332,6 +2363,7 @@ def disable_channel_plan_broadcast(plan_id: int):
         conn.commit()
 
 
+@db_async
 def mark_channel_plan_broadcasted(plan_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2351,6 +2383,7 @@ def mark_channel_plan_broadcasted(plan_id: int):
         conn.commit()
 
 
+@db_async
 def get_due_channel_plan_broadcasts() -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2386,6 +2419,7 @@ def get_due_channel_plan_broadcasts() -> list:
         ]
 
 
+@db_async
 def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, stars_paid: int, duration_days: int, invite_link: str = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2408,6 +2442,7 @@ def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, sta
         conn.commit()
 
 
+@db_async
 def get_channel_subscription(channel_id: int, user_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2432,6 +2467,7 @@ def get_channel_subscription(channel_id: int, user_id: int) -> dict:
         return None
 
 
+@db_async
 def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2447,6 +2483,7 @@ def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
         return cursor.fetchall()
 
 
+@db_async
 def get_expired_channel_subscriptions() -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2460,6 +2497,7 @@ def get_expired_channel_subscriptions() -> list:
         return cursor.fetchall()
 
 
+@db_async
 def mark_subscription_warned(channel_id: int, user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2470,6 +2508,7 @@ def mark_subscription_warned(channel_id: int, user_id: int):
         conn.commit()
 
 
+@db_async
 def update_subscription_status(channel_id: int, user_id: int, status: str):
     valid_statuses = ["active", "grace", "expired", "kicked"]
     if status not in valid_statuses:
@@ -2483,6 +2522,7 @@ def update_subscription_status(channel_id: int, user_id: int, status: str):
         conn.commit()
 
 
+@db_async
 def get_active_subscribers_count(channel_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2494,6 +2534,7 @@ def get_active_subscribers_count(channel_id: int) -> int:
         return row[0] if row else 0
 
 
+@db_async
 def record_chat_activity(group_id: int, user_id: int, full_name: str, username: str, is_reply: bool = False, is_admin: bool = False):
     month_key = datetime.now().strftime("%b '%y")
     with get_db_connection() as conn:
@@ -2519,6 +2560,7 @@ def record_chat_activity(group_id: int, user_id: int, full_name: str, username: 
         conn.commit()
 
 
+@db_async
 def get_chat_dashboard_data(chat_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2590,6 +2632,7 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         }
 
 
+@db_async
 def get_chat_timeseries_stats(chat_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2612,6 +2655,7 @@ def get_chat_timeseries_stats(chat_id: int) -> dict:
         return {"months": months, "mau": mau, "messages": messages, "messages_per_user": msgs_per_user}
 
 
+@db_async
 def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2635,6 +2679,7 @@ def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
         return res
 
 
+@db_async
 def get_chat_admin_stats(chat_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2657,6 +2702,7 @@ def get_chat_admin_stats(chat_id: int) -> list:
         ]
 
 
+@db_async
 def update_chat_operational_settings(chat_id: int, settings: dict):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2711,6 +2757,7 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
         conn.commit()
 
 
+@db_async
 def get_user_global_stats(user_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2750,6 +2797,7 @@ def get_user_global_stats(user_id: int) -> dict:
         }
 
 
+@db_async
 def get_user_subscribers_audit(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2777,6 +2825,7 @@ def get_user_subscribers_audit(user_id: int) -> list:
         ]
 
 
+@db_async
 def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2791,178 +2840,11 @@ def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
             return False
 
 
-def _make_async(sync_fn):
-    @functools.wraps(sync_fn)
-    async def _async_wrapper(*args, **kwargs):
-        return await asyncio.to_thread(sync_fn, *args, **kwargs)
-    return _async_wrapper
-
-
-_ASYNC_WRAPPED_FUNCTIONS = [
-    "get_or_create_user",
-    "update_user_topic",
-    "get_user_by_topic",
-    "add_warning",
-    "reset_warnings",
-    "ban_user",
-    "get_blacklist",
-    "add_to_blacklist",
-    "remove_from_blacklist",
-    "register_user_group",
-    "get_user_groups",
-    "get_user_channels",
-    "set_autolower_status",
-    "get_autolower_status",
-    "set_antispam_status",
-    "get_antispam_status",
-    "set_captcha_status",
-    "get_captcha_status",
-    "get_captcha_config",
-    "set_captcha_config",
-    "get_warns_config",
-    "set_warns_config",
-    "add_user_strike",
-    "get_user_strikes",
-    "reset_user_strikes",
-    "get_lock_status",
-    "set_lock_status",
-    "get_mic_vip_price",
-    "set_mic_vip_price",
-    "get_mic_vip_custom_config",
-    "set_mic_vip_custom_config",
-    "get_free_badge_config",
-    "set_free_badge_config",
-    "get_vip_badge_title",
-    "set_vip_badge_title",
-    "get_vc_monitor_status",
-    "set_vc_monitor_status",
-    "get_radar_config",
-    "set_radar_config",
-    "get_sentinel_payload_config",
-    "set_sentinel_payload_config",
-    "get_ai_sentinel_config",
-    "set_ai_sentinel_config",
-    "get_night_mode_config",
-    "set_night_mode_config",
-    "activate_universal_night_mode",
-    "deactivate_universal_night_mode",
-    "get_ghost_purge_config",
-    "set_ghost_purge_config",
-    "check_can_free_purge",
-    "update_ghost_purge_scan_time",
-    "get_all_active_purge_schedules",
-    "get_antispam_filter",
-    "set_antispam_filter",
-    "get_antispam_delete",
-    "set_antispam_delete",
-    "get_antiflood_config",
-    "set_antiflood_config",
-    "get_service_msgs_mode",
-    "set_service_msgs_mode",
-    "get_tips_config",
-    "set_tips_config",
-    "record_group_tip",
-    "get_group_total_tips",
-    "get_group_tip_targets",
-    "add_group_tip_target",
-    "toggle_group_tip_target",
-    "delete_group_tip_target",
-    "add_to_whitelist",
-    "remove_from_whitelist",
-    "is_whitelisted",
-    "approve_group",
-    "is_group_approved",
-    "get_group_tier",
-    "get_user_global_tier",
-    "check_command_limit",
-    "grant_vip_mic",
-    "is_vip_mic_active",
-    "revoke_vip_mic",
-    "register_bot_clone",
-    "get_bot_clone",
-    "revoke_bot_clone",
-    "get_all_active_clones",
-    "get_all_active_clone_tokens",
-    "save_owner_session",
-    "get_owner_session",
-    "get_session_by_group",
-    "get_all_active_sessions",
-    "revoke_owner_session",
-    "get_vc_schedule",
-    "set_vc_schedule",
-    "update_vc_call_status",
-    "get_all_active_vc_schedules",
-    "get_panic_status",
-    "set_panic_status",
-    "get_shield_status",
-    "set_shield_status",
-    "get_podcast_status",
-    "set_podcast_status",
-    "activate_panic",
-    "deactivate_panic",
-    "get_screen_shield_status",
-    "set_screen_shield_status",
-    "get_podcast_config",
-    "set_podcast_mode",
-    "set_podcast_duck_volume",
-    "set_noise_shield_status",
-    "get_speaker_price",
-    "set_speaker_price",
-    "add_to_speaker_queue",
-    "get_speaker_queue",
-    "get_user_speaker_position",
-    "pop_next_speaker",
-    "remove_from_speaker_queue",
-    "clear_speaker_queue",
-    "get_community_live_telemetry",
-    "get_channel_live_telemetry",
-    "get_channel_settings",
-    "set_channel_settings",
-    "create_channel_plan",
-    "get_channel_plan",
-    "get_channel_plans",
-    "set_channel_plan_status",
-    "toggle_channel_plan_status",
-    "delete_channel_plan",
-    "set_channel_plan_broadcast_config",
-    "disable_channel_plan_broadcast",
-    "mark_channel_plan_broadcasted",
-    "get_due_channel_plan_broadcasts",
-    "record_channel_subscription",
-    "get_channel_subscription",
-    "get_expiring_channel_subscriptions",
-    "get_expired_channel_subscriptions",
-    "mark_subscription_warned",
-    "update_subscription_status",
-    "get_active_subscribers_count",
-    "flag_userbot",
-    "is_userbot_flagged",
-    "purge_flagged_userbot_record",
-    "get_user_global_stats",
-    "get_user_subscribers_audit",
-    "record_chat_activity",
-    "get_chat_dashboard_data",
-    "get_chat_timeseries_stats",
-    "get_chat_top_users",
-    "get_chat_admin_stats",
-    "update_chat_operational_settings",
-    "mark_payment_processed",
-    "create_web_session",
-    "get_user_by_web_session",
-    "get_sentinel_service_messages_config",
-    "set_sentinel_service_message",
-    "get_ai_sentinel_config",
-    "set_ai_sentinel_config"
-]
-
-for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:
-    if _fn_name in globals():
-        globals()[_fn_name] = _make_async(globals()[_fn_name])
-
-if "_fn_name" in globals():
-    del _fn_name
-
+# ==========================================
+# 🚀 ARRANQUE: esquema listo al importar el módulo
+# ==========================================
 try:
     init_db()
 except Exception:
-    pass
+    logger.exception("❌ [DB] Falló init_db(); la base de datos puede estar incompleta")
+    raise
