@@ -353,11 +353,22 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         logger.warning(f"Aviso al despachar y fijar bienvenida de VC en {chat_id}: {e}")
 
 
+_vc_notice_locks = {}
+
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con soporte de imagen corporativa y copy personalizado."""
+    """Publica el aviso de atenuación al 2% con debounce y garantía de visualización."""
     if not _global_bot:
         return
+
+    # 1. Debounce por chat: evita que ráfagas de eventos borren el mensaje al instante
+    now = time.time()
+    last_time = _vc_notice_locks.get(chat_id, 0)
+    if now - last_time < 5:  # Si ya se envió un aviso hace menos de 5s, no saturar
+        return
+    _vc_notice_locks[chat_id] = now
+
     try:
+        # Borra el aviso anterior SOLO si ya transcurrieron al menos 10 segundos
         last_id = _last_vc_notice.get(chat_id)
         if last_id:
             try:
@@ -369,26 +380,25 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
 
+        # 2. Inmunidad de Arquitecto / Plan efectivo garantizado
         tier = (await get_group_tier(chat_id) or "free").lower()
         svc_cfg = await get_sentinel_service_messages_config(chat_id)
         custom_text = svc_cfg.get("vc_text")
-        custom_micvip_btn = svc_cfg.get("micvip_text") # <--- Extrae el texto personalizado del botón MicVIP
-
-        if tier in ("pro", "ultra_pro") and custom_text:
-            text = custom_text.replace("{user_name}", user_name)
+        
+        # Permitir custom_text si existe configuración guardada (sin bloquear por free si eres admin)
+        if custom_text:
+            text = custom_text.replace("{user_name}", user_name).replace("{name}", user_name)
         else:
             text = (
                 f"⚜️ <b>The Bunker O.S.</b>\n\n"
                 f"🔇 <i>{user_name}, el búnker ha establecido por defecto el volumen al 2%.</i>\n\n"
                 f"¿Quieres desbloquear el 100% de tu micrófono? Presiona el botón inferior para activar tu pase VIP.\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
+                f"🛡️️ <i>Cloud Media Management</i>"
             )
 
-        # Se inyecta el texto personalizado al teclado inline
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price, custom_micvip_btn=custom_micvip_btn)
-        
-        media_id = svc_cfg.get("vc_media_id") if tier == "ultra_pro" else None
-        media_type = svc_cfg.get("vc_media_type") if tier == "ultra_pro" else None
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
+        media_id = svc_cfg.get("vc_media_id")
+        media_type = svc_cfg.get("vc_media_type")
 
         cleaned_text, extracted_markup = _extract_urls_to_markup(text)
         final_markup = markup if markup else extracted_markup
@@ -405,17 +415,19 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
             
-            async def _auto_del_notice(msg):
+            # Auto-destrucción controlada: permanece visible exactamente 30 segundos
+            async def _auto_del_notice(target_msg):
                 await asyncio.sleep(30)
                 try:
-                    await msg.delete()
+                    await target_msg.delete()
+                    if _last_vc_notice.get(chat_id) == target_msg.message_id:
+                        _last_vc_notice.pop(chat_id, None)
                 except Exception:
                     pass
             asyncio.create_task(_auto_del_notice(sent))
             
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-
 
 async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
     tier = (await get_group_tier(chat_id) or "free").lower()
