@@ -1136,6 +1136,7 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
             "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None
         }
 
+@db_async
 def set_sentinel_service_message(group_id: int, field: str, value):
     valid = [
         "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
