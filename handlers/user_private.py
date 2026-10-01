@@ -3423,9 +3423,13 @@ async def handle_private_inputs(message: Message, bot: Bot):
             elif message.animation:
                 media_id, media_type = message.animation.file_id, "animation"
 
-        field_text = "vc_join_custom_text" if target == "vc" else ("mic_vip_custom_text" if target == "micvip" else "reset_notice_custom_text")
-        field_media = "vc_join_custom_media_id" if target == "vc" else ("mic_vip_custom_media_id" if target == "micvip" else "reset_notice_custom_media_id")
-        field_mtype = "vc_join_custom_media_type" if target == "vc" else ("mic_vip_custom_media_type" if target == "micvip" else "reset_notice_custom_media_type")
+        if target == "vc":
+            field_text, field_media, field_mtype = "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type"
+        elif target == "micvip":
+            field_text, field_media, field_mtype = "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type"
+        else:
+            field_text, field_media, field_mtype = "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"
+
         if text_val:
             await set_sentinel_service_message(group_id, field_text, message.html_text.strip())
         if media_id and media_type:
@@ -3435,7 +3439,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
         ])
-        resp = await message.answer("✅ <b>¡Mensaje de servicio del Centinela actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+        resp = await message.answer("✅ <b>¡Configuración de servicio del Centinela guardada con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -5980,31 +5984,42 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
     cfg = await get_sentinel_service_messages_config(group_id)
     
     vc_on = bool(cfg.get("vc_text") or cfg.get("vc_media_id"))
-    reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id"))
     micvip_on = bool(cfg.get("micvip_text") or cfg.get("micvip_media_id"))
+    reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id"))
 
     text = (
         f"⚙️ <b>Configuración del Centinela (Sentinel Settings)</b>\n\n"
-        f"Personaliza los mensajes de servicio y botones interactivos de voz:\n\n"
+        f"Personaliza los mensajes de servicio y botones interactivos de voz en tiempo real:\n\n"
         f"• 🎙️ <b>Entrada al Videochat (VC):</b> {'🟢 Personalizado' if vc_on else '⚪ Por defecto'}\n"
         f"• ⭐ <b>Botón / Aviso MicVIP:</b> {'🟢 Personalizado' if micvip_on else '⚪ Por defecto'}\n"
         f"• 🔄 <b>Optimización Audiovisual (3.5h):</b> {'🟢 Personalizado' if reset_on else '⚪ Por defecto'}\n\n"
-        f"<i>Selecciona el módulo que deseas auditar o modificar:</i>\n\n"
+        f"<i>Selecciona el módulo que deseas auditar o configurar:</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    ) if lang == "es" else (
+        f"⚙️ <b>Sentinel Settings</b>\n\n"
+        f"Customize voice chat service notices and interactive buttons in real time:\n\n"
+        f"• 🎙️ <b>VC Join Notice:</b> {'🟢 Custom' if vc_on else '⚪ Default'}\n"
+        f"• ⭐ <b>MicVIP Notice & Button:</b> {'🟢 Custom' if micvip_on else '⚪ Default'}\n"
+        f"• 🔄 <b>Optimization Notice (3.5h):</b> {'🟢 Custom' if reset_on else '⚪ Default'}\n\n"
+        f"<i>Select the module you wish to audit or configure:</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🎙️ " + tr(lang, "Aviso Entrada VC", "VC Join Notice"), callback_data=f"sentinelcfg_edit_vc_{group_id}_{lang}"),
-            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}")
+            InlineKeyboardButton(text="🎙️ " + tr(lang, "Aviso Entrada VC", "VC Join"), callback_data=f"sentinelcfg_edit_vc_{group_id}_{lang}"),
+            InlineKeyboardButton(text="👁️️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_vc_{group_id}_{lang}")
         ],
         [
             InlineKeyboardButton(text="⭐ " + tr(lang, "Configuración MicVIP", "MicVIP Settings"), callback_data=f"sentinelcfg_edit_micvip_{group_id}_{lang}"),
-            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_micvip_{group_id}_{lang}")
+            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_micvip_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_micvip_{group_id}_{lang}")
         ],
         [
-            InlineKeyboardButton(text="🔄 " + tr(lang, "Aviso Optimización", "Optimization Notice"), callback_data=f"sentinelcfg_edit_reset_{group_id}_{lang}"),
-            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_reset_{group_id}_{lang}")
+            InlineKeyboardButton(text="🔄 " + tr(lang, "Aviso Optimización", "Optimization"), callback_data=f"sentinelcfg_edit_reset_{group_id}_{lang}"),
+            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_reset_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_reset_{group_id}_{lang}")
         ],
         [InlineKeyboardButton(text=t["btn_back_ultra"], callback_data=f"menu_ultra_{group_id}_{lang}")]
     ])
@@ -6019,7 +6034,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
     t = TEXTS.get(lang, TEXTS["es"])
 
     try:
-        if sub in ("edit", "view"):
+        if sub in ("edit", "view", "default"):
             target_msg = data[2]
             group_id = int(data[3])
         else:
@@ -6033,44 +6048,31 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
     clear_user_states(bot.id, callback.from_user.id)
 
     if sub == "menu":
-        cfg = await get_sentinel_service_messages_config(group_id)
-        vc_on = bool(cfg.get("vc_text") or cfg.get("vc_media_id"))
-        reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id"))
+        text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
+        await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
-        text = (
-            f"⚙️️ <b>Configuración del Centinela (Sentinel Settings)</b>\n\n"
-            f"Personaliza los mensajes de servicio automatizados para videollamadas:\n\n"
-            f"• 🎙️ <b>Aviso Entrada VC & MicVIP:</b> {'🟢 Personalizado' if vc_on else '⚪ Por defecto'}\n"
-            f"• 🔄 <b>Aviso de Optimización (3.5h):</b> {'🟢 Personalizado' if reset_on else '⚪ Por defecto'}\n\n"
-            f"<i>Selecciona una opción para auditar o modificar:</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        ) if lang == "es" else (
-            f"⚙️ <b>Sentinel Settings</b>\n\n"
-            f"Customize automated voice chat service notices:\n\n"
-            f"• 🎙️ <b>VC Join & MicVIP Notice:</b> {'🟢 Custom' if vc_on else '⚪ Default'}\n"
-            f"• 🔄 <b>Optimization Notice (3.5h):</b> {'🟢 Custom' if reset_on else '⚪ Default'}\n\n"
-            f"<i>Select an option to audit or modify:</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        )
+    elif sub == "default":
+        # Restaura a los valores por defecto limpiando la base de datos
+        f_text = "vc_join_custom_text" if target_msg == "vc" else ("mic_vip_custom_text" if target_msg == "micvip" else "reset_notice_custom_text")
+        f_media = "vc_join_custom_media_id" if target_msg == "vc" else ("mic_vip_custom_media_id" if target_msg == "micvip" else "reset_notice_custom_media_id")
+        f_mtype = "vc_join_custom_media_type" if target_msg == "vc" else ("mic_vip_custom_media_type" if target_msg == "micvip" else "reset_notice_custom_media_type")
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="🎙️ " + tr(lang, "Aviso Entrada VC", "VC Join Notice"), callback_data=f"sentinelcfg_edit_vc_{group_id}_{lang}"),
-                InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}")
-            ],
-            [
-                InlineKeyboardButton(text="🔄 " + tr(lang, "Aviso Optimización", "Optimization Notice"), callback_data=f"sentinelcfg_edit_reset_{group_id}_{lang}"),
-                InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_reset_{group_id}_{lang}")
-            ],
-            [InlineKeyboardButton(text=t["btn_back_ultra"], callback_data=f"menu_ultra_{group_id}_{lang}")]
-        ])
+        await set_sentinel_service_message(group_id, f_text, None)
+        await set_sentinel_service_message(group_id, f_media, None)
+        await set_sentinel_service_message(group_id, f_mtype, None)
+
+        await callback.answer(tr(lang, "🗑️ Restablecido a la plantilla por defecto.", "🗑️ Restored to default template."), show_alert=True)
+        text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
     elif sub == "view":
         cfg = await get_sentinel_service_messages_config(group_id)
         if target_msg == "vc":
-            content = cfg.get("vc_text") or "*(Usando plantilla estándar de entrada al VC y MicVIP)*"
+            content = cfg.get("vc_text") or "*(Usando plantilla estándar de entrada al VC)*"
             m_id, m_type = cfg.get("vc_media_id"), cfg.get("vc_media_type")
+        elif target_msg == "micvip":
+            content = cfg.get("micvip_text") or "*(Usando plantilla estándar del botón y aviso MicVIP)*"
+            m_id, m_type = cfg.get("micvip_media_id"), cfg.get("micvip_media_type")
         else:
             content = cfg.get("reset_text") or "*(Usando plantilla estándar de optimización)*"
             m_id, m_type = cfg.get("reset_media_id"), cfg.get("reset_media_type")
@@ -6107,7 +6109,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         )
         prompt = await callback.message.answer(prompt_txt, reply_markup=_cancel_kb(t, f"sentinelcfg_menu_{group_id}_{lang}"), parse_mode="HTML")
         fire_and_forget_auto_delete([prompt], delay=60)
-    
+
     # ==========================================
 # 📢 FASE 6: DISPATCHER DE PLANES DE CANAL (CONTROL COMERCIAL & VISTA PREVIA)
 # ==========================================

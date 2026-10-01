@@ -1112,6 +1112,7 @@ def set_radar_config(group_id: int, field: str, value):
 
 @db_async
 def get_sentinel_service_messages_config(group_id: int) -> dict:
+    """Lee la configuración de mensajes de servicio personalizados del Centinela (VC, MicVIP y Optimización)."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
