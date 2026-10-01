@@ -317,6 +317,7 @@ VC_SCHED_MESSAGES = {
 
 
 def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_micvip_btn: str = None) -> InlineKeyboardMarkup:
+    # 🌟 Si hay texto personalizado para el botón MicVIP, se usa; de lo contrario, muestra el estándar por defecto
     btn1_text = custom_micvip_btn if custom_micvip_btn else f"🎙️ MICVIP - {price} STARS ⭐"
     btn2_text = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
     btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
@@ -355,7 +356,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con soporte de imagen corporativa, copy corto y auto-destrucción a 30s."""
+    """Publica el aviso de atenuación al 2% con soporte de imagen corporativa y copy personalizado."""
     if not _global_bot:
         return
     try:
@@ -373,11 +374,11 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         tier = (await get_group_tier(chat_id) or "free").lower()
         svc_cfg = await get_sentinel_service_messages_config(chat_id)
         custom_text = svc_cfg.get("vc_text")
+        custom_micvip_btn = svc_cfg.get("micvip_text") # <--- Extrae el texto personalizado del botón MicVIP
 
         if tier in ("pro", "ultra_pro") and custom_text:
             text = custom_text.replace("{user_name}", user_name)
         else:
-            # Copy corto optimizado para la experiencia visual de la sala de voz
             text = (
                 f"⚜️ <b>The Bunker O.S.</b>\n\n"
                 f"🔇 <i>{user_name}, el búnker ha establecido por defecto el volumen al 2%.</i>\n\n"
@@ -385,7 +386,9 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
                 f"🛡️ <i>Cloud Media Management</i>"
             )
 
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
+        # Se inyecta el texto personalizado al teclado inline
+        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price, custom_micvip_btn=custom_micvip_btn)
+        
         media_id = svc_cfg.get("vc_media_id") if tier == "ultra_pro" else None
         media_type = svc_cfg.get("vc_media_type") if tier == "ultra_pro" else None
 
@@ -404,9 +407,8 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
             
-            # ⏱️ Worker asíncrono no bloqueante: auto-destruye el aviso del bot a los 30 segundos
             async def _auto_del_notice(msg):
-                await asyncio.sleep(5)
+                await asyncio.sleep(30)
                 try:
                     await msg.delete()
                 except Exception:
@@ -415,9 +417,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
             
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-        return None
-
-    return sent
 
 
 async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
