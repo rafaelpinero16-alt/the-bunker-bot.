@@ -179,6 +179,9 @@ def init_db():
             ("ai_guardian_status", "INTEGER DEFAULT 0"),
             ("ai_copilot_status", "INTEGER DEFAULT 0"),
             ("ai_custom_prompt", "TEXT"),
+            ("vc_join_custom_text", "TEXT"),          # <--- NUEVO
+            ("vc_join_custom_media_id", "TEXT"),      # <--- NUEVO
+            ("vc_join_custom_media_type", "TEXT"),
             ("log_channel_id", "TEXT"),
             ("spam_detection_mode", "TEXT DEFAULT 'smart'"),
             ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
@@ -1091,28 +1094,37 @@ def set_radar_config(group_id: int, field: str, value):
         conn.commit()
 
 
-def get_sentinel_payload_config(group_id: int) -> dict:
+def get_sentinel_service_messages_config(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT sentinel_payload_enabled, sentinel_payload_text, sentinel_payload_media_id,
-                       sentinel_payload_media_type, sentinel_payload_auto_delete
+                SELECT vc_join_custom_text, vc_join_custom_media_id, vc_join_custom_media_type,
+                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
-                    "enabled": row[0] if row[0] is not None else 0,
-                    "text": row[1] if row[1] is not None else None,
-                    "media_id": row[2] if row[2] is not None else None,
-                    "media_type": row[3] if row[3] is not None else None,
-                    "auto_delete_after": row[4] if row[4] is not None else None
+                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2],
+                    "reset_text": row[3], "reset_media_id": row[4], "reset_media_type": row[5]
                 }
         except sqlite3.OperationalError:
             pass
-        return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
+        return {"vc_text": None, "vc_media_id": None, "vc_media_type": None, "reset_text": None, "reset_media_id": None, "reset_media_type": None}
 
+def set_sentinel_service_message(group_id: int, field: str, value):
+    valid = ["vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
+             "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"]
+    if field not in valid:
+        return
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
+        """, (group_id, value))
+        conn.commit()
 
 def set_sentinel_payload_config(group_id: int, field: str, value):
     valid_fields = [
@@ -2913,6 +2925,8 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "mark_payment_processed",
     "create_web_session",
     "get_user_by_web_session",
+    "get_sentinel_service_messages_config"
+    "set_sentinel_service_message"
 ]
 
 for _fn_name in _ASYNC_WRAPPED_FUNCTIONS:

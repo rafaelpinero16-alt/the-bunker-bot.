@@ -1719,13 +1719,6 @@ def forget_plan_state(bot_id: int, user_id: int) -> None:
 
 
 async def get_active_user_groups(bot: Bot, user_id: int) -> list:
-    """
-    Lista los grupos donde el usuario es propietario legítimo, verificando en vivo contra
-    Telegram para blindar contra cualquier pérdida de persistencia tras un reinicio (Railway).
-    Solo se descarta un grupo ante una confirmación DEFINITIVA de Telegram (bot expulsado/chat
-    inexistente); cualquier otro fallo (timeout, flood-control, hiccup transitorio del arranque)
-    conserva el registro persistido en base de datos en vez de ocultarlo.
-    """
     raw_groups = await get_user_groups(user_id)
     if not raw_groups:
         return []
@@ -1737,52 +1730,25 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
     async def check_ownership(g_id, g_name):
         try:
             bot_member = await bot.get_chat_member(chat_id=g_id, user_id=bot_id)
-        except TelegramForbiddenError:
-            return None  # Baja definitiva: el bot fue expulsado o bloqueado del chat.
-        except TelegramBadRequest as e:
-            msg = str(e).lower()
-            if "chat not found" in msg or "kicked" in msg or "not a member" in msg:
-                return None  # Baja definitiva confirmada por Telegram.
-            logging.warning(f"⚠️ [Sync Grupos] Respuesta ambigua de Telegram para group={g_id}: {e}. Se conserva por persistencia de DB.")
-            return (g_id, g_name)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio (posible arranque en frío) verificando group={g_id}: {e}. Se conserva por persistencia de DB.")
-            return (g_id, g_name)
-
-        if bot_member.status not in ("administrator", "creator"):
-            return None
-
-        try:
+            if bot_member.status not in ("administrator", "creator"):
+                return None
             user_member = await bot.get_chat_member(chat_id=g_id, user_id=user_id)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Grupos] Fallo transitorio verificando propietario user={user_id} group={g_id}: {e}. Se conserva por persistencia de DB.")
-            return (g_id, g_name)
-
-        # Permitir tanto creador como administrador
-        return (g_id, g_name) if user_member.status in ("creator", "administrator") else None
+            # 🛡️ Blindaje estricto: único dueño/creador autorizado
+            return (g_id, g_name) if user_member.status == "creator" else None
+        except Exception:
+            return None
 
     results = await asyncio.gather(*(check_ownership(g_id, g_name) for g_id, g_name in raw_groups))
     return [res for res in results if res is not None]
 
 
 async def get_active_user_channels(bot: Bot, user_id: int) -> list:
-    """
-    Sincronización activa de canales (estilo GroupHelp).
-    Reúne los canales candidatos del usuario desde TODAS las fuentes disponibles (base de datos, registro propio
-    autorreparable y caché de sesión) y los valida EN VIVO contra Telegram en cada apertura del panel:
-      • El bot debe seguir siendo administrador del canal (permisos dinámicos).
-      • El usuario debe ser el propietario (creator), salvo Arquitectos (inmunidad total).
-    Solo se descarta un canal ante una confirmación DEFINITIVA de Telegram (bot expulsado / chat inexistente /
-    bot sin admin); cualquier fallo transitorio (timeout, flood-control, arranque en frío tras un reinicio en
-    Railway) conserva el canal. Todo canal verificado se re-persiste, de modo que la lista se reconstruye sola.
-    """
     candidates: dict = {}
-
     try:
         for row in (await get_user_channels(user_id)) or []:
             candidates[int(row[0])] = row[1]
-    except Exception as ex:
-        logging.warning(f"⚠️ [Sync Canales] get_user_channels falló para user={user_id}: {ex}. Se usan fuentes alternas.")
+    except Exception:
+        pass
 
     for c_id, c_name in await registry_get_channels(user_id):
         candidates.setdefault(c_id, c_name)
@@ -1797,47 +1763,35 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
 
     try:
         bot_id = (await bot.get_me()).id
-    except Exception as ex:
-        logging.warning(f"⚠️ [Sync Canales] get_me falló (arranque en frío): {ex}. Se conserva la lista persistida.")
+    except Exception:
         return _ordered(candidates.items())
 
     async def check_channel(c_id: int, c_name: str):
-        # 1) Permisos del bot, en vivo.
         try:
             bot_member = await bot.get_chat_member(chat_id=c_id, user_id=bot_id)
-        except TelegramForbiddenError:
-            return None  # Baja definitiva: el bot fue expulsado o bloqueado del canal.
-        except TelegramBadRequest as e:
-            msg = str(e).lower()
-            if "chat not found" in msg or "kicked" in msg or "not a member" in msg:
-                return None  # Baja definitiva confirmada por Telegram.
-            logging.warning(f"⚠️ [Sync Canales] Respuesta ambigua para channel={c_id}: {e}. Se conserva por persistencia.")
-            return (c_id, c_name, False)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando channel={c_id}: {e}. Se conserva por persistencia.")
-            return (c_id, c_name, False)
+            if bot_member.status not in ("administrator", "creator"):
+                return None
 
-        if bot_member.status not in ("administrator", "creator"):
-            return None
+            # 2) Título fresco (si el canal fue renombrado).
+            title = c_name
+            try:
+                chat_obj = await bot.get_chat(c_id)
+                title = chat_obj.title or c_name
+            except Exception:
+                pass
 
-        # 2) Título fresco (si el canal fue renombrado).
-        title = c_name
-        try:
-            chat_obj = await bot.get_chat(c_id)
-            title = chat_obj.title or c_name
+            # 3) Propiedad del usuario.
+            if is_super_admin(user_id):
+                return (c_id, title, True)
+            try:
+                user_member = await bot.get_chat_member(chat_id=c_id, user_id=user_id)
+            except Exception as e:
+                logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando propietario user={user_id} channel={c_id}: {e}. Se conserva.")
+                return (c_id, title, False)
+            # Permitir tanto creador como administrador en el canal
+            return (c_id, title, True) if user_member.status in ("creator", "administrator") else None
         except Exception:
-            pass
-
-        # 3) Propiedad del usuario.
-        if is_super_admin(user_id):
-            return (c_id, title, True)
-        try:
-            user_member = await bot.get_chat_member(chat_id=c_id, user_id=user_id)
-        except Exception as e:
-            logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando propietario user={user_id} channel={c_id}: {e}. Se conserva.")
-            return (c_id, title, False)
-        # Permitir tanto creador como administrador en el canal
-        return (c_id, title, True) if user_member.status in ("creator", "administrator") else None
+            return None
 
     results = await asyncio.gather(*(check_channel(c_id, c_name) for c_id, c_name in candidates.items()))
     kept = [res for res in results if res is not None]
@@ -1848,6 +1802,8 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
         if confirmed:
             CHANNEL_SYNC_CACHE.setdefault(user_id, {})[c_id] = title
             await registry_upsert_channel(user_id, c_id, title)
+
+    return _ordered((c_id, title) for c_id, title, _ in kept)
 
     return _ordered((c_id, title) for c_id, title, _ in kept)
 
@@ -2556,8 +2512,11 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
         [InlineKeyboardButton(text=f"⭐ {tr(lang, 'Propinas', 'Tips')}: {'🟢' if on else '🔴'}", callback_data=f"tips_toggle_{group_id}_{lang}")],
         # 2. Monto sugerido
         [InlineKeyboardButton(text=f"💰 {tr(lang, 'Monto Sugerido', 'Suggested')}: {_tips_amount(cfg)} Stars", callback_data=f"tips_setamount_{group_id}_{lang}")],
-        # 3. Telemetría e historial
-        [InlineKeyboardButton(text=f"📊 {tr(lang, 'Telemetría e Historial', 'Telemetry & History')}", callback_data=f"tips_telemetry_{group_id}_{lang}")],
+        # 3. Telemetría y Botón de Difusión Selectiva
+        [
+            InlineKeyboardButton(text=f"📊 {tr(lang, 'Telemetría', 'Telemetry')}", callback_data=f"tips_telemetry_{group_id}_{lang}"),
+            InlineKeyboardButton(text=f"📢 {tr(lang, 'Difundir Panel', 'Broadcast Panel')}", callback_data=f"tips_share_{group_id}_{lang}")
+        ],
     ]
 
     # 4. Rangos: texto personalizado (PRO+) y multimedia (ULTRA PRO). Bloqueado → muro de pago hacia el plan que lo habilita.
@@ -4580,6 +4539,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         try:
             if sub in ("deltarget", "toggletarget"):
                 target_id, group_id = int(data[2]), int(data[3])
+            elif sub == "postto":
+                group_id = int(data[2])
+                target_chat_id = int(data[3])
             else:
                 group_id = int(data[2])
         except (ValueError, IndexError):
@@ -4698,6 +4660,62 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                              "\n\n<i>Check that the bot is still an administrator with permission to post.</i>")
             resp = await bot.send_message(chat_id=viewer_id, text=report + PERIMETER_SIGNATURE, reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
             fire_and_forget_auto_delete([resp], delay=60)
+            return
+
+        elif sub == "share":
+            groups = await get_active_user_groups(bot, callback.from_user.id)
+            channels = await get_active_user_channels(bot, callback.from_user.id)
+
+            share_rows = []
+            for g_id, g_name in groups:
+                share_rows.append([InlineKeyboardButton(text=f"👥 {g_name[:24]}", callback_data=f"tips_postto_{group_id}_{g_id}_{lang}")])
+            for c_id, c_name in channels:
+                share_rows.append([InlineKeyboardButton(text=f"📢 {c_name[:24]}", callback_data=f"tips_postto_{group_id}_{c_id}_{lang}")])
+
+            share_rows.append([InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=back_ctx)])
+            share_kb = InlineKeyboardMarkup(inline_keyboard=share_rows)
+
+            share_text = (
+                f"📢 <b>Difundir Propinas y Donaciones (Stars)</b>\n\n"
+                f"Selecciona la comunidad o canal administrado donde deseas publicar la tarjeta de propinas con botón directo de pago en Stars:\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ) if lang == "es" else (
+                f"📢 <b>Broadcast Tips & Donations (Stars)</b>\n\n"
+                f"Select the managed group or channel where you want to post the tips card with direct Stars checkout:\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            await safe_edit_text(callback, share_text, reply_markup=share_kb, parse_mode="HTML")
+            return
+
+        elif sub == "postto":
+            if not target_chat_id:
+                await callback.answer(tr(lang, "⚠️ Destino no válido.", "⚠️ Invalid target."), show_alert=True)
+                return
+
+            text_pub, media_id, media_type = build_tips_publication(tier, cfg, lang)
+            bot_info = await bot.get_me()
+            tip_url = f"https://t.me/{bot_info.username or 'TheBunkerBot'}?start=tip_{group_id}"
+            pub_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=tr(lang, "⭐ Enviar Propina en Stars", "⭐ Send Stars Tip"), url=tip_url)]
+            ])
+
+            try:
+                if media_id and media_type == "photo":
+                    await bot.send_photo(chat_id=target_chat_id, photo=media_id, caption=text_pub, reply_markup=pub_kb, parse_mode="HTML")
+                elif media_id and media_type == "video":
+                    await bot.send_video(chat_id=target_chat_id, video=media_id, caption=text_pub, reply_markup=pub_kb, parse_mode="HTML")
+                elif media_id and media_type == "animation":
+                    await bot.send_animation(chat_id=target_chat_id, animation=media_id, caption=text_pub, reply_markup=pub_kb, parse_mode="HTML")
+                else:
+                    await bot.send_message(chat_id=target_chat_id, text=text_pub, reply_markup=pub_kb, parse_mode="HTML")
+
+                await callback.answer(tr(lang, "✅ ¡Propina difundida con éxito!", "✅ Tips broadcasted successfully!"), show_alert=True)
+            except Exception as e:
+                logging.exception("Error difundiendo propinas en %s", target_chat_id)
+                await callback.answer(tr(lang, "⚠️ No se pudo difundir. Verifica permisos.", "⚠️ Broadcast failed. Check bot permissions."), show_alert=True)
+
+            text, keyboard = await build_tips_panel(group_id, lang, chat_kind, viewer_id, bot=bot)
+            await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
             return
 
         elif sub == "telemetry":

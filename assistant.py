@@ -49,7 +49,9 @@ from database.database import (
     get_ai_sentinel_config,
     get_ghost_purge_config,
     update_ghost_purge_scan_time,
-    get_mic_vip_price
+    get_mic_vip_price,
+    get_group_tier,
+    get_sentinel_service_messages_config
 )
 
 # 🤖 Integración de Mistral AI para el Guardián de Voz
@@ -337,11 +339,10 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Fase 3 y 4: Publica el aviso de atenuación al 2% auto-eliminando de inmediato el aviso anterior."""
+    """Fase 3 y 4: Publica el aviso de atenuación al 2% con soporte de mensajes personalizados (PRO/ULTRA)."""
     if not _global_bot:
         return
     try:
-        # Borra el aviso anterior de inmediato para evitar carga visual en el chat
         last_id = _last_vc_notice.get(chat_id)
         if last_id:
             try:
@@ -352,16 +353,39 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         bot_info = await _global_bot.get_me()
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
-        template = VC_MEMBER_JOIN_TEXTS.get(lang, VC_MEMBER_JOIN_TEXTS["es"])
-        text = template.format(user_name=user_name)
+
+        # Verificación de nivel y configuración personalizada
+        tier = (await get_group_tier(chat_id) or "free").lower()
+        svc_cfg = await get_sentinel_service_messages_config(chat_id)
+        custom_text = svc_cfg.get("vc_text")
+
+        if tier in ("pro", "ultra_pro") and custom_text:
+            text = custom_text.replace("{user_name}", user_name)
+        else:
+            template = VC_MEMBER_JOIN_TEXTS.get(lang, VC_MEMBER_JOIN_TEXTS["es"])
+            text = template.format(user_name=user_name)
+
         markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
 
-        sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
+        media_id = svc_cfg.get("vc_media_id") if tier == "ultra_pro" else None
+        media_type = svc_cfg.get("vc_media_type") if tier == "ultra_pro" else None
+
+        cleaned_text, extracted_markup = _extract_urls_to_markup(text)
+        final_markup = markup if markup else extracted_markup
+
+        if media_id and media_type == "photo":
+            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
+        elif media_id and media_type == "video":
+            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
+        elif media_id and media_type == "animation":
+            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
+        else:
+            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
+
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-
 
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
     try:
@@ -412,8 +436,17 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
     return sent
 
 
-def _resolve_reset_text(custom_text: str) -> str:
-    return custom_text if custom_text else OPTIMIZATION_TEXT
+async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
+    tier = (await get_group_tier(chat_id) or "free").lower()
+    svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    custom_text = svc_cfg.get("reset_text")
+    if tier in ("pro", "ultra_pro") and custom_text:
+        text = custom_text
+    else:
+        text = OPTIMIZATION_TEXT
+    media_id = svc_cfg.get("reset_media_id") if tier == "ultra_pro" else None
+    media_type = svc_cfg.get("reset_media_type") if tier == "ultra_pro" else None
+    return text, media_id, media_type
 
 
 async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
