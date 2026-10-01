@@ -1501,19 +1501,26 @@ def clear_user_states(bot_id: int, user_id: int) -> None:
 
 async def safe_edit_text(callback: CallbackQuery, text: str, reply_markup=None, parse_mode: str = "HTML", **kwargs):
     """
-    Edición blindada de la consola: ignora 'message is not modified' y, si el mensaje ya no es editable
-    (borrado, expirado o inaccesible tras un reinicio), lo reemplaza por uno nuevo en lugar de romper el flujo.
+    Edición blindada de la consola: si el mensaje previo tiene foto, edita el caption
+    o reemplaza el mensaje de forma segura sin disparar 'there is no text in the message to edit'.
     """
     msg = callback.message
-    if msg is not None and hasattr(msg, "edit_text"):
+    if msg is not None:
         try:
-            return await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+            if getattr(msg, "photo", None):
+                # Si el mensaje actual es una foto, editamos su caption en lugar de edit_text
+                return await msg.edit_caption(caption=text[:1024], reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+            elif hasattr(msg, "edit_text"):
+                return await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         except TelegramBadRequest as e:
-            if "message is not modified" in str(e).lower():
+            err_msg = str(e).lower()
+            if "message is not modified" in err_msg:
                 return None
-            logging.info(f"ℹ️ [safe_edit_text] Mensaje no editable, se reemplaza: {e}")
+            logging.info(f"ℹ️ [safe_edit_text] Mensaje no editable ({e}), reemplazando...")
         except TelegramForbiddenError:
             return None
+
+    # Fallback si el mensaje fue borrado o no se puede transformar
     try:
         if msg is not None and hasattr(msg, "delete"):
             try:
@@ -1529,7 +1536,6 @@ async def safe_edit_text(callback: CallbackQuery, text: str, reply_markup=None, 
     except Exception as ex:
         logging.error(f"❌ [safe_edit_text] No se pudo renderizar la vista: {ex}")
         return None
-
 
 # ------------------------------------------
 # 📒 REGISTRO PROPIO DE CANALES (persistente y autorreparable)
