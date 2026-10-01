@@ -339,7 +339,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con soporte de imagen corporativa y copy corto."""
+    """Publica el aviso de atenuación al 2% con soporte de imagen corporativa, copy corto y auto-destrucción a 30s."""
     if not _global_bot:
         return
     try:
@@ -361,7 +361,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         if tier in ("pro", "ultra_pro") and custom_text:
             text = custom_text.replace("{user_name}", user_name)
         else:
-            # Copy corto sugerido basado en la captura compartida
+            # Copy corto optimizado para la experiencia visual de la sala de voz
             text = (
                 f"⚜️ <b>The Bunker O.S.</b>\n\n"
                 f"🔇 <i>{user_name}, el búnker ha establecido por defecto el volumen al 2%.</i>\n\n"
@@ -387,30 +387,18 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
 
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
+            
+            # ⏱️ Worker asíncrono no bloqueante: auto-destruye el aviso del bot a los 30 segundos
+            async def _auto_del_notice(msg):
+                await asyncio.sleep(5)
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+            asyncio.create_task(_auto_del_notice(sent))
+            
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-
-async def _is_night_active(chat_id: int) -> tuple[bool, str]:
-    try:
-        cfg = await get_night_mode_config(chat_id)
-        if not cfg or cfg.get("status") != 1:
-            return False, ""
-        start, end = cfg.get("start", "22:00"), cfg.get("end", "06:00")
-        active = is_night_mode_time(start, end)
-        return active, cfg.get("action", "lock_universal")
-    except Exception:
-        return False, ""
-
-
-async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None,
-                                  media_type: str = None, auto_delete_after: int = None,
-                                  reply_markup: InlineKeyboardMarkup = None):
-    if not _global_bot:
-        return None
-
-    cleaned_text, extracted_markup = _extract_urls_to_markup(text)
-    final_markup = reply_markup if reply_markup else extracted_markup
-
     try:
         if media_id and media_type == "video":
             sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
