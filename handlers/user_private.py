@@ -60,6 +60,8 @@ from database.database import (
     set_night_mode_config,
     get_ai_sentinel_config,
     set_ai_sentinel_config,
+    get_sentinel_service_messages_config,
+    set_sentinel_service_message,
 )
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
@@ -516,6 +518,7 @@ SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
 CHAN_PLAN_STATES = {}
 AI_PROMPT_STATES = {}
+SENTINEL_CFG_STATES = {}
 WARN_CUSTOM_TEXT_STATES = {}
 WARN_CUSTOM_MEDIA_STATES = {}
 MIC_VIP_TEXT_STATES = {}
@@ -528,7 +531,8 @@ ALL_STATE_DICTS = (
     PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES, TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, TIPS_TEXT_STATES,
     TIPS_MEDIA_STATES, 
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
-    CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES
+    CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
+    SENTINEL_CFG_STATES
 )
 
 # ⏳ Caducidad de asistentes multi-paso (segundos) y enfriamiento del mensaje de "sin acción pendiente".
@@ -2277,7 +2281,7 @@ def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
     )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_ai_sentinel"], callback_data=f"ai_menu_{group_id}_{lang}")],
-        [InlineKeyboardButton(text="⚙️ " + ("Configuración del Centinela" if lang == "es" else "Sentinel Settings"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="⚙️ " + ("Configuración del Centinela" if lang == "es" else "Sentinel Settings"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")], # <--- BOTÓN AÑADIDO
         [InlineKeyboardButton(text="🚨 " + ("Botón de Pánico" if lang == "es" else "Panic Button"), callback_data=f"panic_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎥 " + ("Escudo Antinota" if lang == "es" else "Screen-Share Shield"), callback_data=f"shield_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],
@@ -3384,6 +3388,55 @@ async def handle_private_inputs(message: Message, bot: Bot):
         else:
             empty_prompt_msg = "⚠️ El prompt no puede estar vacío." if lang == "es" else "⚠️ Prompt cannot be empty."
             resp = await message.answer(empty_prompt_msg + "\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+    # 🤖 PROMPT PERSONALIZADO DE INTELIGENCIA ARTIFICIAL (CENTINELA DE IA)
+    if (bot.id, user_id) in AI_PROMPT_STATES:
+        ai_data = AI_PROMPT_STATES.pop((bot.id, user_id))
+        group_id = ai_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"ai_menu_{group_id}_{lang}")]
+        ])
+        if text_input:
+            await set_ai_sentinel_config(group_id, "ai_custom_prompt", text_input[:1000])
+            resp = await message.answer(t["ai_prompt_saved"], reply_markup=back_kb, parse_mode="HTML")
+        else:
+            empty_prompt_msg = "⚠️ El prompt no puede estar vacío." if lang == "es" else "⚠️ Prompt cannot be empty."
+            resp = await message.answer(empty_prompt_msg + "\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
+    # ⚙️ CONFIGURACIÓN DE MENSAJES DE SERVICIO DEL CENTINELA (SENTINEL SETTINGS)
+    if (bot.id, user_id) in SENTINEL_CFG_STATES:
+        st_data = SENTINEL_CFG_STATES.pop((bot.id, user_id))
+        group_id = st_data["group_id"]
+        target = st_data["target"]
+        tier = (await get_effective_group_tier(group_id, user_id) or "free").lower()
+
+        text_val = message.text or message.caption or ""
+        media_id = media_type = None
+        if tier == "ultra_pro":
+            if message.photo:
+                media_id, media_type = message.photo[-1].file_id, "photo"
+            elif message.video:
+                media_id, media_type = message.video.file_id, "video"
+            elif message.animation:
+                media_id, media_type = message.animation.file_id, "animation"
+
+        field_text = "vc_join_custom_text" if target == "vc" else "reset_notice_custom_text"
+        field_media = "vc_join_custom_media_id" if target == "vc" else "reset_notice_custom_media_id"
+        field_mtype = "vc_join_custom_media_type" if target == "vc" else "reset_notice_custom_media_type"
+
+        if text_val:
+            await set_sentinel_service_message(group_id, field_text, message.html_text.strip())
+        if media_id and media_type:
+            await set_sentinel_service_message(group_id, field_media, media_id)
+            await set_sentinel_service_message(group_id, field_mtype, media_type)
+
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
+        ])
+        resp = await message.answer("✅ <b>¡Mensaje de servicio del Centinela actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -5918,6 +5971,145 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             except Exception:
                 pass
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    # ==========================================
+# ⚙️ GESTIÓN DE CONFIGURACIÓN DEL CENTINELA (SENTINEL SETTINGS)
+# ==========================================
+SENTINEL_CFG_STATES = {}
+
+async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
+    t = TEXTS.get(lang, TEXTS["es"])
+    cfg = await get_sentinel_service_messages_config(group_id)
+    
+    vc_on = bool(cfg.get("vc_text") or cfg.get("vc_media_id"))
+    reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id"))
+
+    text = (
+        f"⚙️ <b>Configuración del Centinela (Sentinel Settings)</b>\n\n"
+        f"Personaliza los mensajes automatizados de servicio que emite el núcleo perimetral en tus llamadas de voz:\n\n"
+        f"• 🎙️ <b>Entrada al Videochat (VC):</b> {'🟢 Personalizado' if vc_on else '⚪ Por defecto'}\n"
+        f"• 🔄 <b>Optimización Audiovisual (3.5h):</b> {'🟢 Personalizado' if reset_on else '⚪ Por defecto'}\n\n"
+        f"<i>Selecciona el mensaje que deseas auditar o modificar:</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    ) if lang == "es" else (
+        f"⚙️ <b>Sentinel Settings</b>\n\n"
+        f"Customize the automated service broadcast messages sent by the perimeter core in voice chats:\n\n"
+        f"• 🎙️ <b>VC Member Join Notice:</b> {'🟢 Custom' if vc_on else '⚪ Default'}\n"
+        f"• 🔄 <b>Audiovisual Optimization (3.5h):</b> {'🟢 Custom' if reset_on else '⚪ Default'}\n\n"
+        f"<i>Select the message you wish to audit or modify:</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎙️ " + tr(lang, "Aviso Entrada VC", "VC Join Notice"), callback_data=f"sentinelcfg_edit_vc_{group_id}_{lang}"),
+            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}")
+        ],
+        [
+            InlineKeyboardButton(text="🔄 " + tr(lang, "Aviso Optimización", "Optimization Notice"), callback_data=f"sentinelcfg_edit_reset_{group_id}_{lang}"),
+            InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_reset_{group_id}_{lang}")
+        ],
+        [InlineKeyboardButton(text=t["btn_back_ultra"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data.startswith("sentinelcfg_"))
+async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
+    data = callback.data.split("_")
+    sub = data[1]
+    lang = data[-1] if data[-1] in ["es", "en"] else "es"
+    t = TEXTS.get(lang, TEXTS["es"])
+
+    try:
+        if sub in ("edit", "view"):
+            target_msg = data[2]
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+    except (IndexError, ValueError):
+        return
+
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+
+    clear_user_states(bot.id, callback.from_user.id)
+
+    if sub == "menu":
+        cfg = await get_sentinel_service_messages_config(group_id)
+        vc_on = bool(cfg.get("vc_text") or cfg.get("vc_media_id"))
+        reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id"))
+
+        text = (
+            f"⚙️️ <b>Configuración del Centinela (Sentinel Settings)</b>\n\n"
+            f"Personaliza los mensajes de servicio automatizados para videollamadas:\n\n"
+            f"• 🎙️ <b>Aviso Entrada VC & MicVIP:</b> {'🟢 Personalizado' if vc_on else '⚪ Por defecto'}\n"
+            f"• 🔄 <b>Aviso de Optimización (3.5h):</b> {'🟢 Personalizado' if reset_on else '⚪ Por defecto'}\n\n"
+            f"<i>Selecciona una opción para auditar o modificar:</i>\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            f"⚙️ <b>Sentinel Settings</b>\n\n"
+            f"Customize automated voice chat service notices:\n\n"
+            f"• 🎙️ <b>VC Join & MicVIP Notice:</b> {'🟢 Custom' if vc_on else '⚪ Default'}\n"
+            f"• 🔄 <b>Optimization Notice (3.5h):</b> {'🟢 Custom' if reset_on else '⚪ Default'}\n\n"
+            f"<i>Select an option to audit or modify:</i>\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🎙️ " + tr(lang, "Aviso Entrada VC", "VC Join Notice"), callback_data=f"sentinelcfg_edit_vc_{group_id}_{lang}"),
+                InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}")
+            ],
+            [
+                InlineKeyboardButton(text="🔄 " + tr(lang, "Aviso Optimización", "Optimization Notice"), callback_data=f"sentinelcfg_edit_reset_{group_id}_{lang}"),
+                InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_reset_{group_id}_{lang}")
+            ],
+            [InlineKeyboardButton(text=t["btn_back_ultra"], callback_data=f"menu_ultra_{group_id}_{lang}")]
+        ])
+        await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+
+    elif sub == "view":
+        cfg = await get_sentinel_service_messages_config(group_id)
+        if target_msg == "vc":
+            content = cfg.get("vc_text") or "*(Usando plantilla estándar de entrada al VC y MicVIP)*"
+            m_id, m_type = cfg.get("vc_media_id"), cfg.get("vc_media_type")
+        else:
+            content = cfg.get("reset_text") or "*(Usando plantilla estándar de optimización)*"
+            m_id, m_type = cfg.get("reset_media_id"), cfg.get("reset_media_type")
+
+        preview_text = f"👁️ <b>Vista Previa ({target_msg.upper()}):</b>\n\n{content}\n\n🛡️ <i>Cloud Media Management</i>"
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
+        ])
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        if m_id and m_type == "photo":
+            await bot.send_photo(chat_id=callback.from_user.id, photo=m_id, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
+        elif m_id and m_type == "video":
+            await bot.send_video(chat_id=callback.from_user.id, video=m_id, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
+        elif m_id and m_type == "animation":
+            await bot.send_animation(chat_id=callback.from_user.id, animation=m_id, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=callback.from_user.id, text=preview_text, reply_markup=back_kb, parse_mode="HTML")
+
+    elif sub == "edit":
+        tier = (await get_effective_group_tier(group_id, callback.from_user.id) or "free").lower()
+        if tier == "free":
+            await callback.answer(tr(lang, "⭐ Requiere plan PRO o ULTRA PRO.", "⭐ Requires PRO or ULTRA PRO plan."), show_alert=True)
+            return
+
+        SENTINEL_CFG_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "target": target_msg, "lang": lang}
+        prompt_txt = (
+            f"✍️ <b>Editor de Mensaje ({target_msg.upper()}):</b>\n\n"
+            f"Envía el texto. {'<i>(Nivel ULTRA: puedes adjuntar una foto/video junto al mensaje)</i>' if tier == 'ultra_pro' else ''}\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+        prompt = await callback.message.answer(prompt_txt, reply_markup=_cancel_kb(t, f"sentinelcfg_menu_{group_id}_{lang}"), parse_mode="HTML")
+        fire_and_forget_auto_delete([prompt], delay=60)
+    
     # ==========================================
 # 📢 FASE 6: DISPATCHER DE PLANES DE CANAL (CONTROL COMERCIAL & VISTA PREVIA)
 # ==========================================
