@@ -316,17 +316,23 @@ VC_SCHED_MESSAGES = {
 }
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_micvip_btn: str = None) -> InlineKeyboardMarkup:
-    """Teclado simplificado para el aviso de VC: botón limpio de activación VIP y selector de idioma."""
-    btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
-    btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
-    next_lang = "en" if lang == "es" else "es"
-    
+def build_vc_moderation_keyboard(
+    chat_id: int, 
+    bot_username: str, 
+    lang: str = "es", 
+    price: int = 50, 
+    custom_btn_text: str = None
+) -> InlineKeyboardMarkup:
+    """Botonera limpia de un solo botón de activación: 100% editable y sin selector de idioma."""
+    if custom_btn_text:
+        btn_label = custom_btn_text
+    else:
+        btn_label = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
+
     pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=btn_activate, url=pay_url)],
-        [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
+        [InlineKeyboardButton(text=btn_label, url=pay_url)]
     ])
 
 
@@ -338,8 +344,18 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         bot_info = await _global_bot.get_me()
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
+        
+        svc_cfg = await get_sentinel_service_messages_config(chat_id)
+        custom_btn = svc_cfg.get("vc_btn_text") or svc_cfg.get("micvip_text")
+        
         text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang=lang, price=price)
+        markup = build_vc_moderation_keyboard(
+            chat_id=chat_id, 
+            bot_username=bot_username, 
+            lang=lang, 
+            price=price, 
+            custom_btn_text=custom_btn
+        )
 
         sent = await _global_bot.send_message(chat_id=chat_id, text=text, reply_markup=markup, parse_mode="HTML")
         if sent:
@@ -356,7 +372,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 _vc_notice_locks = {}
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con debounce y garantía de visualización de 30 segundos."""
+    """Publica el aviso de atenuación al 2% con botón editable y tiempo de auto-borrado programable."""
     if not _global_bot:
         return
 
@@ -383,6 +399,14 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         # 2. Carga de configuración del Centinela
         svc_cfg = await get_sentinel_service_messages_config(chat_id)
         custom_text = svc_cfg.get("vc_text")
+        custom_btn = svc_cfg.get("vc_btn_text") or svc_cfg.get("micvip_text")
+        
+        # Tiempo de borrado programable (por defecto 30s)
+        autodel_time = svc_cfg.get("vc_autodel") or svc_cfg.get("vc_join_autodel_seconds") or 30
+        try:
+            autodel_time = int(autodel_time)
+        except (ValueError, TypeError):
+            autodel_time = 30
         
         if custom_text:
             text = custom_text.replace("{user_name}", user_name).replace("{name}", user_name)
@@ -394,7 +418,13 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
                 f"🛡️ <i>Cloud Media Management</i>"
             )
 
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang=lang, price=price)
+        markup = build_vc_moderation_keyboard(
+            chat_id=chat_id, 
+            bot_username=bot_username, 
+            lang=lang, 
+            price=price, 
+            custom_btn_text=custom_btn
+        )
         media_id = svc_cfg.get("vc_media_id")
         media_type = svc_cfg.get("vc_media_type")
 
@@ -414,19 +444,22 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
             
-            # Auto-destrucción: permanece visible en el chat exactamente 30 segundos
-            async def _auto_del_notice(target_msg):
-                await asyncio.sleep(30)
-                try:
-                    await target_msg.delete()
-                    if _last_vc_notice.get(chat_id) == target_msg.message_id:
-                        _last_vc_notice.pop(chat_id, None)
-                except Exception:
-                    pass
-            asyncio.create_task(_auto_del_notice(sent))
+            # Auto-destrucción programable
+            if autodel_time > 0:
+                async def _auto_del_notice(target_msg, delay: int):
+                    await asyncio.sleep(delay)
+                    try:
+                        await target_msg.delete()
+                        if _last_vc_notice.get(chat_id) == target_msg.message_id:
+                            _last_vc_notice.pop(chat_id, None)
+                    except Exception:
+                        pass
+                asyncio.create_task(_auto_del_notice(sent, autodel_time))
             
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
+
+
 async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
     tier = (await get_group_tier(chat_id) or "free").lower()
     svc_cfg = await get_sentinel_service_messages_config(chat_id)
@@ -438,7 +471,6 @@ async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str]:
     media_id = svc_cfg.get("reset_media_id") if tier == "ultra_pro" else None
     media_type = svc_cfg.get("reset_media_type") if tier == "ultra_pro" else None
     return text, media_id, media_type
-
 
 async def _dispatch_radar_notice(
     chat_id: int,

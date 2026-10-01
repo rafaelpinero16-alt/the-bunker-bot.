@@ -239,6 +239,8 @@ def init_db():
             ("vc_join_custom_text", "TEXT"),          # <--- NUEVO
             ("vc_join_custom_media_id", "TEXT"),      # <--- NUEVO
             ("vc_join_custom_media_type", "TEXT"),
+            ("vc_join_btn_text", "TEXT"),                # Texto personalizado del botón de activación
+            ("vc_join_autodel_seconds", "INTEGER DEFAULT 30"),
             ("log_channel_id", "TEXT"),
             ("spam_detection_mode", "TEXT DEFAULT 'smart'"),
             ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
@@ -1122,7 +1124,8 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
             cursor.execute("""
                 SELECT vc_join_custom_text, vc_join_custom_media_id, vc_join_custom_media_type,
                        reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type,
-                       mic_vip_custom_text, mic_vip_custom_media_id, mic_vip_custom_media_type
+                       mic_vip_custom_text, mic_vip_custom_media_id, mic_vip_custom_media_type,
+                       vc_join_btn_text, vc_join_autodel_seconds
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
@@ -1130,14 +1133,17 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
                 return {
                     "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2],
                     "reset_text": row[3], "reset_media_id": row[4], "reset_media_type": row[5],
-                    "micvip_text": row[6], "micvip_media_id": row[7], "micvip_media_type": row[8]
+                    "micvip_text": row[6], "micvip_media_id": row[7], "micvip_media_type": row[8],
+                    "vc_btn_text": row[9],
+                    "vc_autodel": row[10] if row[10] is not None else 30
                 }
         except sqlite3.OperationalError:
             pass
         return {
             "vc_text": None, "vc_media_id": None, "vc_media_type": None,
             "reset_text": None, "reset_media_id": None, "reset_media_type": None,
-            "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None
+            "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None,
+            "vc_btn_text": None, "vc_autodel": 30
         }
 
 @db_async
@@ -1145,7 +1151,8 @@ def set_sentinel_service_message(group_id: int, field: str, value):
     valid = [
         "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
         "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type",
-        "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type"
+        "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type",
+        "vc_join_btn_text", "vc_join_autodel_seconds"
     ]
     if field not in valid:
         return
