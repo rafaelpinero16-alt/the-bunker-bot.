@@ -52,6 +52,8 @@ from database.database import (
     # 💎 Módulos de Canales & Membresías
     get_channel_plans, get_active_subscribers_count,
     create_channel_plan, delete_channel_plan,
+    toggle_channel_plan_status,  # <--- AGREGAR AQUÍ
+    get_channel_plan,
     create_web_session,  # <--- Sesiones web temporales (ChatKeeper Style)
     set_channel_plan_broadcast_config,
     get_night_mode_config,
@@ -5898,41 +5900,67 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 pass
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     # ==========================================
-# 📢 FASE 6: DISPATCHER DE PLANES DE CANAL
+# 📢 FASE 6: DISPATCHER DE PLANES DE CANAL (CONTROL COMERCIAL & VISTA PREVIA)
 # ==========================================
 async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
-    """Construye la vista de Gestión de Membresías del canal (texto + teclado)."""
+    """Construye el panel de planes con botoneras en cascada: [Ver] + [🟢/🔴] [📢] [🗑️]."""
     t = TEXTS.get(lang, TEXTS["es"])
-    plans = await get_channel_plans(channel_id, only_active=True)
+    # Trae todos los planes (activos y pausados) para administración total
+    plans = await get_channel_plans(channel_id, only_active=False)
     sub_count = await get_active_subscribers_count(channel_id)
-    bot_info = await bot.get_me()
 
     try:
         c_name = html.escape((await bot.get_chat(channel_id)).title or "")
     except Exception:
         c_name = tr(lang, "Canal", "Channel")
 
-    plans_list_text = ""
     kb_rows = []
     if plans:
         for p in plans:
-            p_id, p_name, p_days, p_stars = p[0], p[1], p[2], p[3]
-            link = f"https://t.me/{bot_info.username}?start=chanplan_{p_id}_{channel_id}"
-            plans_list_text += f"\n• <b>{html.escape(str(p_name))}:</b> {p_days}d — {p_stars} ⭐\n  └ <code>{link}</code>\n"
-            del_label = f"🗑️ Borrar {str(p_name)[:12]}" if lang == "es" else f"🗑️ Delete {str(p_name)[:12]}"
-            kb_rows.append([InlineKeyboardButton(text=del_label, callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}")])
+            p_id, p_name, p_days, p_stars, p_status = p[0], p[1], p[2], p[3], p[4]
+            is_active = (p_status == "active")
+            st_icon = "🟢" if is_active else "🔴"
+            st_text = tr(lang, "Activo", "Active") if is_active else tr(lang, "Pausado", "Paused")
+
+            # 1. Botón principal: abre la previsualización oficial
+            kb_rows.append([
+                InlineKeyboardButton(
+                    text=f"💎 {p_name} — {p_days}d ({p_stars} ⭐)",
+                    callback_data=f"chplans_view_{p_id}_{channel_id}_{lang}"
+                )
+            ])
+            # 2. Fila de controles operativos: [Estado] [Difundir] [Borrar]
+            kb_rows.append([
+                InlineKeyboardButton(
+                    text=f"{st_icon} {st_text}",
+                    callback_data=f"chplans_toggle_{p_id}_{channel_id}_{lang}"
+                ),
+                InlineKeyboardButton(
+                    text="📢 " + tr(lang, "Difundir", "Broadcast"),
+                    callback_data=f"chplans_share_{p_id}_{channel_id}_{lang}"
+                ),
+                InlineKeyboardButton(
+                    text="🗑️",
+                    callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}"
+                ),
+            ])
     else:
-        plans_list_text = "\n<i>(No hay planes activos configurados aún)</i>" if lang == "es" else "\n<i>(No active plans configured yet)</i>"
+        empty_hint = "<i>(No hay planes configurados aún. Toca «Crear Nuevo Plan»)</i>" if lang == "es" else "<i>(No plans configured yet. Tap «Create New Plan»)</i>"
+        kb_rows.append([InlineKeyboardButton(text="ℹ️ " + tr(lang, "Sin planes activos", "No plans active"), callback_data="noop")])
 
     text = (
         f"💎 <b>Gestión de Membresías — {c_name}</b>\n\n"
         f"• <b>Suscriptores Activos:</b> <code>{sub_count}</code>\n"
-        f"• <b>Planes de Suscripción:</b>\n{plans_list_text}\n"
+        f"• <b>Total de Planes:</b> <code>{len(plans)}</code>\n\n"
+        f"<i>Toca el nombre del plan para ver su vista previa comercial, "
+        f"o usa los botones inferiores para activarlo/pausarlo, difundirlo o eliminarlo.</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     ) if lang == "es" else (
         f"💎 <b>Membership Management — {c_name}</b>\n\n"
         f"• <b>Active Subscribers:</b> <code>{sub_count}</code>\n"
-        f"• <b>Subscription Plans:</b>\n{plans_list_text}\n"
+        f"• <b>Total Plans:</b> <code>{len(plans)}</code>\n\n"
+        f"<i>Tap the plan name to preview its commercial layout, "
+        f"or use the controls below to activate/pause, broadcast, or delete.</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
 
@@ -5949,11 +5977,13 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     try:
         sub = data[1]
-        if sub == "del":
+        if sub in ("del", "toggle", "view", "share", "postto"):
             plan_id = int(data[2])
             channel_id = int(data[3])
+            target_chat_id = int(data[4]) if sub == "postto" else None
         else:
             channel_id = int(data[2])
+            plan_id = None
     except (IndexError, ValueError):
         return
 
@@ -5962,13 +5992,140 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     CHAT_KIND_CACHE[channel_id] = "c"
 
-    if sub != "skip":
+    if sub not in ("skip", "view", "share", "postto"):
         clear_user_states(bot.id, callback.from_user.id)
 
+    # 1. Menú principal de planes
     if sub == "menu":
         text, kb = await _render_plans_menu(bot, channel_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
+    # 2. Alternar estado (Activo / Pausado)
+    elif sub == "toggle":
+        new_st = await toggle_channel_plan_status(plan_id)
+        msg_alert = tr(lang, "🟢 Plan activado.", "🟢 Plan activated.") if new_st == "active" else tr(lang, "🔴 Plan pausado.", "🔴 Plan paused.")
+        await callback.answer(msg_alert)
+        text, kb = await _render_plans_menu(bot, channel_id, lang)
+        await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+
+    # 3. Vista previa comercial limpia (el enlace VIP va sólo en botón inline)
+    elif sub == "view":
+        plan = await get_channel_plan(plan_id)
+        if not plan:
+            await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️️ Plan not found."), show_alert=True)
+            return
+
+        bot_info = await bot.get_me()
+        bot_user = bot_info.username or "TheBunkerBot"
+        buy_url = f"https://t.me/{bot_user}?start=chanplan_{plan['plan_id']}_{channel_id}"
+
+        # Cuerpo del copy formateado (sin links en texto plano)
+        caption_body = (
+            f"💎 <b>{html.escape(plan['plan_name'])}</b>\n\n"
+            f"⏳ <b>Duración:</b> {plan['duration_days']} " + tr(lang, "días", "days") + "\n"
+            f"⭐ <b>Precio:</b> {plan['stars_price']} XTR (Stars)\n\n"
+            f"{plan.get('promo_text') or ''}"
+        ) + PERIMETER_SIGNATURE
+
+        inline_rows = [
+            [InlineKeyboardButton(text=f"⭐ Suscribirme ({plan['stars_price']} Stars)" if lang == "es" else f"⭐ Subscribe ({plan['stars_price']} Stars)", url=buy_url)]
+        ]
+        if plan.get("target_link"):
+            clean_link = plan["target_link"] if plan["target_link"].startswith("http") else f"https://t.me/{plan['target_link'].lstrip('@')}"
+            inline_rows.append([InlineKeyboardButton(text="🔗 " + tr(lang, "Acceder al Recurso VIP", "Access VIP Resource"), url=clean_link)])
+
+        inline_rows.append([InlineKeyboardButton(text="🔙 " + tr(lang, "Volver a Planes", "Back to Plans"), callback_data=f"chplans_menu_{channel_id}_{lang}")])
+        preview_kb = InlineKeyboardMarkup(inline_keyboard=inline_rows)
+
+        # Enviar con media o texto según corresponda
+        m_id, m_type = plan.get("media_id"), plan.get("media_type")
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+
+        if m_id and m_type == "photo":
+            await bot.send_photo(chat_id=callback.from_user.id, photo=m_id, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
+        elif m_id and m_type == "video":
+            await bot.send_video(chat_id=callback.from_user.id, video=m_id, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
+        elif m_id and m_type == "animation":
+            await bot.send_animation(chat_id=callback.from_user.id, animation=m_id, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
+        else:
+            await bot.send_message(chat_id=callback.from_user.id, text=caption_body, reply_markup=preview_kb, parse_mode="HTML")
+
+    # 4. Menú para compartir / difundir en canales o grupos administrados
+    elif sub == "share":
+        plan = await get_channel_plan(plan_id)
+        if not plan:
+            await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
+            return
+
+        groups = await get_active_user_groups(bot, callback.from_user.id)
+        channels = await get_active_user_channels(bot, callback.from_user.id)
+
+        share_rows = []
+        for g_id, g_name in groups:
+            share_rows.append([InlineKeyboardButton(text=f"👥 {g_name[:24]}", callback_data=f"chplans_postto_{plan_id}_{channel_id}_{g_id}_{lang}")])
+        for c_id, c_name in channels:
+            if c_id != channel_id:  # no mostrar el mismo canal de origen
+                share_rows.append([InlineKeyboardButton(text=f"📢 {c_name[:24]}", callback_data=f"chplans_postto_{plan_id}_{channel_id}_{c_id}_{lang}")])
+
+        share_rows.append([InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"chplans_menu_{channel_id}_{lang}")])
+        share_kb = InlineKeyboardMarkup(inline_keyboard=share_rows)
+
+        share_text = (
+            f"📢 <b>Difundir Membresía — {html.escape(plan['plan_name'])}</b>\n\n"
+            f"Selecciona la comunidad o canal administrado donde deseas publicar el anuncio comercial con botón directo de pago en Stars:\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            f"📢 <b>Broadcast Membership — {html.escape(plan['plan_name'])}</b>\n\n"
+            f"Select the managed group or channel where you want to post this announcement with direct Stars checkout:\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+        await safe_edit_text(callback, share_text, reply_markup=share_kb, parse_mode="HTML")
+
+    # 5. Ejecutar la publicación en el destino seleccionado
+    elif sub == "postto":
+        plan = await get_channel_plan(plan_id)
+        if not plan or not target_chat_id:
+            await callback.answer(tr(lang, "⚠️ Error en la publicación.", "⚠️ Broadcast error."), show_alert=True)
+            return
+
+        bot_info = await bot.get_me()
+        bot_user = bot_info.username or "TheBunkerBot"
+        buy_url = f"https://t.me/{bot_user}?start=chanplan_{plan['plan_id']}_{channel_id}"
+
+        post_body = (
+            f"💎 <b>{html.escape(plan['plan_name'])}</b>\n\n"
+            f"⏳ <b>Duración:</b> {plan['duration_days']} " + tr(lang, "días", "days") + "\n"
+            f"⭐ <b>Precio:</b> {plan['stars_price']} XTR\n\n"
+            f"{plan.get('promo_text') or ''}"
+        ) + PERIMETER_SIGNATURE
+
+        post_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"⭐ Obtener Acceso ({plan['stars_price']} Stars)" if lang == "es" else f"⭐ Get Access ({plan['stars_price']} Stars)", url=buy_url)]
+        ])
+
+        m_id, m_type = plan.get("media_id"), plan.get("media_type")
+        try:
+            if m_id and m_type == "photo":
+                await bot.send_photo(chat_id=target_chat_id, photo=m_id, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
+            elif m_id and m_type == "video":
+                await bot.send_video(chat_id=target_chat_id, video=m_id, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
+            elif m_id and m_type == "animation":
+                await bot.send_animation(chat_id=target_chat_id, animation=m_id, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
+            else:
+                await bot.send_message(chat_id=target_chat_id, text=post_body, reply_markup=post_kb, parse_mode="HTML")
+
+            await callback.answer(tr(lang, "✅ ¡Anuncio publicado con éxito!", "✅ Announcement published successfully!"), show_alert=True)
+        except Exception as post_err:
+            logging.error(f"❌ [Channel Plans Share] Error publicando en {target_chat_id}: {post_err}")
+            await callback.answer(tr(lang, "⚠️ No se pudo publicar. Verifica permisos del bot.", "⚠️ Broadcast failed. Check bot permissions."), show_alert=True)
+
+        text, kb = await _render_plans_menu(bot, channel_id, lang)
+        await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+
+    # 6. Crear nuevo plan
     elif sub == "add":
         tier = await get_effective_group_tier(channel_id, callback.from_user.id)
         limit = CHAN_PLAN_TIER_LIMITS.get(tier, CHAN_PLAN_TIER_LIMITS["free"])
@@ -5979,13 +6136,13 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
                 f"🔒 <b>Límite de Planes Alcanzado</b>\n\n"
                 f"Tu licencia actual (<b>{tier.upper()}</b>) permite un máximo de <b>{limit}</b> plan(es) de membresía activos, "
                 f"y ya tienes <b>{len(active_plans)}</b> configurado(s).\n\n"
-                f"Elimina un plan existente o mejora tu licencia para desbloquear más cupos.\n\n"
+                f"Elimina o pausa un plan existente para desbloquear más cupos.\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 f"🔒 <b>Plan Limit Reached</b>\n\n"
                 f"Your current license (<b>{tier.upper()}</b>) allows a maximum of <b>{limit}</b> active membership plan(s), "
                 f"and you already have <b>{len(active_plans)}</b> configured.\n\n"
-                f"Delete an existing plan or upgrade your license to unlock more slots.\n\n"
+                f"Delete or pause an existing plan to unlock more slots.\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             limit_kb_rows = []
@@ -6016,6 +6173,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         )
         fire_and_forget_auto_delete([prompt], delay=60)
 
+    # 7. Omitir multimedia durante creación
     elif sub == "skip":
         skip_key = (bot.id, callback.from_user.id)
         restore_state = globals().get("restore_plan_state")
@@ -6028,7 +6186,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             info_text = (
                 "ℹ️ No hay una creación de plan en curso para omitir (el servidor pudo haberse reiniciado)."
                 if lang == "es" else
-                "ℹ️ There's no plan creation in progress to skip (the server may have restarted)."
+                "ℹ️️ There's no plan creation in progress to skip (the server may have restarted)."
             ) + PERIMETER_SIGNATURE
             info_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_create_plan"], callback_data=f"chplans_add_{channel_id}_{lang}")],
@@ -6065,10 +6223,12 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         fire_and_forget_auto_delete([resp], delay=60)
         return
 
+    # 8. Eliminar plan
     elif sub == "del":
-        plans = await get_channel_plans(channel_id, only_active=True)
+        plans = await get_channel_plans(channel_id, only_active=False)
         if plan_id in {p[0] for p in plans}:
             await delete_channel_plan(plan_id)
+            await callback.answer(tr(lang, "🗑️ Plan eliminado.", "🗑️ Plan deleted."))
 
         text, kb = await _render_plans_menu(bot, channel_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")

@@ -2251,6 +2251,19 @@ def set_channel_plan_status(plan_id: int, status: str):
         cursor.execute("UPDATE channel_plans SET status = ? WHERE plan_id = ?", (status, plan_id))
         conn.commit()
 
+def toggle_channel_plan_status(plan_id: int) -> str:
+    """Alterna el estado del plan de membresía entre 'active' y 'paused'."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM channel_plans WHERE plan_id = ?", (plan_id,))
+        row = cursor.fetchone()
+        if not row:
+            return "active"
+        new_status = "paused" if row[0] == "active" else "active"
+        cursor.execute("UPDATE channel_plans SET status = ? WHERE plan_id = ?", (new_status, plan_id))
+        conn.commit()
+        return new_status        
+
 
 def delete_channel_plan(plan_id: int):
     with get_db_connection() as conn:
@@ -2873,6 +2886,7 @@ _ASYNC_WRAPPED_FUNCTIONS = [
     "get_channel_plan",
     "get_channel_plans",
     "set_channel_plan_status",
+    "toggle_channel_plan_status",
     "delete_channel_plan",
     "set_channel_plan_broadcast_config",
     "disable_channel_plan_broadcast",
