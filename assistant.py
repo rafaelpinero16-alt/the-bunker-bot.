@@ -339,7 +339,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Fase 3 y 4: Publica el aviso de atenuación al 2% con soporte de mensajes personalizados (PRO/ULTRA)."""
+    """Publica el aviso de atenuación al 2% con soporte de imagen corporativa y copy corto."""
     if not _global_bot:
         return
     try:
@@ -354,7 +354,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
 
-        # Verificación de nivel y configuración personalizada
         tier = (await get_group_tier(chat_id) or "free").lower()
         svc_cfg = await get_sentinel_service_messages_config(chat_id)
         custom_text = svc_cfg.get("vc_text")
@@ -362,11 +361,15 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         if tier in ("pro", "ultra_pro") and custom_text:
             text = custom_text.replace("{user_name}", user_name)
         else:
-            template = VC_MEMBER_JOIN_TEXTS.get(lang, VC_MEMBER_JOIN_TEXTS["es"])
-            text = template.format(user_name=user_name)
+            # Copy corto sugerido basado en la captura compartida
+            text = (
+                f"⚜️ <b>The Bunker O.S.</b>\n\n"
+                f"🔇 <i>{user_name}, el búnker ha establecido por defecto el volumen al 2%.</i>\n\n"
+                f"¿Quieres desbloquear el 100% de tu micrófono? Presiona el botón inferior para activar tu pase VIP.\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
 
         markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price=price)
-
         media_id = svc_cfg.get("vc_media_id") if tier == "ultra_pro" else None
         media_type = svc_cfg.get("vc_media_type") if tier == "ultra_pro" else None
 

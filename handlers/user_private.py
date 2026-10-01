@@ -2276,7 +2276,8 @@ def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
         InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")
     )
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_ai_sentinel"], callback_data=f"ai_menu_{group_id}_{lang}")], # <--- ¡Botón de IA añadido aquí!
+        [InlineKeyboardButton(text=t["btn_ai_sentinel"], callback_data=f"ai_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="⚙️ " + ("Configuración del Centinela" if lang == "es" else "Sentinel Settings"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🚨 " + ("Botón de Pánico" if lang == "es" else "Panic Button"), callback_data=f"panic_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎥 " + ("Escudo Antinota" if lang == "es" else "Screen-Share Shield"), callback_data=f"shield_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],

@@ -1112,7 +1112,7 @@ def set_radar_config(group_id: int, field: str, value):
 
 @db_async
 def get_sentinel_service_messages_config(group_id: int) -> dict:
-    """Lee la configuración de mensajes de servicio personalizados del Centinela (VC y Optimización)."""
+    """Lee la configuración de mensajes de servicio personalizados del Centinela."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
@@ -1131,11 +1131,12 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
             pass
         return {"vc_text": None, "vc_media_id": None, "vc_media_type": None, "reset_text": None, "reset_media_id": None, "reset_media_type": None}
 
-
 @db_async
 def set_sentinel_service_message(group_id: int, field: str, value):
-    valid = ["vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
-             "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"]
+    valid = [
+        "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type",
+        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type"
+    ]
     if field not in valid:
         return
     with get_db_connection() as conn:
