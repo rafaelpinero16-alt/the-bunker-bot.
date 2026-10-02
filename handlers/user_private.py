@@ -6024,12 +6024,12 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
     txt_custom = tr(lang, "🟢 Personalizado", "🟢 Custom")
     txt_default = tr(lang, "⚪ Por defecto", "⚪ Default")
 
-    # 2. Interruptores ON / OFF (🟢 = Activado, 🔴 = Desactivado/En edición)
-    sw_vc = "🟢" if cfg.get("vc_enabled", 1) == 1 else "🔴"
-    sw_mic = "🟢" if cfg.get("micvip_enabled", 1) == 1 else "🔴"
-    sw_reset = "🟢" if cfg.get("reset_enabled", 1) == 1 else "🔴"
-    sw_sched = "🟢" if cfg.get("sched_enabled", 1) == 1 else "🔴"
-    sw_welcome = "🟢" if cfg.get("vc_welcome_enabled", 1) == 1 else "🔴"
+   # Lectura estricta de interruptores (1 = 🟢, 0 = 🔴)
+    sw_vc = "🟢" if int(cfg.get("vc_enabled", 1) or 0) == 1 else "🔴"
+    sw_mic = "🟢" if int(cfg.get("micvip_enabled", 1) or 0) == 1 else "🔴"
+    sw_reset = "🟢" if int(cfg.get("reset_enabled", 1) or 0) == 1 else "🔴"
+    sw_sched = "🟢" if int(cfg.get("sched_enabled", 1) or 0) == 1 else "🔴"
+    sw_welcome = "🟢" if int(cfg.get("vc_welcome_enabled", 1) or 0) == 1 else "🔴"
 
     txt_active = tr(lang, "Servicio Activo", "Service Active")
     txt_disabled = tr(lang, "Silenciado (En Edición)", "Muted (Editing)")
@@ -6382,13 +6382,20 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         text, kb = await _render_plans_menu(bot, channel_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
-    # 2. Alternar estado (Activo / Pausado)
+    # 2. Activar / pausar plan de membresía
     elif sub == "toggle":
-        new_st = await toggle_channel_plan_status(plan_id)
-        msg_alert = tr(lang, "🟢 Plan activado.", "🟢 Plan activated.") if new_st == "active" else tr(lang, "🔴 Plan pausado.", "🔴 Plan paused.")
-        await callback.answer(msg_alert)
+        plan = await get_channel_plan(plan_id)
+        if not plan:
+            await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
+            return
+
+        new_status = await toggle_channel_plan_status(plan_id)
+        status_label = tr(lang, "🟢 Plan activado.", "🟢 Plan activated.") if new_status == "active" else tr(lang, "🔴 Plan pausado.", "🔴 Plan paused.")
+        await callback.answer(status_label)
+
         text, kb = await _render_plans_menu(bot, channel_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+        return
 
     # 3. Vista previa comercial limpia (el enlace VIP va sólo en botón inline)
     elif sub == "view":
