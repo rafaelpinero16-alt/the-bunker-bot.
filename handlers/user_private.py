@@ -3451,7 +3451,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
-        # 3. Copy / Multimedia
+        # 3. Copy / Multimedia (Foto, Video o Animación)
         elif field_type == "msg":
             media_id = media_type = None
             if tier == "ultra_pro":
@@ -3462,14 +3462,18 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 elif message.animation:
                     media_id, media_type = message.animation.file_id, "animation"
 
-            col_prefix = f"{prefix}_custom" if target in ("vc", "micvip", "reset") else prefix
+            # Prefijo unificado para coincidir con el esquema real de database.py
+            col_prefix = f"{prefix}_custom"
             if text_val:
                 await set_sentinel_service_message(group_id, f"{col_prefix}_text", message.html_text.strip())
             if media_id and media_type:
                 await set_sentinel_service_message(group_id, f"{col_prefix}_media_id", media_id)
                 await set_sentinel_service_message(group_id, f"{col_prefix}_media_type", media_type)
 
-            resp = await message.answer(f"✅ <b>Mensaje de {target.upper()} guardado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(
+                f"✅ <b>{tr(lang, 'Mensaje y multimedia guardados con éxito para', 'Notice and media saved successfully for')} {target.upper()}!</b>\n\n🛡️️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
@@ -6014,41 +6018,31 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
     cfg = await get_sentinel_service_messages_config(group_id)
 
-    # 1. Estados de personalización (Custom vs Default)
-    vc_on = bool(cfg.get("vc_text") or cfg.get("vc_media_id") or cfg.get("vc_btn"))
-    mic_on = bool(cfg.get("micvip_text") or cfg.get("micvip_media_id") or cfg.get("micvip_btn"))
-    reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id") or cfg.get("reset_btn"))
-    sched_on = bool(cfg.get("sched_start_text") or cfg.get("sched_start_media_id"))
-    welcome_on = bool(cfg.get("vc_welcome_text") or cfg.get("vc_welcome_media_id") or cfg.get("vc_welcome_btn"))
-
-    txt_custom = tr(lang, "🟢 Personalizado", "🟢 Custom")
-    txt_default = tr(lang, "⚪ Por defecto", "⚪ Default")
-
-   # Lectura estricta de interruptores (1 = 🟢, 0 = 🔴)
+    # 1. Estados de activación (1 = 🟢 Activado, 0 = 🔴 Desactivado / En edición)
     sw_vc = "🟢" if int(cfg.get("vc_enabled", 1) or 0) == 1 else "🔴"
     sw_mic = "🟢" if int(cfg.get("micvip_enabled", 1) or 0) == 1 else "🔴"
     sw_reset = "🟢" if int(cfg.get("reset_enabled", 1) or 0) == 1 else "🔴"
     sw_sched = "🟢" if int(cfg.get("sched_enabled", 1) or 0) == 1 else "🔴"
     sw_welcome = "🟢" if int(cfg.get("vc_welcome_enabled", 1) or 0) == 1 else "🔴"
 
-    txt_active = tr(lang, "Servicio Activo", "Service Active")
-    txt_disabled = tr(lang, "Silenciado (En Edición)", "Muted (Editing)")
+    txt_active = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE")
+    txt_disabled = tr(lang, "🔴 DESACTIVADO (EN EDICIÓN)", "🔴 DISABLED (EDITING)")
 
-    st_desc_vc = txt_active if cfg.get("vc_enabled", 1) == 1 else txt_disabled
-    st_desc_mic = txt_active if cfg.get("micvip_enabled", 1) == 1 else txt_disabled
-    st_desc_reset = txt_active if cfg.get("reset_enabled", 1) == 1 else txt_disabled
-    st_desc_sched = txt_active if cfg.get("sched_enabled", 1) == 1 else txt_disabled
-    st_desc_welcome = txt_active if cfg.get("vc_welcome_enabled", 1) == 1 else txt_disabled
+    st_desc_vc = txt_active if sw_vc == "🟢" else txt_disabled
+    st_desc_mic = txt_active if sw_mic == "🟢" else txt_disabled
+    st_desc_reset = txt_active if sw_reset == "🟢" else txt_disabled
+    st_desc_sched = txt_active if sw_sched == "🟢" else txt_disabled
+    st_desc_welcome = txt_active if sw_welcome == "🟢" else txt_disabled
 
     text = (
         f"⚙️ <b>{tr(lang, 'Configuración del Centinela (Sentinel Settings)', 'Sentinel Settings')}</b>\n\n"
         f"{tr(lang, 'Control de avisos y directivas de voz en vivo:', 'Live voice notices and service directives control:')}\n\n"
-        f"• 🎙️ <b>{tr(lang, 'Entrada al VC', 'VC Join Notice')}:</b> {txt_custom if vc_on else txt_default} ({sw_vc} {st_desc_vc})\n"
-        f"• ⭐ <b>{tr(lang, 'Aviso MicVIP', 'MicVIP Notice')}:</b> {txt_custom if mic_on else txt_default} ({sw_mic} {st_desc_mic})\n"
-        f"• 🔄 <b>{tr(lang, 'Optimización (3.5h)', 'Optimization (3.5h)')}:</b> {txt_custom if reset_on else txt_default} ({sw_reset} {st_desc_reset})\n"
-        f"• 📡 <b>{tr(lang, 'Apertura Programada', 'Scheduled Opening')}:</b> {txt_custom if sched_on else txt_default} ({sw_sched} {st_desc_sched})\n"
-        f"• 📌 <b>{tr(lang, 'Bienvenida General VC', 'VC Welcome Notice')}:</b> {txt_custom if welcome_on else txt_default} ({sw_welcome} {st_desc_welcome})\n\n"
-        f"<i>{tr(lang, 'Toca el botón con el indicador para encender (🟢) o apagar (🔴) cualquier mensaje mientras lo editas:', 'Tap the indicator button to enable (🟢) or disable (🔴) any notice while editing:')}</i>\n\n"
+        f"• 🎙️ <b>{tr(lang, 'Entrada al VC', 'VC Join Notice')}:</b> {st_desc_vc}\n"
+        f"• ⭐ <b>{tr(lang, 'Aviso MicVIP', 'MicVIP Notice')}:</b> {st_desc_mic}\n"
+        f"• 🔄 <b>{tr(lang, 'Optimización (3.5h)', 'Optimization (3.5h)')}:</b> {st_desc_reset}\n"
+        f"• 📡 <b>{tr(lang, 'Apertura Programada', 'Scheduled Opening')}:</b> {st_desc_sched}\n"
+        f"• 📌 <b>{tr(lang, 'Bienvenida General VC', 'VC Welcome Notice')}:</b> {st_desc_welcome}\n\n"
+        f"<i>{tr(lang, 'Toca el botón indicador para activar (🟢) o desactivar (🔴) cualquier servicio mientras lo editas:', 'Tap the indicator button to enable (🟢) or disable (🔴) any service while editing:')}</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
 
@@ -6057,10 +6051,10 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
         [
             InlineKeyboardButton(text=f"{sw_vc} VC", callback_data=f"sentinelcfg_toggle_vc_{group_id}_{lang}"),
             InlineKeyboardButton(text="✍️", callback_data=f"sentinelcfg_edit_vc_msg_{group_id}_{lang}"),
-            InlineKeyboardButton(text="🏷️️", callback_data=f"sentinelcfg_edit_vc_btn_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🏷️", callback_data=f"sentinelcfg_edit_vc_btn_{group_id}_{lang}"),
             InlineKeyboardButton(text="⏱️", callback_data=f"sentinelcfg_edit_vc_autodel_{group_id}_{lang}"),
             InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}"),
-            InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_vc_{group_id}_{lang}")
+            InlineKeyboardButton(text="🗑️️", callback_data=f"sentinelcfg_default_vc_{group_id}_{lang}")
         ],
         # 2. MicVIP
         [
@@ -6091,8 +6085,8 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
         # 5. Bienvenida General VC
         [
             InlineKeyboardButton(text=f"{sw_welcome} Pinned", callback_data=f"sentinelcfg_toggle_vcwelcome_{group_id}_{lang}"),
-            InlineKeyboardButton(text="✍️", callback_data=f"sentinelcfg_edit_vcwelcome_msg_{group_id}_{lang}"),
-            InlineKeyboardButton(text="🏷️️", callback_data=f"sentinelcfg_edit_vcwelcome_btn_{group_id}_{lang}"),
+            InlineKeyboardButton(text="✍️️", callback_data=f"sentinelcfg_edit_vcwelcome_msg_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🏷️", callback_data=f"sentinelcfg_edit_vcwelcome_btn_{group_id}_{lang}"),
             InlineKeyboardButton(text="⏱️", callback_data=f"sentinelcfg_edit_vcwelcome_autodel_{group_id}_{lang}"),
             InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vcwelcome_{group_id}_{lang}"),
             InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_vcwelcome_{group_id}_{lang}")
@@ -6138,25 +6132,27 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
     elif sub == "toggle":
         cfg = await get_sentinel_service_messages_config(group_id)
         prefix_sw = {
-            "vc": "vc_join_enabled",
-            "micvip": "mic_vip_enabled",
-            "reset": "reset_notice_enabled",
-            "sched": "vc_sched_start_enabled",
-            "vcwelcome": "vc_welcome_enabled"
+            "vc": ("vc_join_enabled", "vc_enabled"),
+            "micvip": ("mic_vip_enabled", "micvip_enabled"),
+            "reset": ("reset_notice_enabled", "reset_enabled"),
+            "sched": ("vc_sched_start_enabled", "sched_enabled"),
+            "vcwelcome": ("vc_welcome_enabled", "vc_welcome_enabled")
         }
-        col_sw = prefix_sw.get(target_msg, "vc_join_enabled")
-        current_st = cfg.get(f"{'vc' if target_msg == 'vc' else ('micvip' if target_msg == 'micvip' else ('reset' if target_msg == 'reset' else ('sched' if target_msg == 'sched' else 'vc_welcome')))}_enabled", 1)
+        col_db, key_cfg = prefix_sw.get(target_msg, ("vc_join_enabled", "vc_enabled"))
+        current_st = int(cfg.get(key_cfg, 1) or 0)
         new_st = 0 if current_st == 1 else 1
-        await set_sentinel_service_message(group_id, col_sw, new_st)
+
+        await set_sentinel_service_message(group_id, col_db, new_st)
 
         msg_alert = (
-            tr(lang, f"🟢 {target_msg.upper()}: Mensaje activado en el chat.", f"🟢 {target_msg.upper()}: Notice enabled in chat.")
+            tr(lang, f"🟢 {target_msg.upper()}: Servicio activado.", f"🟢 {target_msg.upper()}: Service enabled.")
             if new_st == 1 else
-            tr(lang, f"🔴 {target_msg.upper()}: Mensaje apagado (silenciado durante edición).", f"🔴 {target_msg.upper()}: Notice disabled (muted during editing).")
+            tr(lang, f"🔴 {target_msg.upper()}: Servicio desactivado (en edición).", f"🔴 {target_msg.upper()}: Service disabled (editing).")
         )
         await callback.answer(msg_alert)
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+        return
 
     # 3. Reset por defecto (🗑️)
     elif sub == "default":
