@@ -236,12 +236,15 @@ def init_db():
             ("ai_guardian_status", "INTEGER DEFAULT 0"),
             ("ai_copilot_status", "INTEGER DEFAULT 0"),
             ("ai_custom_prompt", "TEXT"),
-            ("vc_join_custom_text", "TEXT"),
-            ("vc_join_custom_media_id", "TEXT"),
-            ("vc_join_custom_media_type", "TEXT"),
-            ("vc_join_btn_text", "TEXT"),
-            ("vc_join_autodel_seconds", "INTEGER DEFAULT 30"),
-            ("mic_vip_custom_text", "TEXT"),
+            ("vc_sched_start_custom_text", "TEXT"),
+            ("vc_sched_start_custom_media_id", "TEXT"),
+            ("vc_sched_start_custom_media_type", "TEXT"),
+            ("vc_sched_start_autodel_seconds", "INTEGER DEFAULT 0"),
+            ("vc_welcome_custom_text", "TEXT"),
+            ("vc_welcome_custom_media_id", "TEXT"),
+            ("vc_welcome_custom_media_type", "TEXT"),
+            ("vc_welcome_btn_text", "TEXT"),
+            ("vc_welcome_autodel_seconds", "INTEGER DEFAULT 0"),("mic_vip_custom_text", "TEXT"),
             ("mic_vip_custom_media_id", "TEXT"),
             ("mic_vip_custom_media_type", "TEXT"),
             ("mic_vip_btn_text", "TEXT"),
@@ -1127,35 +1130,40 @@ def set_radar_config(group_id: int, field: str, value):
 
 @db_async
 def get_sentinel_service_messages_config(group_id: int) -> dict:
-    """Lee la configuración completa y simétrica de los 3 servicios de videollamada."""
+    """Lee la configuración completa y simétrica de los servicios de videollamada."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         try:
             cursor.execute("""
                 SELECT vc_join_custom_text, vc_join_custom_media_id, vc_join_custom_media_type, vc_join_btn_text, vc_join_autodel_seconds,
                        mic_vip_custom_text, mic_vip_custom_media_id, mic_vip_custom_media_type, mic_vip_btn_text, mic_vip_autodel_seconds,
-                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type, reset_notice_btn_text, reset_notice_autodel_seconds
+                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type, reset_notice_btn_text, reset_notice_autodel_seconds,
+                       vc_sched_start_custom_text, vc_sched_start_custom_media_id, vc_sched_start_custom_media_type, vc_sched_start_autodel_seconds,
+                       vc_welcome_custom_text, vc_welcome_custom_media_id, vc_welcome_custom_media_type, vc_welcome_btn_text, vc_welcome_autodel_seconds
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
-                    # 1. VC Join Notice
-                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2],
-                    "vc_btn": row[3], "vc_autodel": row[4] if row[4] is not None else 30,
-                    # 2. MicVIP Notice
-                    "micvip_text": row[5], "micvip_media_id": row[6], "micvip_media_type": row[7],
-                    "micvip_btn": row[8], "micvip_autodel": row[9] if row[9] is not None else 30,
-                    # 3. Optimization Notice
-                    "reset_text": row[10], "reset_media_id": row[11], "reset_media_type": row[12],
-                    "reset_btn": row[13], "reset_autodel": row[14] if row[14] is not None else 20
+                    # 1. VC Join
+                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2], "vc_btn": row[3], "vc_autodel": row[4] if row[4] is not None else 30,
+                    # 2. MicVIP
+                    "micvip_text": row[5], "micvip_media_id": row[6], "micvip_media_type": row[7], "micvip_btn": row[8], "micvip_autodel": row[9] if row[9] is not None else 30,
+                    # 3. Reset
+                    "reset_text": row[10], "reset_media_id": row[11], "reset_media_type": row[12], "reset_btn": row[13], "reset_autodel": row[14] if row[14] is not None else 20,
+                    # 4. VC Sched Start
+                    "sched_start_text": row[15], "sched_start_media_id": row[16], "sched_start_media_type": row[17], "sched_start_autodel": row[18] if row[18] is not None else 0,
+                    # 5. VC Welcome
+                    "vc_welcome_text": row[19], "vc_welcome_media_id": row[20], "vc_welcome_media_type": row[21], "vc_welcome_btn": row[22], "vc_welcome_autodel": row[23] if row[23] is not None else 0
                 }
         except sqlite3.OperationalError:
             pass
         return {
             "vc_text": None, "vc_media_id": None, "vc_media_type": None, "vc_btn": None, "vc_autodel": 30,
             "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None, "micvip_btn": None, "micvip_autodel": 30,
-            "reset_text": None, "reset_media_id": None, "reset_media_type": None, "reset_btn": None, "reset_autodel": 20
+            "reset_text": None, "reset_media_id": None, "reset_media_type": None, "reset_btn": None, "reset_autodel": 20,
+            "sched_start_text": None, "sched_start_media_id": None, "sched_start_media_type": None, "sched_start_autodel": 0,
+            "vc_welcome_text": None, "vc_welcome_media_id": None, "vc_welcome_media_type": None, "vc_welcome_btn": None, "vc_welcome_autodel": 0
         }
 
 @db_async
@@ -1163,7 +1171,9 @@ def set_sentinel_service_message(group_id: int, field: str, value):
     valid = [
         "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type", "vc_join_btn_text", "vc_join_autodel_seconds",
         "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type", "mic_vip_btn_text", "mic_vip_autodel_seconds",
-        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_autodel_seconds"
+        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_autodel_seconds",
+        "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_autodel_seconds",
+        "vc_welcome_custom_text", "vc_welcome_custom_media_id", "vc_welcome_custom_media_type", "vc_welcome_btn_text", "vc_welcome_autodel_seconds"
     ]
     if field not in valid:
         return

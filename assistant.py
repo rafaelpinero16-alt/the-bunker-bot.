@@ -422,85 +422,82 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
 
 
 async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
-    """Envía el aviso de apertura del VC y conserva el último banner como mensaje anclado."""
+    """Despacha y fija la bienvenida general al videochat según el nivel del grupo (Free / PRO / ULTRA)."""
     if not _global_bot:
-        return None
-
+        return
     try:
-        svc_cfg = await get_sentinel_service_messages_config(chat_id)
-        text = svc_cfg.get("vc_start_text") or VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
-        custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
-
-        if not isinstance(text, str):
-            text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
-
         bot_info = await _global_bot.get_me()
         bot_username = bot_info.username or "thebunkerapp_bot"
-        price = await get_mic_vip_price(chat_id) or 50
-        markup = build_vc_moderation_keyboard(
-            chat_id=chat_id,
-            bot_username=bot_username,
-            lang=lang,
-            price=price,
-            custom_btn_text=custom_btn,
-        )
+        tier = (await get_group_tier(chat_id) or "free").lower()
+        svc_cfg = await get_sentinel_service_messages_config(chat_id)
 
-        media_id = svc_cfg.get("vc_start_media_id") or svc_cfg.get("vc_media_id")
-        media_type = svc_cfg.get("vc_start_media_type") or svc_cfg.get("vc_media_type")
+        custom_text = svc_cfg.get("vc_welcome_text")
+        custom_btn = svc_cfg.get("vc_welcome_btn")
+        media_id = svc_cfg.get("vc_welcome_media_id") if tier == "ultra_pro" else None
+        media_type = svc_cfg.get("vc_welcome_media_type") if tier == "ultra_pro" else None
+        autodel = svc_cfg.get("vc_welcome_autodel", 0)
+
+        pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
+
+        # Lógica de Botonera:
+        # Modo Free: Botón estándar + toggle de idioma para usuarios regulares
+        if tier == "free" or not custom_btn:
+            btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
+            if tier == "free":
+                btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
+                next_lang = "en" if lang == "es" else "es"
+                markup = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=btn_activate, url=pay_url)],
+                    [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
+                ])
+            else:
+                markup = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=btn_activate, url=pay_url)]
+                ])
+        else:
+            # Modo PRO / ULTRA PRO con botón personalizado
+            markup = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=custom_btn, url=pay_url)]
+            ])
+
+        # Texto del mensaje
+        if tier in ("pro", "ultra_pro") and custom_text:
+            text = custom_text
+        else:
+            text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
+
         cleaned_text, extracted_markup = _extract_urls_to_markup(text)
         final_markup = markup if markup else extracted_markup
 
-        last_id = _pinned_vc_messages.get(chat_id)
-        if last_id:
-            try:
-                await _global_bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except Exception:
-                pass
-            _pinned_vc_messages.pop(chat_id, None)
-
         sent = None
         if media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(
-                chat_id=chat_id,
-                photo=media_id,
-                caption=cleaned_text,
-                reply_markup=final_markup,
-                parse_mode="HTML",
-            )
+            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         elif media_id and media_type == "video":
-            sent = await _global_bot.send_video(
-                chat_id=chat_id,
-                video=media_id,
-                caption=cleaned_text,
-                reply_markup=final_markup,
-                parse_mode="HTML",
-            )
+            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(
-                chat_id=chat_id,
-                animation=media_id,
-                caption=cleaned_text,
-                reply_markup=final_markup,
-                parse_mode="HTML",
-            )
+            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
         else:
-            sent = await _global_bot.send_message(
-                chat_id=chat_id,
-                text=cleaned_text,
-                reply_markup=final_markup,
-                parse_mode="HTML",
-            )
+            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
 
         if sent:
-            _pinned_vc_messages[chat_id] = sent.message_id
             try:
-                await _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, disable_notification=True)
+                await _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, both_sides=True)
             except Exception:
                 pass
-        return sent
+            _pinned_vc_messages[chat_id] = sent.message_id
+            logger.info(f"📌 [VideoChat Moderation] Mensaje de bienvenida fijado en comunidad {chat_id}.")
+
+            if autodel and autodel > 0:
+                async def _auto_del_welcome(msg, delay: int):
+                    await asyncio.sleep(delay)
+                    try:
+                        await msg.delete()
+                    except Exception:
+                        pass
+                asyncio.create_task(_auto_del_welcome(sent, autodel))
+
     except Exception as e:
-        logger.warning(f"Aviso despachando welcome de VC en {chat_id}: {e}")
-        return None
+        logger.warning(f"Aviso al despachar y fijar bienvenida de VC en {chat_id}: {e}")
 
 
 async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str, str | None, int]:
