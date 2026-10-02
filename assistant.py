@@ -339,8 +339,13 @@ def build_vc_moderation_keyboard(
 _vc_notice_locks = {}
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con botón configurable y auto-borrado dinámico."""
+    """Publica el aviso de atenuación al 2% etiquetando siempre al usuario con botón y tiempo configurados."""
     if not _global_bot:
+        return
+
+    # 1. Comprobación de interruptor individual (ON / OFF)
+    svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    if svc_cfg.get("vc_enabled", 1) == 0:
         return
 
     now = time.time()
@@ -361,7 +366,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         bot_username = bot_info.username or "thebunkerapp_bot"
         price = await get_mic_vip_price(chat_id) or 50
 
-        svc_cfg = await get_sentinel_service_messages_config(chat_id)
         custom_text = svc_cfg.get("vc_text")
         custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
         
@@ -370,12 +374,20 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         except (ValueError, TypeError):
             autodel_time = 30
         
+        # 🎯 Etiquetado garantizado en cualquier modalidad:
+        # Si hay texto personalizado (PRO / ULTRA PRO), sustituye todos los marcadores habituales
         if custom_text:
-            text = custom_text.replace("{user_name}", user_name).replace("{name}", user_name)
+            text = (
+                custom_text.replace("{user_name}", user_name)
+                .replace("{mention}", user_name)
+                .replace("{user}", user_name)
+                .replace("{name}", user_name)
+            )
         else:
+            # Plantilla por defecto (Free) con etiquetado explícito
             text = (
                 f"⚜️ <b>The Bunker O.S.</b>\n\n"
-                f"🔇 <i>{user_name}, el búnker ha establecido por defecto el volumen al 2%.</i>\n\n"
+                f"🔇 {user_name}, <i>el búnker ha establecido por defecto tu volumen al 2%.</i>\n\n"
                 f"¿Quieres desbloquear el 100% de tu micrófono? Presiona el botón inferior para activar tu pase VIP.\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
@@ -405,7 +417,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
 
         if sent:
             _last_vc_notice[chat_id] = sent.message_id
-            
             if autodel_time > 0:
                 async def _auto_del_notice(target_msg, delay: int):
                     await asyncio.sleep(delay)
@@ -1175,18 +1186,24 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         if u_id not in alerted_users and not night_active:
                             alerted_users.add(u_id)
                             raw_u = user_obj.username if (user_obj and getattr(user_obj, "username", None)) else ""
-                            user_name = f"@{raw_u}" if raw_u else (html.escape(user_obj.first_name) if user_obj and getattr(user_obj, "first_name", None) else f"ID {u_id}")
+                            first_name = html.escape(user_obj.first_name) if (user_obj and getattr(user_obj, "first_name", None)) else f"Usuario {u_id}"
+                            
+                            # 🎯 Mención garantizada: con @username o mediante hipervínculo tg://user?id
+                            if raw_u:
+                                user_mention = f"@{raw_u}"
+                            else:
+                                user_mention = f'<a href="tg://user?id={u_id}">{first_name}</a>'
 
                             if _global_bot:
                                 try:
                                     if noise_spike:
                                         await _dispatch_radar_notice(
                                             chat_id=chat_id,
-                                            text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_name),
+                                            text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_mention),
                                             auto_delete_after=30
                                         )
                                     else:
-                                        asyncio.create_task(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_name, lang="es"))
+                                        asyncio.create_task(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
                                 except Exception:
                                     pass
 
