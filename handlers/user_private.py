@@ -6006,7 +6006,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     
 # ==========================================
-# ⚙️ GESTIÓN SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
+# ⚙️ GESTIÓN BILINGÜE Y SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
 # ==========================================
 SENTINEL_CFG_STATES = {}
 
@@ -6014,29 +6014,41 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
     cfg = await get_sentinel_service_messages_config(group_id)
 
-    # Estado de personalización
+    # 1. Estados de personalización (Custom vs Default)
     vc_on = bool(cfg.get("vc_text") or cfg.get("vc_media_id") or cfg.get("vc_btn"))
     mic_on = bool(cfg.get("micvip_text") or cfg.get("micvip_media_id") or cfg.get("micvip_btn"))
     reset_on = bool(cfg.get("reset_text") or cfg.get("reset_media_id") or cfg.get("reset_btn"))
     sched_on = bool(cfg.get("sched_start_text") or cfg.get("sched_start_media_id"))
     welcome_on = bool(cfg.get("vc_welcome_text") or cfg.get("vc_welcome_media_id") or cfg.get("vc_welcome_btn"))
 
-    # Estado de los interruptores (Activo / Silenciado)
+    txt_custom = tr(lang, "🟢 Personalizado", "🟢 Custom")
+    txt_default = tr(lang, "⚪ Por defecto", "⚪ Default")
+
+    # 2. Interruptores ON / OFF (🟢 = Activado, 🔴 = Desactivado/En edición)
     sw_vc = "🟢" if cfg.get("vc_enabled", 1) == 1 else "🔴"
     sw_mic = "🟢" if cfg.get("micvip_enabled", 1) == 1 else "🔴"
     sw_reset = "🟢" if cfg.get("reset_enabled", 1) == 1 else "🔴"
     sw_sched = "🟢" if cfg.get("sched_enabled", 1) == 1 else "🔴"
     sw_welcome = "🟢" if cfg.get("vc_welcome_enabled", 1) == 1 else "🔴"
 
+    txt_active = tr(lang, "Servicio Activo", "Service Active")
+    txt_disabled = tr(lang, "Silenciado (En Edición)", "Muted (Editing)")
+
+    st_desc_vc = txt_active if cfg.get("vc_enabled", 1) == 1 else txt_disabled
+    st_desc_mic = txt_active if cfg.get("micvip_enabled", 1) == 1 else txt_disabled
+    st_desc_reset = txt_active if cfg.get("reset_enabled", 1) == 1 else txt_disabled
+    st_desc_sched = txt_active if cfg.get("sched_enabled", 1) == 1 else txt_disabled
+    st_desc_welcome = txt_active if cfg.get("vc_welcome_enabled", 1) == 1 else txt_disabled
+
     text = (
-        f"⚙️ <b>Configuración del Centinela (Sentinel Settings)</b>\n\n"
-        f"Control de avisos y directivas de voz en vivo:\n\n"
-        f"• 🎙️ <b>Entrada al VC:</b> {'🟢 Personalizado' if vc_on else '⚪ Por defecto'} (Servicio: {sw_vc})\n"
-        f"• ⭐ <b>Aviso MicVIP:</b> {'🟢 Personalizado' if mic_on else '⚪ Por defecto'} (Servicio: {sw_mic})\n"
-        f"• 🔄 <b>Optimización (3.5h):</b> {'🟢 Personalizado' if reset_on else '⚪ Por defecto'} (Servicio: {sw_reset})\n"
-        f"• 📡 <b>Apertura Programada:</b> {'🟢 Personalizado' if sched_on else '⚪ Por defecto'} (Servicio: {sw_sched})\n"
-        f"• 📌 <b>Bienvenida General VC:</b> {'🟢 Personalizado' if welcome_on else '⚪ Por defecto'} (Servicio: {sw_welcome})\n\n"
-        f"<i>Usa el botón {sw_vc} para apagar/encender cualquier aviso mientras lo editas:</i>\n\n"
+        f"⚙️ <b>{tr(lang, 'Configuración del Centinela (Sentinel Settings)', 'Sentinel Settings')}</b>\n\n"
+        f"{tr(lang, 'Control de avisos y directivas de voz en vivo:', 'Live voice notices and service directives control:')}\n\n"
+        f"• 🎙️ <b>{tr(lang, 'Entrada al VC', 'VC Join Notice')}:</b> {txt_custom if vc_on else txt_default} ({sw_vc} {st_desc_vc})\n"
+        f"• ⭐ <b>{tr(lang, 'Aviso MicVIP', 'MicVIP Notice')}:</b> {txt_custom if mic_on else txt_default} ({sw_mic} {st_desc_mic})\n"
+        f"• 🔄 <b>{tr(lang, 'Optimización (3.5h)', 'Optimization (3.5h)')}:</b> {txt_custom if reset_on else txt_default} ({sw_reset} {st_desc_reset})\n"
+        f"• 📡 <b>{tr(lang, 'Apertura Programada', 'Scheduled Opening')}:</b> {txt_custom if sched_on else txt_default} ({sw_sched} {st_desc_sched})\n"
+        f"• 📌 <b>{tr(lang, 'Bienvenida General VC', 'VC Welcome Notice')}:</b> {txt_custom if welcome_on else txt_default} ({sw_welcome} {st_desc_welcome})\n\n"
+        f"<i>{tr(lang, 'Toca el botón con el indicador para encender (🟢) o apagar (🔴) cualquier mensaje mientras lo editas:', 'Tap the indicator button to enable (🟢) or disable (🔴) any notice while editing:')}</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
 
@@ -6045,7 +6057,7 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
         [
             InlineKeyboardButton(text=f"{sw_vc} VC", callback_data=f"sentinelcfg_toggle_vc_{group_id}_{lang}"),
             InlineKeyboardButton(text="✍️", callback_data=f"sentinelcfg_edit_vc_msg_{group_id}_{lang}"),
-            InlineKeyboardButton(text="🏷️", callback_data=f"sentinelcfg_edit_vc_btn_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🏷️️", callback_data=f"sentinelcfg_edit_vc_btn_{group_id}_{lang}"),
             InlineKeyboardButton(text="⏱️", callback_data=f"sentinelcfg_edit_vc_autodel_{group_id}_{lang}"),
             InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vc_{group_id}_{lang}"),
             InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_vc_{group_id}_{lang}")
@@ -6070,7 +6082,7 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
         ],
         # 4. Apertura Programada
         [
-            InlineKeyboardButton(text=f"{sw_sched} Prog.", callback_data=f"sentinelcfg_toggle_sched_{group_id}_{lang}"),
+            InlineKeyboardButton(text=f"{sw_sched} " + tr(lang, "Prog.", "Sched."), callback_data=f"sentinelcfg_toggle_sched_{group_id}_{lang}"),
             InlineKeyboardButton(text="✍️", callback_data=f"sentinelcfg_edit_sched_msg_{group_id}_{lang}"),
             InlineKeyboardButton(text="⏱️", callback_data=f"sentinelcfg_edit_sched_autodel_{group_id}_{lang}"),
             InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_sched_{group_id}_{lang}"),
@@ -6080,7 +6092,7 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
         [
             InlineKeyboardButton(text=f"{sw_welcome} Pinned", callback_data=f"sentinelcfg_toggle_vcwelcome_{group_id}_{lang}"),
             InlineKeyboardButton(text="✍️", callback_data=f"sentinelcfg_edit_vcwelcome_msg_{group_id}_{lang}"),
-            InlineKeyboardButton(text="🏷️", callback_data=f"sentinelcfg_edit_vcwelcome_btn_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🏷️️", callback_data=f"sentinelcfg_edit_vcwelcome_btn_{group_id}_{lang}"),
             InlineKeyboardButton(text="⏱️", callback_data=f"sentinelcfg_edit_vcwelcome_autodel_{group_id}_{lang}"),
             InlineKeyboardButton(text="👁️", callback_data=f"sentinelcfg_view_vcwelcome_{group_id}_{lang}"),
             InlineKeyboardButton(text="🗑️", callback_data=f"sentinelcfg_default_vcwelcome_{group_id}_{lang}")
@@ -6122,7 +6134,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
-    # 2. Interruptor ON / OFF
+    # 2. Interruptor ON / OFF dinámico (Verde 🟢 <-> Rojo 🔴)
     elif sub == "toggle":
         cfg = await get_sentinel_service_messages_config(group_id)
         prefix_sw = {
@@ -6137,7 +6149,12 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         new_st = 0 if current_st == 1 else 1
         await set_sentinel_service_message(group_id, col_sw, new_st)
 
-        await callback.answer(f"{'🟢 Mensaje activado' if new_st == 1 else '🔴 Mensaje apagado (en edición)'}")
+        msg_alert = (
+            tr(lang, f"🟢 {target_msg.upper()}: Mensaje activado en el chat.", f"🟢 {target_msg.upper()}: Notice enabled in chat.")
+            if new_st == 1 else
+            tr(lang, f"🔴 {target_msg.upper()}: Mensaje apagado (silenciado durante edición).", f"🔴 {target_msg.upper()}: Notice disabled (muted during editing).")
+        )
+        await callback.answer(msg_alert)
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
@@ -6160,54 +6177,57 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         await set_sentinel_service_message(group_id, f"{p}_autodel_seconds", default_secs)
         await set_sentinel_service_message(group_id, f"{p}_enabled", 1)
 
-        await callback.answer(f"🗑️ Módulo {target_msg.upper()} restablecido por defecto.", show_alert=True)
+        await callback.answer(tr(lang, f"🗑️ Módulo {target_msg.upper()} restablecido por defecto.", f"🗑️ Module {target_msg.upper()} restored to default."), show_alert=True)
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
-    # 4. Vista previa (👁️)
+    # 4. Vista previa bilingüe (👁️)
     elif sub == "view":
         cfg = await get_sentinel_service_messages_config(group_id)
         if target_msg == "vc":
-            content = cfg.get("vc_text") or "*(Usando plantilla estándar de entrada al VC)*"
+            content = cfg.get("vc_text") or tr(lang, "*(Usando plantilla estándar de entrada al VC)*", "*(Using default VC entry template)*")
             m_id, m_type = cfg.get("vc_media_id"), cfg.get("vc_media_type")
-            btn = cfg.get("vc_btn") or "⭐ ACTIVAR MICVIP AHORA"
+            btn = cfg.get("vc_btn") or tr(lang, "⭐ ACTIVAR MICVIP AHORA", "⭐ ACTIVATE MICVIP NOW")
             autodel = cfg.get("vc_autodel", 30)
-            status_txt = "🟢 ACTIVO" if cfg.get("vc_enabled", 1) == 1 else "🔴 APAGADO (EN EDICIÓN)"
+            is_enabled = cfg.get("vc_enabled", 1) == 1
         elif target_msg == "micvip":
-            content = cfg.get("micvip_text") or "*(Usando plantilla estándar del aviso MicVIP)*"
+            content = cfg.get("micvip_text") or tr(lang, "*(Usando plantilla estándar del aviso MicVIP)*", "*(Using default MicVIP notice template)*")
             m_id, m_type = cfg.get("micvip_media_id"), cfg.get("micvip_media_type")
-            btn = cfg.get("micvip_btn") or "⭐ ACTIVAR MICVIP AHORA"
+            btn = cfg.get("micvip_btn") or tr(lang, "⭐ ACTIVAR MICVIP AHORA", "⭐ ACTIVATE MICVIP NOW")
             autodel = cfg.get("micvip_autodel", 30)
-            status_txt = "🟢 ACTIVO" if cfg.get("micvip_enabled", 1) == 1 else "🔴 APAGADO (EN EDICIÓN)"
+            is_enabled = cfg.get("micvip_enabled", 1) == 1
         elif target_msg == "reset":
-            content = cfg.get("reset_text") or "*(Usando plantilla estándar de optimización 3.5h)*"
+            content = cfg.get("reset_text") or tr(lang, "*(Usando plantilla estándar de optimización 3.5h)*", "*(Using default 3.5h optimization template)*")
             m_id, m_type = cfg.get("reset_media_id"), cfg.get("reset_media_type")
-            btn = cfg.get("reset_btn") or "Sin botón"
+            btn = cfg.get("reset_btn") or tr(lang, "Sin botón", "No button")
             autodel = cfg.get("reset_autodel", 20)
-            status_txt = "🟢 ACTIVO" if cfg.get("reset_enabled", 1) == 1 else "🔴 APAGADO (EN EDICIÓN)"
+            is_enabled = cfg.get("reset_enabled", 1) == 1
         elif target_msg == "sched":
-            content = cfg.get("sched_start_text") or "*(Usando aviso estándar de apertura programada)*"
+            content = cfg.get("sched_start_text") or tr(lang, "*(Usando aviso estándar de apertura programada)*", "*(Using default scheduled start notice)*")
             m_id, m_type = cfg.get("sched_start_media_id"), cfg.get("sched_start_media_type")
-            btn = "Sin botón"
+            btn = tr(lang, "Sin botón", "No button")
             autodel = cfg.get("sched_start_autodel", 0)
-            status_txt = "🟢 ACTIVO" if cfg.get("sched_enabled", 1) == 1 else "🔴 APAGADO (EN EDICIÓN)"
+            is_enabled = cfg.get("sched_enabled", 1) == 1
         else:
-            content = cfg.get("vc_welcome_text") or "*(Usando aviso estándar fijado de bienvenida al VC)*"
+            content = cfg.get("vc_welcome_text") or tr(lang, "*(Usando aviso estándar fijado de bienvenida al VC)*", "*(Using default pinned VC welcome notice)*")
             m_id, m_type = cfg.get("vc_welcome_media_id"), cfg.get("vc_welcome_media_type")
-            btn = cfg.get("vc_welcome_btn") or "⭐ ACTIVAR MICVIP AHORA"
+            btn = cfg.get("vc_welcome_btn") or tr(lang, "⭐ ACTIVAR MICVIP AHORA", "⭐ ACTIVATE MICVIP NOW")
             autodel = cfg.get("vc_welcome_autodel", 0)
-            status_txt = "🟢 ACTIVO" if cfg.get("vc_welcome_enabled", 1) == 1 else "🔴 APAGADO (EN EDICIÓN)"
+            is_enabled = cfg.get("vc_welcome_enabled", 1) == 1
+
+        st_label = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if is_enabled else tr(lang, "🔴 APAGADO (EN EDICIÓN)", "🔴 MUTED (EDITING)")
+        autodel_label = f"{autodel} " + tr(lang, "segundos", "seconds") if autodel > 0 else tr(lang, "Permanente (sin auto-borrado)", "Permanent (no auto-delete)")
 
         preview_text = (
-            f"👁️ <b>Vista Previa ({target_msg.upper()}):</b>\n\n"
+            f"👁️ <b>{tr(lang, 'Vista Previa', 'Preview')} ({target_msg.upper()}):</b>\n\n"
             f"{content}\n\n"
-            f"• <b>Estado:</b> <code>{status_txt}</code>\n"
-            f"• <b>Texto del Botón:</b> <code>{btn}</code>\n"
-            f"• <b>Tiempo de auto-borrado:</b> <code>{autodel} segundos</code>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
+            f"• <b>{tr(lang, 'Estado del Servicio', 'Service Status')}:</b> <code>{st_label}</code>\n"
+            f"• <b>{tr(lang, 'Texto del Botón', 'Button Label')}:</b> <code>{btn}</code>\n"
+            f"• <b>{tr(lang, 'Auto-borrado', 'Auto-delete')}:</b> <code>{autodel_label}</code>\n\n"
+            f"🛡️️ <i>Cloud Media Management</i>"
         )
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 Volver", callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
+            [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
         ])
         try:
             await callback.message.delete()
@@ -6223,11 +6243,11 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         else:
             await bot.send_message(chat_id=callback.from_user.id, text=preview_text, reply_markup=back_kb, parse_mode="HTML")
 
-    # 5. Edición de Parámetros
+    # 5. Edición de campos (Bilingüe)
     elif sub == "edit":
         tier = (await get_effective_group_tier(group_id, callback.from_user.id) or "free").lower()
         if tier == "free":
-            await callback.answer("⭐ Requiere plan PRO o ULTRA PRO.", show_alert=True)
+            await callback.answer(tr(lang, "⭐ Requiere plan PRO o ULTRA PRO.", "⭐ Requires PRO or ULTRA PRO plan."), show_alert=True)
             return
 
         SENTINEL_CFG_STATES[(bot.id, callback.from_user.id)] = {
@@ -6238,19 +6258,29 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         }
 
         if field_name == "autodel":
-            prompt_txt = f"⏱️ <b>Tiempo de Auto-Borrado ({target_msg.upper()}):</b>\n\nEnvía un número en segundos (0 para mantener siempre activo):\n\n🛡️ <i>Cloud Media Management</i>"
-        elif field_name == "btn":
-            prompt_txt = f"🏷️ <b>Nombre del Botón ({target_msg.upper()}):</b>\n\nEnvía el texto que llevará el botón (máx. 35 caracteres):\n\n🛡️ <i>Cloud Media Management</i>"
-        else:
             prompt_txt = (
-                f"✍️ <b>Editor de Mensaje ({target_msg.upper()}):</b>\n\n"
-                f"Envía el texto del aviso. {'<i>(Nivel ULTRA PRO: puedes adjuntar Foto, Video o GIF junto al mensaje)</i>' if tier == 'ultra_pro' else ''}\n\n"
+                f"⏱️ <b>{tr(lang, 'Tiempo de Auto-Borrado', 'Auto-Delete Timer')} ({target_msg.upper()}):</b>\n\n"
+                f"{tr(lang, 'Envía un número entero en segundos (0 para no borrar automáticamente):', 'Send an integer in seconds (0 to keep permanently):')}\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+        elif field_name == "btn":
+            prompt_txt = (
+                f"🏷️ <b>{tr(lang, 'Nombre del Botón', 'Button Label')} ({target_msg.upper()}):</b>\n\n"
+                f"{tr(lang, 'Envía el texto que llevará el botón de activación (máx. 35 caracteres):', 'Send the text for the activation button (max 35 chars):')}\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+        else:
+            ultra_note = tr(lang, "<i>(Nivel ULTRA PRO: puedes adjuntar Foto, Video o GIF junto al mensaje)</i>", "<i>(ULTRA PRO tier: you may attach Photo, Video or GIF with your message)</i>")
+            prompt_txt = (
+                f"✍️ <b>{tr(lang, 'Editor de Mensaje', 'Notice Editor')} ({target_msg.upper()}):</b>\n\n"
+                f"{tr(lang, 'Envía el texto del aviso.', 'Send the notice template.')} "
+                f"{ultra_note if tier == 'ultra_pro' else ''}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
 
         prompt = await callback.message.answer(prompt_txt, reply_markup=_cancel_kb(t, f"sentinelcfg_menu_{group_id}_{lang}"), parse_mode="HTML")
         fire_and_forget_auto_delete([prompt], delay=60)
-        
+
     # ==========================================
 # 📢 FASE 6: DISPATCHER DE PLANES DE CANAL (CONTROL COMERCIAL & VISTA PREVIA)
 # ==========================================
