@@ -11,8 +11,10 @@ import contextlib
 import threading
 import logging
 import re
+import json
+import hmac
+import hashlib
 from datetime import datetime
-
 DB_PATH = "database/bot_data.db"
 
 # Thread-local storage para reutilización de conexiones por hilo bajo alta concurrencia
@@ -286,6 +288,13 @@ def init_db():
             ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
             ("chat_language", "TEXT DEFAULT 'ES'"),
             ("active_modules_count", "INTEGER DEFAULT 11")
+
+            # --- Fase 1: Gamificación y Centinela de IA Autónomo ---
+            ("reputation_enabled", "INTEGER DEFAULT 1"),
+            ("reputation_xp_multiplier", "REAL DEFAULT 1.0"),
+            ("ai_response_mode", "TEXT DEFAULT 'mention_only'"),
+            ("ai_response_chance", "INTEGER DEFAULT 15"),
+            ("ai_personality_tone", "TEXT DEFAULT 'guardian'"),
         ]
 
         _ensure_columns(cursor, "group_settings", settings_columns)
@@ -561,6 +570,42 @@ def init_db():
                 PRIMARY KEY (group_id, month_key)
             )
         """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_user_reputation (
+                group_id INTEGER,
+                user_id INTEGER,
+                full_name TEXT,
+                username TEXT,
+                xp INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                last_xp_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (group_id, user_id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_reputation_xp ON chat_user_reputation (group_id, xp DESC)")
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_hourly_activity (
+                group_id INTEGER,
+                day_of_week INTEGER,
+                hour_of_day INTEGER,
+                message_count INTEGER DEFAULT 0,
+                PRIMARY KEY (group_id, day_of_week, hour_of_day)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ai_chat_context (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_context_chat ON ai_chat_context (chat_id, created_at)")
 
         conn.commit()
 
@@ -1253,23 +1298,70 @@ def set_sentinel_payload_config(group_id: int, field: str, value):
 _AI_SENTINEL_FIELDS = {"ai_guardian_status", "ai_copilot_status", "ai_custom_prompt"}
 
 
+# ==========================================
+# 🤖 MEMORIA CONTEXTUAL Y CENTINELA DE IA AUTÓNOMO
+# ==========================================
+_AI_SENTINEL_FIELDS = {
+    "ai_guardian_status", "ai_copilot_status", "ai_custom_prompt",
+    "ai_response_mode", "ai_response_chance", "ai_personality_tone"
+}
+
+
 @db_async
 def get_ai_sentinel_config(group_id: int) -> dict:
-    """Configuración del Centinela de IA (ULTRA): guardián, copiloto y prompt personalizado."""
+    """Configuración extendida del Centinela de IA (ULTRA PRO): guardián, copiloto, tono y probabilidad."""
     return {
         "guardian_status": _get_setting(group_id, "ai_guardian_status", 0),
         "copilot_status": _get_setting(group_id, "ai_copilot_status", 0),
         "custom_prompt": _get_setting(group_id, "ai_custom_prompt", "") or "",
+        "response_mode": _get_setting(group_id, "ai_response_mode", "mention_only"),
+        "response_chance": _get_setting(group_id, "ai_response_chance", 15),
+        "personality_tone": _get_setting(group_id, "ai_personality_tone", "guardian")
     }
 
 
 @db_async
-def set_ai_sentinel_config(group_id: int, field: str, value):
-    """Guarda un campo del Centinela de IA (lista blanca de columnas)."""
-    if field not in _AI_SENTINEL_FIELDS:
-        raise ValueError(f"Campo de IA no permitido: {field!r}")
-    _upsert_setting(group_id, field, value)
+def save_ai_chat_context(chat_id: int, user_id: int, role: str, content: str, max_history: int = 12):
+    """Almacena intervenciones en el buffer de memoria del Centinela podando mensajes antiguos."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO ai_chat_context (chat_id, user_id, role, content)
+            VALUES (?, ?, ?, ?)
+        """, (chat_id, user_id, role, content.strip()))
 
+        # Mantiene solo los últimos `max_history` mensajes en memoria activa por chat
+        cursor.execute("""
+            DELETE FROM ai_chat_context 
+            WHERE chat_id = ? AND id NOT IN (
+                SELECT id FROM ai_chat_context 
+                WHERE chat_id = ? 
+                ORDER BY created_at DESC, id DESC LIMIT ?
+            )
+        """, (chat_id, chat_id, max_history))
+        conn.commit()
+
+
+@db_async
+def get_ai_chat_context(chat_id: int, limit: int = 8) -> list:
+    """Recupera la memoria contextual reciente en formato compatible con LLMs."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT role, content FROM ai_chat_context 
+            WHERE chat_id = ? 
+            ORDER BY created_at ASC, id ASC LIMIT ?
+        """, (chat_id, limit))
+        return [{"role": r[0], "content": r[1]} for r in cursor.fetchall()]
+
+
+@db_async
+def clear_ai_chat_context(chat_id: int):
+    """Limpia el buffer de memoria del Centinela en la sala o canal."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ai_chat_context WHERE chat_id = ?", (chat_id,))
+        conn.commit()
 
 
 @db_async
@@ -2626,6 +2718,149 @@ def record_chat_activity(group_id: int, user_id: int, full_name: str, username: 
         conn.commit()
 
 
+# ==========================================
+# 🎮 GAMIFICACIÓN Y REPUTACIÓN TOKENIZADA
+# ==========================================
+@db_async
+def add_user_reputation_xp(
+    group_id: int, 
+    user_id: int, 
+    full_name: str, 
+    username: str, 
+    base_xp: int = 10, 
+    cooldown_seconds: int = 45
+) -> dict:
+    """Otorga XP respetando cooldown anti-spam y calcula subidas de nivel automáticas."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT xp, level, CAST((julianday('now') - julianday(last_xp_at)) * 86400 AS INTEGER)
+            FROM chat_user_reputation WHERE group_id = ? AND user_id = ?
+        """, (group_id, user_id))
+        row = cursor.fetchone()
+
+        if row:
+            current_xp, current_level, elapsed_sec = row
+            if elapsed_sec is not None and elapsed_sec < cooldown_seconds:
+                return {"awarded": False, "xp": current_xp, "level": current_level, "leveled_up": False}
+        else:
+            current_xp, current_level = 0, 1
+
+        new_xp = current_xp + base_xp
+        # Curva de nivel: Nivel = int((XP / 100) ** 0.5) + 1
+        new_level = int((new_xp / 100) ** 0.5) + 1
+        leveled_up = new_level > current_level
+
+        cursor.execute("""
+            INSERT INTO chat_user_reputation (group_id, user_id, full_name, username, xp, level, last_xp_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                full_name = excluded.full_name,
+                username = excluded.username,
+                xp = ?,
+                level = ?,
+                last_xp_at = CURRENT_TIMESTAMP
+        """, (group_id, user_id, full_name, username or "", new_xp, new_level, new_xp, new_level))
+        conn.commit()
+
+        return {
+            "awarded": True,
+            "xp": new_xp,
+            "level": new_level,
+            "leveled_up": leveled_up,
+            "gained_xp": base_xp
+        }
+
+
+@db_async
+def get_user_reputation(group_id: int, user_id: int) -> dict:
+    """Obtiene el rango, nivel y posición en el ranking de un usuario."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT xp, level FROM chat_user_reputation 
+            WHERE group_id = ? AND user_id = ?
+        """, (group_id, user_id))
+        row = cursor.fetchone()
+        if not row:
+            return {"xp": 0, "level": 1, "rank": 0}
+
+        cursor.execute("""
+            SELECT COUNT(*) + 1 FROM chat_user_reputation 
+            WHERE group_id = ? AND xp > ?
+        """, (group_id, row[0]))
+        rank = cursor.fetchone()[0]
+
+        return {"xp": row[0], "level": row[1], "rank": rank}
+
+
+@db_async
+def get_top_reputation(group_id: int, limit: int = 10) -> list:
+    """Obtiene el cuadro de honor de reputación de la comunidad."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, full_name, username, xp, level 
+            FROM chat_user_reputation 
+            WHERE group_id = ? 
+            ORDER BY xp DESC LIMIT ?
+        """, (group_id, limit))
+        rows = cursor.fetchall()
+        return [
+            {
+                "user_id": r[0],
+                "name": r[1] or f"User {r[0]}",
+                "username": f"@{r[2]}" if r[2] else "",
+                "xp": r[3],
+                "level": r[4]
+            }
+            for r in rows
+        ]
+
+
+# ==========================================
+# 📊 MAPAS DE CALOR Y DENSIDAD HORARIA (24x7)
+# ==========================================
+@db_async
+def record_hourly_chat_activity(group_id: int, dt: datetime = None):
+    """Registra un mensaje indexado por día de la semana (1-7) y hora (0-23)."""
+    now = dt or datetime.now()
+    day_of_week = now.isoweekday()  # 1 = Lunes, 7 = Domingo
+    hour_of_day = now.hour          # 0 .. 23
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO chat_hourly_activity (group_id, day_of_week, hour_of_day, message_count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(group_id, day_of_week, hour_of_day) DO UPDATE SET
+                message_count = message_count + 1
+        """, (group_id, day_of_week, hour_of_day))
+        conn.commit()
+
+
+@db_async
+def get_chat_heatmap_matrix(group_id: int) -> dict:
+    """Retorna una matriz completa de 7x24 con densidad de mensajes para visualización gráfica."""
+    matrix = {day: {hour: 0 for hour in range(24)} for day in range(1, 8)}
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT day_of_week, hour_of_day, message_count 
+            FROM chat_hourly_activity 
+            WHERE group_id = ?
+        """, (group_id,))
+        for day, hour, count in cursor.fetchall():
+            if day in matrix and hour in matrix[day]:
+                matrix[day][hour] = count
+
+    return {
+        "group_id": group_id,
+        "matrix": matrix,
+        "days": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    }
+
+
 @db_async
 def get_chat_dashboard_data(chat_id: int) -> dict:
     with get_db_connection() as conn:
@@ -2633,7 +2868,7 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         cursor.execute("SELECT tier FROM approved_groups WHERE group_id = ?", (chat_id,))
         row = cursor.fetchone()
         tier = row[0] if row else "free"
-    
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2918,6 +3153,113 @@ def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
         except sqlite3.IntegrityError:
             return False
 
+# ==========================================
+# 🔐 RESPALDO CRIPTOGRÁFICO Y MIGRACIÓN (BACKUP & RESTORE)
+# ==========================================
+BACKUP_SECRET_SALT = os.getenv("BACKUP_SECRET_SALT", "bunker-secret-vault-2026")
+
+
+@db_async
+def export_group_configuration(group_id: int) -> str:
+    """Exporta la configuración completa de la comunidad en un paquete JSON firmado con HMAC-SHA256."""
+    with get_db_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM group_settings WHERE group_id = ?", (group_id,))
+        settings_row = cursor.fetchone()
+        settings_dict = dict(settings_row) if settings_row else {}
+        settings_dict.pop("group_id", None)
+
+        cursor.execute("SELECT days, start_time, end_time, status FROM vc_schedules WHERE group_id = ?", (group_id,))
+        sched_row = cursor.fetchone()
+        sched_dict = dict(sched_row) if sched_row else {}
+
+        cursor.execute("SELECT target_value FROM group_tip_targets WHERE group_id = ?", (group_id,))
+        targets = [r[0] for r in cursor.fetchall()]
+
+    payload = {
+        "version": "6.0",
+        "exported_at": datetime.now().isoformat(),
+        "source_group_id": group_id,
+        "settings": settings_dict,
+        "vc_schedule": sched_dict,
+        "tip_targets": targets
+    }
+
+    raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    signature = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    package = {
+        "payload": payload,
+        "signature": signature
+    }
+    return json.dumps(package, indent=2, ensure_ascii=False)
+
+
+@db_async
+def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[bool, str]:
+    """Valida la firma HMAC e importa de forma atómica la configuración a una nueva comunidad."""
+    try:
+        package = json.loads(backup_json)
+        payload = package.get("payload")
+        received_sig = package.get("signature")
+
+        if not payload or not received_sig:
+            return False, "Estructura de paquete inválida."
+
+        raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        expected_sig = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(expected_sig, received_sig):
+            return False, "Firma digital no válida. El archivo ha sido manipulado."
+
+        settings = payload.get("settings", {})
+        sched = payload.get("vc_schedule", {})
+        targets = payload.get("tip_targets", [])
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+
+            # 1. Aplicar parámetros de group_settings
+            if settings:
+                clean_cols = [c for c in settings.keys() if _IDENT_RE.match(c)]
+                if clean_cols:
+                    placeholders = ", ".join([f"{col} = ?" for col in clean_cols])
+                    values = [settings[col] for col in clean_cols]
+                    values.append(target_group_id)
+
+                    cursor.execute("""
+                        INSERT INTO group_settings (group_id) VALUES (?)
+                        ON CONFLICT(group_id) DO NOTHING
+                    """, (target_group_id,))
+
+                    cursor.execute(f"UPDATE group_settings SET {placeholders} WHERE group_id = ?", tuple(values))
+
+            # 2. Aplicar cronograma de voz
+            if sched:
+                cursor.execute("""
+                    INSERT INTO vc_schedules (group_id, days, start_time, end_time, status)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id) DO UPDATE SET
+                        days = excluded.days,
+                        start_time = excluded.start_time,
+                        end_time = excluded.end_time,
+                        status = excluded.status
+                """, (target_group_id, sched.get("days", "1,2,3,4,5,6,7"), sched.get("start_time", "20:00"), sched.get("end_time", "23:00"), sched.get("status", 0)))
+
+            # 3. Importar destinos de propinas
+            for target_val in targets:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO group_tip_targets (group_id, target_value, is_active)
+                    VALUES (?, ?, 1)
+                """, (target_group_id, target_val))
+
+            conn.commit()
+
+        return True, "Configuración importada y verificada con éxito."
+    except Exception as ex:
+        return False, f"Error durante la restauración: {ex}"
 
 # ==========================================
 # 🚀 ARRANQUE: esquema listo al importar el módulo
