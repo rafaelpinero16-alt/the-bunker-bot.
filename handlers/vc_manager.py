@@ -321,7 +321,10 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
 
 
 async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
-    """Valida la aprobación del grupo y rango de Dueño, Administrador o Arquitecto."""
+    """
+    Garantiza que EXCLUSIVAMENTE el Creador legítimo (Dueño) o Arquitecto Supremo
+    pueda operar el bot. Bloquea administradores secundarios y anonimato no verificado.
+    """
     if message.chat.type == "private":
         return True
 
@@ -329,17 +332,59 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
     if not await is_group_approved(chat_id):
         return False
 
-    # Administradores anónimos en supergrupos
+    # 1. Caso: El comando proviene de un Canal como remitente (sender_chat)
+    if message.sender_chat and message.sender_chat.id != chat_id:
+        channel_id = message.sender_chat.id
+        # Verificar en base de datos si el canal y el grupo pertenecen al mismo dueño
+        from database.database import get_db_connection
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (chat_id,))
+            grp_owner = cursor.fetchone()
+            cursor.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (channel_id,))
+            chn_owner = cursor.fetchone()
+
+        if grp_owner and chn_owner and grp_owner[0] == chn_owner[0]:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return True  # El canal pertenece al mismo creador verificado
+        else:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            lang = get_lang(message.from_user.language_code if message.from_user else "es")
+            warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
+            _spawn(auto_delete_msg(warn, 8))
+            return False
+
+    # 2. Caso: Administrador Anónimo genérico de grupo (sender_chat == chat_id)
+    # Por protocolo Telegram oculta la identidad real; se bloquea para evitar que admins secundarios usurpen al Dueño
     if message.sender_chat and message.sender_chat.id == chat_id:
         try:
             await message.delete()
         except Exception:
             pass
-        return True
+        lang = get_lang(message.from_user.language_code if message.from_user else "es")
+        anon_warn = (
+            "⚠️ <b>Acceso Restringido:</b> Por seguridad perimetral, los comandos ejecutivos no admiten "
+            "modo anónimo de grupo. Desactiva 'Permanecer anónimo' para validar tu rango de Creador "
+            "o gestiona el Búnker desde tu chat privado.\n\n🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            "⚠️ <b>Access Restricted:</b> For perimeter security, executive commands do not accept "
+            "group anonymous mode. Disable 'Remain anonymous' to verify Owner status or manage "
+            "The Bunker from DMs.\n\n🛡️ <i>Cloud Media Management</i>"
+        )
+        warn = await bot.send_message(chat_id=chat_id, text=anon_warn, parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, 10))
+        return False
 
     if not message.from_user:
         return False
 
+    # 3. Inmunidad absoluta de Arquitectos
     if is_super_admin(message.from_user.id):
         try:
             await message.delete()
@@ -347,15 +392,17 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
             pass
         return True
 
+    # 4. Verificación estricta: ÚNICAMENTE status == "creator" (Dueño real del grupo)
     try:
         member = await bot.get_chat_member(chat_id, message.from_user.id)
-        if member.status in ["creator", "administrator"]:
+        if member.status == "creator":
             try:
                 await message.delete()
             except Exception:
                 pass
             return True
         else:
+            # Bloqueo inmediato a cualquier administrador secundario o usuario regular
             try:
                 await message.delete()
             except Exception:
