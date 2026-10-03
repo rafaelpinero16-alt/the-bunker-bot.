@@ -6,6 +6,8 @@ administración concurrente de clones y Centinelas acústicos.
 Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints de Heatmaps, Reputación y Backups.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
+from __future__ import annotations
+
 import asyncio
 import base64
 from contextlib import asynccontextmanager
@@ -17,6 +19,7 @@ import logging
 import os
 import sys
 import time
+from typing import Any, Optional, Set, Dict
 import urllib.parse
 from dotenv import load_dotenv
 
@@ -58,26 +61,24 @@ except ImportError:
             self.status_code = status_code
             self.detail = detail
 
-    class _WebSocketStub:
+    class WebSocket:  # type: ignore[no-redef]
         async def accept(self): pass
         async def send_json(self, data): pass
         async def receive_text(self): return ""
         async def close(self, code=1000): pass
 
-    class _WebSocketDisconnectStub(Exception): pass
+    class WebSocketDisconnect(Exception): pass  # type: ignore[no-redef]
 
     class _CORSMiddlewareStub:
         def __init__(self, *args, **kwargs): pass
 
-    FastAPI = _FastAPIStub
-    APIRouter = _APIRouterStub
-    Header = lambda *args, **kwargs: None
-    Body = lambda *args, **kwargs: None
-    Query = lambda *args, **kwargs: None
-    HTTPException = _HTTPExceptionStub
-    WebSocket = _WebSocketStub
-    WebSocketDisconnect = _WebSocketDisconnectStub
-    CORSMiddleware = _CORSMiddlewareStub
+    FastAPI = _FastAPIStub  # type: ignore[misc]
+    APIRouter = _APIRouterStub  # type: ignore[misc]
+    Header = lambda *args, **kwargs: None  # type: ignore[assignment]
+    Body = lambda *args, **kwargs: None  # type: ignore[assignment]
+    Query = lambda *args, **kwargs: None  # type: ignore[assignment]
+    HTTPException = _HTTPExceptionStub  # type: ignore[misc]
+    CORSMiddleware = _CORSMiddlewareStub  # type: ignore[misc]
 
 try:
     import uvicorn  # type: ignore[import-not-found]
@@ -162,9 +163,9 @@ except ValueError:
     ADMIN_GROUP_ID = -1004351489258
 
 CREATOR_FALLBACK_ID = 8269470905
-active_clone_tasks = {}
+active_clone_tasks: dict[str, dict] = {}
 dp = Dispatcher()
-master_bot_instance: Bot = None
+master_bot_instance: Optional[Bot] = None
 
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
@@ -175,13 +176,24 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 
+_BG_TASKS: Set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Ejecuta corrutinas en segundo plano reteniendo referencia fuerte para evitar recolección por GC."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
 # ==========================================
 # ⚡ GESTOR DE CONEXIONES WEBSOCKET (FASE 3)
 # ==========================================
 class ConnectionManager:
     """Administra conexiones reactivas WebSocket por chat_id para telemetría en tiempo real."""
     def __init__(self):
-        self.active_connections: dict[int, set] = {}
+        self.active_connections: dict[int, set[WebSocket]] = {}
         self._lock = asyncio.Lock()
 
     async def connect(self, chat_id: int, websocket: WebSocket):
@@ -277,7 +289,7 @@ def parse_telegram_user_id(init_data: str) -> int:
         computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(computed_hash, received_hash):
-            logging.warning("⚠️ [initData] Firma inválida rechazada.")
+            logging.warning("⚠️️ [initData] Firma inválida rechazada.")
             return 0
 
         auth_date = int(parsed.get("auth_date", 0))
@@ -945,7 +957,7 @@ async def api_update_chat_settings(
 
         # 3. Ghost Purge
         elif action == "run_ghost_purge":
-            asyncio.create_task(execute_ghost_purge(numeric_id, action="ban"))
+            _spawn(execute_ghost_purge(numeric_id, action="ban"))
             return {
                 "status": "success",
                 "action": "run_ghost_purge",
@@ -1075,7 +1087,7 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
     
     lang_code = callback.from_user.language_code if callback.from_user else ""
     is_es = bool(lang_code and lang_code.startswith("es"))
-    text = "⚠️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
+    text = "⚠️️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
     
     try:
         await callback.answer(text, show_alert=True)
@@ -1196,11 +1208,11 @@ async def stop_clone_polling_task(token: str):
 
 
 def trigger_dynamic_clone(token: str):
-    asyncio.create_task(start_clone_polling_task(token))
+    _spawn(start_clone_polling_task(token))
 
 
 def trigger_disconnect_clone(token: str):
-    asyncio.create_task(stop_clone_polling_task(token))
+    _spawn(stop_clone_polling_task(token))
 
 
 # ==========================================
@@ -1244,7 +1256,7 @@ async def main():
     init_db()
     print("🛡️ [Base de Datos]: Inicializada correctamente.")
 
-    asyncio.create_task(run_fastapi_server())
+    _spawn(run_fastapi_server())
     print(f"🌐 [API Backend & WebSockets]: Servidor activo en puerto {os.getenv('PORT', 8080)}.")
 
     master_bot = Bot(
@@ -1274,7 +1286,7 @@ async def main():
     # 4. ecosystem y vc_manager: telemetría y directivas de videollamada
     dp.include_router(ecosystem.router)
     dp.include_router(vc_manager.router)
-    # 5. groups: aduana captcha, anti-flood y matriz perimetral
+    # 5. groups: aduana captcha, anti-flood, gamificación y matriz perimetral
     dp.include_router(groups.router)
     # 6. fallback_router: salvaguarda de callbacks huérfanos
     dp.include_router(fallback_router)
@@ -1287,13 +1299,13 @@ async def main():
 
     # Inicialización del worker de difusión recurrente de planes en canales
     if hasattr(ecosystem, "start_channel_broadcast_worker"):
-        asyncio.create_task(ecosystem.start_channel_broadcast_worker(master_bot))
+        _spawn(ecosystem.start_channel_broadcast_worker(master_bot))
 
     # Carga concurrente de bots clones persistidos en SQLite
     try:
         stored_clones = await get_all_active_clone_tokens()
         for clone_token in stored_clones:
-            await start_clone_polling_task(clone_token)
+            _spawn(start_clone_polling_task(clone_token))
     except Exception as e:
         print(f"⚠️ [Clones BD]: {e}")
 
