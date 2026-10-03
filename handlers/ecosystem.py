@@ -2,10 +2,12 @@
 ecosystem.py — The Bunker OS (Aiogram 3.x)
 
 Módulo de telemetría del ecosistema, workers perimetrales en segundo plano,
-auditor de membresías de canales y anunciador programado de videollamadas (Fase 4).
+auditor de membresías de canales y anunciador programado de videollamadas.
+Fase 4: Analítica de Retención Post-Captcha + Sincronización WebSocket (Live Radar).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
+import sys
 import asyncio
 import logging
 import time
@@ -111,6 +113,15 @@ async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 30):
         pass
 
 
+def _notify_radar_ws(chat_id: int, event_type: str, data: dict = None):
+    """Difusión en tiempo real hacia WebSockets resolviendo dependencias de forma diferida."""
+    main_mod = sys.modules.get("main")
+    if main_mod:
+        fn = getattr(main_mod, "emit_radar_event", None)
+        if callable(fn):
+            _spawn(fn(chat_id, event_type, data or {}))
+
+
 # ==========================================================
 # 🌐 DICCIONARIO BILINGÜE DEL ECOSISTEMA Y NAVEGACIÓN
 # ==========================================================
@@ -178,6 +189,101 @@ def build_radar_markup(chat_id: int, lang: str, in_private: bool = False) -> Inl
 
 
 # ==========================================================
+# 📊 FASE 4: CÁLCULO DE RETENCIÓN POST-CAPTCHA
+# ==========================================================
+def _sync_calculate_retention(group_id: int) -> dict:
+    """Calcula la tasa de retención de cohortes a 7 y 30 días desde el padrón local."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        
+        # 1. Total de miembros registrados en el padrón local
+        cursor.execute("SELECT COUNT(*) FROM group_members WHERE group_id = ?", (group_id,))
+        total_tracked = cursor.fetchone()[0] or 0
+
+        # 2. Miembros registrados hace más de 7 días
+        cursor.execute("""
+            SELECT COUNT(*) FROM group_members 
+            WHERE group_id = ? AND first_seen <= strftime('%s', 'now', '-7 days')
+        """, (group_id,))
+        cohort_7d = cursor.fetchone()[0] or 0
+
+        # 3. Miembros activos en los últimos 7 días dentro de esa cohorte
+        cursor.execute("""
+            SELECT COUNT(*) FROM group_members 
+            WHERE group_id = ? 
+              AND first_seen <= strftime('%s', 'now', '-7 days')
+              AND last_seen >= strftime('%s', 'now', '-7 days')
+        """, (group_id,))
+        retained_7d = cursor.fetchone()[0] or 0
+
+        # 4. Miembros registrados hace más de 30 días
+        cursor.execute("""
+            SELECT COUNT(*) FROM group_members 
+            WHERE group_id = ? AND first_seen <= strftime('%s', 'now', '-30 days')
+        """, (group_id,))
+        cohort_30d = cursor.fetchone()[0] or 0
+
+        # 5. Miembros activos en los últimos 30 días dentro de esa cohorte
+        cursor.execute("""
+            SELECT COUNT(*) FROM group_members 
+            WHERE group_id = ? 
+              AND first_seen <= strftime('%s', 'now', '-30 days')
+              AND last_seen >= strftime('%s', 'now', '-30 days')
+        """, (group_id,))
+        retained_30d = cursor.fetchone()[0] or 0
+
+        rate_7d = round((retained_7d / max(1, cohort_7d)) * 100, 1) if cohort_7d > 0 else 100.0
+        rate_30d = round((retained_30d / max(1, cohort_30d)) * 100, 1) if cohort_30d > 0 else 100.0
+
+        return {
+            "total_tracked": total_tracked,
+            "cohort_7d": cohort_7d,
+            "retained_7d": retained_7d,
+            "rate_7d": rate_7d,
+            "cohort_30d": cohort_30d,
+            "retained_30d": retained_30d,
+            "rate_30d": rate_30d
+        }
+
+
+async def calculate_retention_metrics(group_id: int) -> dict:
+    return await asyncio.to_thread(_sync_calculate_retention, group_id)
+
+
+@router.message(Command("retention", "retencion"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_community_retention(message: Message, bot: Bot):
+    """Muestra la tasa de retención post-captcha a los 7 y 30 días."""
+    group_id = message.chat.id
+    if not await is_operator_admin(bot, group_id, message.from_user.id):
+        return
+
+    data = await calculate_retention_metrics(group_id)
+
+    bar_7d = "█" * int(data["rate_7d"] // 10) + "░" * (10 - int(data["rate_7d"] // 10))
+    bar_30d = "█" * int(data["rate_30d"] // 10) + "░" * (10 - int(data["rate_30d"] // 10))
+
+    report = (
+        f"📈 <b>Auditoría de Retención Post-Captcha — {message.chat.title or 'Comunidad'}</b>\n\n"
+        f"• 👥 <b>Miembros en Seguimiento:</b> <code>{data['total_tracked']}</code>\n\n"
+        f"<b>Retención a 7 Días:</b>\n"
+        f"<code>[{bar_7d}]</code> <b>{data['rate_7d']}%</b>\n"
+        f"<i>({data['retained_7d']} activos de {data['cohort_7d']} miembros en cohorte)</i>\n\n"
+        f"<b>Retención a 30 Días:</b>\n"
+        f"<code>[{bar_30d}]</code> <b>{data['rate_30d']}%</b>\n"
+        f"<i>({data['retained_30d']} activos de {data['cohort_30d']} miembros en cohorte)</i>\n\n"
+        f"💡 <i>Una retención a 7 días superior al 60% indica una comunidad con alta afinidad orgánica y bajo abandono tras la aduana de seguridad.</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Command Center Analítico", url=f"{WEBAPP_URL}?chat_id={group_id}")]
+    ])
+
+    sent = await message.answer(report, reply_markup=kb, parse_mode="HTML")
+    _spawn(auto_delete_pair(message, sent, delay=45))
+
+
+# ==========================================================
 # 📡 COMANDO PÚBLICO/ADMIN: /radar y /ecosystem
 # ==========================================================
 @router.message(Command("radar", "ecosystem"))
@@ -228,6 +334,8 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
 
     keyboard = build_radar_markup(chat_id, lang, in_private=in_private)
     sent = await message.answer(status_text, reply_markup=keyboard, parse_mode="HTML")
+
+    _notify_radar_ws(chat_id, "telemetry_checked", {"tier": tier_label, "autolower": al_status})
 
     if not in_private:
         _spawn(auto_delete_pair(message, sent, delay=35))
@@ -289,6 +397,8 @@ async def cb_refresh_status(callback: CallbackQuery):
     except TelegramBadRequest:
         pass
 
+    _notify_radar_ws(chat_id, "telemetry_refreshed", {"tier": tier_label, "autolower": al_status})
+
 
 @router.callback_query(F.data.startswith("radar_eco_"))
 async def cb_open_radar_private(callback: CallbackQuery):
@@ -339,6 +449,8 @@ async def cb_open_radar_private(callback: CallbackQuery):
     except TelegramBadRequest:
         pass
 
+    _notify_radar_ws(chat_id, "telemetry_opened_dm", {"tier": tier_label})
+
 
 @router.callback_query(F.data == "close_eco_panel")
 async def cb_close_panel(callback: CallbackQuery):
@@ -354,7 +466,6 @@ async def cb_close_panel(callback: CallbackQuery):
 # 📢 FASE 4: ANUNCIADOR DE VIDEOLLAMADAS (PRO / ULTRA PRO)
 # ==========================================================
 def _sync_get_announcement_data(group_id: int) -> dict:
-    """Consulta la configuración de anuncios programados de la comunidad."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -386,7 +497,6 @@ def _sync_get_announcement_data(group_id: int) -> dict:
 
 
 def _sync_mark_vc_announced(group_id: int, date_str: str):
-    """Registra la fecha del último anuncio emitido para evitar duplicidad."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -398,11 +508,7 @@ def _sync_mark_vc_announced(group_id: int, date_str: str):
 
 
 async def start_meeting_announcement_worker(bot: Bot):
-    """
-    Worker perimetral en segundo plano (Fase 4):
-    Evalúa el inicio del videochat semanal y despacha el precalentamiento con reglas,
-    multimedia y botón interactivo respetando la configuración del Centinela.
-    """
+    """Worker perimetral en segundo plano para preanuncios de videochats."""
     logger.info("📢 [Meeting Announcer Worker]: Sistema de anuncios previos de VC iniciado.")
     while True:
         try:
@@ -422,7 +528,6 @@ async def start_meeting_announcement_worker(bot: Bot):
                 if tier not in ("pro", "ultra_pro", "ultra"):
                     continue
 
-                # 1. Comprobación cruzada con Sentinel Settings (Apertura programada)
                 sentinel_cfg = await get_sentinel_service_messages_config(group_id)
                 if sentinel_cfg.get("sched_enabled", 1) == 0:
                     continue
@@ -443,7 +548,6 @@ async def start_meeting_announcement_worker(bot: Bot):
                 mins_before = ann_cfg.get("minutes_before", 15)
                 diff_minutes = start_total_minutes - current_total_minutes
 
-                # Si estamos dentro de la ventana de anticipación previa al inicio
                 if 0 <= diff_minutes <= mins_before and call_active == 0:
                     custom_text = sentinel_cfg.get("sched_start_text") or ann_cfg.get("text")
                     media_id = sentinel_cfg.get("sched_start_media_id") or ann_cfg.get("media_id")
@@ -469,7 +573,6 @@ async def start_meeting_announcement_worker(bot: Bot):
 
                     body = custom_text if custom_text else default_body
 
-                    # Botonera interactiva segura (sin web_app en grupos)
                     join_btn = (
                         InlineKeyboardButton(text="🎙️ Abrir Sala / Videochat", url=f"https://t.me/{chat_user}")
                         if chat_user else
@@ -490,6 +593,7 @@ async def start_meeting_announcement_worker(bot: Bot):
 
                         await asyncio.to_thread(_sync_mark_vc_announced, group_id, today_date_str)
                         logger.info(f"📢 [Meeting Announcer] Aviso de VC despachado en {group_id} ({diff_minutes}m antes).")
+                        _notify_radar_ws(group_id, "meeting_announced", {"diff_minutes": diff_minutes})
 
                         if sent_msg and autodel_secs > 0:
                             async def _del_ann(msg_to_del, delay):
@@ -515,22 +619,17 @@ async def start_meeting_announcement_worker(bot: Bot):
 # 👁️ WATCHDOG VIP EN SEGUNDO PLANO (AUTO-KICK & RENOVACIÓN)
 # ==========================================================
 async def start_subscription_watchdog_worker(bot: Bot):
-    """
-    Supervisa continuamente los vencimientos de membresías VIP en canales:
-    1. Alerta de renovación a miembros con 48h de anticipación conectando al plan comercial exacto.
-    2. Aplica Auto-Kick y revocación tras vencer los días de gracia configurados.
-    """
-    logger.info("👁️ [Subscription Watchdog]: Auditor de membresías VIP y auto-kick iniciado.")
+    """Supervisa vencimientos de membresías VIP en canales con alertas y Auto-Kick."""
+    logger.info("👁️️ [Subscription Watchdog]: Auditor de membresías VIP y auto-kick iniciado.")
     while True:
         try:
-            # 1. Alertas de renovación (próximos a vencer)
+            # 1. Alertas de renovación preventivas
             expiring = await get_expiring_channel_subscriptions(hours_ahead=48)
             if expiring:
                 bot_info = await bot.get_me()
                 bot_username = bot_info.username or "thebunkerapp_bot"
                 for ch_id, u_id, exp_at, stars_paid, grace_days in expiring:
                     try:
-                        # Resuelve el plan activo específico del canal para enlazar directamente a la compra
                         plans = await get_channel_plans(ch_id, only_active=True)
                         if plans:
                             first_plan = plans[0]
@@ -560,7 +659,7 @@ async def start_subscription_watchdog_worker(bot: Bot):
                         logger.warning(f"⚠️ [Watchdog] Fallo al alertar usuario {u_id}: {warn_err}")
                         await mark_subscription_warned(ch_id, u_id)
 
-            # 2. Expulsión automática (Auto-Kick) al agotarse la gracia
+            # 2. Expulsión automática (Auto-Kick)
             expired = await get_expired_channel_subscriptions()
             if expired:
                 for ch_id, u_id, exp_at, grace_days, auto_kick in expired:
@@ -581,6 +680,9 @@ async def start_subscription_watchdog_worker(bot: Bot):
                                 await bot.send_message(chat_id=u_id, text=kick_msg, parse_mode="HTML")
                             except Exception:
                                 pass
+                            
+                            _notify_radar_ws(ch_id, "member_kicked_expired", {"user_id": u_id})
+
                         except TelegramRetryAfter as rate_err:
                             await asyncio.sleep(rate_err.retry_after + 1)
                         except Exception as kick_err:
@@ -598,11 +700,7 @@ async def start_subscription_watchdog_worker(bot: Bot):
 # 📡 BACKGROUND WORKER: DIFUSIÓN RECURRENTE DE PLANES
 # ==========================================
 async def start_channel_broadcast_worker(bot: Bot):
-    """
-    Worker perimetral en segundo plano: evalúa continuamente los planes de membresía 
-    con difusión recurrente activa y publica los anuncios con botones inline limpios.
-    Inicia simultáneamente el Watchdog de membresías y el Anunciador de Videollamadas.
-    """
+    """Worker perimetral en segundo plano para difusión recurrente de planes en canales."""
     _spawn(start_subscription_watchdog_worker(bot))
     _spawn(start_meeting_announcement_worker(bot))
     logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
@@ -637,7 +735,6 @@ async def start_channel_broadcast_worker(bot: Bot):
 
                     caption = promo_text.strip() if promo_text else f"💎 <b>{plan_name}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR\n\n🛡️ <i>Cloud Media Management</i>"
 
-                    # Botonera interactiva limpia (cero URLs en texto plano)
                     kb_rows = [
                         [InlineKeyboardButton(text=f"⭐ Adquirir por {stars_price} Stars", url=pay_link)]
                     ]
@@ -661,7 +758,7 @@ async def start_channel_broadcast_worker(bot: Bot):
                         await mark_channel_plan_broadcasted(plan_id)
                         logger.info(f"✅ [Broadcast Worker] Plan {plan_id} difundido exitosamente en chat {target_chat}.")
                     except (TelegramForbiddenError, TelegramBadRequest) as perm_err:
-                        logger.warning(f"⚠️ [Broadcast Worker] Permiso denegado en chat {target_chat}. Difusión pausada para plan {plan_id}: {perm_err}")
+                        logger.warning(f"⚠️️ [Broadcast Worker] Permiso denegado en chat {target_chat}. Difusión pausada para plan {plan_id}: {perm_err}")
                         await disable_channel_plan_broadcast(plan_id)
                     except TelegramRetryAfter as rate_err:
                         await asyncio.sleep(rate_err.retry_after + 1)
