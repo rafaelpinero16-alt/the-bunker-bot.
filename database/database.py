@@ -34,10 +34,7 @@ def is_super_admin(user_id: int) -> bool:
 
 @contextlib.contextmanager
 def get_db_connection():
-    """
-    Genera y reutiliza conexiones SQLite por hilo optimizadas con WAL y modo concurrente.
-    Evita la saturación del ThreadPoolExecutor reutilizando la conexión en hilos de trabajo.
-    """
+    """Genera y reutiliza conexiones SQLite por hilo optimizadas con WAL y modo concurrente."""
     conn = getattr(_thread_local, "conn", None)
     if conn is None:
         conn = sqlite3.connect(DB_PATH, timeout=30.0)
@@ -67,14 +64,12 @@ def db_async(fn):
 
 
 def _ident(name: str) -> str:
-    """Valida un nombre de columna/tabla antes de interpolarlo en SQL."""
     if not _IDENT_RE.match(name):
         raise ValueError(f"Identificador SQL no permitido: {name!r}")
     return name
 
 
 def _ensure_columns(cursor, table: str, columns) -> None:
-    """Migración idempotente: añade solo las columnas que aún no existen."""
     existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({_ident(table)})")}
     for col_name, col_def in columns:
         if col_name not in existing:
@@ -82,7 +77,6 @@ def _ensure_columns(cursor, table: str, columns) -> None:
 
 
 def _upsert_setting(group_id: int, column: str, value) -> None:
-    """Guarda una columna de group_settings (crea la fila si no existe)."""
     column = _ident(column)
     with get_db_connection() as conn:
         conn.execute(
@@ -94,7 +88,6 @@ def _upsert_setting(group_id: int, column: str, value) -> None:
 
 
 def _get_setting(group_id: int, column: str, default=0):
-    """Lee una columna de group_settings; devuelve `default` si falta la fila, el valor es NULL o la columna no existe."""
     column = _ident(column)
     with get_db_connection() as conn:
         try:
@@ -105,7 +98,6 @@ def _get_setting(group_id: int, column: str, default=0):
 
 
 def init_db():
-    """Inicializa el esquema relacional, canales, telemetría y migraciones dinámicas para The Bunker OS."""
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
@@ -194,7 +186,7 @@ def init_db():
             ("lock_commands", "INTEGER DEFAULT 0"),
             ("mic_vip_price", "INTEGER DEFAULT 50"),
             ("mic_vip_custom_price", "INTEGER DEFAULT 50"),
-            ("mic_vip_custom_tag", "TEXT DEFAULT '⚜️MIC🎙️VIP⚜️'"),
+            ("mic_vip_custom_tag", "TEXT DEFAULT '⚜️️MIC🎙️VIP⚜️'"),
             ("free_badge_status", "INTEGER DEFAULT 0"),
             ("free_badge_title", "TEXT DEFAULT 'VIP Free 🎙️'"),
             ("vip_mic_badge_title", "TEXT DEFAULT 'Pase VIP 24h 🎙️'"),
@@ -344,6 +336,7 @@ def init_default_blacklist():
         cursor = conn.cursor()
         cursor.executemany("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", [(w.lower().strip(),) for w in banned_words])
         conn.commit()
+
 
 @db_async
 def get_or_create_user(user_id: int, username: str, full_name: str):
@@ -662,12 +655,12 @@ def get_mic_vip_custom_config(group_id: int) -> dict:
                 price_val = row[1] if (row[1] is not None and row[1] > 0) else (row[0] if (row[0] is not None and row[0] > 0) else 50)
                 return {
                     "price": price_val,
-                    "tag": row[2] if row[2] else "⚜️MIC🎙️VIP⚜️",
+                    "tag": row[2] if row[2] else "⚜️MIC🎙️️VIP⚜️",
                     "text": row[3] if row[3] else ""
                 }
         except sqlite3.OperationalError:
             pass
-        return {"price": 50, "tag": "⚜️MIC🎙️VIP⚜️️", "text": ""}
+        return {"price": 50, "tag": "⚜️MIC🎙️VIP⚜️", "text": ""}
 
 
 @db_async
@@ -734,7 +727,7 @@ def get_vip_badge_title(group_id: int) -> str:
             elif row and row[1]:
                 title = row[1]
             else:
-                title = "Pase VIP 24h 🎙️"
+                title = "Pase VIP 24h 🎙️️"
         except sqlite3.OperationalError:
             title = "Pase VIP 24h 🎙️"
     return title[:16]
@@ -2511,6 +2504,32 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
 
 
 @db_async
+def get_chat_admin_stats(chat_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT full_name, username, message_count, reply_count
+                FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
+                ORDER BY message_count DESC
+            """, (chat_id,))
+            rows = cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+        
+        return [
+            {
+                "name": r[0] or f"Admin {r[1]}",
+                "role": "Administrator",
+                "messages": r[2],
+                "replies": r[3],
+                "actions": 0
+            }
+            for r in rows
+        ]
+
+
+@db_async
 def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2564,7 +2583,6 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
         if not payload or not received_sig:
             return False, "Estructura de paquete inválida."
         raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        expected_sig = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigned if hasattr(hmac, 'compare_digest') else False
         expected_sig = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected_sig, received_sig):
             return False, "Firma digital no válida."
@@ -2584,30 +2602,6 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
     except Exception as ex:
         return False, f"Error durante la restauración: {ex}"
 
-@db_async
-def get_chat_admin_stats(chat_id: int) -> list:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT full_name, username, message_count, reply_count
-                FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
-                ORDER BY message_count DESC
-            """, (chat_id,))
-            rows = cursor.fetchall()
-        except sqlite3.OperationalError:
-            return []
-        
-        return [
-            {
-                "name": r[0] or f"Admin {r[1]}",
-                "role": "Administrator",
-                "messages": r[2],
-                "replies": r[3],
-                "actions": 0
-            }
-            for r in rows
-        ]
 
 try:
     init_db()
