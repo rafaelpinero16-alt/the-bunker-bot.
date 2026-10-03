@@ -1327,11 +1327,14 @@ def set_ai_sentinel_config(group_id: int, field: str, value):
         raise ValueError(f"Campo de IA no permitido: {field!r}")
     _upsert_setting(group_id, field, value)
 
+# ==========================================
+# 🎮 CONFIGURACIÓN Y PERSISTENCIA DE GAMIFICACIÓN
+# ==========================================
 @db_async
 def get_reputation_settings(group_id: int) -> dict:
     """Lee el estado del motor de gamificación y multiplicador de XP del grupo."""
     return {
-        "enabled": _get_setting(group_id, "reputation_enabled", 1),
+        "enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
         "multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0)
     }
 
@@ -1340,7 +1343,7 @@ def get_reputation_settings(group_id: int) -> dict:
 def set_reputation_setting(group_id: int, field: str, value):
     """Guarda parámetros de gamificación en group_settings mediante upsert seguro."""
     if field not in ("reputation_enabled", "reputation_xp_multiplier"):
-        return
+        raise ValueError(f"Campo de reputación no permitido: {field!r}")
     _upsert_setting(group_id, field, value)    
 
 
@@ -2754,7 +2757,18 @@ def add_user_reputation_xp(
     base_xp: int = 10, 
     cooldown_seconds: int = 45
 ) -> dict:
-    """Otorga XP respetando cooldown anti-spam y calcula subidas de nivel automáticas."""
+    """Otorga XP respetando cooldown anti-spam, multiplicadores y estado activo."""
+    # 1. Comprobación de interruptor global de reputación del grupo
+    rep_cfg = {
+        "enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
+        "multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0)
+    }
+    if rep_cfg["enabled"] != 1:
+        return {"awarded": False, "xp": 0, "level": 1, "leveled_up": False, "reason": "disabled"}
+
+    # 2. Aplicación del multiplicador configurado (1.0x, 1.5x, 2.0x)
+    effective_xp = max(1, int(base_xp * rep_cfg["multiplier"]))
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2766,11 +2780,11 @@ def add_user_reputation_xp(
         if row:
             current_xp, current_level, elapsed_sec = row
             if elapsed_sec is not None and elapsed_sec < cooldown_seconds:
-                return {"awarded": False, "xp": current_xp, "level": current_level, "leveled_up": False}
+                return {"awarded": False, "xp": current_xp, "level": current_level, "leveled_up": False, "reason": "cooldown"}
         else:
             current_xp, current_level = 0, 1
 
-        new_xp = current_xp + base_xp
+        new_xp = current_xp + effective_xp
         # Curva de nivel: Nivel = int((XP / 100) ** 0.5) + 1
         new_level = int((new_xp / 100) ** 0.5) + 1
         leveled_up = new_level > current_level
@@ -2792,7 +2806,7 @@ def add_user_reputation_xp(
             "xp": new_xp,
             "level": new_level,
             "leveled_up": leveled_up,
-            "gained_xp": base_xp
+            "gained_xp": effective_xp
         }
 
 
@@ -3208,7 +3222,9 @@ def export_group_configuration(group_id: int) -> str:
         "source_group_id": group_id,
         "settings": settings_dict,
         "vc_schedule": sched_dict,
-        "tip_targets": targets
+        "tip_targets": targets,
+        "reputation_enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
+        "reputation_xp_multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0),
     }
 
     raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))

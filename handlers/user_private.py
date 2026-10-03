@@ -5777,8 +5777,7 @@ def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: 
 
 def get_reputation_keyboard(group_id: int, lang: str, rep_cfg: dict, chat_type: str = "g") -> InlineKeyboardMarkup:
     """Botonera de control de Gamificación y Niveles XP con indicadores visuales activos."""
-    t = TEXTS.get(lang, TEXTS["es"])
-    is_on = (rep_cfg.get("enabled", 1) == 1)
+    is_on = (int(rep_cfg.get("enabled", 1) or 0) == 1)
     st_btn = f"🎮 {'Sistema XP: 🟢 Activado' if is_on else 'Sistema XP: 🔴 Desactivado'}"
     mult = float(rep_cfg.get("multiplier", 1.0) or 1.0)
     back_btn = ultra_back_button(chat_type, group_id, lang)
@@ -5795,20 +5794,20 @@ def get_reputation_keyboard(group_id: int, lang: str, rep_cfg: dict, chat_type: 
             InlineKeyboardButton(text=btn_2_0, callback_data=f"rep_setmult_2.0_{group_id}_{lang}")
         ],
         [InlineKeyboardButton(text=f"🏆 {'Ver Cuadro de Honor (Top 10)' if lang == 'es' else 'View Leaderboard (Top 10)'}", callback_data=f"rep_viewtop_{group_id}_{lang}")],
-        [back_btn]
+        [back_btn],
     ])
 
 
 def get_backup_vault_keyboard(group_id: int, lang: str, chat_type: str = "g") -> InlineKeyboardMarkup:
     """Botonera de exportación e importación criptográfica (.bunker)."""
-    t = TEXTS.get(lang, TEXTS["es"])
     back_btn = ultra_back_button(chat_type, group_id, lang)
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"📤 {'Exportar Respaldo (.bunker)' if lang == 'es' else 'Export Backup (.bunker)'}", callback_data=f"backup_export_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"📥 {'Importar / Migrar Respaldo' if lang == 'es' else 'Import / Restore Backup'}", callback_data=f"backup_import_{group_id}_{lang}")],
-        [back_btn]
+        [back_btn],
     ])
+
 
 @router.callback_query(
     F.data.startswith("panic_") | F.data.startswith("shield_") |
@@ -5897,6 +5896,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 return
 
     elif module == "rep":
+        # 🎯 EXTRACCIÓN SEGURA DE ARGUMENTOS (Evita ValueError en floats)
         if sub == "setmult":
             val = float(data[2])
             group_id = int(data[3])
@@ -5927,9 +5927,8 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)
         elif sub == "setmult":
             await set_reputation_setting(group_id, "reputation_xp_multiplier", val)
-            await callback.answer(f"Multiplicador: {val}x XP 🟢")
+            await callback.answer(f"Multiplicador ajustado a {val}x XP 🟢")
             rep_cfg = await get_reputation_settings(group_id)
-            rep_cfg["multiplier"] = val
             st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if rep_cfg["enabled"] == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
             text = t["rep_main"].format(st_badge=st_badge, multiplier=val)
             keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)

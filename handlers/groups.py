@@ -1878,7 +1878,7 @@ async def enforce_warn_ladder(
 # 🎮 FASE 4: MOTOR DE GAMIFICACIÓN EN TIEMPO REAL
 # ==========================================
 async def _process_message_reputation(bot: Bot, message: Message):
-    """Otorga XP por mensaje legítimo y notifica subidas de nivel de forma elegante."""
+    """Otorga XP por mensaje legítimo respetando multiplicadores y notifica ascensos."""
     if not message.from_user or message.from_user.is_bot:
         return
 
