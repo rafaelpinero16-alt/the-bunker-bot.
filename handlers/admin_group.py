@@ -1,8 +1,11 @@
 """
 admin_group.py — Gestor de comandos y administración de grupos en The Bunker OS (Aiogram 3.x)
-Cloud Media Management © 2026
+Fase 5: Sistema Criptográfico de Respaldo y Migración (Backup & Restore con HMAC-SHA256).
+The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
+import io
+import sys
 import inspect
 import asyncio
 import time
@@ -11,7 +14,7 @@ import logging
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, 
-    InlineKeyboardButton, CallbackQuery
+    InlineKeyboardButton, CallbackQuery, BufferedInputFile
 )
 from aiogram.filters import Command, CommandObject
 import database.database as _db_module
@@ -25,7 +28,8 @@ from database.database import (
     add_user_strike, get_user_strikes, reset_user_strikes, get_warns_config,
     get_night_mode_config, activate_universal_night_mode, deactivate_universal_night_mode,
     approve_group, is_group_approved, get_group_tier, get_session_by_group,
-    set_vc_monitor_status, get_vc_monitor_status
+    set_vc_monitor_status, get_vc_monitor_status,
+    export_group_configuration, import_group_configuration
 )
 from assistant import (
     set_participant_mic,
@@ -140,7 +144,7 @@ TEXTS = {
             "🎛️ <b>Radar Console: AutoLower Acoustic Shield</b>\n\n"
             "• <b>Active State:</b> {status}\n\n"
             "Select an action to change microphone attenuation in real-time:\n\n"
-            "🛡️ <i>Cloud Media Management</i>"
+            "🛡️️ <i>Cloud Media Management</i>"
         ),
         "autolower_on_btn": "✅ Enable AutoLower (2%)",
         "autolower_off_btn": "❌ Disable AutoLower (Free)",
@@ -169,11 +173,41 @@ TEXTS = {
         "night_on_msg": "🌙 <b>Universal Night Mode:</b> 🟢 ACTIVATED. Perimeter restrictions applied.",
         "night_off_msg": "☀️ <b>Universal Night Mode:</b> 🔴 DEACTIVATED. Standard permissions restored.",
         "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️️ <i>Cloud Media Management</i>",
+        "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_warn": "⚠️ Target required. Reply to a message or use: <code>/warn [@user or ID] [reason]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_issued": "⚠️ <b>Warning Issued:</b> {target_tag} has received a formal strike ({current}/{limit}).\n• <b>Reason:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_punished": "⚖️ <b>Threshold Reached:</b> {target_tag} reached {limit}/{limit} strikes.\n• <b>Automated Action:</b> {action_name} executed.\n\n🛡️ <i>Cloud Media Management</i>",
-        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}. Full voice and text permissions restored.\n\n🛡️ <i>Cloud Media Management</i>"
+        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}. Full voice and text permissions restored.\n\n🛡️ <i>Cloud Media Management</i>",
+        "backup_export_caption": (
+            "🔐 <b>The Bunker OS — Cryptographic Perimeter Backup</b>\n\n"
+            "• <b>Community:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
+            "• <b>Digital Signature:</b> HMAC-SHA256 🛡️\n"
+            "• <b>Version:</b> <code>v6.0</code>\n\n"
+            "<i>This configuration file contains all perimeter rules, captcha configs, content locks, "
+            "schedules, and tip destinations.\n\n"
+            "To migrate or restore this configuration in another community, reply to this file with:</i> "
+            "<code>/importsettings</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_export_error": "❌ Error exporting cryptographic backup: {error}\n\n🛡️ <i>Cloud Media Management</i>",
+        "backup_import_needed": (
+            "⚠️ <b>Backup File Required:</b>\n\n"
+            "Reply to a <code>.bunker</code> backup file with <code>/importsettings</code> or attach it directly "
+            "to restore and migrate community security settings.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_import_success": (
+            "✅ <b>Perimeter Configuration Restored Successfully!</b>\n\n"
+            "• <b>Target Community:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
+            "• <b>Integrity Check:</b> Cryptographically Verified (HMAC Valid) 🟢\n"
+            "• <b>Status:</b> All perimeter locks, captcha, and schedules applied instantly.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_import_failed": (
+            "❌ <b>Backup Restoration Failed:</b>\n\n"
+            "{error}\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        )
     },
     "es": {
         "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -206,7 +240,7 @@ TEXTS = {
         "status_active": "🟢 ACTIVO (Reduciendo a 2% a no autorizados)",
         "status_inactive": "🔴 DESACTIVADO (Micrófonos Libres al 100%)",
         "podcast_panel": (
-            "🎙️️ <b>Panel de Control: Modo Podcast (Ducking)</b>\n\n"
+            "🎙️ <b>Panel de Control: Modo Podcast (Ducking)</b>\n\n"
             "• <b>Estado Actual:</b> {status}\n\n"
             "Selecciona una directiva para alterar la atenuación dinámica:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -227,12 +261,42 @@ TEXTS = {
         "status_inactive_shield": "🔴 DESACTIVADO",
         "night_on_msg": "🌙 <b>Modo Nocturno Universal:</b> 🟢 ACTIVADO. Restricciones perimetrales aplicadas.",
         "night_off_msg": "☀️ <b>Modo Nocturno Universal:</b> 🔴 DESACTIVADO. Permisos previos restaurados.",
-        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️️ <i>Cloud Media Management</i>",
+        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Objetivo requerido. Responde a un usuario, menciónalo con @ o pasa su ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_warn": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/warn [@usuario o ID] [motivo]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "warn_issued": "⚠️️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_issued": "⚠️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_punished": "⚖️ <b>Límite de Faltas Alcanzado:</b> {target_tag} sumó {limit}/{limit} faltas.\n• <b>Castigo Automático:</b> Se aplicó {action_name} de inmediato.\n\n🛡️ <i>Cloud Media Management</i>",
-        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}. Permisos y voz restablecidos al 100%.\n\n🛡️ <i>Cloud Media Management</i>"
+        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}. Permisos y voz restablecidos al 100%.\n\n🛡️ <i>Cloud Media Management</i>",
+        "backup_export_caption": (
+            "🔐 <b>The Bunker OS — Respaldo Criptográfico Perimetral</b>\n\n"
+            "• <b>Comunidad:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
+            "• <b>Firma Digital:</b> HMAC-SHA256 🛡️\n"
+            "• <b>Versión:</b> <code>v6.0</code>\n\n"
+            "<i>Este paquete contiene todas las cerraduras perimetrales, captcha, filtros, "
+            "horarios de modo nocturno y destinos de propinas.\n\n"
+            "Para restaurar o migrar estos ajustes a otra comunidad, responde a este archivo con:</i> "
+            "<code>/importsettings</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_export_error": "❌ Error generando el respaldo criptográfico: {error}\n\n🛡️ <i>Cloud Media Management</i>",
+        "backup_import_needed": (
+            "⚠️ <b>Archivo de Respaldo Requerido:</b>\n\n"
+            "Responde a un archivo <code>.bunker</code> con <code>/importsettings</code> o adjúntalo directamente "
+            "con el comando para restaurar y migrar la seguridad de la comunidad.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_import_success": (
+            "✅ <b>¡Configuración Perimetral Restaurada con Éxito!</b>\n\n"
+            "• <b>Comunidad Destino:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
+            "• <b>Verificación de Integridad:</b> Autenticación Criptográfica (HMAC Válido) 🟢\n"
+            "• <b>Estado:</b> Cerraduras, captcha, filtros y directivas aplicados al instante.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_import_failed": (
+            "❌ <b>Fallo al Restaurar Respaldo:</b>\n\n"
+            "{error}\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        )
     }
 }
 
@@ -282,6 +346,149 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
 
 
 # ==========================================================
+# 🔐 FASE 5: RESPALDO Y MIGRACIÓN CRIPTOGRÁFICA (/exportsettings, /importsettings)
+# ==========================================================
+@router.message(Command("exportsettings", "backup", "respaldo", "exportar"))
+async def cmd_export_settings(message: Message, bot: Bot):
+    """Genera y despacha el archivo criptográfico .bunker firmado con HMAC-SHA256."""
+    if message.chat.type == "private":
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    t = TEXTS[lang]
+
+    if not await is_user_creator(bot, chat_id, user_id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        _spawn(auto_delete_pair(message, msg, 8))
+        return
+
+    try:
+        package_json_str = await export_group_configuration(chat_id)
+        chat_title = message.chat.title or f"Chat {chat_id}"
+        clean_filename = f"bunker_backup_{abs(chat_id)}_{int(time.time())}.bunker"
+
+        file_data = BufferedInputFile(package_json_str.encode("utf-8"), filename=clean_filename)
+        caption_text = t["backup_export_caption"].format(
+            title=html.escape(chat_title),
+            chat_id=chat_id
+        )
+
+        # Entrega preferente al DM del Creador para no exponer los ajustes en el chat
+        try:
+            await bot.send_document(
+                chat_id=user_id,
+                document=file_data,
+                caption=caption_text,
+                parse_mode="HTML"
+            )
+            confirm_text = (
+                "🔐 <b>Respaldo criptográfico enviado a tus mensajes privados con éxito.</b>\n\n🛡️ <i>Cloud Media Management</i>"
+                if lang == "es" else
+                "🔐 <b>Cryptographic backup successfully sent to your private DMs.</b>\n\n🛡️ <i>Cloud Media Management</i>"
+            )
+            confirm = await message.reply(confirm_text, parse_mode="HTML")
+            _spawn(auto_delete_pair(message, confirm, 15))
+        except Exception:
+            # Fallback al chat del grupo si el Creador no ha iniciado chat con el bot
+            sent_doc = await message.reply_document(
+                document=file_data,
+                caption=caption_text,
+                parse_mode="HTML"
+            )
+            _spawn(auto_delete_pair(message, sent_doc, 60))
+
+    except Exception as ex:
+        logger.error(f"Error en /exportsettings ({chat_id}): {ex}")
+        err_msg = await message.reply(t["backup_export_error"].format(error=html.escape(str(ex))), parse_mode="HTML")
+        _spawn(auto_delete_pair(message, err_msg, 12))
+
+
+@router.message(Command("importsettings", "restore", "restaurar", "importar"))
+async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot):
+    """Valida e importa la configuración perimetral verificando la firma HMAC."""
+    if message.chat.type == "private":
+        return
+
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    t = TEXTS[lang]
+
+    if not await is_user_creator(bot, chat_id, user_id):
+        msg = await message.reply(t["owner_only"], parse_mode="HTML")
+        _spawn(auto_delete_pair(message, msg, 8))
+        return
+
+    doc = None
+    json_content = None
+
+    if message.reply_to_message and message.reply_to_message.document:
+        doc = message.reply_to_message.document
+    elif message.document:
+        doc = message.document
+    elif message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
+        candidate = message.reply_to_message.text or message.reply_to_message.caption
+        if "payload" in candidate and "signature" in candidate:
+            json_content = candidate
+    elif command and command.args:
+        candidate = command.args.strip()
+        if "payload" in candidate and "signature" in candidate:
+            json_content = candidate
+
+    if doc:
+        try:
+            file_obj = await bot.get_file(doc.file_id)
+            downloaded = await bot.download_file(file_obj.file_path)
+            json_content = downloaded.read().decode("utf-8")
+        except Exception as dl_err:
+            logger.error(f"Error descargando archivo de backup: {dl_err}")
+            msg = await message.reply(t["backup_import_failed"].format(error=f"No se pudo descargar el archivo: {dl_err}"), parse_mode="HTML")
+            _spawn(auto_delete_pair(message, msg, 12))
+            return
+
+    if not json_content:
+        msg = await message.reply(t["backup_import_needed"], parse_mode="HTML")
+        _spawn(auto_delete_pair(message, msg, 20))
+        return
+
+    try:
+        success, report = await import_group_configuration(chat_id, json_content)
+        chat_title = message.chat.title or f"Chat {chat_id}"
+
+        if success:
+            admin_caches.pop(chat_id, None)
+
+            # Notificar al WebSocket de la sala (Live Radar)
+            try:
+                main_mod = sys.modules.get("main")
+                if main_mod:
+                    fn = getattr(main_mod, "emit_radar_event", None)
+                    if callable(fn):
+                        _spawn(fn(chat_id, "backup_restored", {"chat_id": chat_id}))
+            except Exception:
+                pass
+
+            succ_msg = await message.reply(
+                t["backup_import_success"].format(title=html.escape(chat_title), chat_id=chat_id),
+                parse_mode="HTML"
+            )
+            _spawn(auto_delete_pair(message, succ_msg, 30))
+        else:
+            fail_msg = await message.reply(
+                t["backup_import_failed"].format(error=html.escape(report)),
+                parse_mode="HTML"
+            )
+            _spawn(auto_delete_pair(message, fail_msg, 15))
+
+    except Exception as ex:
+        logger.error(f"Error procesando import_group_configuration en {chat_id}: {ex}")
+        err_msg = await message.reply(t["backup_import_failed"].format(error=html.escape(str(ex))), parse_mode="HTML")
+        _spawn(auto_delete_pair(message, err_msg, 12))
+
+
+# ==========================================================
 # 🔄 COMANDO DE RECARGA, INDEXACIÓN Y RECONEXIÓN TOTAL (/reload)
 # ==========================================================
 @router.message(Command("reload"))
@@ -291,8 +498,8 @@ async def cmd_reload_group(message: Message, bot: Bot):
         return
     
     chat_id = message.chat.id
-    user_id = message.from_user.id
-    lang = get_lang(message.from_user.language_code)
+    user_id = message.from_user.id if message.from_user else 0
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
 
     if not await is_user_admin(bot, chat_id, user_id):
@@ -305,7 +512,6 @@ async def cmd_reload_group(message: Message, bot: Bot):
     chat_title = message.chat.title or "Comunidad"
     chat_type = message.chat.type
 
-    # 1. Registrar entorno en el padrón del creador / usuario admin
     await register_user_group(
         user_id=user_id, 
         group_id=chat_id, 
@@ -313,18 +519,13 @@ async def cmd_reload_group(message: Message, bot: Bot):
         chat_type=chat_type
     )
 
-    # 2. Asegurar aprobación e indexación en approved_groups
     current_tier = await get_group_tier(chat_id) or "free"
     if not await is_group_approved(chat_id):
         await approve_group(chat_id, tier=current_tier)
 
-    # 3. Forzar supervisión de videochat activa
     await set_vc_monitor_status(chat_id, 1)
-
-    # 4. Purgar caché de administradores para forzar re-lectura inmediata
     admin_caches.pop(chat_id, None)
 
-    # 5. Reconexión en caliente del Centinela MTProto
     sentinel_status = "Centinela Activo 🟢" if lang == "es" else "Active Sentinel 🟢"
     try:
         session_row = await get_session_by_group(chat_id)
@@ -334,7 +535,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
             if connected:
                 sentinel_status = "Centinela Dedicado Reconectado 💎" if lang == "es" else "Dedicated Sentinel Reconnected 💎"
             else:
-                sentinel_status = "Error en Sesión Dedicada ⚠️" if lang == "es" else "Dedicated Session Error ⚠️"
+                sentinel_status = "Error en Sesión Dedicada ⚠️️" if lang == "es" else "Dedicated Session Error ⚠️"
         elif assistant_app and assistant_app.is_connected:
             try:
                 peer = await assistant_app.resolve_peer(chat_id)
@@ -370,7 +571,6 @@ async def cmd_reload_group(message: Message, bot: Bot):
 
     bot_info = await bot.get_me()
     
-    # Teclado inline seguro para grupos usando enlaces estándar
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
         [InlineKeyboardButton(text=t["btn_open_miniapp"], url=f"{WEBAPP_URL}?chat_id={chat_id}")]
@@ -399,7 +599,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
     if message.chat.type == "private": 
         return
     
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
+    if not await is_user_admin(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         try: 
             await message.delete()
         except Exception: 
@@ -413,10 +613,9 @@ async def cmd_settings_group(message: Message, bot: Bot):
         chat_type=message.chat.type
     )
     bot_info = await bot.get_me()
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
     
-    # En grupos se debe usar URL directa para evitar BUTTON_TYPE_INVALID
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_open_miniapp"], url=f"{WEBAPP_URL}?chat_id={message.chat.id}")],
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{message.chat.id}")]
@@ -435,7 +634,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     if message.chat.type == "private":
         return
 
-    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         try: 
             await message.delete()
         except Exception: 
@@ -444,7 +643,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
 
     chat_id = message.chat.id
     current_status = await get_autolower_status(chat_id)
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -496,7 +695,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
     if message.chat.type == "private":
         return
 
-    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         try: 
             await message.delete()
         except Exception: 
@@ -505,7 +704,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     current_status = await get_podcast_status(chat_id)
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -562,7 +761,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
     if message.chat.type == "private":
         return
 
-    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         try: 
             await message.delete()
         except Exception: 
@@ -571,7 +770,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     current_status = await get_screen_shield_status(chat_id)
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -631,10 +830,10 @@ async def cmd_toggle_night(message: Message, bot: Bot):
     if message.chat.type == "private":
         return
         
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
 
-    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         msg = await message.reply(t["owner_only"], parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, 8))
         return
@@ -660,10 +859,10 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type == "private":
         return
 
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
 
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
+    if not await is_user_admin(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
@@ -677,9 +876,6 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
         _spawn(auto_delete_pair(message, msg, 8))
         return
 
-    # Extracción inteligente de motivo:
-    # 1. Si responde a un mensaje, todos los argumentos escritos componen el motivo.
-    # 2. Si no es respuesta, el primer argumento fue el usuario y el resto es el motivo.
     reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
     if message.reply_to_message:
         if command and command.args:
@@ -710,7 +906,6 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     except Exception as e:
         logger.debug(f"Aviso ejecutando ladder de warns: {e}")
 
-    # Fallback directo en caso de fallo en el despachador de grupos
     cfg = await get_warns_config(message.chat.id)
     limit = cfg.get("limit", 3)
     action = cfg.get("action", "mute")
@@ -761,10 +956,10 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type == "private":
         return
 
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
 
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id):
+    if not await is_user_admin(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
@@ -782,13 +977,11 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
         except Exception:
             pass
 
-    # 1. Restaurar volumen acústico en la llamada
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=10000)
     except Exception:
         pass
 
-    # 2. Restaurar permisos de texto y multimedia en el chat general
     try:
         await bot.restrict_chat_member(
             chat_id=message.chat.id,
@@ -822,10 +1015,10 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type == "private": 
         return
         
-    lang = get_lang(message.from_user.language_code)
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
 
-    if not await is_user_creator(bot, message.chat.id, message.from_user.id):
+    if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
         msg = await message.reply(t["owner_only"], parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, 8))
         return
@@ -843,13 +1036,11 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
         
     await revoke_vip_mic(target_id, message.chat.id)
     
-    # 1. Atenuación acústica de vuelta al 2%
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=200)
     except Exception as e:
         logger.warning(f"Aviso Centinela al revocar VIP en grupo {message.chat.id}: {e}")
 
-    # 2. Retiro de insignia/administrador simbólico si fue promovido por compra de pase
     try:
         await bot.promote_chat_member(
             chat_id=message.chat.id, user_id=target_id,
