@@ -235,6 +235,7 @@ def init_db():
             ("vc_join_custom_media_id", "TEXT"),
             ("vc_join_custom_media_type", "TEXT"),
             ("vc_join_btn_text", "TEXT"),
+            ("vc_join_btn_url", "TEXT"),
             ("vc_join_autodel_seconds", "INTEGER DEFAULT 30"),
             ("vc_join_enabled", "INTEGER DEFAULT 1"),
 
@@ -243,6 +244,7 @@ def init_db():
             ("mic_vip_custom_media_id", "TEXT"),
             ("mic_vip_custom_media_type", "TEXT"),
             ("mic_vip_btn_text", "TEXT"),
+            ("mic_vip_btn_url", "TEXT"),
             ("mic_vip_autodel_seconds", "INTEGER DEFAULT 30"),
             ("mic_vip_enabled", "INTEGER DEFAULT 1"),
 
@@ -251,6 +253,7 @@ def init_db():
             ("reset_notice_custom_media_id", "TEXT"),
             ("reset_notice_custom_media_type", "TEXT"),
             ("reset_notice_btn_text", "TEXT"),
+            ("reset_notice_btn_url", "TEXT"),
             ("reset_notice_autodel_seconds", "INTEGER DEFAULT 20"),
             ("reset_notice_enabled", "INTEGER DEFAULT 1"),
 
@@ -258,6 +261,8 @@ def init_db():
             ("vc_sched_start_custom_text", "TEXT"),
             ("vc_sched_start_custom_media_id", "TEXT"),
             ("vc_sched_start_custom_media_type", "TEXT"),
+            ("vc_sched_start_btn_text", "TEXT"),
+            ("vc_sched_start_btn_url", "TEXT"),
             ("vc_sched_start_autodel_seconds", "INTEGER DEFAULT 0"),
             ("vc_sched_start_enabled", "INTEGER DEFAULT 1"),
 
@@ -266,8 +271,14 @@ def init_db():
             ("vc_welcome_custom_media_id", "TEXT"),
             ("vc_welcome_custom_media_type", "TEXT"),
             ("vc_welcome_btn_text", "TEXT"),
+            ("vc_welcome_btn_url", "TEXT"),
             ("vc_welcome_autodel_seconds", "INTEGER DEFAULT 0"),
             ("vc_welcome_enabled", "INTEGER DEFAULT 1"),
+
+            # --- 6. ADVERTENCIAS PERSONALIZADAS (PRO / ULTRA PRO) ---
+            ("warn_custom_text", "TEXT"),
+            ("warn_custom_media_id", "TEXT"),
+            ("warn_custom_media_type", "TEXT"),
 
             # --- Parámetros Generales ---
             ("log_channel_id", "TEXT"),
@@ -1151,45 +1162,45 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT vc_join_custom_text, vc_join_custom_media_id, vc_join_custom_media_type, vc_join_btn_text, vc_join_autodel_seconds,
-                       mic_vip_custom_text, mic_vip_custom_media_id, mic_vip_custom_media_type, mic_vip_btn_text, mic_vip_autodel_seconds,
-                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type, reset_notice_btn_text, reset_notice_autodel_seconds,
-                       vc_sched_start_custom_text, vc_sched_start_custom_media_id, vc_sched_start_custom_media_type, vc_sched_start_autodel_seconds,
-                       vc_welcome_custom_text, vc_welcome_custom_media_id, vc_welcome_custom_media_type, vc_welcome_btn_text, vc_welcome_autodel_seconds
+                SELECT vc_join_custom_text, vc_join_custom_media_id, vc_join_custom_media_type, vc_join_btn_text, vc_join_btn_url, vc_join_autodel_seconds, vc_join_enabled,
+                       mic_vip_custom_text, mic_vip_custom_media_id, mic_vip_custom_media_type, mic_vip_btn_text, mic_vip_btn_url, mic_vip_autodel_seconds, mic_vip_enabled,
+                       reset_notice_custom_text, reset_notice_custom_media_id, reset_notice_custom_media_type, reset_notice_btn_text, reset_notice_btn_url, reset_notice_autodel_seconds, reset_notice_enabled,
+                       vc_sched_start_custom_text, vc_sched_start_custom_media_id, vc_sched_start_custom_media_type, vc_sched_start_btn_text, vc_sched_start_btn_url, vc_sched_start_autodel_seconds, vc_sched_start_enabled,
+                       vc_welcome_custom_text, vc_welcome_custom_media_id, vc_welcome_custom_media_type, vc_welcome_btn_text, vc_welcome_btn_url, vc_welcome_autodel_seconds, vc_welcome_enabled
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
             if row:
                 return {
                     # 1. VC Join
-                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2], "vc_btn": row[3], "vc_autodel": row[4] if row[4] is not None else 30,
+                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2], "vc_btn": row[3], "vc_btn_url": row[4], "vc_autodel": row[5] if row[5] is not None else 30, "vc_enabled": row[6] if row[6] is not None else 1,
                     # 2. MicVIP
-                    "micvip_text": row[5], "micvip_media_id": row[6], "micvip_media_type": row[7], "micvip_btn": row[8], "micvip_autodel": row[9] if row[9] is not None else 30,
+                    "micvip_text": row[7], "micvip_media_id": row[8], "micvip_media_type": row[9], "micvip_btn": row[10], "micvip_btn_url": row[11], "micvip_autodel": row[12] if row[12] is not None else 30, "micvip_enabled": row[13] if row[13] is not None else 1,
                     # 3. Reset
-                    "reset_text": row[10], "reset_media_id": row[11], "reset_media_type": row[12], "reset_btn": row[13], "reset_autodel": row[14] if row[14] is not None else 20,
+                    "reset_text": row[14], "reset_media_id": row[15], "reset_media_type": row[16], "reset_btn": row[17], "reset_btn_url": row[18], "reset_autodel": row[19] if row[19] is not None else 20, "reset_enabled": row[20] if row[20] is not None else 1,
                     # 4. VC Sched Start
-                    "sched_start_text": row[15], "sched_start_media_id": row[16], "sched_start_media_type": row[17], "sched_start_autodel": row[18] if row[18] is not None else 0,
+                    "sched_start_text": row[21], "sched_start_media_id": row[22], "sched_start_media_type": row[23], "sched_start_btn": row[24], "sched_start_btn_url": row[25], "sched_start_autodel": row[26] if row[26] is not None else 0, "sched_enabled": row[27] if row[27] is not None else 1,
                     # 5. VC Welcome
-                    "vc_welcome_text": row[19], "vc_welcome_media_id": row[20], "vc_welcome_media_type": row[21], "vc_welcome_btn": row[22], "vc_welcome_autodel": row[23] if row[23] is not None else 0
+                    "vc_welcome_text": row[28], "vc_welcome_media_id": row[29], "vc_welcome_media_type": row[30], "vc_welcome_btn": row[31], "vc_welcome_btn_url": row[32], "vc_welcome_autodel": row[33] if row[33] is not None else 0, "vc_welcome_enabled": row[34] if row[34] is not None else 1
                 }
         except sqlite3.OperationalError:
             pass
         return {
-            "vc_text": None, "vc_media_id": None, "vc_media_type": None, "vc_btn": None, "vc_autodel": 30,
-            "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None, "micvip_btn": None, "micvip_autodel": 30,
-            "reset_text": None, "reset_media_id": None, "reset_media_type": None, "reset_btn": None, "reset_autodel": 20,
-            "sched_start_text": None, "sched_start_media_id": None, "sched_start_media_type": None, "sched_start_autodel": 0,
-            "vc_welcome_text": None, "vc_welcome_media_id": None, "vc_welcome_media_type": None, "vc_welcome_btn": None, "vc_welcome_autodel": 0
+            "vc_text": None, "vc_media_id": None, "vc_media_type": None, "vc_btn": None, "vc_btn_url": None, "vc_autodel": 30, "vc_enabled": 1,
+            "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None, "micvip_btn": None, "micvip_btn_url": None, "micvip_autodel": 30, "micvip_enabled": 1,
+            "reset_text": None, "reset_media_id": None, "reset_media_type": None, "reset_btn": None, "reset_btn_url": None, "reset_autodel": 20, "reset_enabled": 1,
+            "sched_start_text": None, "sched_start_media_id": None, "sched_start_media_type": None, "sched_start_btn": None, "sched_start_btn_url": None, "sched_start_autodel": 0, "sched_enabled": 1,
+            "vc_welcome_text": None, "vc_welcome_media_id": None, "vc_welcome_media_type": None, "vc_welcome_btn": None, "vc_welcome_btn_url": None, "vc_welcome_autodel": 0, "vc_welcome_enabled": 1
         }
 
 @db_async
 def set_sentinel_service_message(group_id: int, field: str, value):
     valid = [
-        "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type", "vc_join_btn_text", "vc_join_autodel_seconds",
-        "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type", "mic_vip_btn_text", "mic_vip_autodel_seconds",
-        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_autodel_seconds",
-        "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_autodel_seconds",
-        "vc_welcome_custom_text", "vc_welcome_custom_media_id", "vc_welcome_custom_media_type", "vc_welcome_btn_text", "vc_welcome_autodel_seconds"
+        "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type", "vc_join_btn_text", "vc_join_btn_url", "vc_join_autodel_seconds", "vc_join_enabled",
+        "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type", "mic_vip_btn_text", "mic_vip_btn_url", "mic_vip_autodel_seconds", "mic_vip_enabled",
+        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_btn_url", "reset_notice_autodel_seconds", "reset_notice_enabled",
+        "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_btn_text", "vc_sched_start_btn_url", "vc_sched_start_autodel_seconds", "vc_sched_start_enabled",
+        "vc_welcome_custom_text", "vc_welcome_custom_media_id", "vc_welcome_custom_media_type", "vc_welcome_btn_text", "vc_welcome_btn_url", "vc_welcome_autodel_seconds", "vc_welcome_enabled"
     ]
     if field not in valid:
         return
@@ -2362,7 +2373,7 @@ def get_channel_plans(channel_id: int, only_active: bool = True) -> list:
 
 @db_async
 def set_channel_plan_status(plan_id: int, status: str):
-    if status not in ["active", "archived"]:
+    if status not in ["active", "paused", "archived"]:
         return
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -2805,9 +2816,22 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
             days = settings.get("duration_days", 30)
             link = settings.get("target_link", "")
             cursor.execute("""
-                INSERT INTO channel_plans (channel_id, plan_name, duration_days, stars_price, target_link, status)
-                VALUES (?, 'Acceso VIP', ?, ?, ?, 'active')
-            """, (chat_id, days, price, link))
+                SELECT plan_id FROM channel_plans 
+                WHERE channel_id = ? AND status = 'active' 
+                ORDER BY plan_id ASC LIMIT 1
+            """, (chat_id,))
+            existing_p = cursor.fetchone()
+            if existing_p:
+                cursor.execute("""
+                    UPDATE channel_plans 
+                    SET duration_days = ?, stars_price = ?, target_link = ? 
+                    WHERE plan_id = ?
+                """, (days, price, link, existing_p[0]))
+            else:
+                cursor.execute("""
+                    INSERT INTO channel_plans (channel_id, plan_name, duration_days, stars_price, target_link, status)
+                    VALUES (?, 'Acceso VIP', ?, ?, ?, 'active')
+                """, (chat_id, days, price, link))
 
         conn.commit()
 
