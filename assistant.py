@@ -107,12 +107,12 @@ GHOST_PURGE_ALERT_TEXT = (
     "• Cuentas Fantasma / Eliminadas detectadas: <b>{found}</b>\n"
     "• Cuentas purgadas exitosamente: <b>{purged}</b>\n"
     "• Acción ejecutada: <code>{action}</code>\n\n"
-    "🛡️️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
+    "🛡️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
 )
 
 VC_START_TEXTS = {
     "es": (
-        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
+        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
         "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
         "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
         "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
@@ -123,7 +123,7 @@ VC_START_TEXTS = {
         "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
         "⚜ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
         "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓\n\n"
-        "🛡️️ <i>Cloud Media Management</i>"
+        "🛡️ <i>Cloud Media Management</i>"
     )
 }
 
@@ -296,7 +296,7 @@ def _register_noise_strike(chat_id: int, user_id: int) -> bool:
     if len(history) >= NOISE_SPIKE_STRIKE_LIMIT:
         history.clear()
         _noise_unmute_history[key] = history
-        logger.warning(f"⚠️ [Spike de ruido] Usuario {user_id} superó el umbral en grupo {chat_id}.")
+        logger.warning(f"⚠️️ [Spike de ruido] Usuario {user_id} superó el umbral en grupo {chat_id}.")
         return True
     return False
 
@@ -1229,7 +1229,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
 
 async def vc_scheduler_loop():
-    logger.info("🗓️️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
+    logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
     while True:
         try:
             now = _get_group_now()
@@ -1364,12 +1364,12 @@ async def night_mode_autonomous_loop():
                                 try:
                                     await _global_bot.send_message(
                                         chat_id=group_id,
-                                        text="☀️️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>",
+                                        text="☀️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>",
                                         parse_mode="HTML"
                                     )
                                 except Exception:
                                     pass
-                            logger.info(f"☀️️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
+                            logger.info(f"☀️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
                 except Exception as inner_err:
                     logger.debug(f"Aviso evaluando modo nocturno autónomo en grupo {group_id}: {inner_err}")
         except Exception as e:
