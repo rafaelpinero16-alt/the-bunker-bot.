@@ -3,7 +3,6 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
-Fase 2: IA Autónoma de Centinela (Grupos/Canales) + Filtrado Semántico en el Borde + Telemetría Gamificada.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -128,7 +127,6 @@ _default_my_id = None
 
 
 def get_assistant_bot_id() -> int:
-    """Retorna con seguridad el ID de la cuenta MTProto activa (maestra o por defecto)."""
     global _default_my_id
     if _default_my_id:
         return _default_my_id
@@ -141,14 +139,11 @@ def get_assistant_bot_id() -> int:
 active_sentinels = {}
 admin_caches = {}  
 ADMIN_CACHE_TTL = 300
-
 pending_auth_sessions = {}
-
 _forbidden_strikes = {}
 _autolower_cooldowns = {}
 FORBIDDEN_STRIKE_LIMIT = 3
 FORBIDDEN_COOLDOWN_SECONDS = 900  
-
 _screen_shield_flagged = {}
 _noise_unmute_history = {}
 NOISE_SPIKE_WINDOW_SECONDS = 12
@@ -158,8 +153,6 @@ _sentinel_payload_last_sent = {}
 SENTINEL_PAYLOAD_MIN_GAP_SECONDS = 60
 _sentinel_launch_locks = {}
 _sentinel_launch_semaphore = asyncio.Semaphore(4)
-
-# Control perimetral de mensajes de videochat
 _pinned_vc_messages = {}
 _last_vc_notice = {}
 
@@ -182,12 +175,10 @@ def _get_group_now(tz_name: str = None) -> datetime:
 
 
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
-    """Retorna si el modo nocturno está activo y el estado asociado del grupo."""
     try:
         cfg = await get_night_mode_config(chat_id)
         if not cfg or cfg.get("status") != 1:
             return False, "disabled"
-
         start_str = cfg.get("start", "22:00")
         end_str = cfg.get("end", "06:00")
         in_night = is_night_mode_time(start_str, end_str)
@@ -209,12 +200,7 @@ def _extract_urls_to_markup(
     custom_btn_text: str = None, 
     custom_btn_url: str = None
 ) -> tuple[str, InlineKeyboardMarkup | None]:
-    """
-    Extrae URLs en texto plano, las retira del cuerpo del mensaje y genera la botonera.
-    Respeta la URL personalizada para que el botón cubra el enlace nativamente.
-    """
     buttons = []
-    
     if custom_btn_url:
         label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
         buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
@@ -234,9 +220,6 @@ def _extract_urls_to_markup(
     return cleaned_text, markup
 
 
-# ==========================================================
-# 🤖 FASE 2: MOTOR CONVERSACIONAL Y FILTRADO SEMÁNTICO
-# ==========================================================
 _LEETSPEAK_PATTERNS = [
     (re.compile(r'\bc[\W_]*p\b', re.IGNORECASE), "Material Ilícito Evasivo (CP)"),
     (re.compile(r'\bp[\W_]*[e3][\W_]*d[\W_]*[o0]\b', re.IGNORECASE), "Violación Perimetral Infantil"),
@@ -246,16 +229,12 @@ _LEETSPEAK_PATTERNS = [
 
 
 async def semantic_scan_content(text: str, custom_prompt: str = "") -> dict:
-    """Escaneo híbrido: heurística rápida anti-leetspeak + clasificación semántica con IA."""
     if not text:
         return {"flagged": False, "reason": ""}
-
-    # 1. Filtro Heurístico en el Borde (Cero Latencia)
     for pattern, reason in _LEETSPEAK_PATTERNS:
         if pattern.search(text):
             return {"flagged": True, "reason": reason}
 
-    # 2. Análisis Semántico Profundo (Mistral AI)
     if not mistral_client or len(text.strip()) < 8:
         return {"flagged": False, "reason": ""}
 
@@ -291,7 +270,6 @@ async def generate_sentinel_ai_response(
     personality_tone: str = "guardian",
     custom_prompt: str = ""
 ) -> str:
-    """Genera una respuesta contextual de la IA del Centinela dentro de la comunidad."""
     tones = {
         "guardian": (
             "Eres el Centinela Guardián de The Bunker OS (Cloud Media Management © 2026). "
@@ -342,7 +320,6 @@ async def generate_sentinel_ai_response(
         )
         reply_text = response.choices[0].message.content.strip()
 
-        # Almacenar en la memoria contextual
         await save_ai_chat_context(chat_id, user_id, "user", message_text)
         await save_ai_chat_context(chat_id, 0, "assistant", reply_text)
 
@@ -353,24 +330,15 @@ async def generate_sentinel_ai_response(
 
 
 async def sentinel_incoming_message_dispatcher(client: Client, message):
-    """
-    Escuchador unificado de Pyrogram para Centinelas en Grupos y Canales:
-    - Gamificación y Telemetría horaria.
-    - Intervención Semántica del Guardián.
-    - Respuestas Autónomas de IA en salas Ultra Pro.
-    """
     if not message.chat or message.chat.type == ChatType.PRIVATE:
         return
-
     chat_id = message.chat.id
 
-    # 1. Deduplicación: Si la sala tiene centinela dedicado, el maestro no procesa mensajes
     if client == assistant_app and chat_id in active_sentinels:
         dedicated = active_sentinels[chat_id]
         if dedicated.get("client") != assistant_app:
             return
 
-    # 2. Ignorar mensajes propios del centinela
     if message.from_user and message.from_user.is_self:
         return
 
@@ -378,7 +346,6 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
     user_id = from_user.id if from_user else 0
     text_content = (message.text or message.caption or "").strip()
 
-    # 3. Telemetría y Gamificación en Tiempo Real (Fase 1 integrándose en vivo)
     if user_id and not (from_user and from_user.is_bot):
         _spawn(record_hourly_chat_activity(chat_id))
         _spawn(add_user_reputation_xp(
@@ -396,7 +363,6 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
 
     ai_cfg = await get_ai_sentinel_config(chat_id)
 
-    # 4. Escudo Semántico de IA (Guardián Ultra Pro)
     if ai_cfg.get("guardian_status") == 1 and user_id and not is_super_admin(user_id) and user_id not in SERVICE_ACCOUNT_IDS:
         if not await is_whitelisted(user_id):
             threat = await semantic_scan_content(text_content, custom_prompt=ai_cfg.get("custom_prompt", ""))
@@ -420,7 +386,6 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
                 _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20))
                 return
 
-    # 5. Respuestas Autónomas de la IA (Copiloto / PR Ultra Pro)
     if ai_cfg.get("copilot_status") == 1:
         me_username = (client.me.username or "").lower() if client.me else ""
         text_lower = text_content.lower()
@@ -475,688 +440,9 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
                         logger.warning(f"Aviso enviando réplica IA en {chat_id}: {send_err}")
 
 
-async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> dict:
-    if not mistral_client:
-        return {"toxic": False, "reason": "Mistral API Key no configurada"}
-
-    system_prompt = custom_prompt if custom_prompt else (
-        "Eres el Guardián de Voz de The Bunker OS. Analiza el siguiente texto transcrito de una "
-        "comunidad de Telegram. Determina si contiene insultos graves, toxicidad extrema o intentos de estafa. "
-        "Responde estrictamente en formato JSON con dos campos: 'toxic' (true/false) y 'reason' (breve explicación)."
-    )
-
-    try:
-        response = await asyncio.to_thread(
-            mistral_client.chat.complete,
-            model="mistral-small-latest",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text_snippet}
-            ],
-            response_format={"type": "json_object"}
-        )
-        return json.loads(response.choices[0].message.content)
-    except Exception as e:
-        logger.error(f"❌ [Error API Mistral AI Guardián]: {e}")
-        return {"toxic": False, "reason": str(e)}
-
-
-SCREEN_SHIELD_ALERT_TEXT = (
-    "🎥 <b>The Bunker Bot: Escudo Antinota Activado</b>\n\n"
-    "Se detectó una transmisión de pantalla no autorizada por parte de <b>{user_name}</b>. "
-    "La señal fue cortada y la cuenta fue retirada de la sala de inmediato para proteger a la comunidad.\n\n"
-    "🇺🇸 <i>Unauthorized screen-share detected from <b>{user_name}</b>. Signal cut and the account "
-    "was removed from the room instantly to protect the community.</i>\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
-)
-
-NOISE_SHIELD_ALERT_TEXT = (
-    "🔇 <b>The Bunker Bot: Escudo Antirruido Activado</b>\n\n"
-    "<b>{user_name}</b> fue silenciado automáticamente tras detectar picos de ruido anómalos y "
-    "repetidos en la transmisión.\n\n"
-    "🇺🇸 <i><b>{user_name}</b> was auto-muted after repeated anomalous noise spikes were detected "
-    "in the live stream.</i>\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
-)
-
-GHOST_PURGE_ALERT_TEXT = (
-    "💀 <b>The Bunker Bot: Ghost Purge Completado</b>\n\n"
-    "• Cuentas Fantasma / Eliminadas detectadas: <b>{found}</b>\n"
-    "• Cuentas purgadas exitosamente: <b>{purged}</b>\n"
-    "• Acción ejecutada: <code>{action}</code>\n\n"
-    "🛡️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
-)
-
-VC_START_TEXTS = {
-    "es": (
-        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
-        "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
-        "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
-        "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    ),
-    "en": (
-        "THE VOICE CHAT FOR ⚜️🔐The Búnker Chat🔐⚜️ HAS STARTED! EVERYONE IS WELCOME TO JOIN 🔥🐽💨🚀\n\n"
-        "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
-        "⚜ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
-        "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    )
-}
-
-VC_MEMBER_JOIN_TEXTS = {
-    "es": (
-        "UN NUEVO MIEMBRO SE HA UNIDO AL VC DE THE BÚNKER CHAT.\n\n"
-        "🔇 {user_name}, el volumen de tu micrófono se ha establecido por defecto a un máximo del 2%.\n\n"
-        "¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y ACTIVAR EL VOLUMEN DE TU MICRÓFONO AL 100% DE CAPACIDAD?\n\n"
-        "Usa los siguientes botones para obtener tu ⚜️MIC🎙️VIP⚜️\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    ),
-    "en": (
-        "A NEW MEMBER HAS JOINED THE BÚNKER CHAT VC.\n\n"
-        "🔇 {user_name}, your microphone volume has been set to a maximum of 2% by default.\n\n"
-        "DO YOU WANT TO BECOME A VIP MEMBER AND UNLOCK YOUR MICROPHONE VOLUME AT 100% CAPACITY?\n\n"
-        "Use the buttons below to get your ⚜️MIC🎙️VIP⚜️\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    )
-}
-
-OPTIMIZATION_TEXT = (
-    "🔄 <b>Protocolo de Optimización Audiovisual — The Bunker</b>\n\n"
-    "Estamos realizando una optimización de rutina en segundo plano para refrescar cámaras, purgar la transmisión y garantizar máxima fluidez sin retrasos.\n\n"
-    "⚡ <i>La sala se reiniciará en 3 segundos y se abrirá limpia de inmediato. Los pases VIP se mantendrán activos al reconectarse.</i>\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
-)
-
-VC_SCHED_MESSAGES = {
-    "start": (
-        "📡 <b>Apertura Programada — The Bunker</b>\n\n"
-        "El videochat de la comunidad ha sido abierto automáticamente según el cronograma ULTRA PRO.\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    ),
-    "end": (
-        "📡 <b>Cierre Programado — The Bunker</b>\n\n"
-        "El ciclo programado de videochat ha concluido. La sala ha sido cerrada de forma ordenada.\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    )
-}
-
-
-def build_vc_moderation_keyboard(
-    chat_id: int, 
-    bot_username: str, 
-    lang: str = "es", 
-    price: int = 50, 
-    custom_btn_text: str = None,
-    custom_btn_url: str = None
-) -> InlineKeyboardMarkup:
-    """Botonera limpia de un solo botón: texto 100% editable que cubre el enlace de destino."""
-    btn_label = custom_btn_text if custom_btn_text else ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
-    pay_url = custom_btn_url.strip() if custom_btn_url else f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
-
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=btn_label, url=pay_url)]
-    ])
-
-
-_vc_notice_locks = {}
-
-async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% etiquetando siempre al usuario con botón y tiempo configurados."""
-    if not _global_bot:
-        return
-
-    # 1. Comprobación de interruptor individual (ON / OFF)
-    svc_cfg = await get_sentinel_service_messages_config(chat_id)
-    if svc_cfg.get("vc_enabled", 1) == 0:
-        return
-
-    now = time.time()
-    last_time = _vc_notice_locks.get(chat_id, 0)
-    if now - last_time < 3:
-        return
-    _vc_notice_locks[chat_id] = now
-
-    try:
-        last_id = _last_vc_notice.get(chat_id)
-        if last_id:
-            try:
-                await _global_bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except Exception:
-                pass
-
-        bot_info = await _global_bot.get_me()
-        bot_username = bot_info.username or "thebunkerapp_bot"
-        price = await get_mic_vip_price(chat_id) or 50
-
-        custom_text = svc_cfg.get("vc_text")
-        custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
-        custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
-        
-        try:
-            autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
-        except (ValueError, TypeError):
-            autodel_time = 30
-        
-        if custom_text:
-            text = (
-                custom_text.replace("{user_name}", user_name)
-                .replace("{mention}", user_name)
-                .replace("{user}", user_name)
-                .replace("{name}", user_name)
-            )
-        else:
-            text = (
-                f"⚜️ <b>The Bunker O.S.</b>\n\n"
-                f"🔇 {user_name}, <i>el búnker ha establecido por defecto tu volumen al 2%.</i>\n\n"
-                f"¿Quieres desbloquear el 100% de tu micrófono? Presiona el botón inferior para activar tu pase VIP.\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            )
-
-        markup = build_vc_moderation_keyboard(
-            chat_id=chat_id, 
-            bot_username=bot_username, 
-            lang=lang, 
-            price=price, 
-            custom_btn_text=custom_btn,
-            custom_btn_url=custom_url
-        )
-        media_id = svc_cfg.get("vc_media_id")
-        media_type = svc_cfg.get("vc_media_type")
-
-        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
-        final_markup = markup if markup else extracted_markup
-
-        sent = None
-        if media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        elif media_id and media_type == "video":
-            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        else:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-
-        if sent:
-            _last_vc_notice[chat_id] = sent.message_id
-            if autodel_time > 0:
-                async def _auto_del_notice(target_msg, delay: int):
-                    await asyncio.sleep(delay)
-                    try:
-                        await target_msg.delete()
-                        if _last_vc_notice.get(chat_id) == target_msg.message_id:
-                            _last_vc_notice.pop(chat_id, None)
-                    except Exception:
-                        pass
-                _spawn(_auto_del_notice(sent, autodel_time))
-            
-    except Exception as e:
-        logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
-
-
-async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
-    """Despacha y fija la bienvenida general al videochat según el nivel del grupo (Free / PRO / ULTRA)."""
-    if not _global_bot:
-        return
-    try:
-        svc_cfg = await get_sentinel_service_messages_config(chat_id)
-        if svc_cfg.get("vc_welcome_enabled", 1) == 0:
-            return
-
-        bot_info = await _global_bot.get_me()
-        bot_username = bot_info.username or "thebunkerapp_bot"
-        tier = (await get_group_tier(chat_id) or "free").lower()
-
-        custom_text = svc_cfg.get("vc_welcome_text")
-        custom_btn = svc_cfg.get("vc_welcome_btn")
-        custom_url = svc_cfg.get("vc_welcome_btn_url")
-        media_id = svc_cfg.get("vc_welcome_media_id") if tier == "ultra_pro" else None
-        media_type = svc_cfg.get("vc_welcome_media_type") if tier == "ultra_pro" else None
-        autodel = svc_cfg.get("vc_welcome_autodel", 0) or 0
-
-        if custom_btn or custom_url:
-            markup = build_vc_moderation_keyboard(
-                chat_id=chat_id,
-                bot_username=bot_username,
-                lang=lang,
-                custom_btn_text=custom_btn,
-                custom_btn_url=custom_url
-            )
-        elif tier == "free":
-            pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
-            btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
-            btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
-            next_lang = "en" if lang == "es" else "es"
-            markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=btn_activate, url=pay_url)],
-                [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
-            ])
-        else:
-            markup = build_vc_moderation_keyboard(chat_id=chat_id, bot_username=bot_username, lang=lang)
-
-        if tier in ("pro", "ultra_pro") and custom_text:
-            text = custom_text
-        else:
-            text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
-
-        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
-        final_markup = markup if markup else extracted_markup
-
-        sent = None
-        if media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        elif media_id and media_type == "video":
-            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-        else:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=cleaned_text, reply_markup=final_markup, parse_mode="HTML")
-
-        if sent:
-            try:
-                await _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, both_sides=True)
-            except Exception:
-                pass
-            _pinned_vc_messages[chat_id] = sent.message_id
-            logger.info(f"📌 [VideoChat Moderation] Mensaje de bienvenida fijado en comunidad {chat_id}.")
-
-            if autodel and autodel > 0:
-                async def _auto_del_welcome(msg, delay: int):
-                    await asyncio.sleep(delay)
-                    try:
-                        await msg.delete()
-                    except Exception:
-                        pass
-                _spawn(_auto_del_welcome(sent, autodel))
-
-    except Exception as e:
-        logger.warning(f"Aviso al despachar y fijar bienvenida de VC en {chat_id}: {e}")
-
-
-async def _resolve_reset_text(chat_id: int) -> tuple[str, str | None, str | None, str | None, str | None, int]:
-    """Retorna (texto, media_id, media_type, btn_text, btn_url, autodel_seconds) para la optimización."""
-    svc_cfg = await get_sentinel_service_messages_config(chat_id)
-    custom_text = svc_cfg.get("reset_text")
-    text = custom_text if custom_text else OPTIMIZATION_TEXT
-    media_id = svc_cfg.get("reset_media_id")
-    media_type = svc_cfg.get("reset_media_type")
-    btn_text = svc_cfg.get("reset_btn")
-    btn_url = svc_cfg.get("reset_btn_url")
-    autodel = svc_cfg.get("reset_autodel", 20) or 20
-    return text, media_id, media_type, btn_text, btn_url, autodel
-
-
-async def _dispatch_radar_notice(
-    chat_id: int,
-    text: str,
-    media_id: str | None = None,
-    media_type: str | None = None,
-    auto_delete_after: int | None = None,
-    reply_markup: InlineKeyboardMarkup | None = None,
-):
-    """Envía un aviso del Radar Acústico en Telegram con apoyo multimedia opcional."""
-    if not _global_bot:
-        return None
-
-    try:
-        if media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(
-                chat_id=chat_id,
-                photo=media_id,
-                caption=text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-        elif media_id and media_type == "video":
-            sent = await _global_bot.send_video(
-                chat_id=chat_id,
-                video=media_id,
-                caption=text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-        elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(
-                chat_id=chat_id,
-                animation=media_id,
-                caption=text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-        else:
-            sent = await _global_bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup,
-                parse_mode="HTML"
-            )
-
-        if sent and auto_delete_after and auto_delete_after > 0:
-            async def _auto_delete_notice(msg):
-                await asyncio.sleep(auto_delete_after)
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-            _spawn(_auto_delete_notice(sent))
-
-        return sent
-    except Exception as e:
-        logger.warning(f"Aviso despachando radar notice en {chat_id}: {e}")
-        return None
-
-
-async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
-    if not _global_bot:
-        return None
-
-    try:
-        payload_cfg = await get_sentinel_payload_config(chat_id)
-    except Exception as e:
-        logger.debug(f"Aviso leyendo payload Ultra Pro para {chat_id}: {e}")
-        return None
-
-    if not payload_cfg or payload_cfg.get("enabled") != 1:
-        return None
-
-    text = payload_cfg.get("text")
-    if not text:
-        return None
-
-    now = asyncio.get_event_loop().time()
-    last_sent = _sentinel_payload_last_sent.get(chat_id, 0)
-    if now - last_sent < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
-        return None
-
-    btn_text = payload_cfg.get("button_text")
-    btn_url = payload_cfg.get("button_url")
-    cleaned_text, markup = _extract_urls_to_markup(text, btn_text, btn_url)
-
-    sent = await _dispatch_radar_notice(
-        chat_id=chat_id,
-        text=cleaned_text,
-        media_id=payload_cfg.get("media_id"),
-        media_type=payload_cfg.get("media_type"),
-        auto_delete_after=payload_cfg.get("auto_delete_after"),
-        reply_markup=markup
-    )
-
-    if sent:
-        _sentinel_payload_last_sent[chat_id] = now
-        logger.info(f"💎 [Payload Ultra Pro Despachado] Grupo {chat_id} (origen={origin}).")
-
-    return sent
-
-
-async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
-    sentinel_data = active_sentinels.get(chat_id)
-    client: Client = sentinel_data["client"] if sentinel_data else assistant_app
-
-    found = 0
-    purged = 0
-
-    if client and client.is_connected:
-        try:
-            async for member in client.get_chat_members(chat_id):
-                user = member.user
-                if user and getattr(user, "is_deleted", False):
-                    found += 1
-                    try:
-                        if action == "ban":
-                            await client.ban_chat_member(chat_id, user.id)
-                        else:
-                            await client.ban_chat_member(chat_id, user.id)
-                            await client.unban_chat_member(chat_id, user.id)
-                        purged += 1
-                    except Exception as p_err:
-                        logger.warning(f"Aviso purgando usuario {user.id} en {chat_id}: {p_err}")
-
-            await update_ghost_purge_scan_time(chat_id)
-            if _global_bot and purged > 0:
-                alert_text = GHOST_PURGE_ALERT_TEXT.format(
-                    found=found,
-                    purged=purged,
-                    action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
-                )
-                await _dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60)
-
-            return {"status": "success", "found": found, "purged": purged, "action": action}
-        except Exception as e:
-            logger.warning(f"Aviso en Ghost Purge MTProto para {chat_id}, activando fallback: {e}")
-
-    if _global_bot:
-        try:
-            await update_ghost_purge_scan_time(chat_id)
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,))
-                tracked = cursor.fetchall()
-
-            for (uid,) in tracked:
-                try:
-                    chat_member = await _global_bot.get_chat_member(chat_id, uid)
-                    user = chat_member.user
-                    if getattr(user, "is_deleted", False) or (user.first_name and "Deleted Account" in user.first_name):
-                        found += 1
-                        if chat_member.status not in ("creator", "administrator"):
-                            await _global_bot.ban_chat_member(chat_id, uid)
-                            if action != "ban":
-                                await _global_bot.unban_chat_member(chat_id, uid)
-                            purged += 1
-                            await asyncio.sleep(0.1)
-                except Exception:
-                    continue
-
-            return {"status": "success", "found": found, "purged": purged, "action": action, "fallback": True}
-        except Exception as fb_err:
-            logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
-
-    return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}
-
-
-async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
-    await cancel_phone_auth(user_id)
-    clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
-    if not clean_phone.startswith("+"):
-        clean_phone = f"+{clean_phone}"
-
-    client = Client(
-        f"auth_temp_{user_id}_{group_id}_{int(time.time())}",
-        api_id=DEFAULT_API_ID,
-        api_hash=DEFAULT_API_HASH,
-        in_memory=True
-    )
-
-    try:
-        if not await _ensure_connected(client):
-            return {"status": "error", "message": "connection_lost"}
-        sent_code = await client.send_code(clean_phone)
-        pending_auth_sessions[user_id] = {
-            "client": client,
-            "phone": clean_phone,
-            "phone_code_hash": sent_code.phone_code_hash,
-            "group_id": group_id,
-            "ts": time.time()
-        }
-        return {"status": "ok", "phone": clean_phone}
-    except PhoneNumberInvalid:
-        if client.is_connected:
-            await client.disconnect()
-        return {"status": "error", "message": "invalid_phone"}
-    except FloodWait as fw:
-        if client.is_connected:
-            await client.disconnect()
-        return {"status": "error", "message": f"flood_wait_{fw.value}"}
-    except Exception as e:
-        if client.is_connected:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-        return {"status": "error", "message": str(e)}
-
-
-async def verify_phone_code(user_id: int, code: str) -> dict:
-    auth_data = pending_auth_sessions.get(user_id)
-    if not auth_data:
-        return {"status": "error", "message": "session_expired"}
-
-    client: Client = auth_data["client"]
-    clean_code = code.strip().replace(" ", "").replace("-", "")
-
-    try:
-        if not await _ensure_connected(client):
-            return {"status": "error", "message": "connection_lost"}
-        await client.sign_in(
-            phone_number=auth_data["phone"],
-            phone_code_hash=auth_data["phone_code_hash"],
-            phone_code=clean_code
-        )
-        session_str = await client.export_session_string()
-        group_id = auth_data["group_id"]
-        
-        await cancel_phone_auth(user_id)
-        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data["phone"])
-        await register_or_update_sentinel(user_id, group_id, session_str)
-        return {"status": "success", "session_string": session_str, "group_id": group_id}
-
-    except SessionPasswordNeeded:
-        return {"status": "2fa_required"}
-    except (PhoneCodeInvalid, PhoneCodeExpired):
-        return {"status": "error", "message": "invalid_code"}
-    except FloodWait as fw:
-        return {"status": "error", "message": f"flood_wait_{fw.value}"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-async def verify_2fa_password(user_id: int, password: str) -> dict:
-    auth_data = pending_auth_sessions.get(user_id)
-    if not auth_data:
-        return {"status": "error", "message": "session_expired"}
-
-    client: Client = auth_data["client"]
-
-    try:
-        if not await _ensure_connected(client):
-            return {"status": "error", "message": "connection_lost"}
-        await client.check_password(password=password.strip())
-        session_str = await client.export_session_string()
-        group_id = auth_data["group_id"]
-
-        await cancel_phone_auth(user_id)
-        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data.get("phone"))
-        await register_or_update_sentinel(user_id, group_id, session_str)
-        return {"status": "success", "session_string": session_str, "group_id": group_id}
-
-    except PasswordHashInvalid:
-        return {"status": "error", "message": "invalid_password"}
-    except FloodWait as fw:
-        return {"status": "error", "message": f"flood_wait_{fw.value}"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-async def cancel_phone_auth(user_id: int):
-    if user_id in pending_auth_sessions:
-        auth_data = pending_auth_sessions.pop(user_id)
-        client: Client = auth_data.get("client")
-        if client and client.is_connected:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-
-
-def _register_forbidden_strike(chat_id: int, action: str):
-    strikes = _forbidden_strikes.get(chat_id, 0) + 1
-    if strikes >= FORBIDDEN_STRIKE_LIMIT:
-        _autolower_cooldowns[chat_id] = asyncio.get_event_loop().time() + FORBIDDEN_COOLDOWN_SECONDS
-        _forbidden_strikes[chat_id] = 0
-        logger.warning(
-            f"🚫 [GROUPCALL_FORBIDDEN] Grupo {chat_id}: la cuenta del Centinela no tiene permisos "
-            f"suficientes para {action}. AutoLower pausado {FORBIDDEN_COOLDOWN_SECONDS // 60} min."
-        )
-    else:
-        _forbidden_strikes[chat_id] = strikes
-
-
-async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id: int, p_peer) -> bool:
-    if is_super_admin(u_id) or u_id in SERVICE_ACCOUNT_IDS:
-        return False
-
-    try:
-        await client.invoke(
-            EditGroupCallParticipant(
-                call=current_call, participant=p_peer,
-                video_stopped=True, presentation_paused=True, muted=True, volume=200
-            )
-        )
-    except Exception as e:
-        logger.debug(f"Aviso al intentar cortar video en {chat_id} para {u_id}: {e}")
-
-    if _global_bot:
-        try:
-            await _global_bot.ban_chat_member(chat_id=chat_id, user_id=u_id, until_date=int(time.time() + 35))
-            await _global_bot.unban_chat_member(chat_id=chat_id, user_id=u_id)
-            return True
-        except Exception as e:
-            logger.warning(f"Aviso: no se pudo expulsar a {u_id} de {chat_id} tras Escudo Antinota: {e}")
-    return False
-
-
-def _register_noise_strike(chat_id: int, u_id: int) -> bool:
-    key = (chat_id, u_id)
-    now = asyncio.get_event_loop().time()
-    history = [t for t in _noise_unmute_history.get(key, []) if now - t < NOISE_SPIKE_WINDOW_SECONDS]
-    history.append(now)
-    _noise_unmute_history[key] = history
-    return len(history) >= NOISE_SPIKE_STRIKE_LIMIT
-
-
-async def _verify_active_membership(client: Client, chat_id: int) -> bool:
-    try:
-        member = await client.get_chat_member(chat_id, "me")
-        status_val = str(getattr(member.status, "value", member.status)).lower()
-        return status_val not in ("left", "banned", "kicked")
-    except Exception as e:
-        logger.debug(f"Membresía no confirmada inmediatamente en {chat_id}: {e}")
-        return True
-
-
-async def _ensure_connected(client: Client, retries: int = 3, delay: float = 1.5) -> bool:
-    for attempt in range(retries):
-        if client.is_connected:
-            return True
-        try:
-            await client.connect()
-            return True
-        except Exception as e:
-            logger.debug(f"Reintento de conexión ({attempt + 1}/{retries}) falló: {e}")
-            await asyncio.sleep(delay)
-    return client.is_connected
-
-
-async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
-    try:
-        if not await is_group_approved(chat_id):
-            admin_caches[chat_id] = {'admins': {bot_client_id} if bot_client_id else set(), 'ts': asyncio.get_event_loop().time()}
-            return
-
-        new_admins = set()
-        async for member in client.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS):
-            status_val = str(getattr(member.status, "value", member.status)).lower()
-            if status_val in ["creator", "owner", "administrator"] and member.user and not member.user.is_bot:
-                new_admins.add(member.user.id)
-                
-        if bot_client_id:
-            new_admins.add(bot_client_id)
-            
-        admin_caches[chat_id] = {'admins': new_admins, 'ts': asyncio.get_event_loop().time()}
-    except Exception as e:
-        logger.debug(f"Aviso actualizando admin cache en chat {chat_id}: {e}")
-
-
+# ==========================================
+# 🛡️ BUCLE RESILIENTE DE MONITOREO DE GRUPOS
+# ==========================================
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
     alerted_users = set()
     current_call = None
@@ -1202,9 +488,13 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     full_chat_res = await client.invoke(GetFullChannel(channel=peer))
                     raw_call = full_chat_res.full_chat.call
                 except PeerIdInvalid:
-                    logger.warning(f"⚠️ [Peer ID Inválido] El chat {chat_id} no está disponible en esta sesión. Pausando monitor.")
-                    await asyncio.sleep(300)
-                    continue
+                    # 🔄 REINTENTO INTELIGENTE DE RESOLUCIÓN DE PEER
+                    try:
+                        peer = await client.resolve_peer(chat_id)
+                        full_chat_res = await client.invoke(GetFullChannel(channel=peer))
+                        raw_call = full_chat_res.full_chat.call
+                    except Exception:
+                        raw_call = None
                 except Exception:
                     try:
                         full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
@@ -1225,62 +515,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     call_start_time = 0
 
                 last_channel_check = current_time
-
-            # Protocolo de reinicio preventivo audiovisual cada 3.5 horas de transmisión continua
-            if current_call and call_start_time > 0:
-                if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
-                    logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
-                    if _global_bot:
-                        try:
-                            svc_cfg = await get_sentinel_service_messages_config(chat_id)
-                            if svc_cfg.get("reset_enabled", 1) == 1:
-                                text, media_id, media_type, btn_text, btn_url, autodel = await _resolve_reset_text(chat_id)
-                                reset_markup = None
-                                if btn_text or btn_url:
-                                    bot_info = await _global_bot.get_me()
-                                    reset_markup = build_vc_moderation_keyboard(
-                                        chat_id=chat_id,
-                                        bot_username=bot_info.username or "thebunkerapp_bot",
-                                        lang="es",
-                                        custom_btn_text=btn_text,
-                                        custom_btn_url=btn_url
-                                    )
-                                cleaned_text, extracted_markup = _extract_urls_to_markup(text, btn_text, btn_url)
-                                final_reset_markup = reset_markup if reset_markup else extracted_markup
-
-                                await _dispatch_radar_notice(
-                                    chat_id=chat_id,
-                                    text=cleaned_text,
-                                    media_id=media_id,
-                                    media_type=media_type,
-                                    auto_delete_after=autodel,
-                                    reply_markup=final_reset_markup
-                                )
-                        except Exception as reset_notice_err:
-                            logger.warning(f"Aviso despachando aviso de reset en {chat_id}: {reset_notice_err}")
-
-                        try:
-                            await _dispatch_sentinel_payload(chat_id, origin="optimizacion_3.5h")
-                        except Exception as payload_err:
-                            logger.debug(f"Aviso despachando payload Ultra Pro en {chat_id}: {payload_err}")
-
-                    try:
-                        await client.invoke(DiscardGroupCall(call=current_call))
-                    except Exception as disc_err:
-                        logger.warning(f"Aviso al cerrar llamada previa: {disc_err}")
-
-                    await asyncio.sleep(3.0)
-
-                    try:
-                        await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
-                        asyncio.create_task(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
-                    except Exception as create_err:
-                        logger.warning(f"Aviso al reiniciar llamada: {create_err}")
-
-                    current_call = None
-                    is_joined_audio = False
-                    call_start_time = 0
-                    continue
 
             if current_call:
                 night_active, night_action = await _is_night_active(chat_id)
@@ -1617,11 +851,9 @@ async def night_mode_autonomous_loop():
                     cfg = await get_night_mode_config(group_id)
                     if not cfg or cfg.get("status") != 1:
                         continue
-
                     start_str = cfg.get("start", "22:00")
                     end_str = cfg.get("end", "06:00")
                     in_night_time = is_night_mode_time(start_str, end_str)
-
                     current_media_lock = await get_lock_status(group_id, "lock_media")
 
                     if in_night_time and current_media_lock == 0:
@@ -1655,7 +887,6 @@ async def night_mode_autonomous_loop():
                     logger.debug(f"Aviso evaluando modo nocturno autónomo en grupo {group_id}: {inner_err}")
         except Exception as e:
             logger.error(f"Error en bucle autónomo de modo nocturno: {e}")
-
         await asyncio.sleep(60)
 
 
@@ -1672,7 +903,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
     )
     
     try:
-        # Registro dinámico del motor conversacional y moderación semántica en Pyrogram
         session_client.add_handler(
             MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
         )
@@ -1689,7 +919,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
 
         is_member = await _verify_active_membership(session_client, group_id)
         if not is_member:
-            logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
+            logger.warning(f"⚠️️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
 
         peer = await session_client.resolve_peer(group_id)
 
@@ -1805,7 +1035,6 @@ async def radar_master_loop():
                                 pass
         except Exception as e:
             logger.debug(f"Aviso en radar master loop: {e}")
-            
         await asyncio.sleep(45)
 
 
@@ -1829,7 +1058,6 @@ async def init_assistant_master():
     else:
         try:
             if not assistant_app.is_connected:
-                # Registro del escuchador para el centinela maestro
                 assistant_app.add_handler(
                     MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
                 )
@@ -1911,7 +1139,7 @@ async def disengage_screen_shield(group_id: int):
 async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
     await set_podcast_mode(group_id, 1)
     await set_podcast_duck_volume(group_id, duck_level * 100)
-    logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
+    logger.info(f"🎙️️ [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
 
 
 async def disengage_podcast_ducking(group_id: int):
