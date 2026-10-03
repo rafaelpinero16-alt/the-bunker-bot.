@@ -1436,3 +1436,45 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
             logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
 
     return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}    
+
+async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
+    """Inicia el proceso de autenticación telefónica para conectar un Centinela propio."""
+    await cancel_phone_auth(user_id)
+    clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
+    if not clean_phone.startswith("+"):
+        clean_phone = f"+{clean_phone}"
+
+    client = Client(
+        f"auth_temp_{user_id}_{group_id}_{int(time.time())}",
+        api_id=DEFAULT_API_ID,
+        api_hash=DEFAULT_API_HASH,
+        in_memory=True
+    )
+
+    try:
+        if not await _ensure_connected(client):
+            return {"status": "error", "message": "connection_lost"}
+        sent_code = await client.send_code(clean_phone)
+        pending_auth_sessions[user_id] = {
+            "client": client,
+            "phone": clean_phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "group_id": group_id,
+            "ts": time.time()
+        }
+        return {"status": "ok", "phone": clean_phone}
+    except PhoneNumberInvalid:
+        if client.is_connected:
+            await client.disconnect()
+        return {"status": "error", "message": "invalid_phone"}
+    except FloodWait as fw:
+        if client.is_connected:
+            await client.disconnect()
+        return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except Exception as e:
+        if client.is_connected:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        return {"status": "error", "message": str(e)}
