@@ -3,6 +3,7 @@ groups.py — The Bunker OS (Aiogram 3.x)
 
 Núcleo de seguridad perimetral para grupos y supergrupos.
 Motor Híbrido: Detección MTProto + Padrón Local Bot API + Protección Total por Niveles (Free / PRO / ULTRA PRO).
+Fase 4: Gamificación Tokenizada (XP / Niveles / /rank / /top) + Analítica Heatmap 24x7.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import time
@@ -20,7 +21,7 @@ from typing import Optional
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, ChatMemberUpdated, ChatJoinRequest, LabeledPrice, PreCheckoutQuery,
@@ -41,12 +42,17 @@ from database.database import (
     get_speaker_queue, pop_next_speaker, remove_from_speaker_queue, clear_speaker_queue,
     flag_userbot, is_userbot_flagged,
     get_ghost_purge_config, update_ghost_purge_scan_time,
-    get_service_msgs_mode
+    get_service_msgs_mode,
+    # 🎮 Fase 4: Gamificación y Analítica Horaria
+    record_hourly_chat_activity,
+    add_user_reputation_xp,
+    get_user_reputation,
+    get_top_reputation,
+    get_chat_heatmap_matrix
 )
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
 
-# Fallback seguro en caso de que el middleware CAS no esté presente
 try:
     from middlewares.anti_spam import check_global_cas_spam
 except ImportError:
@@ -94,6 +100,7 @@ def _spawn(coro) -> asyncio.Task:
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
@@ -278,9 +285,10 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             except Exception as ex:
                 logger.warning(f"Aviso al enviar bienvenida privada de canal al usuario {user.id}: {ex}")
     else:
+        # En grupos se utiliza URL directa para evitar BUTTON_TYPE_INVALID
         group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
-            [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))]
+            [InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={group_id}")]
         ])
 
         group_welcome_text = (
@@ -537,7 +545,6 @@ async def handle_new_members(message: Message, bot: Bot):
     bot_me = await bot.get_me()
     now = time.time()
 
-    # Mantenimiento de caché de verificación reciente para evitar saturación de RAM
     if len(RECENTLY_VERIFIED) > 2000:
         stale_keys = [k for k, ts in RECENTLY_VERIFIED.items() if now - ts > 300]
         for k in stale_keys:
@@ -681,7 +688,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                     f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
                     f"🔓 Tu acceso ha sido liberado para participar en <b>{html.escape(group_title)}</b>.\n\n"
                     f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
-                    f"🛡️️ <i>Cloud Media Management</i>"
+                    f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 parse_mode="HTML"
             )
@@ -750,10 +757,6 @@ async def purge_left_member(message: Message):
     F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.video_chat_scheduled | F.pinned_message
 )
 async def purge_general_service_messages(message: Message):
-    """
-    Purga instantánea de avisos grises nativos de Telegram.
-    Los avisos de videochat iniciados, terminados o programados se eliminan directamente.
-    """
     if (message.video_chat_started or message.video_chat_ended or 
         message.video_chat_participants_invited or getattr(message, "video_chat_scheduled", None)):
         try:
@@ -1044,7 +1047,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
 
 
 # ==========================================
-# 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
+# 🛡️️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
 # ==========================================
 _FULL_PERMISSION_FIELDS = [
     "can_send_messages", "can_send_audios", "can_send_documents", "can_send_photos",
@@ -1697,7 +1700,6 @@ async def _send_temp(
                 logger.debug(f"Fallo enviando multimedia temporal de advertencia ({media_err}); usando texto.")
 
         if not sent:
-            # Fallback seguro: si el mensaje infractor ya fue borrado, bot.send_message garantiza la entrega
             try:
                 if reply_to is not None:
                     sent = await reply_to.answer(text, parse_mode="HTML")
@@ -1764,7 +1766,6 @@ async def enforce_warn_ladder(
     media_id = ext_cfg.get("warn_custom_media_id")
     media_type = ext_cfg.get("warn_custom_media_type")
 
-    # Si se pasa un motivo personalizado desde /warn o filtros, se preserva textualmente
     if reason in _REASON_TEXT:
         es_txt, en_txt = _REASON_TEXT[reason]
     else:
@@ -1874,6 +1875,209 @@ async def enforce_warn_ladder(
 
 
 # ==========================================
+# 🎮 FASE 4: MOTOR DE GAMIFICACIÓN EN TIEMPO REAL
+# ==========================================
+async def _process_message_reputation(bot: Bot, message: Message):
+    """Otorga XP por mensaje legítimo y notifica subidas de nivel de forma elegante."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    group_id = message.chat.id
+    user_id = message.from_user.id
+    full_name = message.from_user.full_name or "Usuario"
+    username = message.from_user.username or ""
+
+    rep_result = await add_user_reputation_xp(
+        group_id=group_id,
+        user_id=user_id,
+        full_name=full_name,
+        username=username,
+        base_xp=10,
+        cooldown_seconds=45
+    )
+
+    if rep_result.get("leveled_up"):
+        new_lvl = rep_result.get("level", 1)
+        clean_name = html.escape(full_name)
+        mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
+        levelup_text = (
+            f"🎉 <b>¡Ascenso de Rango en el Búnker! / Level Up!</b>\n\n"
+            f"¡Felicitaciones {mention}! Has alcanzado el <b>Nivel {new_lvl}</b> con <code>{rep_result.get('xp', 0)} XP</code>.\n"
+            f"<i>Tu reputación e influencia perimetral se han elevado en la comunidad.</i>\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+        try:
+            lvl_msg = await message.answer(levelup_text, parse_mode="HTML")
+            _spawn(auto_delete_msg(lvl_msg, 15))
+        except Exception:
+            pass
+
+
+# ==========================================
+# 🏆 COMANDOS DE GAMIFICACIÓN & ANALÍTICA (/rank, /top, /heatmap)
+# ==========================================
+@router.message(Command("rank", "xp", "nivel"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_user_rank(message: Message, command: CommandObject, bot: Bot):
+    """Muestra el nivel, XP acumulado, barra de progreso y posición en el ranking."""
+    group_id = message.chat.id
+    target_user = message.from_user
+    
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+    elif command and command.args:
+        arg = command.args.split()[0].strip()
+        if arg.isdigit():
+            try:
+                member = await bot.get_chat_member(group_id, int(arg))
+                target_user = member.user
+            except Exception:
+                pass
+        elif arg.startswith("@"):
+            try:
+                chat_info = await bot.get_chat(arg)
+                target_user = chat_info
+            except Exception:
+                pass
+
+    if not target_user:
+        return
+
+    rep = await get_user_reputation(group_id, target_user.id)
+    xp = rep.get("xp", 0)
+    level = rep.get("level", 1)
+    rank_pos = rep.get("rank", 1)
+
+    # Cálculo visual de la barra de progreso
+    prev_xp = ((level - 1) ** 2) * 100
+    next_xp = (level ** 2) * 100
+    diff = max(1, next_xp - prev_xp)
+    current_in_level = max(0, xp - prev_xp)
+    pct = min(100, int((current_in_level / diff) * 100))
+    filled = pct // 10
+    bar = "█" * filled + "░" * (10 - filled)
+
+    clean_name = html.escape(getattr(target_user, "full_name", getattr(target_user, "first_name", "Usuario")))
+    mention = f"<a href='tg://user?id={target_user.id}'>{clean_name}</a>"
+
+    rank_card = (
+        f"🎖️ <b>Registro de Rango & Reputación — {message.chat.title or 'Comunidad'}</b>\n\n"
+        f"👤 <b>Miembro:</b> {mention}\n"
+        f"⭐ <b>Posición en el Cuadro:</b> <code>#{rank_pos}</code>\n"
+        f"🏆 <b>Nivel:</b> <b>{level}</b>\n"
+        f"⚡ <b>Experiencia Total:</b> <code>{xp} XP</code>\n\n"
+        f"<b>Progreso al siguiente nivel:</b>\n"
+        f"<code>[{bar}]</code> {pct}%\n"
+        f"<i>({current_in_level} / {diff} XP para Nivel {level + 1})</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    try:
+        sent = await message.answer(rank_card, parse_mode="HTML")
+        _spawn(auto_delete_msg(sent, 25))
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"Aviso en /rank: {e}")
+
+
+@router.message(Command("top", "leaderboard", "ranking"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_top_ranking(message: Message, bot: Bot):
+    """Muestra el Top 10 de usuarios con mayor nivel y XP en la comunidad."""
+    group_id = message.chat.id
+    top_list = await get_top_reputation(group_id, limit=10)
+
+    if not top_list:
+        msg = await message.answer(
+            "📭 <b>Aún no hay suficiente actividad registrada en el cuadro de reputación.</b>\n\n🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+        _spawn(auto_delete_msg(msg, 15))
+        return
+
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    lines = []
+    for idx, item in enumerate(top_list):
+        medal = medals[idx] if idx < len(medals) else f"#{idx+1}"
+        name = html.escape(item["name"])
+        lines.append(f"{medal} <b>{name}</b> — <code>Nivel {item['level']}</code> ({item['xp']} XP)")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌐 Ver Analítica Completa", url=f"{WEBAPP_URL}?chat_id={group_id}")]
+    ])
+
+    top_card = (
+        f"🏆 <b>Cuadro de Honor Comunitario (Top 10)</b>\n"
+        f"📍 <b>Comunidad:</b> <code>{html.escape(message.chat.title or '')}</code>\n\n"
+        + "\n".join(lines) + "\n\n"
+        f"<i>¡Chatea legítimamente para acumular XP y subir de rango!</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    try:
+        sent = await message.answer(top_card, reply_markup=kb, parse_mode="HTML")
+        _spawn(auto_delete_msg(sent, 35))
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"Aviso en /top: {e}")
+
+
+@router.message(Command("heatmap", "horas", "densidad"), F.chat.type.in_({"group", "supergroup"}))
+async def cmd_chat_heatmap(message: Message, bot: Bot):
+    """Muestra un resumen táctico de las horas pico de mensajes de la comunidad."""
+    group_id = message.chat.id
+    if not await _message_author_is_admin(bot, message):
+        return
+
+    data = await get_chat_heatmap_matrix(group_id)
+    matrix = data.get("matrix", {})
+    days = data.get("days", [])
+
+    # Identificar la hora pico global y el día de mayor actividad
+    peak_day = "Lunes"
+    peak_hour = 12
+    max_count = 0
+    total_msgs = 0
+
+    for day_num, hours in matrix.items():
+        for hour, count in hours.items():
+            total_msgs += count
+            if count > max_count:
+                max_count = count
+                peak_day = days[day_num - 1] if 1 <= day_num <= 7 else "Día"
+                peak_hour = hour
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Ver Mapa de Calor 24x7", url=f"{WEBAPP_URL}?chat_id={group_id}")]
+    ])
+
+    report = (
+        f"📊 <b>Auditoría de Tráfico y Horas Pico (Heatmap)</b>\n"
+        f"📍 <b>Comunidad:</b> <code>{html.escape(message.chat.title or '')}</code>\n\n"
+        f"• 📈 <b>Mensajes Indexados:</b> <code>{total_msgs}</code>\n"
+        f"• ⚡ <b>Día de Mayor Actividad:</b> <b>{peak_day}</b>\n"
+        f"• ⏰ <b>Franja Horaria Más Concurrida:</b> <code>{peak_hour:02d}:00 - {peak_hour+1:02d}:00</code>\n"
+        f"• 🔥 <b>Récord de Tráfico en Pico:</b> <code>{max_count} mensajes</code>\n\n"
+        f"💡 <i>Recomendación Táctica: Programa tus aperturas de videollamada y difusión de anuncios durante los días y horas pico para maximizar la audiencia.</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    try:
+        sent = await message.answer(report, reply_markup=kb, parse_mode="HTML")
+        _spawn(auto_delete_msg(sent, 40))
+        try:
+            await message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        logger.debug(f"Aviso en /heatmap: {e}")
+
+
+# ==========================================
 # 🛡️ MATRIZ PERIMETRAL DE MENSAJES & SEGURIDAD
 # ==========================================
 @router.message(F.chat.type.in_({"group", "supergroup"}))
@@ -1895,6 +2099,8 @@ async def group_security_matrix(message: Message, bot: Bot):
 
     tier = await get_privilege_tier(bot, group_id, user_id, username)
     if _tier_is_privileged(tier):
+        # Miembros inmunes también registran densidad horaria
+        _spawn(record_hourly_chat_activity(group_id))
         return
 
     # 1. Cerradura de Comandos
@@ -1987,76 +2193,79 @@ async def group_security_matrix(message: Message, bot: Bot):
     af_cfg = await get_antiflood_config(group_id)
     max_msgs, time_window, af_action = af_cfg["msgs"], af_cfg["time"], af_cfg["action"]
 
-    if af_action == "off":
-        return
+    if af_action != "off":
+        now = time.time()
+        cache_key = (group_id, user_id)
+        
+        if cache_key not in FLOOD_CACHE: 
+            FLOOD_CACHE[cache_key] = []
+        
+        FLOOD_CACHE[cache_key] = [t for t in FLOOD_CACHE[cache_key] if now - t < time_window]
+        FLOOD_CACHE[cache_key].append(now)
 
-    now = time.time()
-    cache_key = (group_id, user_id)
-    
-    if cache_key not in FLOOD_CACHE: 
-        FLOOD_CACHE[cache_key] = []
-    
-    FLOOD_CACHE[cache_key] = [t for t in FLOOD_CACHE[cache_key] if now - t < time_window]
-    FLOOD_CACHE[cache_key].append(now)
+        if len(FLOOD_CACHE) > 500:
+            keys_to_delete = [k for k, v in FLOOD_CACHE.items() if not v or (now - v[-1] > 60)]
+            for k in keys_to_delete:
+                del FLOOD_CACHE[k]
 
-    if len(FLOOD_CACHE) > 500:
-        keys_to_delete = [k for k, v in FLOOD_CACHE.items() if not v or (now - v[-1] > 60)]
-        for k in keys_to_delete:
-            del FLOOD_CACHE[k]
+        if len(FLOOD_CACHE[cache_key]) > max_msgs:
+            FLOOD_CACHE[cache_key] = [] 
+            try:
+                if af_cfg["delete"] == 1: 
+                    await message.delete()
+                user_mention = message.from_user.mention_html()
 
-    if len(FLOOD_CACHE[cache_key]) > max_msgs:
-        FLOOD_CACHE[cache_key] = [] 
-        try:
-            if af_cfg["delete"] == 1: 
-                await message.delete()
-            user_mention = message.from_user.mention_html()
+                if af_action == "warn":
+                    await enforce_warn_ladder(
+                        bot, group_id, user_id, username, user_mention,
+                        reply_to=message, reason="flood"
+                    )
+                    return
 
-            if af_action == "warn":
-                await enforce_warn_ladder(
-                    bot, group_id, user_id, username, user_mention,
-                    reply_to=message, reason="flood"
-                )
-                return
+                if af_action in ("kick", "mute", "ban"):
+                    await _acoustic_attenuate(bot, group_id, user_id, username, strikes=1, limit=1, force_mute=True)
 
-            if af_action in ("kick", "mute", "ban"):
-                await _acoustic_attenuate(bot, group_id, user_id, username, strikes=1, limit=1, force_mute=True)
+                if af_action == "kick":
+                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
+                    await bot.unban_chat_member(chat_id=group_id, user_id=user_id, only_if_banned=True)
+                    await registry_forget(group_id, user_id)
+                    await _send_temp(
+                        bot, group_id,
+                        f"👢 <b>Aviso de Expulsión / Kick Notice:</b>\n"
+                        f"{user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood).\n"
+                        f"🇺🇸 <i>User kicked due to message flood.</i>\n\n"
+                        f"🛡️ <i>Cloud Media Management</i>",
+                        ttl=20, reply_to=message
+                    )
+                elif af_action == "mute":
+                    await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
+                    await _send_temp(
+                        bot, group_id,
+                        f"🔇 <b>Aviso de Silencio / Mute Notice:</b>\n"
+                        f"{user_mention} ha sido silenciado por saturación masiva de mensajes (Flood).\n"
+                        f"🇺🇸 <i>User muted due to message flood.</i>\n\n"
+                        f"🛡️ <i>Cloud Media Management</i>",
+                        ttl=20, reply_to=message
+                    )
+                elif af_action == "ban":
+                    await ban_user(user_id)
+                    await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+                    await registry_forget(group_id, user_id)
+                    await _send_temp(
+                        bot, group_id,
+                        f"🚫 <b>Bloqueo Definitivo / Ban Notice:</b>\n"
+                        f"{user_mention} ha sido baneado permanentemente por flood reiterado.\n"
+                        f"🇺🇸 <i>User permanently banned due to continuous flood.</i>\n\n"
+                        f"🛡️ <i>Cloud Media Management</i>",
+                        ttl=25, reply_to=message
+                    )
+            except Exception as e:
+                logger.error(f"Error aplicando sanción anti-flood ({group_id}/{user_id}): {e}")
+            return
 
-            if af_action == "kick":
-                await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
-                await bot.unban_chat_member(chat_id=group_id, user_id=user_id, only_if_banned=True)
-                await registry_forget(group_id, user_id)
-                await _send_temp(
-                    bot, group_id,
-                    f"👢 <b>Aviso de Expulsión / Kick Notice:</b>\n"
-                    f"{user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood).\n"
-                    f"🇺🇸 <i>User kicked due to message flood.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>",
-                    ttl=20, reply_to=message
-                )
-            elif af_action == "mute":
-                await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
-                await _send_temp(
-                    bot, group_id,
-                    f"🔇 <b>Aviso de Silencio / Mute Notice:</b>\n"
-                    f"{user_mention} ha sido silenciado por saturación masiva de mensajes (Flood).\n"
-                    f"🇺🇸 <i>User muted due to message flood.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>",
-                    ttl=20, reply_to=message
-                )
-            elif af_action == "ban":
-                await ban_user(user_id)
-                await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
-                await registry_forget(group_id, user_id)
-                await _send_temp(
-                    bot, group_id,
-                    f"🚫 <b>Bloqueo Definitivo / Ban Notice:</b>\n"
-                    f"{user_mention} ha sido baneado permanentemente por flood reiterado.\n"
-                    f"🇺🇸 <i>User permanently banned due to continuous flood.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>",
-                    ttl=25, reply_to=message
-                )
-        except Exception as e:
-            logger.error(f"Error aplicando sanción anti-flood ({group_id}/{user_id}): {e}")
+    # 6. MENSAJE LEGÍTIMO VERIFICADO: PROCESAMIENTO DE FASE 4 (XP & HEATMAPS)
+    _spawn(record_hourly_chat_activity(group_id))
+    _spawn(_process_message_reputation(bot, message))
 
 
 async def add_speaker_to_queue(group_id: int, user_id: int, full_name: str = "Speaker", username: str = "", stars_paid: int = 0):
