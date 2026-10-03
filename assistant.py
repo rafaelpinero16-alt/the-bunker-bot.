@@ -3,6 +3,7 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
+Fase 2: IA Autónoma de Centinela (Grupos/Canales) + Filtrado Semántico en el Borde + Telemetría Gamificada.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -134,7 +135,7 @@ DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
 DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
 if not DEFAULT_API_ID or not DEFAULT_API_HASH:
-    logger.warning("⚠ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
+    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -147,7 +148,7 @@ if MASTER_SESSION:
     )
 else:
     assistant_app = None
-    logger.warning("⚠️ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
+    logger.warning("⚠️️ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
 
 _global_bot = None
 _default_my_id = None
@@ -202,13 +203,12 @@ def _get_group_now(tz_name: str = None) -> datetime:
 
 
 async def _ensure_connected(client: Client) -> bool:
-    """Ensure a Pyrogram client is connected, returning False if it cannot connect."""
     try:
         if not client.is_connected:
             await client.connect()
         return bool(client.is_connected)
     except Exception as exc:
-        logger.warning(f"⚠️ No se pudo conectar el cliente de autenticación: {exc}")
+        logger.warning(f"⚠️ No se pudo conectar el cliente: {exc}")
         return False
 
 
@@ -219,9 +219,7 @@ def _register_forbidden_strike(chat_id: int, action_label: str) -> int:
 
     if current >= FORBIDDEN_STRIKE_LIMIT:
         _autolower_cooldowns[chat_id] = time.monotonic() + FORBIDDEN_COOLDOWN_SECONDS
-        logger.warning(
-            f"⏳ [Cooldown activado] Grupo {chat_id} bloqueado por {FORBIDDEN_COOLDOWN_SECONDS}s por exceso de acciones prohibidas."
-        )
+        logger.warning(f"⏳ [Cooldown activado] Grupo {chat_id} bloqueado por {FORBIDDEN_COOLDOWN_SECONDS}s.")
     return current
 
 
@@ -236,7 +234,6 @@ def _register_noise_strike(chat_id: int, user_id: int) -> bool:
     if len(history) >= NOISE_SPIKE_STRIKE_LIMIT:
         history.clear()
         _noise_unmute_history[key] = history
-        logger.warning(f"⚠️ [Spike de ruido] Usuario {user_id} superó el umbral en grupo {chat_id}.")
         return True
     return False
 
@@ -285,6 +282,23 @@ def _extract_urls_to_markup(
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
     markup = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     return cleaned_text, markup
+
+
+def build_vc_moderation_keyboard(
+    chat_id: int, 
+    bot_username: str, 
+    lang: str = "es", 
+    price: int = 50, 
+    custom_btn_text: str = None,
+    custom_btn_url: str = None
+) -> InlineKeyboardMarkup:
+    """Botonera limpia de un solo botón: texto 100% editable que cubre el enlace de destino."""
+    btn_label = custom_btn_text if custom_btn_text else ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
+    pay_url = custom_btn_url.strip() if custom_btn_url else f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=btn_label, url=pay_url)]
+    ])
 
 
 async def _dispatch_radar_notice(
@@ -553,7 +567,7 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
                     f"🛡️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
                     f"Mensaje de <b>{html.escape(user_tag)}</b> purgado preventivamente.\n"
                     f"• <b>Detección:</b> <code>{html.escape(threat.get('reason'))}</code>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
+                    f"🛡️️ <i>Cloud Media Management</i>"
                 )
                 _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20))
                 return
@@ -693,7 +707,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     full_chat_res = await client.invoke(GetFullChannel(channel=peer))
                     raw_call = full_chat_res.full_chat.call
                 except PeerIdInvalid:
-                    # 🔄 REINTENTO INTELIGENTE DE RESOLUCIÓN DE PEER
                     try:
                         peer = await client.resolve_peer(chat_id)
                         full_chat_res = await client.invoke(GetFullChannel(channel=peer))
@@ -1124,7 +1137,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
 
         is_member = await _verify_active_membership(session_client, group_id)
         if not is_member:
-            logger.warning(f"⚠️️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
+            logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
 
         peer = await session_client.resolve_peer(group_id)
 
@@ -1144,7 +1157,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             pass
         return False
     except PeerIdInvalid:
-        logger.error(f"⚠ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
+        logger.error(f"⚠️ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
         return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
@@ -1244,16 +1257,13 @@ async def radar_master_loop():
 
 
 async def cancel_phone_auth(uid: int):
-    """Cancela una sesión pendiente de autenticación por teléfono si aún existe."""
+    """Limpia una sesión de autenticación telefónica pendiente y evita fugas de estado."""
     try:
-        session_data = pending_auth_sessions.pop(uid, None)
-        if not session_data:
-            return False
-        logger.info(f"🧹 [Auth Pendiente] Cancelando verificación telefónica de UID {uid} por expiración.")
-        return True
+        data = pending_auth_sessions.pop(uid, None)
+        if data is not None:
+            logger.info(f"🧹 [Auth pendiente cancelada] Usuario {uid} eliminada de la cola de verificación.")
     except Exception as e:
-        logger.debug(f"Aviso cancelando auth pendiente {uid}: {e}")
-        return False
+        logger.debug(f"Aviso cancelando autenticación pendiente para {uid}: {e}")
 
 
 async def pending_auth_cleanup_loop():
@@ -1272,7 +1282,7 @@ async def pending_auth_cleanup_loop():
 async def init_assistant_master():
     global _default_my_id
     if assistant_app is None:
-        logger.warning("⚠ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
+        logger.warning("⚠️ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
     else:
         try:
             if not assistant_app.is_connected:
@@ -1290,7 +1300,7 @@ async def init_assistant_master():
             if "AUTH_KEY_DUPLICATED" in err_msg or "406" in err_msg:
                 logger.warning("⚠️ [MASTER_SESSION Clave Duplicada] Telegram detectó uso simultáneo. El maestro continuará en reposo sin afectar a los centinelas dedicados.")
             else:
-                logger.warning(f"⚠ [Aviso Centinela Maestro]: {e}")
+                logger.warning(f"⚠️ [Aviso Centinela Maestro]: {e}")
 
     await load_all_sentinels()
     _spawn(radar_master_loop())
@@ -1375,7 +1385,7 @@ async def disengage_screen_shield(group_id: int):
 async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
     await set_podcast_mode(group_id, 1)
     await set_podcast_duck_volume(group_id, duck_level * 100)
-    logger.info(f"🎙️️ [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
+    logger.info(f"🎙 [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
 
 
 async def disengage_podcast_ducking(group_id: int):
@@ -1552,15 +1562,3 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
-
-
-async def cancel_phone_auth(user_id: int):
-    """Limpia la sesión de autenticación temporal en curso."""
-    if user_id in pending_auth_sessions:
-        auth_data = pending_auth_sessions.pop(user_id)
-        client: Client = auth_data.get("client")
-        if client and client.is_connected:
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
