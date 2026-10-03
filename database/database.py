@@ -1327,6 +1327,22 @@ def set_ai_sentinel_config(group_id: int, field: str, value):
         raise ValueError(f"Campo de IA no permitido: {field!r}")
     _upsert_setting(group_id, field, value)
 
+@db_async
+def get_reputation_settings(group_id: int) -> dict:
+    """Lee el estado del motor de gamificación y multiplicador de XP del grupo."""
+    return {
+        "enabled": _get_setting(group_id, "reputation_enabled", 1),
+        "multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0)
+    }
+
+
+@db_async
+def set_reputation_setting(group_id: int, field: str, value):
+    """Guarda parámetros de gamificación en group_settings mediante upsert seguro."""
+    if field not in ("reputation_enabled", "reputation_xp_multiplier"):
+        return
+    _upsert_setting(group_id, field, value)    
+
 
 @db_async
 def save_ai_chat_context(chat_id: int, user_id: int, role: str, content: str, max_history: int = 12):

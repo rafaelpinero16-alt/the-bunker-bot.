@@ -65,7 +65,9 @@ from database.database import (
     export_group_configuration,
     import_group_configuration,
     get_top_reputation,
-    get_user_reputation
+    get_user_reputation,
+    get_reputation_settings,
+    set_reputation_setting,
 )
 
 from assistant import (
@@ -5774,19 +5776,23 @@ def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: 
     ])
 
 def get_reputation_keyboard(group_id: int, lang: str, rep_cfg: dict, chat_type: str = "g") -> InlineKeyboardMarkup:
-    """Botonera de control de Gamificación y Niveles XP."""
+    """Botonera de control de Gamificación y Niveles XP con indicadores visuales activos."""
     t = TEXTS.get(lang, TEXTS["es"])
     is_on = (rep_cfg.get("enabled", 1) == 1)
-    st_btn = f"🎮 {'Sistema XP: 🟢' if is_on else 'Sistema XP: 🔴'}"
-    mult = rep_cfg.get("multiplier", 1.0)
+    st_btn = f"🎮 {'Sistema XP: 🟢 Activado' if is_on else 'Sistema XP: 🔴 Desactivado'}"
+    mult = float(rep_cfg.get("multiplier", 1.0) or 1.0)
     back_btn = ultra_back_button(chat_type, group_id, lang)
+
+    btn_1_0 = "⚡ 1.0x 🟢" if abs(mult - 1.0) < 0.05 else "⚡ 1.0x"
+    btn_1_5 = "⚡ 1.5x 🟢" if abs(mult - 1.5) < 0.05 else "⚡ 1.5x"
+    btn_2_0 = "⚡ 2.0x 🟢" if abs(mult - 2.0) < 0.05 else "⚡ 2.0x"
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=st_btn, callback_data=f"rep_toggle_{group_id}_{lang}")],
         [
-            InlineKeyboardButton(text="⚡ 1.0x", callback_data=f"rep_setmult_1.0_{group_id}_{lang}"),
-            InlineKeyboardButton(text="⚡ 1.5x", callback_data=f"rep_setmult_1.5_{group_id}_{lang}"),
-            InlineKeyboardButton(text="⚡ 2.0x", callback_data=f"rep_setmult_2.0_{group_id}_{lang}")
+            InlineKeyboardButton(text=btn_1_0, callback_data=f"rep_setmult_1.0_{group_id}_{lang}"),
+            InlineKeyboardButton(text=btn_1_5, callback_data=f"rep_setmult_1.5_{group_id}_{lang}"),
+            InlineKeyboardButton(text=btn_2_0, callback_data=f"rep_setmult_2.0_{group_id}_{lang}")
         ],
         [InlineKeyboardButton(text=f"🏆 {'Ver Cuadro de Honor (Top 10)' if lang == 'es' else 'View Leaderboard (Top 10)'}", callback_data=f"rep_viewtop_{group_id}_{lang}")],
         [back_btn]
@@ -5891,7 +5897,12 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 return
 
     elif module == "rep":
-        group_id = int(data[2])
+        if sub == "setmult":
+            val = float(data[2])
+            group_id = int(data[3])
+        else:
+            group_id = int(data[2])
+
         if not await verify_admin_privileges(callback, bot, group_id):
             return
         chat_kind = await resolve_chat_kind(bot, group_id)
@@ -5910,26 +5921,29 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             new_st = 0 if rep_cfg["enabled"] == 1 else 1
             await set_reputation_setting(group_id, "reputation_enabled", new_st)
             rep_cfg["enabled"] = new_st
-            await callback.answer(tr(lang, "Estado de XP actualizado.", "XP state updated."))
+            await callback.answer(tr(lang, f"Sistema XP: {'Activado 🟢' if new_st == 1 else 'Pausado 🔴'}", f"XP System: {'Enabled 🟢' if new_st == 1 else 'Disabled 🔴'}"))
             st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if new_st == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
             text = t["rep_main"].format(st_badge=st_badge, multiplier=rep_cfg["multiplier"])
             keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)
         elif sub == "setmult":
-            val = float(data[2])
-            group_id = int(data[3])
             await set_reputation_setting(group_id, "reputation_xp_multiplier", val)
-            await callback.answer(f"Multiplicador: {val}x XP")
+            await callback.answer(f"Multiplicador: {val}x XP 🟢")
             rep_cfg = await get_reputation_settings(group_id)
+            rep_cfg["multiplier"] = val
             st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if rep_cfg["enabled"] == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
             text = t["rep_main"].format(st_badge=st_badge, multiplier=val)
             keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)
         elif sub == "viewtop":
             top_list = await get_top_reputation(group_id, limit=10)
-            lines = [f"#{idx+1} {html.escape(item['name'])} — Nivel {item['level']} ({item['xp']} XP)" for idx, item in enumerate(top_list)] or ["(Sin actividad registrada aún)"]
+            lines = [f"#{idx+1} {html.escape(item['name'])} — Nivel {item['level']} ({item['xp']} XP)" for idx, item in enumerate(top_list)] if top_list else [tr(lang, "(Sin actividad registrada aún)", "(No activity recorded yet)")]
             text = f"🏆 <b>Cuadro de Honor (Top 10):</b>\n\n" + "\n".join(lines) + PERIMETER_SIGNATURE
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"rep_menu_{group_id}_{lang}")]
             ])
+
+        if text and keyboard:
+            await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
+        return
 
     elif module == "backup":
         group_id = int(data[2])
