@@ -1095,7 +1095,7 @@ async def on_dispatcher_error(event: ErrorEvent) -> bool:
     logging.error(f"❌ [Error Dispatcher]: {event.exception!r}", exc_info=event.exception)
     if event.update and event.update.callback_query:
         try:
-            await event.update.callback_query.answer("⚠️ Error temporal", show_alert=False)
+            await event.update.callback_query.answer("⚠️️ Error temporal", show_alert=False)
         except Exception:
             pass
     return True
