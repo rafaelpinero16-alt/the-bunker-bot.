@@ -39,7 +39,7 @@ from pyrogram.raw.functions.phone import (
     DiscardGroupCall
 )
 from database.database import (
-    is_vip_mic_active, is_group_approved, 
+    is_vip_mic_active, is_group_approved, approve_group,
     get_autolower_status, is_whitelisted,
     get_all_active_sessions, get_session_by_group,
     get_all_active_vc_schedules, update_vc_call_status,
@@ -85,7 +85,7 @@ FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, UserDeactivated, User
 logger = logging.getLogger("assistant_radar")
 
 # ==========================================
-# 📢 TEXTOS Y PLANTILLAS MULTILINGÜES OFICIALES
+# 📢 CONSTANTES Y PLANTILLAS MULTILINGÜES
 # ==========================================
 SCREEN_SHIELD_ALERT_TEXT = (
     "🎥 <b>The Bunker Bot: Escudo Antinota Activado</b>\n\n"
@@ -93,15 +93,12 @@ SCREEN_SHIELD_ALERT_TEXT = (
     "La señal fue cortada y la cuenta fue retirada de la sala de inmediato para proteger a la comunidad.\n\n"
     "🇺🇸 <i>Unauthorized screen-share detected from <b>{user_name}</b>. Signal cut and the account "
     "was removed from the room instantly to protect the community.</i>\n\n"
-    "🛡️️ <i>Cloud Media Management</i>"
+    "🛡️ <i>Cloud Media Management</i>"
 )
 
 NOISE_SHIELD_ALERT_TEXT = (
     "🔇 <b>The Bunker Bot: Escudo Antirruido Activado</b>\n\n"
-    "<b>{user_name}</b> fue silenciado automáticamente tras detectar picos de ruido anómalos y "
-    "repetidos en la transmisión.\n\n"
-    "🇺🇸 <i><b>{user_name}</b> was auto-muted after repeated anomalous noise spikes were detected "
-    "in the live stream.</i>\n\n"
+    "<b>{user_name}</b> fue silenciado automáticamente tras detectar picos de ruido anómalos y repetidos.\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
 
@@ -110,12 +107,12 @@ GHOST_PURGE_ALERT_TEXT = (
     "• Cuentas Fantasma / Eliminadas detectadas: <b>{found}</b>\n"
     "• Cuentas purgadas exitosamente: <b>{purged}</b>\n"
     "• Acción ejecutada: <code>{action}</code>\n\n"
-    "🛡️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
+    "🛡️️ <i>Perímetro depurado y optimizado — Cloud Media Management</i>"
 )
 
 VC_START_TEXTS = {
     "es": (
-        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
+        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
         "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
         "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
         "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
@@ -126,7 +123,7 @@ VC_START_TEXTS = {
         "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
         "⚜ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
         "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
+        "🛡️️ <i>Cloud Media Management</i>"
     )
 }
 
@@ -194,7 +191,7 @@ DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
 DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
 if not DEFAULT_API_ID or not DEFAULT_API_HASH:
-    logger.warning("⚠ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
+    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -207,7 +204,7 @@ if MASTER_SESSION:
     )
 else:
     assistant_app = None
-    logger.warning("⚠ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
+    logger.warning("⚠️ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
 
 _global_bot = None
 _default_my_id = None
@@ -958,7 +955,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     active_sentinels.pop(chat_id, None)
                     return
 
-            # Detección precisa de la llamada mediante resolución protegida InputChannel
             if not current_call or (current_time - last_channel_check > 15):
                 raw_call_obj = await _get_raw_group_call(client, chat_id, peer)
 
@@ -1042,7 +1038,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     await asyncio.sleep(15)
                     continue
 
-                # Bypass no bloqueante en JoinGroupCall: modera incluso si no entra como participante de voz
                 if not is_joined_audio:
                     try:
                         my_peer = await client.resolve_peer("me")
@@ -1234,7 +1229,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
 
 async def vc_scheduler_loop():
-    logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
+    logger.info("🗓️️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
     while True:
         try:
             now = _get_group_now()
@@ -1369,12 +1364,12 @@ async def night_mode_autonomous_loop():
                                 try:
                                     await _global_bot.send_message(
                                         chat_id=group_id,
-                                        text="☀️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>",
+                                        text="☀️️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>",
                                         parse_mode="HTML"
                                     )
                                 except Exception:
                                     pass
-                            logger.info(f"☀️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
+                            logger.info(f"☀️️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
                 except Exception as inner_err:
                     logger.debug(f"Aviso evaluando modo nocturno autónomo en grupo {group_id}: {inner_err}")
         except Exception as e:
@@ -1489,6 +1484,7 @@ async def load_all_sentinels():
 
 
 async def radar_master_loop():
+    """Bucle del maestro con auto-reconexión periódica ante colisiones de clave."""
     while True:
         try:
             if assistant_app and not assistant_app.is_connected:
@@ -1500,8 +1496,9 @@ async def radar_master_loop():
 
             if assistant_app and assistant_app.is_connected:
                 async for dialog in assistant_app.get_dialogs(limit=100):
-                    if dialog.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
-                        chat_id = dialog.chat.id
+                    chat = dialog.chat
+                    if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+                        chat_id = chat.id
                         lock = _get_launch_lock(chat_id)
                         async with lock:
                             if chat_id in active_sentinels:
@@ -1719,7 +1716,7 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
                             if action != "ban":
                                 await _global_bot.unban_chat_member(chat_id, uid)
                             purged += 1
-                            await asyncio.sleep(0.05)
+                            await asyncio.sleep(0.1)
                 except Exception:
                     continue
 
