@@ -201,6 +201,17 @@ def _get_group_now(tz_name: str = None) -> datetime:
         return datetime.now()
 
 
+async def _ensure_connected(client: Client) -> bool:
+    """Ensure a Pyrogram client is connected, returning False if it cannot connect."""
+    try:
+        if not client.is_connected:
+            await client.connect()
+        return bool(client.is_connected)
+    except Exception as exc:
+        logger.warning(f"⚠️ No se pudo conectar el cliente de autenticación: {exc}")
+        return False
+
+
 def _register_forbidden_strike(chat_id: int, action_label: str) -> int:
     current = _forbidden_strikes.get(chat_id, 0) + 1
     _forbidden_strikes[chat_id] = current
