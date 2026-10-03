@@ -1489,3 +1489,78 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
             except Exception:
                 pass
         return {"status": "error", "message": str(e)}
+
+
+async def verify_phone_code(user_id: int, code: str) -> dict:
+    """Verifica el código numérico de 5 dígitos enviado por Telegram."""
+    auth_data = pending_auth_sessions.get(user_id)
+    if not auth_data:
+        return {"status": "error", "message": "session_expired"}
+
+    client: Client = auth_data["client"]
+    clean_code = code.strip().replace(" ", "").replace("-", "")
+
+    try:
+        if not await _ensure_connected(client):
+            return {"status": "error", "message": "connection_lost"}
+        await client.sign_in(
+            phone_number=auth_data["phone"],
+            phone_code_hash=auth_data["phone_code_hash"],
+            phone_code=clean_code
+        )
+        session_str = await client.export_session_string()
+        group_id = auth_data["group_id"]
+        
+        await cancel_phone_auth(user_id)
+        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data["phone"])
+        await register_or_update_sentinel(user_id, group_id, session_str)
+        return {"status": "success", "session_string": session_str, "group_id": group_id}
+
+    except SessionPasswordNeeded:
+        return {"status": "2fa_required"}
+    except (PhoneCodeInvalid, PhoneCodeExpired):
+        return {"status": "error", "message": "invalid_code"}
+    except FloodWait as fw:
+        return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+async def verify_2fa_password(user_id: int, password: str) -> dict:
+    """Valida la contraseña de Verificación en Dos Pasos (2FA)."""
+    auth_data = pending_auth_sessions.get(user_id)
+    if not auth_data:
+        return {"status": "error", "message": "session_expired"}
+
+    client: Client = auth_data["client"]
+
+    try:
+        if not await _ensure_connected(client):
+            return {"status": "error", "message": "connection_lost"}
+        await client.check_password(password=password.strip())
+        session_str = await client.export_session_string()
+        group_id = auth_data["group_id"]
+
+        await cancel_phone_auth(user_id)
+        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data.get("phone"))
+        await register_or_update_sentinel(user_id, group_id, session_str)
+        return {"status": "success", "session_string": session_str, "group_id": group_id}
+
+    except PasswordHashInvalid:
+        return {"status": "error", "message": "invalid_password"}
+    except FloodWait as fw:
+        return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+async def cancel_phone_auth(user_id: int):
+    """Limpia la sesión de autenticación temporal en curso."""
+    if user_id in pending_auth_sessions:
+        auth_data = pending_auth_sessions.pop(user_id)
+        client: Client = auth_data.get("client")
+        if client and client.is_connected:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
