@@ -1,14 +1,22 @@
+"""
+main.py — The Bunker OS (Aiogram 3.x / FastAPI / Pyrogram)
+
+Núcleo de arranque maestro, sincronización de enrutadores, pasarela Web API y
+administración concurrente de clones y Centinelas acústicos.
+The Bunker Command OS © 2026 — Cloud Media Management
+"""
 import asyncio
-import logging
-import sys
-import os
-import urllib.parse
-import json
-import hmac
-import hashlib
 import base64
-import time
 from contextlib import asynccontextmanager
+import hashlib
+import hmac
+import html
+import json
+import logging
+import os
+import sys
+import time
+import urllib.parse
 from dotenv import load_dotenv
 
 if __name__ == "__main__":
@@ -16,10 +24,13 @@ if __name__ == "__main__":
 
 load_dotenv()
 
+# ==========================================
+# 🌐 IMPORTACIONES Y COMPATIBILIDAD CON FASTAPI
+# ==========================================
 try:
-    from fastapi import FastAPI, APIRouter, Header, HTTPException, Body  # type: ignore[import-not-found]
+    from fastapi import Body, FastAPI, Header, HTTPException, APIRouter  # type: ignore[import-not-found]
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover
+except ImportError:
     class _FastAPIStub:
         def __init__(self, *args, **kwargs): pass
         def add_middleware(self, *args, **kwargs): pass
@@ -56,80 +67,93 @@ try:
 except ImportError:
     uvicorn = None
 
-from aiogram import Bot, Dispatcher, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
-from aiogram.types import CallbackQuery, ErrorEvent, Update, ChatMemberUpdated
 from aiogram.exceptions import TelegramUnauthorizedError
+from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message, Update
 
+from assistant import (
+    close_all_sentinels,
+    execute_ghost_purge,
+    register_or_update_sentinel,
+    start_voice_radar
+)
 from database.database import (
-    init_db, 
-    get_all_active_clone_tokens, 
-    get_or_create_user,
-    get_user_global_stats,
-    get_user_channels,
-    get_user_groups,
-    get_user_subscribers_audit,
-    get_group_tier,
-    get_db_connection,
-    register_user_group,
-    record_chat_activity,
+    get_all_active_clone_tokens,
+    get_channel_plans,
+    get_chat_admin_stats,
     get_chat_dashboard_data,
     get_chat_timeseries_stats,
     get_chat_top_users,
-    get_chat_admin_stats,
-    update_chat_operational_settings,
+    get_db_connection,
+    get_group_tier,
+    get_or_create_user,
     get_user_by_web_session,
+    get_user_channels,
+    get_user_global_stats,
+    get_user_groups,
+    get_user_subscribers_audit,
+    init_db,
     mark_payment_processed,
+    record_chat_activity,
     register_bot_clone,
+    register_user_group,
     save_owner_session,
-    update_ghost_purge_scan_time,
-    get_channel_plans
+    update_chat_operational_settings,
+    update_ghost_purge_scan_time
 )
-from middlewares.anti_spam import AntiSpamMiddleware
 from handlers import (
+    admin_group,
+    ecosystem,
+    groups,
+    moderation,
     payments,
-    user_private, 
-    moderation, 
-    admin_group, 
-    ecosystem, 
-    vc_manager, 
-    groups
+    user_private,
+    vc_manager
 )
 from handlers.user_private import (
+    get_active_user_channels,
+    get_active_user_groups,
+    revoke_bot_clone_db,
     send_official_welcome,
     set_master_bot_id,
-    set_master_bot_username,
-    revoke_bot_clone_db,
-    get_active_user_channels,
-    get_active_user_groups
+    set_master_bot_username
 )
-from assistant import (
-    start_voice_radar, 
-    close_all_sentinels,
-    register_or_update_sentinel,
-    execute_ghost_purge
-)
+from middlewares.anti_spam import AntiSpamMiddleware
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID")
-WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
+# ==========================================
+# ⚙️ CONFIGURACIÓN Y VARIABLES GLOBALES
+# ==========================================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID", "-1004351489258").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN no está definido en las variables de entorno.")
-if not ADMIN_GROUP_ID_RAW:
-    raise RuntimeError("❌ ADMIN_GROUP_ID no está definido en las variables de entorno.")
 
-ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
+try:
+    ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_RAW)
+except ValueError:
+    ADMIN_GROUP_ID = -1004351489258
+
 CREATOR_FALLBACK_ID = 8269470905
-
 active_clone_tasks = {}
 dp = Dispatcher()
 master_bot_instance: Bot = None
 
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")
+SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
+SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
+
 # ==========================================
-# 🌐 CONFIGURACIÓN DEL SERVIDOR WEB API (FASTAPI)
+# 🌐 SERVIDOR WEB API (FASTAPI)
 # ==========================================
 app = FastAPI(title="The Bunker OS Backend API", version="2.0")
 
@@ -143,6 +167,7 @@ app.add_middleware(
 
 api_router = APIRouter()
 
+
 @app.get("/")
 @app.get("/health")
 @app.get("/api/health")
@@ -152,6 +177,7 @@ async def health_check():
         "service": "The Bunker Command OS API",
         "bot_connected": master_bot_instance is not None
     }
+
 
 def parse_telegram_user_id(init_data: str) -> int:
     """Valida la firma HMAC del initData de Telegram WebApp y extrae el user_id legítimo."""
@@ -181,8 +207,10 @@ def parse_telegram_user_id(init_data: str) -> int:
         logging.debug(f"Error parseando initData: {e}")
         return 0
 
+
 SESSION_SECRET = hashlib.sha256(f"bunker-web-session::{BOT_TOKEN}".encode()).digest()
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días
+
 
 def issue_session_token(user_id: int, first_name: str = "", username: str = "", photo_url: str = "") -> str:
     payload = {
@@ -196,6 +224,7 @@ def issue_session_token(user_id: int, first_name: str = "", username: str = "", 
     raw_b64 = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
     signature = hmac.new(SESSION_SECRET, raw_b64.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{raw_b64}.{signature}"
+
 
 def verify_session_token(token: str):
     try:
@@ -212,6 +241,7 @@ def verify_session_token(token: str):
         return payload
     except Exception:
         return None
+
 
 def verify_telegram_widget_login(data: dict) -> bool:
     if not isinstance(data, dict):
@@ -238,12 +268,6 @@ def verify_telegram_widget_login(data: dict) -> bool:
 
     return True
 
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
-
-def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
 
 def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
     if x_telegram_init_data:
@@ -266,9 +290,11 @@ def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None)
 
     return CREATOR_FALLBACK_ID
 
+
 def require_authenticated_user(x_telegram_init_data: str = None, authorization: str = None) -> int:
     uid = resolve_user_id(x_telegram_init_data, authorization)
     return uid if uid else CREATOR_FALLBACK_ID
+
 
 async def assert_chat_ownership(user_id: int, chat_id: int):
     if is_super_admin(user_id) or user_id == CREATOR_FALLBACK_ID:
@@ -279,17 +305,20 @@ async def assert_chat_ownership(user_id: int, chat_id: int):
     if chat_id not in owned_ids:
         raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
 
+
 def _get_global_channels_sync():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type = 'channel'")
         return cursor.fetchall()
 
+
 def _get_global_groups_sync():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type != 'channel' OR chat_type IS NULL")
         return cursor.fetchall()
+
 
 def _get_groups_count_sync():
     with get_db_connection() as conn:
@@ -298,10 +327,10 @@ def _get_groups_count_sync():
         row = cursor.fetchone()
         return row[0] if row else 0
 
-# ==========================================
-# 📡 DEFINICIÓN DE RUTAS EN API_ROUTER
-# ==========================================
 
+# ==========================================
+# 📡 RUTAS DE LA API FASTAPI
+# ==========================================
 @api_router.post("/auth/telegram-widget")
 async def api_auth_telegram_widget(payload: dict = Body(...)):
     if not verify_telegram_widget_login(payload):
@@ -330,6 +359,7 @@ async def api_auth_telegram_widget(payload: dict = Body(...)):
         "user": {"id": user_id, "first_name": first_name, "username": username, "photo_url": photo_url}
     }
 
+
 @api_router.post("/auth/exchange-token")
 async def api_exchange_web_token(payload: dict = Body(...)):
     temp_token = payload.get("token")
@@ -347,6 +377,7 @@ async def api_exchange_web_token(payload: dict = Body(...)):
         "user": {"id": user_id, "first_name": "Operador", "username": "", "photo_url": ""}
     }
 
+
 @api_router.get("/auth/session-check")
 async def api_auth_session_check(authorization: str = Header(None)):
     if not authorization or not authorization.lower().startswith("bearer "):
@@ -362,6 +393,7 @@ async def api_auth_session_check(authorization: str = Header(None)):
         "username": payload.get("un", ""),
         "photo_url": payload.get("ph", "")
     }
+
 
 @api_router.get("/stats")
 async def api_stats(
@@ -381,6 +413,7 @@ async def api_stats(
                 "captcha_active": True, "autolower_active": True, "shield_active": True, "linklock_active": False
             }
         }
+
 
 @api_router.get("/channels")
 async def api_channels(
@@ -435,6 +468,7 @@ async def api_channels(
         logging.error(f"❌ [API Channels Error]: {e}")
         return {"channels": []}
 
+
 @api_router.get("/groups")
 async def api_groups(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -488,6 +522,7 @@ async def api_groups(
         logging.error(f"❌ [API Groups Error]: {e}")
         return {"groups": []}
 
+
 @api_router.post("/sync-chats")
 async def api_sync_chats(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -533,6 +568,7 @@ async def api_sync_chats(
         "total_groups": max(1, synced_groups)
     }
 
+
 @api_router.get("/subscribers")
 async def api_subscribers(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
@@ -545,6 +581,7 @@ async def api_subscribers(
     except Exception as e:
         logging.error(f"❌ [API Subscribers Error]: {e}")
         return {"subscribers": []}
+
 
 @api_router.get("/chat/{chat_id}/dashboard")
 async def api_chat_dashboard(
@@ -570,7 +607,6 @@ async def api_chat_dashboard(
                 "footer_metrics": {}
             }
 
-        # Inyectar parámetros del plan VIP para autorrellenar el Estudio de Canales
         try:
             plans = await get_channel_plans(numeric_id, only_active=True)
             if plans:
@@ -604,6 +640,7 @@ async def api_chat_dashboard(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @api_router.get("/chat/{chat_id}/stats")
 async def api_chat_stats(
     chat_id: str, 
@@ -622,6 +659,7 @@ async def api_chat_stats(
         raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
         return {"months": [], "mau": [], "messages": [], "messages_per_user": []}
+
 
 @api_router.get("/chat/{chat_id}/admin-stats")
 async def api_chat_admin_stats(
@@ -642,6 +680,7 @@ async def api_chat_admin_stats(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @api_router.get("/chat/{chat_id}/top-users")
 async def api_chat_top_users(
     chat_id: str, 
@@ -661,6 +700,7 @@ async def api_chat_top_users(
     except Exception as e:
         return {"top_users": []}
 
+
 @api_router.post("/chat/{chat_id}/settings")
 async def api_update_chat_settings(
     chat_id: str, 
@@ -674,7 +714,7 @@ async def api_update_chat_settings(
         await assert_chat_ownership(user_id, numeric_id)
         action = payload.get("action")
         
-        # 1. Despliegue de Bot Clon en memoria y base de datos
+        # 1. Despliegue de Bot Clon
         if action == "deploy_clone":
             bot_token = (payload.get("bot_token") or "").strip()
             if not bot_token:
@@ -695,7 +735,7 @@ async def api_update_chat_settings(
                 "chat_id": chat_id
             }
 
-        # 2. Conexión y activación en vivo del Centinela Acústico MTProto
+        # 2. Conexión de Centinela MTProto
         elif action == "connect_sentinel":
             session_str = (payload.get("session_string") or "").strip()
             if not session_str:
@@ -711,7 +751,7 @@ async def api_update_chat_settings(
                 "chat_id": chat_id
             }
 
-        # 3. Purga Táctica Unificada de Cuentas Fantasma (Ghost Purge)
+        # 3. Ghost Purge
         elif action == "run_ghost_purge":
             asyncio.create_task(execute_ghost_purge(numeric_id, action="ban"))
             return {
@@ -721,7 +761,7 @@ async def api_update_chat_settings(
                 "message": "Ghost Purge iniciada en segundo plano."
             }
 
-        # 4. Actualización general de Switches, Ajustes de Moderación y Tarifas
+        # 4. Actualización general
         await update_chat_operational_settings(numeric_id, payload or {})
         return {"status": "success", "chat_id": chat_id, "updated": payload}
     except HTTPException:
@@ -732,6 +772,7 @@ async def api_update_chat_settings(
         logging.error(f"❌ [Settings API Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @api_router.get("/affiliates/me")
 async def api_affiliates(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
@@ -740,9 +781,9 @@ async def api_affiliates(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     return {"invited_communities": 0, "earned_stars": 0, "balance": 0}
 
-# 🛡️ MONTAJE DUAL: Responde tanto con prefijo /api como en la raíz
 app.include_router(api_router, prefix="/api")
 app.include_router(api_router)
+
 
 async def run_fastapi_server():
     if uvicorn is None:
@@ -753,10 +794,12 @@ async def run_fastapi_server():
     server = uvicorn.Server(config)
     await server.serve()
 
+
 # ==========================================
 # ⚙️ GESTIÓN DE CALLBACKS Y CLONES DE AIOGRAM
 # ==========================================
 fallback_router = Router(name="callback_fallback")
+
 
 @fallback_router.callback_query()
 async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
@@ -778,6 +821,7 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
     except Exception:
         pass
 
+
 @dp.errors()
 async def on_dispatcher_error(event: ErrorEvent) -> bool:
     logging.error(f"❌ [Error Dispatcher]: {event.exception!r}", exc_info=event.exception)
@@ -787,6 +831,7 @@ async def on_dispatcher_error(event: ErrorEvent) -> bool:
         except Exception:
             pass
     return True
+
 
 @dp.my_chat_member()
 async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
@@ -806,6 +851,7 @@ async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
             logging.info(f"🎯 [Auto-Detección]: '{chat_title}' ({event.chat.id}) vinculado.")
     except Exception as e:
         logging.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
+
 
 async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Update):
     try:
@@ -841,6 +887,7 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
     except Exception as feed_err:
         logging.error(f"❌ [Error clon @{bot_username}]: {feed_err}", exc_info=True)
 
+
 async def _clone_worker(clone_bot: Bot, token: str):
     allowed_updates = ["message", "callback_query", "pre_checkout_query", "chat_join_request", "chat_member", "my_chat_member"]
     try:
@@ -865,6 +912,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
         except Exception:
             await asyncio.sleep(2)
 
+
 async def start_clone_polling_task(token: str):
     if not token or token in active_clone_tasks:
         return
@@ -875,6 +923,7 @@ async def start_clone_polling_task(token: str):
     except Exception as e:
         logging.error(f"⚠️ [Error Clon {token[:10]}]: {e}")
 
+
 async def stop_clone_polling_task(token: str):
     task_data = active_clone_tasks.pop(token, None)
     if task_data:
@@ -884,12 +933,45 @@ async def stop_clone_polling_task(token: str):
         except Exception:
             pass
 
+
 def trigger_dynamic_clone(token: str):
     asyncio.create_task(start_clone_polling_task(token))
+
 
 def trigger_disconnect_clone(token: str):
     asyncio.create_task(stop_clone_polling_task(token))
 
+
+# ==========================================
+# 📊 MIDDLEWARE ROBUSTO DE ACTIVIDAD DE CHAT
+# ==========================================
+class ActivityTrackerMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: Message, data: dict):
+        if event.chat and event.chat.type in ("group", "supergroup") and event.from_user:
+            try:
+                is_admin = False
+                try:
+                    member = await event.chat.get_member(event.from_user.id)
+                    is_admin = member.status in ("creator", "administrator")
+                except Exception:
+                    pass
+
+                await record_chat_activity(
+                    group_id=event.chat.id,
+                    user_id=event.from_user.id,
+                    full_name=event.from_user.full_name or "Usuario",
+                    username=event.from_user.username or "",
+                    is_reply=bool(event.reply_to_message),
+                    is_admin=is_admin
+                )
+            except Exception:
+                pass
+        return await handler(event, data)
+
+
+# ==========================================
+# 🚀 FUNCIÓN PRINCIPAL DE ARRANQUE (MAIN)
+# ==========================================
 async def main():
     global master_bot_instance
     logging.basicConfig(
@@ -916,47 +998,37 @@ async def main():
     except Exception as e:
         print(f"⚠️ [Identidad Maestro]: {e}")
 
+    # Registro formal de middlewares
     dp.message.middleware(AntiSpamMiddleware())
+    dp.message.outer_middleware.register(ActivityTrackerMiddleware())
 
-    @dp.message.outer_middleware()
-    async def track_chat_activity_middleware(handler, event, data):
-        if event.chat and event.chat.type in ("group", "supergroup") and event.from_user:
-            try:
-                is_admin = False
-                try:
-                    member = await event.chat.get_member(event.from_user.id)
-                    is_admin = member.status in ("creator", "administrator")
-                except Exception:
-                    pass
-
-                await record_chat_activity(
-                    group_id=event.chat.id,
-                    user_id=event.from_user.id,
-                    full_name=event.from_user.full_name or "Usuario",
-                    username=event.from_user.username or "",
-                    is_reply=bool(event.reply_to_message),
-                    is_admin=is_admin
-                )
-            except Exception:
-                pass
-        return await handler(event, data)
-
+    # 🎯 ORDEN ESTRICTO DE ROUTERS:
+    # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
     dp.include_router(payments.router)
+    # 2. user_private: consolas privadas, Sentinel Settings, sincronización y creador de planes
     dp.include_router(user_private.router)
+    # 3. moderation y admin_group: comandos ejecutivos y /reload antes de procesar el chat general
     dp.include_router(moderation.router)
     dp.include_router(admin_group.router)
+    # 4. ecosystem y vc_manager: telemetría y directivas de videollamada
     dp.include_router(ecosystem.router)
     dp.include_router(vc_manager.router)
+    # 5. groups: aduana captcha, anti-flood y matriz perimetral
     dp.include_router(groups.router)
+    # 6. fallback_router: salvaguarda de callbacks huérfanos
     dp.include_router(fallback_router)
 
+    # Inicialización del Radar Acústico MTProto y Centinelas dedicados
     try:
         start_voice_radar(master_bot)
     except Exception as e:
         print(f"⚠️ [Radar MTProto]: {e}")
 
-    asyncio.create_task(ecosystem.start_channel_broadcast_worker(master_bot))
+    # Inicialización del worker de difusión recurrente de planes en canales
+    if hasattr(ecosystem, "start_channel_broadcast_worker"):
+        asyncio.create_task(ecosystem.start_channel_broadcast_worker(master_bot))
 
+    # Carga concurrente de bots clones persistidos en SQLite
     try:
         stored_clones = await get_all_active_clone_tokens()
         for clone_token in stored_clones:
@@ -967,7 +1039,10 @@ async def main():
     try:
         await master_bot.delete_webhook(drop_pending_updates=True)
         allowed_updates = dp.resolve_used_update_types()
-        required_updates = ["message", "callback_query", "pre_checkout_query", "chat_join_request", "chat_member", "my_chat_member"]
+        required_updates = [
+            "message", "callback_query", "pre_checkout_query", 
+            "chat_join_request", "chat_member", "my_chat_member"
+        ]
         for update_type in required_updates:
             if update_type not in allowed_updates:
                 allowed_updates.append(update_type)
@@ -978,6 +1053,7 @@ async def main():
             await stop_clone_polling_task(token)
         await close_all_sentinels()
         await master_bot.session.close()
+
 
 if __name__ == "__main__":
     try:

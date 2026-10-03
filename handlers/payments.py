@@ -9,27 +9,26 @@ The Bunker Command OS © 2026 — Cloud Media Management
 import os
 import asyncio
 import html
+import importlib
 import logging
+import re
 import time
 from aiogram import Router, F, Bot
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
-    Message, LabeledPrice, PreCheckoutQuery, 
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+    LabeledPrice, PreCheckoutQuery, WebAppInfo
 )
 from aiogram.filters import Command, CommandObject
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from database.database import (
-    approve_group, get_group_tier, grant_vip_mic, get_mic_vip_price,
-    get_mic_vip_custom_config, get_vip_badge_title, get_channel_plans, 
-    get_channel_plan, record_channel_subscription, get_channel_settings,
-    mark_payment_processed, get_speaker_price, add_to_speaker_queue,
-    get_user_speaker_position, get_tips_config, record_group_tip
-)
-from assistant import set_participant_mic
-from handlers.user_private import is_clone_bot, get_master_bot_username
 
+# ==========================================
+# 🧠 ESTADOS Y CONFIGURACIÓN BASE
+# ==========================================
 logger = logging.getLogger("payments_gateway")
 router = Router()
+
+# Diccionario de estado conversacional para capturar montos manuales de Stars
+CUSTOM_TIP_STATES: dict[tuple[int, int], int] = {}  # (bot_id, user_id) -> group_id
 
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
@@ -39,9 +38,6 @@ SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().is
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
-
-def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
 
 # ==========================================
 # 💰 TARIFAS Y CONFIGURACIÓN DE FACTURACIÓN
@@ -62,6 +58,31 @@ ASSISTANT_INVITE_URL = "https://t.me/Alphacentinel?startgroup=true"
 def get_lang(lang_code: str) -> str:
     """Detecta el idioma del operador para renderizar la pasarela adecuada."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
+
+
+def is_clone_bot(bot: Bot) -> bool:
+    """Detecta si la instancia actual es un bot clon del maestro."""
+    bot_username = (getattr(bot, "username", "") or "").strip().lstrip("@").lower()
+    master_username = (get_master_bot_username() or "").strip().lstrip("@").lower()
+    if not bot_username or not master_username:
+        return False
+    return bot_username != master_username
+
+
+def is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMIN_IDS
+
+
+def get_master_bot_username() -> str | None:
+    """Devuelve el nombre de usuario del Bot Maestro configurado para redirigir pagos."""
+    username = (
+        os.getenv("MASTER_BOT_USERNAME")
+        or os.getenv("MASTER_BOT_USERNAME_TG")
+        or os.getenv("MASTER_BOT")
+        or os.getenv("MASTER_BOT_USER")
+        or "Alphacentinel"
+    ).strip().lstrip("@")
+    return username or None
 
 
 async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -123,6 +144,134 @@ def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
         )]
     ])
     return text, markup
+
+
+# ==========================================
+# 🗄️ RESOLUTORES DINÁMICOS DE BASE DE DATOS
+# ==========================================
+async def _call_db_fn(function_name: str, *args, **kwargs):
+    """Resuelve funciones de persistencia de forma lazy evitando dependencias circulares."""
+    package = __package__ or __name__.rpartition(".")[0]
+    db_module = (
+        importlib.import_module(".database", package=package)
+        if package else importlib.import_module("database.database")
+    )
+    func = getattr(db_module, function_name, None)
+    if func is None:
+        raise AttributeError(f"{function_name} not found in database module")
+    return await func(*args, **kwargs)
+
+
+async def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
+    key = f"{charge_id}:{user_id}:{payload}"
+    if not hasattr(mark_payment_processed, "_seen"):
+        mark_payment_processed._seen = set()
+
+    if key in mark_payment_processed._seen:
+        return False
+
+    try:
+        result = await _call_db_fn("mark_payment_processed", charge_id, user_id, payload)
+        if result is False:
+            return False
+        mark_payment_processed._seen.add(key)
+        return True
+    except Exception:
+        pass
+
+    mark_payment_processed._seen.add(key)
+    return True
+
+
+async def get_group_tier(chat_id: int) -> str:
+    try:
+        return await _call_db_fn("get_group_tier", chat_id) or "free"
+    except Exception:
+        return "free"
+
+
+async def approve_group(group_id: int, tier: str, duration_days: int = 30):
+    return await _call_db_fn("approve_group", group_id=group_id, tier=tier, duration_days=duration_days)
+
+
+async def get_speaker_price(chat_id: int) -> int | None:
+    try:
+        return await _call_db_fn("get_speaker_price", chat_id)
+    except Exception:
+        return None
+
+
+async def grant_vip_mic(user_id: int, group_id: int):
+    try:
+        return await _call_db_fn("grant_vip_mic", user_id, group_id)
+    except Exception:
+        return False
+
+
+async def set_participant_mic(chat_id: int, user_id: int, muted: bool = False, volume: int = 10000):
+    try:
+        from assistant import set_participant_mic as spm
+        return await spm(chat_id, user_id, muted, volume)
+    except Exception:
+        try:
+            return await _call_db_fn("set_participant_mic", chat_id, user_id, muted, volume)
+        except Exception:
+            return None
+
+
+async def get_vip_badge_title(chat_id: int) -> str:
+    try:
+        return await _call_db_fn("get_vip_badge_title", chat_id) or "VIP 24h"
+    except Exception:
+        return "VIP 24h"
+
+
+async def add_to_speaker_queue(chat_id: int, user_id: int, full_name: str, username: str, stars: int):
+    try:
+        return await _call_db_fn("add_to_speaker_queue", chat_id, user_id, full_name, username, stars)
+    except Exception:
+        return None
+
+
+async def get_user_speaker_position(chat_id: int, user_id: int) -> int:
+    try:
+        pos = await _call_db_fn("get_user_speaker_position", chat_id, user_id)
+        return int(pos or 0)
+    except Exception:
+        return 0
+
+
+async def record_group_tip(chat_id: int, user_id: int, stars: int):
+    try:
+        return await _call_db_fn("record_group_tip", chat_id, user_id, stars)
+    except Exception:
+        return None
+
+
+async def get_mic_vip_custom_config(chat_id: int) -> dict:
+    try:
+        return await _call_db_fn("get_mic_vip_custom_config", chat_id) or {}
+    except Exception:
+        return {}
+
+
+async def get_tips_config(chat_id: int) -> dict:
+    try:
+        return await _call_db_fn("get_tips_config", chat_id) or {}
+    except Exception:
+        return {}
+
+
+async def get_channel_plan(plan_id: int):
+    return await _call_db_fn("get_channel_plan", plan_id)
+
+
+async def get_channel_settings(channel_id: int):
+    return await _call_db_fn("get_channel_settings", channel_id)
+
+
+async def record_channel_subscription(**kwargs):
+    return await _call_db_fn("record_channel_subscription", **kwargs)
 
 
 # ==========================================
@@ -295,9 +444,75 @@ TEXTS = {
         "btn_return_group": "👥 Volver al Grupo",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
         "err_link": "⚠️ Enlace de facturación no válido, sin entorno asociado o expirado.",
-        "private_only": "⚠️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
+        "private_only": "⚠️️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
     }
 }
+
+
+# ==========================================
+# 🌟 MENÚ DE SELECCIÓN Y EMISIÓN DE PROPINAS EN STARS
+# ==========================================
+async def show_tip_selection(message: Message, group_id: int, lang: str = "es"):
+    """Despliega presets rápidos de Stars y el botón interactivo para monto personalizado."""
+    btn_custom_text = "✍️ Donar otro monto / Custom amount" if lang == "es" else "✍️ Custom amount / Other amount"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⭐ 15", callback_data=f"paytip_{group_id}_15"),
+            InlineKeyboardButton(text="⭐ 50", callback_data=f"paytip_{group_id}_50"),
+            InlineKeyboardButton(text="⭐ 100", callback_data=f"paytip_{group_id}_100")
+        ],
+        [
+            InlineKeyboardButton(text="⭐ 250", callback_data=f"paytip_{group_id}_250"),
+            InlineKeyboardButton(text="⭐ 500", callback_data=f"paytip_{group_id}_500")
+        ],
+        [
+            InlineKeyboardButton(text=btn_custom_text, callback_data=f"paytip_custom_{group_id}")
+        ]
+    ])
+
+    text = (
+        "⭐ <b>Aporte Voluntario a la Comunidad</b>\n\n"
+        "Selecciona uno de los montos predeterminados o pulsa <b>«Donar otro monto»</b> "
+        "para ingresar la cantidad exacta de Telegram Stars que deseas enviar.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ) if lang == "es" else (
+        "⭐ <b>Voluntary Community Tip</b>\n\n"
+        "Select one of the preset amounts below or tap <b>«Custom amount»</b> "
+        "to specify the exact amount of Telegram Stars you wish to contribute.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    )
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+async def send_stars_tip_invoice(bot: Bot, user_id: int, group_id: int, amount: int, lang: str = "es"):
+    """Emite la factura oficial de Telegram Stars con la cantidad dinámica solicitada."""
+    t = TEXTS.get(lang, TEXTS["es"])
+    title = f"{t['inv_tip_t']} ({amount} ⭐)"[:32]
+    description = f"{t['inv_tip_d']} ({amount} XTR)"[:255]
+    payload = f"tip_{group_id}_{amount}"
+
+    kb_rows = [
+        [InlineKeyboardButton(text=f"⭐ Donar {amount} Stars" if lang == "es" else f"⭐ Donate {amount} Stars", pay=True)]
+    ]
+    try:
+        chat_info = await bot.get_chat(group_id)
+        if chat_info and getattr(chat_info, "username", None):
+            kb_rows.append([InlineKeyboardButton(text=t["btn_return_group"], url=f"https://t.me/{chat_info.username}")])
+    except Exception:
+        pass
+    kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+
+    await bot.send_invoice(
+        chat_id=user_id,
+        title=title,
+        description=description,
+        payload=payload,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label=title, amount=amount)],
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+    )
 
 
 # ==========================================
@@ -591,7 +806,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             await message.answer(t["err_link"], parse_mode="HTML")
         return
 
-    # 5. MOTOR DE PROPINAS STARS (TIPS ENGINE)
+    # 5. MOTOR DE PROPINAS STARS (TIPS ENGINE CON SELECTOR INTERACTIVO)
     elif args.startswith("tip_"):
         try:
             parts = args.split("_")
@@ -602,30 +817,13 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
 
-            tips_cfg = await get_tips_config(chat_id) or {}
-            cfg_amount = tips_cfg.get("amount") or tips_cfg.get("tips_amount")   # el panel guarda "tips_amount"
-            final_tip = tip_amount if tip_amount > 0 else (int(cfg_amount) if cfg_amount else DEFAULT_TIP_AMOUNT)
+            # Si el enlace no trae monto fijo (ej: /start tip_<chat_id>), muestra presets + monto libre
+            if tip_amount <= 0:
+                await show_tip_selection(message, chat_id, lang)
+                return
 
-            title = t["inv_tip_t"][:32]
-            desc = t["inv_tip_d"]
-            payload = f"tip_{chat_id}_{final_tip}"
-
-            prices = [LabeledPrice(label=title, amount=final_tip)]
-            markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"⭐ Donar {final_tip} Stars", pay=True)],
-                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
-            ])
-
-            await bot.send_invoice(
-                chat_id=message.chat.id,
-                title=title,
-                description=desc,
-                payload=payload,
-                provider_token="",
-                currency="XTR",
-                prices=prices,
-                reply_markup=markup
-            )
+            # Si ya trae monto fijo definido, genera la factura directa
+            await send_stars_tip_invoice(bot, message.chat.id, chat_id, tip_amount, lang)
         except Exception as e:
             logger.error(f"Error generando factura de propina: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
@@ -698,6 +896,80 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.error(f"Error despachando factura mediante callback: {e}")
             await callback.message.answer(t["err_inv"], parse_mode="HTML")
+
+
+# ==========================================
+# 🌟 BOTONES DE SELECCIÓN Y CAPTURA MANUAL DE PROPINAS
+# ==========================================
+@router.callback_query(F.data.startswith("paytip_"))
+async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
+    parts = callback.data.split("_")
+    lang = get_lang(callback.from_user.language_code)
+    
+    # Caso 1: El usuario pulsa "Donar otro monto"
+    if len(parts) >= 3 and parts[1] == "custom":
+        group_id = int(parts[2])
+        CUSTOM_TIP_STATES[(bot.id, callback.from_user.id)] = group_id
+        
+        cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Cancelar / Cancel", callback_data="cancel_custom_tip")]
+        ])
+        prompt_text = (
+            "✍️ <b>Ingresa tu monto personalizado:</b>\n\n"
+            "Escribe en este chat el número exacto de Telegram Stars que deseas donar (ejemplo: <code>75</code>, <code>300</code>, <code>1500</code>):\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            "✍️ <b>Enter your custom amount:</b>\n\n"
+            "Send the exact number of Telegram Stars you wish to donate (e.g. <code>75</code>, <code>300</code>, <code>1500</code>):\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        )
+        await callback.message.answer(prompt_text, reply_markup=cancel_kb, parse_mode="HTML")
+        await callback.answer()
+        return
+
+    # Caso 2: El usuario selecciona un preset (ej. 15, 50, 100, 250, 500)
+    if len(parts) >= 3:
+        group_id = int(parts[1])
+        amount = int(parts[2])
+        await callback.answer()
+        await send_stars_tip_invoice(bot, callback.from_user.id, group_id, amount, lang)
+
+
+@router.callback_query(F.data == "cancel_custom_tip")
+async def cancel_custom_tip_callback(callback: CallbackQuery, bot: Bot):
+    """Cancela la solicitud de monto manual y libera el estado en memoria."""
+    CUSTOM_TIP_STATES.pop((bot.id, callback.from_user.id), None)
+    lang = get_lang(callback.from_user.language_code)
+    await callback.answer("Donación cancelada." if lang == "es" else "Donation cancelled.")
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+
+@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
+async def process_custom_tip_input(message: Message, bot: Bot):
+    """Captura el número de Stars ingresado por el usuario y genera la factura."""
+    user_key = (bot.id, message.from_user.id)
+    if user_key not in CUSTOM_TIP_STATES:
+        return
+
+    group_id = CUSTOM_TIP_STATES.pop(user_key)
+    lang = get_lang(message.from_user.language_code)
+    text_val = (message.text or "").strip()
+
+    if not text_val.isdigit() or int(text_val) < 1:
+        CUSTOM_TIP_STATES[user_key] = group_id  # Mantiene la espera activa si se equivoca
+        err_msg = (
+            "⚠️ Ingresa un número entero positivo (mínimo 1 ⭐)."
+            if lang == "es" else
+            "⚠️ Please enter a positive integer of Stars (minimum 1 ⭐)."
+        )
+        await message.answer(err_msg)
+        return
+
+    amount = int(text_val)
+    await send_stars_tip_invoice(bot, message.chat.id, group_id, amount, lang)
 
 
 # ==========================================
@@ -814,7 +1086,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 f"• Período de vigencia: <b>{duration_days} días</b>\n"
                 f"• Tu <b>enlace criptográfico de un solo uso</b> está listo (se quemará automáticamente al unirte):\n\n"
                 f"Usa los botones interactivos abajo para ingresar:{welcome_extra}\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
+                f"🛡️️ <i>Cloud Media Management</i>"
             ) if lang == "es" else (
                 f"💎 <b>Channel Membership Activated Successfully!</b>\n\n"
                 f"• Payment processed: <b>{stars_paid} Stars (XTR)</b>\n"
@@ -871,7 +1143,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             kb_rows = []
             try:
                 chat_info = await bot.get_chat(chat_id)
-                if chat_info.username:
+                if chat_info and getattr(chat_info, "username", None):
                     kb_rows.append([InlineKeyboardButton(text=t["btn_return_vc"], url=f"https://t.me/{chat_info.username}")])
             except Exception:
                 pass
@@ -903,7 +1175,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             kb_rows = []
             try:
                 chat_info = await bot.get_chat(chat_id)
-                if chat_info.username:
+                if chat_info and getattr(chat_info, "username", None):
                     kb_rows.append([InlineKeyboardButton(text=t["btn_return_vc"], url=f"https://t.me/{chat_info.username}")])
             except Exception:
                 pass
@@ -931,28 +1203,34 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             await record_group_tip(chat_id, user_id, stars_paid)
 
-            # 💖 Despacho del mensaje de gratitud oficial del Búnker
+            # Despacho de agradecimiento si existe la función en user_private
             try:
-                from .user_private import send_tip_thanks
-                await send_tip_thanks(
-                    bot=bot,
-                    user_id=user_id,
-                    stars=stars_paid,
-                    group_id=chat_id,
-                    lang=lang
+                package = __package__ or __name__.rpartition(".")[0]
+                up_mod = (
+                    importlib.import_module(".user_private", package=package)
+                    if package else importlib.import_module("handlers.user_private")
                 )
+                send_thanks_fn = getattr(up_mod, "send_tip_thanks", None)
+                if send_thanks_fn:
+                    await send_thanks_fn(
+                        bot=bot,
+                        user_id=user_id,
+                        stars=stars_paid,
+                        group_id=chat_id,
+                        lang=lang
+                    )
             except Exception as thanks_err:
-                logger.warning(f"⚠️️ [Tips Thanks] Error enviando mensaje de agradecimiento a {user_id}: {thanks_err}")
+                logger.debug(f"Aviso en agradecimiento de propina: {thanks_err}")
 
             kb_rows = []
             try:
                 chat_info = await bot.get_chat(chat_id)
-                if chat_info.username:
+                if chat_info and getattr(chat_info, "username", None):
                     kb_rows.append([InlineKeyboardButton(text=t["btn_return_group"], url=f"https://t.me/{chat_info.username}")])
             except Exception:
                 pass
 
-            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))])
+            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],)
             markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
             confirm_text = t["pmt_tip_ok"].format(stars=stars_paid)
@@ -965,6 +1243,10 @@ async def process_successful_payment(message: Message, bot: Bot):
                     public_notice = (
                         f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> acaba de enviar una propina "
                         f"de <b>{stars_paid} Stars (XTR)</b>. ¡Gracias por respaldar el proyecto!\n\n"
+                        f"🛡️ <i>Cloud Media Management</i>"
+                    ) if lang == "es" else (
+                        f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> just sent a tip "
+                        f"of <b>{stars_paid} Stars (XTR)</b>. Thank you for supporting the community!\n\n"
                         f"🛡️ <i>Cloud Media Management</i>"
                     )
                     pub_msg = await bot.send_message(chat_id=chat_id, text=public_notice, parse_mode="HTML")

@@ -45,7 +45,13 @@ from database.database import (
 )
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
-from middlewares.anti_spam import check_global_cas_spam
+
+# Fallback seguro en caso de que el middleware CAS no esté presente
+try:
+    from middlewares.anti_spam import check_global_cas_spam
+except ImportError:
+    async def check_global_cas_spam(user_id: int) -> bool:
+        return False
 
 logger = logging.getLogger("groups_handler")
 router = Router()
@@ -94,7 +100,7 @@ def is_super_admin(user_id: int) -> bool:
 
 
 # ==========================================
-# 🧠 CACHÉ DE ESTADO DE MIEMBROS
+# 🧠 CACHÉ DE ESTADO DE MIEMBROS CON PURGA
 # ==========================================
 _MEMBER_STATUS_CACHE: dict = {}
 _MEMBER_STATUS_TTL = 60
@@ -195,7 +201,9 @@ CAPTCHA_SESSIONS = {}
 RECENTLY_VERIFIED = {}
 
 
-async def auto_delete_msg(message: Message, delay: int = 15):
+async def auto_delete_msg(message: Optional[Message], delay: int = 15):
+    if not message:
+        return
     await asyncio.sleep(delay)
     try:
         await message.delete()
@@ -225,7 +233,7 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
 
 
 # ==========================================
-# 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA (BIENVENIDA LIMPIA FASE 1)
+# 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA
 # ==========================================
 @router.my_chat_member()
 async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
@@ -254,11 +262,11 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
         if user:
             ch_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🌐 Abrir Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?channel_id={group_id}"))],
-                [InlineKeyboardButton(text="📡 Consola del Canal / Studio Panel", url=f"https://t.me/{bot_info.username}?start=cset_{group_id}")]
+                [InlineKeyboardButton(text="📡 Consola del Canal / Studio Panel", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")]
             ])
             channel_welcome_text = (
                 f"📡 <b>¡ESTUDIO DE CANAL CONECTADO! / CHANNEL CONNECTED!</b>\n\n"
-                f"Has promovido a <b>@{bot_info.username}</b> como administrador en <b>{group_name}</b>.\n\n"
+                f"Has promovido a <b>@{bot_info.username}</b> como administrador en <b>{html.escape(group_name)}</b>.\n\n"
                 f"• 🎙️ <b>Moderación de Lives:</b> Desmuteo inteligente tras 'Levantar Mano' (*Raise Hand*).\n"
                 f"• 💎 <b>Membresías VIP:</b> Enlaces efímeros de 1 solo uso y expulsión automática de morosos.\n"
                 f"• ⭐ <b>Propinas Stars:</b> Monetización directa en tus transmisiones.\n\n"
@@ -277,10 +285,10 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
 
         group_welcome_text = (
             f"🛡️ <b>The Bunker OS — Núcleo Perimetral Activado</b>\n\n"
-            f"El sistema de seguridad ha sido desplegado exitosamente en <b>{group_name}</b>.\n\n"
+            f"El sistema de seguridad ha sido desplegado exitosamente en <b>{html.escape(group_name)}</b>.\n\n"
             f"👑 <b>Panel de Control Exclusivo para el Dueño:</b>\n"
             f"Pulsa el botón inferior para configurar la aduana anti-spam, captcha y cerraduras directamente en el chat privado del bot.\n\n"
-            f"🛡️️ <i>Cloud Media Management</i>"
+            f"🛡️ <i>Cloud Media Management</i>"
         )
 
         try:
@@ -349,7 +357,7 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
         if chat_msg_id:
             try:
                 await bot.delete_message(chat_id=group_id, message_id=chat_msg_id)
-            except Exception:
+            except Exception: 
                 pass
 
         support_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -412,7 +420,8 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
     except Exception:
         pass
 
-    mention = f"<a href='tg://user?id={user_id}'>{full_name}</a>"
+    clean_name = html.escape(full_name or "Usuario")
+    mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
 
     if not is_join_req:
         try:
@@ -517,8 +526,9 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
 async def handle_new_members(message: Message, bot: Bot):
     group_id = message.chat.id
     cfg = await get_captcha_config(group_id)
+    srv_mode = await get_service_msgs_mode(group_id)
 
-    if cfg.get("service_del") == 1:
+    if cfg.get("service_del") == 1 or srv_mode == 1:
         try: 
             await message.delete()
         except Exception: 
@@ -526,6 +536,12 @@ async def handle_new_members(message: Message, bot: Bot):
 
     bot_me = await bot.get_me()
     now = time.time()
+
+    # Mantenimiento de caché de verificación reciente para evitar saturación de RAM
+    if len(RECENTLY_VERIFIED) > 2000:
+        stale_keys = [k for k, ts in RECENTLY_VERIFIED.items() if now - ts > 300]
+        for k in stale_keys:
+            RECENTLY_VERIFIED.pop(k, None)
 
     for new_user in message.new_chat_members:
         if new_user.id == bot_me.id:
@@ -654,7 +670,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.warning(f"Aviso otorgando permisos en {group_id}: {e}")
             
-        user_full_name = callback.from_user.full_name
+        user_full_name = html.escape(callback.from_user.full_name or "Usuario")
         user_mention = f"<a href='tg://user?id={target_user_id}'>{user_full_name}</a>"
 
         try:
@@ -663,7 +679,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                 text=(
                     f"🎉 <b>¡Acceso Concedido! / Access Granted!</b>\n\n"
                     f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
-                    f"🔓 Tu acceso ha sido liberado para participar en <b>{group_title}</b>.\n\n"
+                    f"🔓 Tu acceso ha sido liberado para participar en <b>{html.escape(group_title)}</b>.\n\n"
                     f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
                     f"🛡️️ <i>Cloud Media Management</i>"
                 ),
@@ -731,14 +747,15 @@ async def purge_left_member(message: Message):
 
 @router.message(
     F.chat.type.in_({"group", "supergroup"}),
-    F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.pinned_message
+    F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.video_chat_scheduled | F.pinned_message
 )
 async def purge_general_service_messages(message: Message):
     """
     Purga instantánea de avisos grises nativos de Telegram.
-    Los avisos de videochat se eliminan directamente para mantener la sala limpia sin basura visual.
+    Los avisos de videochat iniciados, terminados o programados se eliminan directamente.
     """
-    if message.video_chat_started or message.video_chat_ended or message.video_chat_participants_invited:
+    if (message.video_chat_started or message.video_chat_ended or 
+        message.video_chat_participants_invited or getattr(message, "video_chat_scheduled", None)):
         try:
             await message.delete()
             return
@@ -778,6 +795,8 @@ async def _call_with_retry(func, *args, attempts: int = 3, **kwargs):
 
 
 def _is_ghost_user(user) -> bool:
+    if getattr(user, "is_deleted", False):
+        return True
     first_name = (getattr(user, "first_name", "") or "").strip().lower()
     return first_name in GHOST_DISPLAY_NAMES
 
@@ -855,7 +874,7 @@ async def _edit_status(status_msg: Message, text: str) -> None:
 
 
 async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
-    added_by_sentinel = await _bootstrap_registry_from_sentinel(group_id)
+    await _bootstrap_registry_from_sentinel(group_id)
     registered = await registry_members(group_id)
     candidates = registered[:GHOST_SCAN_MAX_MEMBERS]
 
@@ -963,6 +982,22 @@ async def purge_ghosts_command(message: Message, bot: Bot):
         _spawn(auto_delete_msg(warn, 8))
         return
 
+    tier = (await get_group_tier(group_id) or "free").lower()
+    if tier == "free":
+        try:
+            from database.database import check_can_free_purge
+            if not await check_can_free_purge(group_id):
+                warn = await message.answer(
+                    "⏳ <b>Límite de Ghost Purge (Plan Free):</b> Solo se permite 1 escaneo diario gratuito.\n"
+                    "Mejora a <b>PRO ⭐</b> o <b>ULTRA PRO 💎</b> para escaneos y purgas automatizadas ilimitadas.\n\n"
+                    "🛡️ <i>Cloud Media Management</i>",
+                    parse_mode="HTML"
+                )
+                _spawn(auto_delete_msg(warn, 15))
+                return
+        except Exception:
+            pass
+
     args = (message.text or "").split()[1:]
     dry_run = bool(args) and args[0].strip().lower() in ("scan", "dry", "simular", "preview")
     action = "kick" if bool(args) and args[0].strip().lower() in ("kick", "expulsar") else "ban"
@@ -990,7 +1025,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
             f"• <b>Motor Utilizado:</b> <code>{engine_name}</code>",
             f"• 👻 <b>Fantasmas Detectados:</b> <b>{found}</b>",
             f"• 💀 <b>Fantasmas Depurados:</b> <b>{purged}</b>",
-            f"• ⚖️️ <b>Acción Aplicada:</b> <code>{action.upper()}</code>",
+            f"• ⚖️ <b>Acción Aplicada:</b> <code>{action.upper()}</code>",
             "",
             "🛡️ <i>Cloud Media Management</i>"
         ]
@@ -1008,46 +1043,8 @@ async def purge_ghosts_command(message: Message, bot: Bot):
         _GHOST_PURGE_RUNNING.discard(group_id)
 
 
-@router.message(Command("reload"), F.chat.type.in_({"group", "supergroup"}))
-async def cmd_reload_group(message: Message, bot: Bot):
-    """Fuerza la recarga del perímetro, sincroniza la comunidad en la base de datos y muestra la tarjeta de acceso."""
-    group_id = message.chat.id
-    user_id = message.from_user.id if message.from_user else 0
-    username = message.from_user.username or ""
-
-    if user_id and not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
-        warn = await message.answer("⛔ El comando /reload es exclusivo para administradores.", parse_mode="HTML")
-        _spawn(auto_delete_msg(warn, 8))
-        return
-
-    chat = message.chat
-    group_name = chat.title or "Comunidad"
-    
-    await approve_group(group_id, tier=await get_group_tier(group_id))
-    await register_user_group(user_id or 8269470905, group_id, group_name, chat_type="supergroup")
-
-    bot_info = await bot.get_me()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
-        [InlineKeyboardButton(text="🌐 Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))]
-    ])
-
-    resp = await message.answer(
-        f"🔄 <b>Perímetro Recargado y Sincronizado</b>\n\n"
-        f"• <b>Comunidad:</b> {html.escape(group_name)}\n"
-        f"• <b>Estado:</b> Conexión activa y reflejada 🟢\n\n"
-        f"🛡️ <i>Cloud Media Management</i>",
-        reply_markup=kb, parse_mode="HTML"
-    )
-    _spawn(auto_delete_msg(resp, 35))
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
-
 # ==========================================
-# 🛡️️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
+# 🛡️ EL BOTÓN DE PÁNICO (PROTOCOLO RAID LOCKDOWN)
 # ==========================================
 _FULL_PERMISSION_FIELDS = [
     "can_send_messages", "can_send_audios", "can_send_documents", "can_send_photos",
@@ -1282,7 +1279,7 @@ async def speakers_command(message: Message, bot: Bot):
             await message.answer("📭 La cola de oradores está vacía.")
             return
         _, spk_user_id, full_name, spk_username, stars_paid = row
-        mention = f"<a href='tg://user?id={spk_user_id}'>{full_name}</a>"
+        mention = f"<a href='tg://user?id={spk_user_id}'>{html.escape(full_name)}</a>"
         tag = f" (⭐ {stars_paid} XTR)" if stars_paid else ""
         await message.answer(
             f"🎙️ <b>Siguiente orador en la ronda de preguntas:</b> {mention}{tag}\n\n"
@@ -1310,14 +1307,14 @@ async def speakers_command(message: Message, bot: Bot):
         return
 
     queue = await get_speaker_queue(group_id)
-    price = await get_speaker_price(group_id)
+    price = await get_speaker_price(group_id) or 25
 
     if queue:
         lines = []
         for idx, row in enumerate(queue[:10], start=1):
             _, spk_user_id, full_name, spk_username, stars_paid, _ts = row
             tag = f" ⭐{stars_paid}" if stars_paid else ""
-            lines.append(f"{idx}. {full_name}{tag}")
+            lines.append(f"{idx}. {html.escape(full_name)}{tag}")
         queue_text = "\n".join(lines)
     else:
         queue_text = "— La cola está vacía —"
@@ -1326,7 +1323,7 @@ async def speakers_command(message: Message, bot: Bot):
         [InlineKeyboardButton(text=f"🎟️ Asegurar turno prioritario ({price} ⭐)", callback_data=f"speak_buy_{group_id}_{price}")]
     ])
     await message.answer(
-        f"🎙️ <b>Cola de Preguntas (AMA) — {message.chat.title}</b>\n\n{queue_text}\n\n"
+        f"🎙️ <b>Cola de Preguntas (AMA) — {html.escape(message.chat.title or '')}</b>\n\n{queue_text}\n\n"
         f"💰 Paga <b>{price} Telegram Stars</b> y asegura tu prioridad en la próxima ronda de preguntas.\n\n"
         f"🇺🇸 <i>Pay {price} Telegram Stars to lock in priority in the next round.</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>",
@@ -1379,7 +1376,7 @@ async def speakers_successful_payment(message: Message, bot: Bot):
         return
 
     stars_paid = message.successful_payment.total_amount
-    full_name = message.from_user.full_name
+    full_name = message.from_user.full_name or "Usuario"
     username = message.from_user.username or ""
 
     await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
@@ -1389,10 +1386,11 @@ async def speakers_successful_payment(message: Message, bot: Bot):
         f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
     )
     try:
+        clean_name = html.escape(full_name)
         await bot.send_message(
             chat_id=group_id,
             text=(
-                f"🎙️ <a href='tg://user?id={buyer_id}'>{full_name}</a> aseguró un turno prioritario en la "
+                f"🎙️ <a href='tg://user?id={buyer_id}'>{clean_name}</a> aseguró un turno prioritario en la "
                 f"cola de preguntas (⭐ {stars_paid} XTR).\n\n🛡️ <i>Cloud Media Management</i>"
             ),
             parse_mode="HTML"
@@ -1613,7 +1611,7 @@ async def _acoustic_attenuate(
 
 
 # ==========================================
-# ⚖️️ ESCALA CENTRALIZADA DE ADVERTENCIAS POR NIVELES (FREE / PRO / ULTRA PRO)
+# ⚖️ ESCALA CENTRALIZADA DE ADVERTENCIAS POR NIVELES
 # ==========================================
 _REASON_TEXT = {
     "filter": (
@@ -1699,9 +1697,19 @@ async def _send_temp(
                 logger.debug(f"Fallo enviando multimedia temporal de advertencia ({media_err}); usando texto.")
 
         if not sent:
-            if reply_to is not None:
-                sent = await reply_to.answer(text, parse_mode="HTML")
-            else:
+            # Fallback seguro: si el mensaje infractor ya fue borrado, bot.send_message garantiza la entrega
+            try:
+                if reply_to is not None:
+                    sent = await reply_to.answer(text, parse_mode="HTML")
+            except TelegramBadRequest as br:
+                if "reply" in str(br).lower() or "not found" in str(br).lower():
+                    sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+                else:
+                    raise
+            except Exception:
+                sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            
+            if not sent:
                 sent = await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
                 
         _spawn(auto_delete_msg(sent, ttl))
@@ -1756,18 +1764,28 @@ async def enforce_warn_ladder(
     media_id = ext_cfg.get("warn_custom_media_id")
     media_type = ext_cfg.get("warn_custom_media_type")
 
+    # Si se pasa un motivo personalizado desde /warn o filtros, se preserva textualmente
+    if reason in _REASON_TEXT:
+        es_txt, en_txt = _REASON_TEXT[reason]
+    else:
+        es_txt = en_txt = reason
+
     # CASO A: EL USUARIO AÚN NO ALCANZA EL LÍMITE PUNITIVO
     if strikes < limit:
         await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit)
 
         if not silent:
-            es_txt, en_txt = _REASON_TEXT.get(reason, _REASON_TEXT["filter"])
-            
             if group_tier in ("ultra_pro", "ultra"):
                 if custom_text:
-                    body = custom_text.replace("{mention}", target_mention).replace("{user}", target_mention)\
-                                      .replace("{strikes}", str(strikes)).replace("{limit}", str(limit))\
-                                      .replace("{reason}", reason)
+                    body = (
+                        custom_text.replace("{mention}", target_mention)
+                        .replace("{user}", target_mention)
+                        .replace("{user_name}", target_mention)
+                        .replace("{name}", target_mention)
+                        .replace("{strikes}", str(strikes))
+                        .replace("{limit}", str(limit))
+                        .replace("{reason}", es_txt)
+                    )
                 else:
                     body = f"{target_mention}, has recibido una advertencia ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
                     
@@ -1780,14 +1798,20 @@ async def enforce_warn_ladder(
 
             elif group_tier == "pro":
                 if custom_text:
-                    body = custom_text.replace("{mention}", target_mention).replace("{user}", target_mention)\
-                                      .replace("{strikes}", str(strikes)).replace("{limit}", str(limit))\
-                                      .replace("{reason}", reason)
+                    body = (
+                        custom_text.replace("{mention}", target_mention)
+                        .replace("{user}", target_mention)
+                        .replace("{user_name}", target_mention)
+                        .replace("{name}", target_mention)
+                        .replace("{strikes}", str(strikes))
+                        .replace("{limit}", str(limit))
+                        .replace("{reason}", es_txt)
+                    )
                 else:
                     body = f"{target_mention}, has recibido una falta formal ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
 
                 notice = (
-                    f"⚠️️ <b>Aviso de Seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n"
+                    f"⚠️ <b>Aviso de Seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n"
                     f"{body}\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 )
@@ -1813,6 +1837,10 @@ async def enforce_warn_ladder(
                 chat_id=chat_id, user_id=target_id,
                 permissions=ChatPermissions(can_send_messages=False)
             )
+            try:
+                await set_participant_mic(chat_id=chat_id, user_id=target_id, muted=True, volume=0)
+            except Exception:
+                pass
         elif action == "kick":
             await bot.ban_chat_member(chat_id=chat_id, user_id=target_id, until_date=int(time.time() + 35))
             await bot.unban_chat_member(chat_id=chat_id, user_id=target_id, only_if_banned=True)
@@ -1829,13 +1857,13 @@ async def enforce_warn_ladder(
         await registry_forget(chat_id, target_id)
 
     if not silent:
-        icon, title, es_txt, en_txt = _SANCTION_TEXT[action]
+        icon, title, s_es, s_en = _SANCTION_TEXT[action]
         badge = " 💎" if group_tier in ("ultra_pro", "ultra") else (" ⭐" if group_tier == "pro" else "")
         sanction_notice = (
             f"{icon} <b>{title}{badge} ({strikes}/{limit})</b>\n\n"
-            f"{target_mention} {es_txt}\n"
+            f"{target_mention} {s_es}\n"
             f"• <b>Medida ejecutada:</b> <code>{action.upper()}</code>\n"
-            f"🇺🇸 <i>{en_txt}</i>\n\n"
+            f"🇺🇸 <i>{s_en}</i>\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
         use_media = media_id if group_tier in ("ultra_pro", "ultra") else None
@@ -1876,7 +1904,7 @@ async def group_security_matrix(message: Message, bot: Bot):
         except Exception:
             pass
 
-        outcome = await enforce_warn_ladder(
+        await enforce_warn_ladder(
             bot, group_id, user_id, username, message.from_user.mention_html(),
             reply_to=message, reason="command", silent=True
         )
@@ -1884,6 +1912,17 @@ async def group_security_matrix(message: Message, bot: Bot):
 
     is_threat_detected = False
     lower_text = text_content.lower()
+
+    # Extracción profunda de enlaces dentro de entidades para evitar evasiones con hipervínculos
+    has_link_entity = False
+    entities = (message.entities or []) + (message.caption_entities or [])
+    for ent in entities:
+        if ent.type == "url":
+            has_link_entity = True
+            break
+        elif ent.type == "text_link" and ent.url:
+            has_link_entity = True
+            lower_text += " " + ent.url.lower()
 
     # 2. Cerraduras de Contenido
     if await get_lock_status(group_id, "lock_media") == 1 and (
@@ -1894,7 +1933,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     elif await get_lock_status(group_id, "lock_stickers") == 1 and message.sticker:
         is_threat_detected = True
     elif await get_lock_status(group_id, "lock_links") == 1 and (
-        "http://" in lower_text or "https://" in lower_text or 
+        has_link_entity or "http://" in lower_text or "https://" in lower_text or 
         "www." in lower_text or "t.me/" in lower_text or "telegram.me/" in lower_text
     ):
         is_threat_detected = True
@@ -1911,7 +1950,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     if not is_threat_detected:
         if await get_antispam_filter(group_id, "tg_links") == 1 and ("t.me/" in lower_text or "telegram.me/" in lower_text):
             is_threat_detected = True
-        elif await get_antispam_filter(group_id, "web_links") == 1 and ("http://" in lower_text or "https://" in lower_text or "www." in lower_text):
+        elif await get_antispam_filter(group_id, "web_links") == 1 and (has_link_entity or "http://" in lower_text or "https://" in lower_text or "www." in lower_text):
             if "t.me/" not in lower_text and "telegram.me/" not in lower_text:
                 is_threat_detected = True
         elif await get_antispam_filter(group_id, "quotes") == 1 and (message.quote or message.reply_to_message):
@@ -1947,6 +1986,9 @@ async def group_security_matrix(message: Message, bot: Bot):
     # 5. Escudo Anti-Flood
     af_cfg = await get_antiflood_config(group_id)
     max_msgs, time_window, af_action = af_cfg["msgs"], af_cfg["time"], af_cfg["action"]
+
+    if af_action == "off":
+        return
 
     now = time.time()
     cache_key = (group_id, user_id)
