@@ -11,7 +11,10 @@ import logging
 import time
 import html
 from aiogram import Router, F, Bot
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, WebAppInfo
+from aiogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton, 
+    CallbackQuery, WebAppInfo
+)
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
@@ -19,7 +22,8 @@ from database.database import (
     get_mic_vip_price, get_mic_vip_custom_config, get_session_by_group,
     get_night_mode_config,
     get_community_live_telemetry,
-    get_vc_monitor_status, set_vc_monitor_status
+    get_vc_monitor_status, set_vc_monitor_status,
+    is_whitelisted, get_sentinel_service_messages_config
 )
 from assistant import (
     set_participant_mic, 
@@ -40,6 +44,15 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
@@ -52,7 +65,7 @@ def get_lang(lang_code: str) -> str:
 
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     """Valida si el ejecutor cuenta con rango administrativo o inmunidad de Arquitecto."""
-    if is_super_admin(user_id):
+    if is_super_admin(user_id) or user_id == 1087968824:
         return True
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -67,7 +80,7 @@ async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 TEXTS = {
     "en": {
         "owner_only": "⛔ <b>Access Denied:</b> This protocol is strictly reserved for the Community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status, Admin privileges, or Whitelist immunity.\n\n🛡️️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, please start a private chat with me first to view this control console: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
         "unauthorized_start": "⚠️ @{name}, this command is strictly reserved for community administrators.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 Voice chat monitoring and AutoLower sentinel are now <b>activated</b> for your group.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -138,7 +151,7 @@ TEXTS = {
     },
     "es": {
         "owner_only": "⛔ <b>Acceso Denegado:</b> Este protocolo está reservado exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto o Rango de Administrador.\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto, Rango de Administrador o Lista Blanca.\n\n🛡️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, para ver esta información debes iniciar un chat privado conmigo primero: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
         "unauthorized_start": "⚠️ @{name}, este comando está reservado exclusivamente para los administradores del grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 El sistema de control acústico y radar centinela ha sido <b>activado</b> para tu grupo.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -247,7 +260,11 @@ async def extract_vc_target(message: Message, command: CommandObject, bot: Bot):
         arg = command.args.split()[0].strip()
         if arg.isdigit():
             target_id = int(arg)
-            return target_id, f"<code>{target_id}</code>"
+            try:
+                member = await bot.get_chat_member(chat_id=message.chat.id, user_id=target_id)
+                return target_id, get_user_mention_html(member.user)
+            except Exception:
+                return target_id, f"<code>{target_id}</code>"
         elif arg.startswith("@"):
             try:
                 chat_info = await bot.get_chat(arg)
@@ -304,12 +321,23 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
 
 
 async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
-    """Valida la aprobación del grupo y rango de Dueño o Arquitecto."""
+    """Valida la aprobación del grupo y rango de Dueño, Administrador o Arquitecto."""
     if message.chat.type == "private":
         return True
 
     chat_id = message.chat.id
     if not await is_group_approved(chat_id):
+        return False
+
+    # Administradores anónimos en supergrupos
+    if message.sender_chat and message.sender_chat.id == chat_id:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return True
+
+    if not message.from_user:
         return False
 
     if is_super_admin(message.from_user.id):
@@ -334,7 +362,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
                 pass
             lang = get_lang(message.from_user.language_code)
             warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
-            asyncio.create_task(auto_delete_msg(warn, 8))
+            _spawn(auto_delete_msg(warn, 8))
             return False
     except Exception:
         return False
@@ -342,23 +370,48 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
 
 async def send_private_response(message: Message, text: str, reply_markup=None):
     """Fuerza que las respuestas a comandos de administración lleguen al chat privado."""
-    user_id = message.from_user.id
-    lang = get_lang(message.from_user.language_code)
+    user_id = message.from_user.id if message.from_user else 0
+    lang = get_lang(message.from_user.language_code if message.from_user else "es")
     t = TEXTS[lang]
-    try:
-        await message.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
-    except Exception:
+
+    sent_dm = False
+    if user_id and user_id not in (777000, 1087968824):
+        try:
+            await message.bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+            sent_dm = True
+        except Exception:
+            pass
+
+    if not sent_dm:
         bot_info = await message.bot.get_me()
-        name = message.from_user.username or message.from_user.first_name
+        name = (message.from_user.username or message.from_user.first_name) if message.from_user else "Operador"
         try:
             temp_msg = await message.bot.send_message(
                 chat_id=message.chat.id,
                 text=t["private_warning"].format(name=name, bot_user=bot_info.username),
                 parse_mode="HTML"
             )
-            asyncio.create_task(auto_delete_msg(temp_msg, 12))
+            _spawn(auto_delete_msg(temp_msg, 12))
         except Exception:
             pass
+
+
+def _build_status_keyboard(chat_id: int, lang: str, t: dict, is_private: bool = True) -> InlineKeyboardMarkup:
+    miniapp_btn = (
+        InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
+        if is_private else
+        InlineKeyboardButton(text=t["btn_miniapp"], url=f"{WEBAPP_URL}?chat_id={chat_id}")
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=t["btn_cams"], callback_data=f"vc_cams_{chat_id}"),
+            InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
+        ],
+        [miniapp_btn],
+        [
+            InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
+        ]
+    ])
 
 
 # ==========================================
@@ -382,7 +435,7 @@ async def cb_vcinfo_micvip(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("vclang_toggle_"))
 async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
-    """Alterna el idioma del panel (mensaje fijado o de entrada) sin crear nuevos mensajes."""
+    """Alterna el idioma del panel conservando botones y enlaces personalizados."""
     parts = callback.data.split("_")
     if len(parts) < 4:
         await callback.answer()
@@ -400,8 +453,13 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
     custom_cfg = await get_mic_vip_custom_config(chat_id)
     price = custom_cfg.get("price") or 50
 
+    # Lectura de la botonera y enlace embebido personalizado configurados en Sentinel Settings
+    svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
+    custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
+
     current_text = callback.message.text or callback.message.caption or ""
-    if "UN NUEVO MIEMBRO" in current_text.upper() or "A NEW MEMBER" in current_text.upper():
+    if "UN NUEVO MIEMBRO" in current_text.upper() or "A NEW MEMBER" in current_text.upper() or "VOLUMEN" in current_text.upper():
         lines = current_text.split("\n")
         user_line = next((l for l in lines if "@" in l or "volumen" in l or "volume" in l), "")
         user_ref = user_line.split(",")[0].replace("🔇", "").strip() or "Miembro"
@@ -410,7 +468,14 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
     else:
         new_text = VC_START_TEXTS.get(new_lang, VC_START_TEXTS["es"])
 
-    new_kb = build_vc_moderation_keyboard(chat_id, bot_username, new_lang, price=price)
+    new_kb = build_vc_moderation_keyboard(
+        chat_id=chat_id, 
+        bot_username=bot_username, 
+        lang=new_lang, 
+        price=price,
+        custom_btn_text=custom_btn,
+        custom_btn_url=custom_url
+    )
 
     try:
         await callback.message.edit_text(new_text, reply_markup=new_kb, parse_mode="HTML")
@@ -439,7 +504,7 @@ async def cmd_start_group(message: Message, bot: Bot):
                 text=TEXTS[lang]["unauthorized_start"].format(name=name),
                 parse_mode="HTML"
             )
-            asyncio.create_task(auto_delete_msg(temp_msg, 8))
+            _spawn(auto_delete_msg(temp_msg, 8))
     except Exception:
         pass
 
@@ -498,7 +563,7 @@ async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
     target_id, target_mention = await extract_vc_target(message, command, bot)
 
     if target_id:
-        if is_super_admin(target_id) or await is_operator_admin(bot, message.chat.id, target_id):
+        if is_super_admin(target_id) or await is_operator_admin(bot, message.chat.id, target_id) or await is_whitelisted(target_id):
             await send_private_response(message, t["target_protected"])
             return
 
@@ -578,18 +643,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
     else:
         status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text=t["btn_cams"], callback_data=f"vc_cams_{chat_id}"),
-            InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
-        ],
-        [
-            InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
-        ],
-        [
-            InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
-        ]
-    ])
+    keyboard = _build_status_keyboard(chat_id, lang, t, is_private=True)
 
     await send_private_response(
         message, 
@@ -618,6 +672,9 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
         return
 
     action = f"{data[0]}_{data[1]}"
+    if action not in ("vc_status", "vc_cams", "vc_reset"):
+        return
+
     try:
         chat_id = int(data[2])
     except ValueError:
@@ -629,6 +686,8 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
     if not await is_operator_admin(bot, chat_id, callback.from_user.id):
         await callback.answer(t["owner_only"], show_alert=True)
         return
+
+    is_private = bool(callback.message and callback.message.chat.type == "private")
     
     try:
         if action == "vc_status":
@@ -642,18 +701,7 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
             else:
                 status_text = "🟢 Activo y supervisando" if is_active else "🔴 En pausa"
 
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text=t["btn_cams"], callback_data=f"vc_cams_{chat_id}"),
-                    InlineKeyboardButton(text=t["btn_reset"], callback_data=f"vc_reset_{chat_id}")
-                ],
-                [
-                    InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
-                ],
-                [
-                    InlineKeyboardButton(text=t["btn_close_vc"], callback_data="vc_close_panel")
-                ]
-            ])
+            keyboard = _build_status_keyboard(chat_id, lang, t, is_private=is_private)
             await callback.message.edit_text(
                 t["status_text"].format(
                     status=status_text,
@@ -668,9 +716,14 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
             ctx = await get_telemetry_context(chat_id, lang)
 
             report = t["cams_report"].format(**ctx)
+            miniapp_btn = (
+                InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
+                if is_private else
+                InlineKeyboardButton(text=t["btn_miniapp"], url=f"{WEBAPP_URL}?chat_id={chat_id}")
+            )
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")],
-                [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+                [miniapp_btn]
             ])
             await callback.message.edit_text(report, reply_markup=back_kb, parse_mode="HTML")
 
@@ -707,7 +760,7 @@ async def cmd_get_id(message: Message, bot: Bot):
 
 
 # ==========================================
-# PASE VIP DE MICRÓFONO (COMANDO PÚBLICO)
+# PASE VIP DE MICRÓFONO (COMANDO PÚBLICO INTEGRADO)
 # ==========================================
 @router.message(Command("micvip", "mic_vip"))
 async def trigger_mic_vip_offer(message: Message, bot: Bot):
@@ -726,22 +779,41 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
         return
 
     bot_info = await bot.get_me()
-    custom_cfg = await get_mic_vip_custom_config(chat_id)
-    price = custom_cfg.get("price") or 50
+    bot_username = bot_info.username or "thebunkerapp_bot"
 
-    mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.full_name
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=t["btn_pay_stars"].format(price=price), 
-                url=f"https://t.me/{bot_info.username}?start=vipmic_{chat_id}"
-            )
-        ]
-    ])
+    # Lectura de tarifa personalizada
+    custom_cfg = await get_mic_vip_custom_config(chat_id)
+    price = custom_cfg.get("price") or (await get_mic_vip_price(chat_id)) or 50
+
+    # Lectura de personalizaciones de Sentinel Settings
+    svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    custom_text = svc_cfg.get("micvip_text") or svc_cfg.get("vc_text")
+    custom_btn = svc_cfg.get("micvip_btn") or svc_cfg.get("vc_btn")
+    custom_url = svc_cfg.get("micvip_btn_url") or svc_cfg.get("vc_btn_url")
+
+    mention = get_user_mention_html(message.from_user)
+
+    if custom_text:
+        text = (
+            custom_text.replace("{mention}", mention)
+            .replace("{user}", mention)
+            .replace("{user_name}", mention)
+            .replace("{name}", mention)
+        )
+    else:
+        text = t["micvip_msg"].format(mention=mention)
+
+    keyboard = build_vc_moderation_keyboard(
+        chat_id=chat_id,
+        bot_username=bot_username,
+        lang=lang,
+        price=price,
+        custom_btn_text=custom_btn,
+        custom_btn_url=custom_url
+    )
 
     sent_msg = await message.answer(
-        t["micvip_msg"].format(mention=mention),
+        text,
         reply_markup=keyboard,
         parse_mode="HTML"
     )
@@ -751,4 +823,4 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
     except Exception:
         pass
 
-    asyncio.create_task(auto_delete_msg(sent_msg, 45))
+    _spawn(auto_delete_msg(sent_msg, 45))
