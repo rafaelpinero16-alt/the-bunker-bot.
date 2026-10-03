@@ -93,7 +93,7 @@ SCREEN_SHIELD_ALERT_TEXT = (
     "La señal fue cortada y la cuenta fue retirada de la sala de inmediato para proteger a la comunidad.\n\n"
     "🇺🇸 <i>Unauthorized screen-share detected from <b>{user_name}</b>. Signal cut and the account "
     "was removed from the room instantly to protect the community.</i>\n\n"
-    "🛡️ <i>Cloud Media Management</i>"
+    "🛡️️ <i>Cloud Media Management</i>"
 )
 
 NOISE_SHIELD_ALERT_TEXT = (
@@ -115,7 +115,7 @@ GHOST_PURGE_ALERT_TEXT = (
 
 VC_START_TEXTS = {
     "es": (
-        "EL VIDEO CHAT DE ⚜️️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
+        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
         "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
         "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
         "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
@@ -1402,7 +1402,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
 
-        # Descarga la entidad completa del chat para poblar el access_hash en memoria y evitar PeerIdInvalid
         try:
             chat_obj = await session_client.get_chat(group_id)
             peer = await session_client.resolve_peer(chat_obj.id)
@@ -1490,7 +1489,6 @@ async def load_all_sentinels():
 
 
 async def radar_master_loop():
-    """Bucle del maestro con reconexión automática periódica si Telegram liberó la sesión duplicada."""
     while True:
         try:
             if assistant_app and not assistant_app.is_connected:
@@ -1502,9 +1500,8 @@ async def radar_master_loop():
 
             if assistant_app and assistant_app.is_connected:
                 async for dialog in assistant_app.get_dialogs(limit=100):
-                    chat = dialog.chat
-                    if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-                        chat_id = chat.id
+                    if dialog.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+                        chat_id = dialog.chat.id
                         lock = _get_launch_lock(chat_id)
                         async with lock:
                             if chat_id in active_sentinels:
@@ -1797,7 +1794,6 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
         group_id = auth_data["group_id"]
         
         await cancel_phone_auth(user_id)
-        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único sin duplicidades
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except SessionPasswordNeeded:
@@ -1826,7 +1822,6 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
         group_id = auth_data["group_id"]
 
         await cancel_phone_auth(user_id)
-        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único sin duplicidades
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except PasswordHashInvalid:
