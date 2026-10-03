@@ -1338,6 +1338,7 @@ def save_ai_chat_context(chat_id: int, user_id: int, role: str, content: str, ma
             VALUES (?, ?, ?, ?)
         """, (chat_id, user_id, role, content.strip()))
 
+        # Mantiene solo los últimos max_history mensajes en memoria activa por chat
         cursor.execute("""
             DELETE FROM ai_chat_context 
             WHERE chat_id = ? AND id NOT IN (
@@ -1346,6 +1347,28 @@ def save_ai_chat_context(chat_id: int, user_id: int, role: str, content: str, ma
                 ORDER BY created_at DESC, id DESC LIMIT ?
             )
         """, (chat_id, chat_id, max_history))
+        conn.commit()
+
+
+@db_async
+def get_ai_chat_context(chat_id: int, limit: int = 8) -> list:
+    """Recupera la memoria contextual reciente en formato compatible con LLMs."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT role, content FROM ai_chat_context 
+            WHERE chat_id = ? 
+            ORDER BY created_at ASC, id ASC LIMIT ?
+        """, (chat_id, limit))
+        return [{"role": r[0], "content": r[1]} for r in cursor.fetchall()]
+
+
+@db_async
+def clear_ai_chat_context(chat_id: int):
+    """Limpia el buffer de memoria del Centinela en la sala o canal."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM ai_chat_context WHERE chat_id = ?", (chat_id,))
         conn.commit()
 
 
