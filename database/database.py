@@ -2584,6 +2584,30 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
     except Exception as ex:
         return False, f"Error durante la restauración: {ex}"
 
+@db_async
+def get_chat_admin_stats(chat_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT full_name, username, message_count, reply_count
+                FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
+                ORDER BY message_count DESC
+            """, (chat_id,))
+            rows = cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+        
+        return [
+            {
+                "name": r[0] or f"Admin {r[1]}",
+                "role": "Administrator",
+                "messages": r[2],
+                "replies": r[3],
+                "actions": 0
+            }
+            for r in rows
+        ]
 
 try:
     init_db()
