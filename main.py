@@ -3,6 +3,7 @@ main.py — The Bunker OS (Aiogram 3.x / FastAPI / Pyrogram)
 
 Núcleo de arranque maestro, sincronización de enrutadores, pasarela Web API y
 administración concurrente de clones y Centinelas acústicos.
+Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints de Heatmaps, Reputación y Backups.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -25,10 +26,13 @@ if __name__ == "__main__":
 load_dotenv()
 
 # ==========================================
-# 🌐 IMPORTACIONES Y COMPATIBILIDAD CON FASTAPI
+# 🌐 IMPORTACIONES Y COMPATIBILIDAD CON FASTAPI & WEBSOCKETS
 # ==========================================
 try:
-    from fastapi import Body, FastAPI, Header, HTTPException, APIRouter  # type: ignore[import-not-found]
+    from fastapi import (  # type: ignore[import-not-found]
+        Body, FastAPI, Header, HTTPException, APIRouter, 
+        WebSocket, WebSocketDisconnect, Query, status
+    )
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
 except ImportError:
     class _FastAPIStub:
@@ -38,6 +42,7 @@ except ImportError:
         def on_event(self, *args, **kwargs): return lambda f: f
         def get(self, *args, **kwargs): return lambda f: f
         def post(self, *args, **kwargs): return lambda f: f
+        def websocket(self, *args, **kwargs): return lambda f: f
         def exception_handler(self, *args, **kwargs): return lambda f: f
 
     class _APIRouterStub:
@@ -45,12 +50,21 @@ except ImportError:
         def add_api_route(self, *args, **kwargs): pass
         def get(self, *args, **kwargs): return lambda f: f
         def post(self, *args, **kwargs): return lambda f: f
+        def websocket(self, *args, **kwargs): return lambda f: f
 
     class _HTTPExceptionStub(Exception):
         def __init__(self, status_code=None, detail=None, *args, **kwargs):
             super().__init__(detail or status_code)
             self.status_code = status_code
             self.detail = detail
+
+    class _WebSocketStub:
+        async def accept(self): pass
+        async def send_json(self, data): pass
+        async def receive_text(self): return ""
+        async def close(self, code=1000): pass
+
+    class _WebSocketDisconnectStub(Exception): pass
 
     class _CORSMiddlewareStub:
         def __init__(self, *args, **kwargs): pass
@@ -59,7 +73,10 @@ except ImportError:
     APIRouter = _APIRouterStub
     Header = lambda *args, **kwargs: None
     Body = lambda *args, **kwargs: None
+    Query = lambda *args, **kwargs: None
     HTTPException = _HTTPExceptionStub
+    WebSocket = _WebSocketStub
+    WebSocketDisconnect = _WebSocketDisconnectStub
     CORSMiddleware = _CORSMiddlewareStub
 
 try:
@@ -102,7 +119,13 @@ from database.database import (
     register_user_group,
     save_owner_session,
     update_chat_operational_settings,
-    update_ghost_purge_scan_time
+    update_ghost_purge_scan_time,
+    get_community_live_telemetry,
+    get_chat_heatmap_matrix,
+    get_top_reputation,
+    get_user_reputation,
+    export_group_configuration,
+    import_group_configuration
 )
 from handlers import (
     admin_group,
@@ -150,6 +173,66 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+# ==========================================
+# ⚡ GESTOR DE CONEXIONES WEBSOCKET (FASE 3)
+# ==========================================
+class ConnectionManager:
+    """Administra conexiones reactivas WebSocket por chat_id para telemetría en tiempo real."""
+    def __init__(self):
+        self.active_connections: dict[int, set] = {}
+        self._lock = asyncio.Lock()
+
+    async def connect(self, chat_id: int, websocket: WebSocket):
+        await websocket.accept()
+        async with self._lock:
+            if chat_id not in self.active_connections:
+                self.active_connections[chat_id] = set()
+            self.active_connections[chat_id].add(websocket)
+
+    async def disconnect(self, chat_id: int, websocket: WebSocket):
+        async with self._lock:
+            if chat_id in self.active_connections:
+                self.active_connections[chat_id].discard(websocket)
+                if not self.active_connections[chat_id]:
+                    self.active_connections.pop(chat_id, None)
+
+    async def broadcast(self, chat_id: int, message: dict):
+        async with self._lock:
+            connections = list(self.active_connections.get(chat_id, []))
+        for ws in connections:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                await self.disconnect(chat_id, ws)
+
+    async def broadcast_global(self, message: dict):
+        async with self._lock:
+            all_connections = [
+                (cid, ws) 
+                for cid, conns in self.active_connections.items() 
+                for ws in list(conns)
+            ]
+        for cid, ws in all_connections:
+            try:
+                await ws.send_json(message)
+            except Exception:
+                await self.disconnect(cid, ws)
+
+
+ws_manager = ConnectionManager()
+
+
+async def emit_radar_event(chat_id: int, event_type: str, data: dict = None):
+    """Emite un evento reactivo en milisegundos a todos los clientes conectados a la sala."""
+    payload = {
+        "event": event_type,
+        "chat_id": str(chat_id),
+        "timestamp": int(time.time()),
+        "data": data or {}
+    }
+    await ws_manager.broadcast(chat_id, payload)
 
 
 # ==========================================
@@ -701,6 +784,115 @@ async def api_chat_top_users(
         return {"top_users": []}
 
 
+# ==========================================
+# 📊 FASE 1 / 4: MAPAS DE CALOR Y GAMIFICACIÓN (REST)
+# ==========================================
+@api_router.get("/chat/{chat_id}/heatmap")
+async def api_chat_heatmap(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
+        return await get_chat_heatmap_matrix(numeric_id)
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/chat/{chat_id}/reputation/top")
+async def api_chat_top_reputation(
+    chat_id: str,
+    limit: int = 10,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
+        return {"top": await get_top_reputation(numeric_id, limit=limit)}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/chat/{chat_id}/reputation/{target_user_id}")
+async def api_chat_user_reputation(
+    chat_id: str,
+    target_user_id: int,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
+        return await get_user_reputation(numeric_id, target_user_id)
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# 🔐 FASE 1 / 5: BACKUP & RESTORE CRIPTOGRÁFICO (REST)
+# ==========================================
+@api_router.get("/chat/{chat_id}/backup/export")
+async def api_export_backup(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
+        package_str = await export_group_configuration(numeric_id)
+        return json.loads(package_str)
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/chat/{chat_id}/backup/import")
+async def api_import_backup(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+        await assert_chat_ownership(user_id, numeric_id)
+        backup_json = json.dumps(payload)
+        success, msg = await import_group_configuration(numeric_id, backup_json)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"status": "success", "message": msg}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.post("/chat/{chat_id}/settings")
 async def api_update_chat_settings(
     chat_id: str, 
@@ -763,6 +955,10 @@ async def api_update_chat_settings(
 
         # 4. Actualización general
         await update_chat_operational_settings(numeric_id, payload or {})
+        
+        # Notificar en vivo a los WebSockets de la sala
+        _spawn(emit_radar_event(numeric_id, "settings_updated", payload or {}))
+        
         return {"status": "success", "chat_id": chat_id, "updated": payload}
     except HTTPException:
         raise
@@ -780,6 +976,71 @@ async def api_affiliates(
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     return {"invited_communities": 0, "earned_stars": 0, "balance": 0}
+
+
+# ==========================================
+# ⚡ WEBSOCKET DE TELEMETRÍA REACTIVA EN VIVO (FASE 3)
+# ==========================================
+@app.websocket("/ws/live-radar/{chat_id}")
+@app.websocket("/api/ws/live-radar/{chat_id}")
+async def websocket_live_radar(websocket: WebSocket, chat_id: str, token: str = Query(None)):
+    """Canal bidireccional reactivo en tiempo real para Mini App y Dashboard."""
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        await websocket.close(code=1003)
+        return
+
+    # 1. Autenticación de la sesión WebSocket
+    user_payload = verify_session_token(token) if token else None
+    user_id = user_payload.get("uid") if user_payload else resolve_user_id(authorization=f"Bearer {token}" if token else None)
+
+    if not is_super_admin(user_id) and user_id != CREATOR_FALLBACK_ID:
+        try:
+            await assert_chat_ownership(user_id, numeric_id)
+        except Exception:
+            await websocket.close(code=1008)
+            return
+
+    await ws_manager.connect(numeric_id, websocket)
+
+    # 2. Despacho inmediato del snapshot de estado al conectar
+    try:
+        snapshot = await get_community_live_telemetry(numeric_id)
+        await websocket.send_json({
+            "event": "initial_state",
+            "chat_id": str(numeric_id),
+            "timestamp": int(time.time()),
+            "data": snapshot
+        })
+    except Exception as e:
+        logging.debug(f"Aviso enviando snapshot inicial WS ({numeric_id}): {e}")
+
+    # 3. Bucle de escucha reactivo con soporte de heartbeat (ping / pong)
+    try:
+        while True:
+            client_msg = await websocket.receive_text()
+            if client_msg == "ping":
+                await websocket.send_json({"event": "pong", "timestamp": int(time.time())})
+            elif client_msg.startswith("{"):
+                try:
+                    parsed_req = json.loads(client_msg)
+                    if parsed_req.get("action") == "refresh":
+                        snapshot = await get_community_live_telemetry(numeric_id)
+                        await websocket.send_json({
+                            "event": "state_refresh",
+                            "chat_id": str(numeric_id),
+                            "timestamp": int(time.time()),
+                            "data": snapshot
+                        })
+                except Exception:
+                    pass
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(numeric_id, websocket)
+    except Exception as ws_err:
+        logging.debug(f"Aviso en conexión WebSocket ({numeric_id}): {ws_err}")
+        await ws_manager.disconnect(numeric_id, websocket)
+
 
 app.include_router(api_router, prefix="/api")
 app.include_router(api_router)
@@ -984,7 +1245,7 @@ async def main():
     print("🛡️ [Base de Datos]: Inicializada correctamente.")
 
     asyncio.create_task(run_fastapi_server())
-    print(f"🌐 [API Backend]: Servidor FastAPI activo en puerto {os.getenv('PORT', 8080)}.")
+    print(f"🌐 [API Backend & WebSockets]: Servidor activo en puerto {os.getenv('PORT', 8080)}.")
 
     master_bot = Bot(
         token=BOT_TOKEN, 
