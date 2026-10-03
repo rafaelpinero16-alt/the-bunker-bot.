@@ -115,9 +115,9 @@ GHOST_PURGE_ALERT_TEXT = (
 
 VC_START_TEXTS = {
     "es": (
-        "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
+        "EL VIDEO CHAT DE ⚜️️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
         "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
-        "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
+        "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
         "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     ),
@@ -388,13 +388,12 @@ async def _dispatch_radar_notice(
     auto_delete_after: int | None = None,
     reply_markup: InlineKeyboardMarkup | None = None,
 ):
-    """Envía un aviso del Radar Acústico en Telegram con soporte multimedia y auto-borrado en background."""
+    """Envía un aviso del Radar Acústico en Telegram con soporte multimedia real y auto-borrado en background."""
     if not _global_bot:
         return None
 
     try:
         sent = None
-        # Telegram restringe los captions a 1024 caracteres
         safe_caption = text[:1020] + "..." if len(text) > 1024 else text
 
         if media_id and media_type == "photo":
@@ -411,7 +410,7 @@ async def _dispatch_radar_notice(
             )
         else:
             sent = await _global_bot.send_message(
-                chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML"
+                chat_id=chat_id, text=text[:4000], reply_markup=reply_markup, parse_mode="HTML"
             )
 
         if sent and auto_delete_after and auto_delete_after > 0:
@@ -426,7 +425,6 @@ async def _dispatch_radar_notice(
         return sent
     except Exception as e:
         logger.warning(f"Aviso despachando radar notice en {chat_id}: {e}")
-        # Fallback de emergencia a texto simple si falla el envío multimedia
         try:
             return await _global_bot.send_message(
                 chat_id=chat_id, text=text[:4000], reply_markup=reply_markup, parse_mode="HTML"
@@ -436,7 +434,7 @@ async def _dispatch_radar_notice(
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% etiquetando al usuario con botón y tiempo configurados."""
+    """Publica el aviso de atenuación al 2% con botón de MicVIP y auto-borrado."""
     if not _global_bot:
         return
 
@@ -465,12 +463,8 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         custom_text = svc_cfg.get("vc_text")
         custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
         custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
-        
-        try:
-            autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
-        except (ValueError, TypeError):
-            autodel_time = 30
-        
+        autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
+
         if custom_text:
             text = (
                 custom_text.replace("{user_name}", user_name)
@@ -517,7 +511,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
 
 
 async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
-    """Despacha y fija la bienvenida general al videochat según el nivel del grupo (Free / PRO / ULTRA)."""
+    """Despacha y fija la bienvenida general al videochat con botón interactivo de pase VIP."""
     if not _global_bot:
         return
     try:
@@ -632,8 +626,8 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
 # ==========================================
 async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
     """
-    Obtiene de forma segura el objeto InputGroupCall activo del chat usando los tipos
-    exactos de MTProto (InputChannel para canales/supergrupos o chat_id para grupos básicos).
+    Obtiene de forma precisa el InputGroupCall activo convirtiendo a InputChannel para evitar
+    incompatibilidades de tipo con GetFullChannel en canales y supergrupos.
     """
     try:
         if peer is None:
@@ -641,10 +635,11 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
 
         raw_call = None
         if isinstance(peer, (InputPeerChannel, InputChannel)):
-            ch_id = getattr(peer, "channel_id", None)
-            ac_hash = getattr(peer, "access_hash", 0)
-            target_channel = InputChannel(channel_id=ch_id, access_hash=ac_hash)
-            full_chat_res = await client.invoke(GetFullChannel(channel=target_channel))
+            ch_id = getattr(peer, "channel_id")
+            ac_hash = getattr(peer, "access_hash")
+            full_chat_res = await client.invoke(
+                GetFullChannel(channel=InputChannel(channel_id=ch_id, access_hash=ac_hash))
+            )
             raw_call = getattr(full_chat_res.full_chat, "call", None)
         elif isinstance(peer, InputPeerChat):
             full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
@@ -652,8 +647,9 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
         else:
             resolved = await client.resolve_peer(chat_id)
             if isinstance(resolved, (InputPeerChannel, InputChannel)):
-                target_channel = InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash)
-                full_chat_res = await client.invoke(GetFullChannel(channel=target_channel))
+                full_chat_res = await client.invoke(
+                    GetFullChannel(channel=InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash))
+                )
                 raw_call = getattr(full_chat_res.full_chat, "call", None)
             elif isinstance(resolved, InputPeerChat):
                 full_chat_res = await client.invoke(GetFullChat(chat_id=resolved.chat_id))
@@ -663,7 +659,7 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
             return InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
         return None
     except Exception as e:
-        logger.debug(f"Aviso resolviendo llamada grupal activa en {chat_id}: {e}")
+        logger.debug(f"Aviso obteniendo llamada en {chat_id}: {e}")
         return None
 
 
@@ -928,7 +924,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
     current_call = None
     last_channel_check = 0
     is_joined_audio = False
-    permission_warned = False
     call_start_time = 0
 
     while True:
@@ -963,8 +958,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     active_sentinels.pop(chat_id, None)
                     return
 
-            # Detección precisa y continua de llamadas de voz mediante MTProto
-            if not current_call or (current_time - last_channel_check > 45):
+            # Detección precisa de la llamada mediante resolución protegida InputChannel
+            if not current_call or (current_time - last_channel_check > 15):
                 raw_call_obj = await _get_raw_group_call(client, chat_id, peer)
 
                 if raw_call_obj:
@@ -972,7 +967,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         call_start_time = asyncio.get_event_loop().time()
                         _spawn(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
                     current_call = raw_call_obj
-                    permission_warned = False
                 else:
                     current_call = None
                     is_joined_audio = False
@@ -1040,7 +1034,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 night_active, night_action = await _is_night_active(chat_id)
                 autolower_enabled = await get_autolower_status(chat_id)
                 if autolower_enabled != 1 and not night_active:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(8)
                     continue
 
                 cooldown_until = _autolower_cooldowns.get(chat_id, 0)
@@ -1048,6 +1042,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     await asyncio.sleep(15)
                     continue
 
+                # Bypass no bloqueante en JoinGroupCall: modera incluso si no entra como participante de voz
                 if not is_joined_audio:
                     try:
                         my_peer = await client.resolve_peer("me")
@@ -1056,24 +1051,15 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         )
                         is_joined_audio = True
                         _forbidden_strikes[chat_id] = 0
-                    except Exception as join_err:
-                        err_text = str(join_err).upper()
-                        if "ALREADY_PARTICIPATED" in err_text or "DUPLICATE" in err_text:
-                            is_joined_audio = True
-                        elif "GROUPCALL_FORBIDDEN" in err_text:
-                            _register_forbidden_strike(chat_id, "unirse al videochat (JoinGroupCall)")
-                            await asyncio.sleep(25)
-                            continue
-                        else:
-                            await asyncio.sleep(5)
-                            continue
+                    except Exception:
+                        is_joined_audio = True
 
                 res = await client.invoke(
                     GetGroupParticipants(call=current_call, ids=[], sources=[], offset="", limit=100)
                 )
                 
-                participants = res.participants
-                users_map = {u.id: u for u in res.users} if getattr(res, 'users', None) else {}
+                participants = getattr(res, "participants", [])
+                users_map = {u.id: u for u in getattr(res, "users", [])}
                 active_users = set()
 
                 podcast_cfg = await get_podcast_config(chat_id)
@@ -1139,14 +1125,11 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 removed = await _cut_video_and_remove(client, current_call, chat_id, u_id, p_peer)
                                 if removed:
                                     user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
-                                    try:
-                                        await _dispatch_radar_notice(
-                                            chat_id=chat_id,
-                                            text=SCREEN_SHIELD_ALERT_TEXT.format(user_name=user_name),
-                                            auto_delete_after=30
-                                        )
-                                    except Exception:
-                                        pass
+                                    _spawn(_dispatch_radar_notice(
+                                        chat_id=chat_id,
+                                        text=SCREEN_SHIELD_ALERT_TEXT.format(user_name=user_name),
+                                        auto_delete_after=30
+                                    ))
                             except Exception as e:
                                 logger.debug(f"Aviso en Escudo Antinota para {u_id} en {chat_id}: {e}")
                         continue
@@ -1206,8 +1189,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         except Exception as e:
                             err_msg = str(e).upper()
                             if "GROUPCALL_FORBIDDEN" in err_msg:
-                                if not permission_warned:
-                                    permission_warned = True
                                 _register_forbidden_strike(chat_id, "silenciar un participante")
                                 await asyncio.sleep(25)
                                 break
@@ -1230,18 +1211,15 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             if _global_bot:
                                 try:
                                     if noise_spike:
-                                        await _dispatch_radar_notice(
+                                        _spawn(_dispatch_radar_notice(
                                             chat_id=chat_id,
                                             text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_mention),
                                             auto_delete_after=30
-                                        )
+                                        ))
                                     else:
                                         _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
                                 except Exception:
                                     pass
-
-                if is_joined_audio and bot_client_id not in active_users:
-                    is_joined_audio = False
 
                 alerted_users.intersection_update(active_users)
 
@@ -1249,12 +1227,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
             await asyncio.sleep(fw.value + 2)
         except PeerIdInvalid:
             await asyncio.sleep(60)
-        except Exception as e:
-            err_str = str(e).upper()
-            if "GROUPCALL_INVALID" in err_str or "CALL_ALREADY_ENDED" in err_str:
-                current_call = None
-                is_joined_audio = False
-            await asyncio.sleep(5)
+        except Exception:
+            await asyncio.sleep(3)
 
         await asyncio.sleep(3)
 
@@ -1428,16 +1402,12 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
 
-        # Obtener y cachear la entidad del chat directamente para evitar PeerIdInvalid
+        # Descarga la entidad completa del chat para poblar el access_hash en memoria y evitar PeerIdInvalid
         try:
             chat_obj = await session_client.get_chat(group_id)
             peer = await session_client.resolve_peer(chat_obj.id)
         except Exception:
-            try:
-                peer = await session_client.resolve_peer(group_id)
-            except Exception as e:
-                logger.error(f"⚠️️ [Error al resolver Peer] Grupo {group_id}: {e}")
-                return False
+            peer = await session_client.resolve_peer(group_id)
 
         task = asyncio.create_task(monitor_single_group(group_id, peer, session_client, me.id, user_id))
         active_sentinels[group_id] = {
@@ -1520,8 +1490,16 @@ async def load_all_sentinels():
 
 
 async def radar_master_loop():
+    """Bucle del maestro con reconexión automática periódica si Telegram liberó la sesión duplicada."""
     while True:
         try:
+            if assistant_app and not assistant_app.is_connected:
+                try:
+                    await assistant_app.start()
+                    logger.info("🤖 [Centinela Maestro Reconectado con Éxito]")
+                except Exception:
+                    pass
+
             if assistant_app and assistant_app.is_connected:
                 async for dialog in assistant_app.get_dialogs(limit=100):
                     chat = dialog.chat
@@ -1540,13 +1518,11 @@ async def radar_master_loop():
                                     "task": task,
                                     "user_id": 0
                                 }
-                            except PeerIdInvalid:
-                                continue
                             except Exception:
                                 pass
         except Exception as e:
             logger.debug(f"Aviso en radar master loop: {e}")
-        await asyncio.sleep(45)
+        await asyncio.sleep(25)
 
 
 async def cancel_phone_auth(uid: int):
@@ -1594,15 +1570,11 @@ async def init_assistant_master():
                 await assistant_app.start()
             me = await assistant_app.get_me()
             _default_my_id = me.id
-            logger.info(f"🤖 [Centinela Maestro Activo] Online como: @{me.username or me.first_name}")
+            logger.info(f"🤖 [Centinela Maestro Activo] Online como ID {_default_my_id} (@{me.username or me.first_name})")
         except FATAL_SESSION_ERRORS as auth_err:
             logger.error(f"🔒 [MASTER_SESSION Inválida] {auth_err}. Opera con Centinelas propios por comunidad.")
         except Exception as e:
-            err_msg = str(e)
-            if "AUTH_KEY_DUPLICATED" in err_msg or "406" in err_msg:
-                logger.warning("⚠️ [MASTER_SESSION Clave Duplicada] Telegram detectó uso simultáneo. El maestro continuará en reposo sin afectar a los centinelas dedicados.")
-            else:
-                logger.warning(f"⚠️ [Aviso Centinela Maestro]: {e}")
+            logger.warning(f"⚠️ [Centinela Maestro]: Conexión pospuesta para reintento en background ({e})")
 
     await load_all_sentinels()
     _spawn(radar_master_loop())
@@ -1750,7 +1722,7 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
                             if action != "ban":
                                 await _global_bot.unban_chat_member(chat_id, uid)
                             purged += 1
-                            await asyncio.sleep(0.1)
+                            await asyncio.sleep(0.05)
                 except Exception:
                     continue
 
@@ -1825,7 +1797,7 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
         group_id = auth_data["group_id"]
         
         await cancel_phone_auth(user_id)
-        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único
+        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único sin duplicidades
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except SessionPasswordNeeded:
@@ -1854,7 +1826,7 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
         group_id = auth_data["group_id"]
 
         await cancel_phone_auth(user_id)
-        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único
+        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único sin duplicidades
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except PasswordHashInvalid:
