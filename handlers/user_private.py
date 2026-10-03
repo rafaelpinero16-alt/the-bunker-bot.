@@ -1809,8 +1809,6 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
 
     return _ordered((c_id, title) for c_id, title, _ in kept)
 
-    return _ordered((c_id, title) for c_id, title, _ in kept)
-
 
 async def is_registered_owner_db(user_id: int, group_id: int) -> bool:
     def _sync():
@@ -3406,7 +3404,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
-    # ⚙️️ CONFIGURACIÓN SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
+    # ⚙️ CONFIGURACIÓN SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
     if (bot.id, user_id) in SENTINEL_CFG_STATES:
         st_data = SENTINEL_CFG_STATES.pop((bot.id, user_id))
         group_id = st_data["group_id"]
@@ -3414,12 +3412,12 @@ async def handle_private_inputs(message: Message, bot: Bot):
         field_type = st_data["field"]    # 'msg', 'btn', 'autodel'
         tier = (await get_effective_group_tier(group_id, user_id) or "free").lower()
 
-        text_val = message.text or message.caption or ""
+        text_val = (message.text or message.caption or "").strip()
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
         ])
 
-        # Mapeo de prefijos
+        # Mapeo de prefijos de columnas de base de datos
         prefix_map = {
             "vc": "vc_join",
             "micvip": "mic_vip",
@@ -3440,40 +3438,33 @@ async def handle_private_inputs(message: Message, bot: Bot):
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
-        # 2. Nombre del Botón
+        # 2. Nombre del Botón y Enlace Embebido (Sintaxis: Texto | URL)
         elif field_type == "btn":
             if text_val:
+                btn_text = text_val
+                btn_url = None
+                if "|" in text_val:
+                    parts = text_val.split("|", 1)
+                    btn_text = parts[0].strip()[:35]
+                    url_candidate = parts[1].strip()
+                    if url_candidate.startswith("http://") or url_candidate.startswith("https://") or url_candidate.startswith("t.me/"):
+                        btn_url = url_candidate if url_candidate.startswith("http") else f"https://{url_candidate}"
+
                 col_name = f"{prefix}_btn_text"
-                await set_sentinel_service_message(group_id, col_name, text_val[:35])
-                resp = await message.answer(f"✅ <b>Nombre del botón para {target.upper()} actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+                await set_sentinel_service_message(group_id, col_name, btn_text[:35])
+                if btn_url is not None:
+                    url_col = f"{prefix}_btn_url"
+                    await set_sentinel_service_message(group_id, url_col, btn_url)
+
+                url_info = f"\n🔗 <b>Enlace embebido:</b> <code>{btn_url}</code>" if btn_url else ""
+                resp = await message.answer(
+                    f"✅ <b>{tr(lang, 'Botón configurado para', 'Button configured for')} {target.upper()}!</b>\n"
+                    f"🏷️ <b>Texto:</b> <code>{html.escape(btn_text)}</code>{url_info}\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
+                    reply_markup=back_kb, parse_mode="HTML"
+                )
             else:
-                resp = await message.answer("⚠️ El texto del botón no puede estar vacío.", reply_markup=back_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
-            return
-
-        # 3. Copy / Multimedia (Foto, Video o Animación)
-        elif field_type == "msg":
-            media_id = media_type = None
-            if tier == "ultra_pro":
-                if message.photo:
-                    media_id, media_type = message.photo[-1].file_id, "photo"
-                elif message.video:
-                    media_id, media_type = message.video.file_id, "video"
-                elif message.animation:
-                    media_id, media_type = message.animation.file_id, "animation"
-
-            # Prefijo unificado para coincidir con el esquema real de database.py
-            col_prefix = f"{prefix}_custom"
-            if text_val:
-                await set_sentinel_service_message(group_id, f"{col_prefix}_text", message.html_text.strip())
-            if media_id and media_type:
-                await set_sentinel_service_message(group_id, f"{col_prefix}_media_id", media_id)
-                await set_sentinel_service_message(group_id, f"{col_prefix}_media_type", media_type)
-
-            resp = await message.answer(
-                f"✅ <b>{tr(lang, 'Mensaje y multimedia guardados con éxito para', 'Notice and media saved successfully for')} {target.upper()}!</b>\n\n🛡️️ <i>Cloud Media Management</i>",
-                reply_markup=back_kb, parse_mode="HTML"
-            )
+                resp = await message.answer(tr(lang, "⚠️ El texto del botón no puede estar vacío.", "⚠️ Button label cannot be empty."), reply_markup=back_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
@@ -5635,58 +5626,6 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             parse_mode="HTML"
         )
 
-    elif action == "capval":
-        sub_type = data[1]
-        val = data[2]
-        if sub_type == "time":
-            await set_captcha_config(group_id, "captcha_time", int(val))
-        elif sub_type == "action":
-            await set_captcha_config(group_id, "captcha_action", val)
-
-        cfg = await get_captcha_config(group_id)
-        st_text = "🟢" if cfg["status"] == 1 else "🔴"
-        mode_text = "🟢" if cfg["mode"] == 1 else "🔴"
-        try:
-            await safe_edit_text(callback,
-                t["captcha_main_title"].format(status_text=st_text, mode_text=mode_text, time_text=str(cfg["time"]), action_text=cfg["action"].upper()),
-                reply_markup=await get_captcha_keyboard(group_id, lang),
-                parse_mode="HTML"
-            )
-        except TelegramBadRequest:
-            pass
-
-    elif action == "afset":
-        sub_mode = data[1]
-        prompt = f"<b>{t['af_msgs']}</b>\n{tr(lang, 'Selecciona el límite:', 'Select the limit:')}" + PERIMETER_SIGNATURE
-        await safe_edit_text(callback, prompt, reply_markup=get_antiflood_number_keyboard(group_id, lang, sub_mode), parse_mode="HTML")
-
-    elif action == "afval":
-        sub_mode = data[1]
-        val = int(data[2])
-        await set_antiflood_config(group_id, "antiflood_msgs" if sub_mode == "msgs" else "antiflood_time", val)
-        cfg = await get_antiflood_config(group_id)
-        delete_st = "🟢" if cfg["delete"] == 1 else "🔴"
-        await safe_edit_text(callback,
-            t["antiflood_main_title"].format(msgs=cfg["msgs"], time=cfg["time"], action=cfg["action"].upper(), delete_st=delete_st),
-            reply_markup=get_antiflood_keyboard(group_id, lang, cfg),
-            parse_mode="HTML"
-        )
-
-    elif action == "afact":
-        sub_act = data[1]
-        if sub_act == "togdel":
-            cfg = await get_antiflood_config(group_id)
-            await set_antiflood_config(group_id, "antiflood_delete", 0 if cfg["delete"] == 1 else 1)
-        else:
-            await set_antiflood_config(group_id, "antiflood_action", sub_act)
-
-        cfg = await get_antiflood_config(group_id)
-        delete_st = "🟢" if cfg["delete"] == 1 else "🔴"
-        await safe_edit_text(callback,
-            t["antiflood_main_title"].format(msgs=cfg["msgs"], time=cfg["time"], action=cfg["action"].upper(), delete_st=delete_st),
-            reply_markup=get_antiflood_keyboard(group_id, lang, cfg),
-            parse_mode="HTML"
-        )
 
 # ==========================================
 # 💎 ULTRA PRO — HERRAMIENTAS DE ÉLITE & CENTINELA DE IA
@@ -6168,6 +6107,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         await set_sentinel_service_message(group_id, f"{col_prefix}_media_type", None)
         if target_msg in ("vc", "micvip", "reset", "vcwelcome"):
             await set_sentinel_service_message(group_id, f"{p}_btn_text", None)
+            await set_sentinel_service_message(group_id, f"{p}_btn_url", None)  # 🧹 Limpieza de URL
         
         default_secs = 20 if target_msg == "reset" else (30 if target_msg in ("vc", "micvip") else 0)
         await set_sentinel_service_message(group_id, f"{p}_autodel_seconds", default_secs)
@@ -6261,8 +6201,10 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
             )
         elif field_name == "btn":
             prompt_txt = (
-                f"🏷️ <b>{tr(lang, 'Nombre del Botón', 'Button Label')} ({target_msg.upper()}):</b>\n\n"
-                f"{tr(lang, 'Envía el texto que llevará el botón de activación (máx. 35 caracteres):', 'Send the text for the activation button (max 35 chars):')}\n\n"
+                f"🏷️ <b>{tr(lang, 'Nombre del Botón y Enlace', 'Button Label and URL')} ({target_msg.upper()}):</b>\n\n"
+                f"{tr(lang, 'Envía el texto del botón, o usa la sintaxis:', 'Send the button text, or use the syntax:')}\n"
+                f"<code>Texto del Botón | https://t.me/tu_enlace</code>\n\n"
+                f"{tr(lang, 'El texto cubrirá el enlace al 100% sin exponer URLs en el mensaje.', 'The button text will seamlessly embed the link without exposing URLs.')}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
         else:
@@ -6617,3 +6559,40 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
         text, kb = await _render_plans_menu(bot, channel_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+
+        # ==========================================
+# 💖 AGRADECIMIENTO OFICIAL DE PROPINAS STARS
+# ==========================================
+async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "es") -> None:
+    """Despacha un mensaje de gratitud oficial del Búnker en privado al donante de Stars."""
+    t = TEXTS.get(lang, TEXTS["es"])
+    thanks_text = (
+        f"🌟 <b>¡Muchas gracias por tu contribución!</b>\n\n"
+        f"Tu aporte voluntario de <b>{stars} Telegram Stars (XTR)</b> ha sido recibido y acreditado con éxito en la tesorería de la comunidad.\n\n"
+        f"Tu apoyo impulsa la infraestructura del Búnker y el mantenimiento de nuestras transmisiones y herramientas de élite.\n\n"
+        f"🛡️️ <i>Cloud Media Management</i>"
+    ) if lang == "es" else (
+        f"🌟 <b>Thank you so much for your contribution!</b>\n\n"
+        f"Your voluntary contribution of <b>{stars} Telegram Stars (XTR)</b> has been successfully received and credited to the community treasury.\n\n"
+        f"Your support powers The Bunker's infrastructure, streaming servers, and elite toolset.\n\n"
+        f"🛡️ <i>Cloud Media Management</i>"
+    )
+
+    rows = []
+    try:
+        chat_info = await bot.get_chat(group_id)
+        if chat_info and getattr(chat_info, "username", None):
+            rows.append([InlineKeyboardButton(text=t["btn_back_group"], url=f"https://t.me/{chat_info.username}")])
+    except Exception:
+        pass
+    rows.append([InlineKeyboardButton(text=t["btn_saas"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))])
+
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=thanks_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            parse_mode="HTML"
+        )
+    except Exception as ex:
+        logging.debug(f"Aviso al enviar agradecimiento de propina a {user_id}: {ex}")
