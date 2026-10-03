@@ -3,7 +3,6 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
-Fase 2: IA Autónoma de Centinela (Grupos/Canales) + Filtrado Semántico en el Borde + Telemetría Gamificada.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -91,8 +90,6 @@ SCREEN_SHIELD_ALERT_TEXT = (
     "🎥 <b>The Bunker Bot: Escudo Antinota Activado</b>\n\n"
     "Se detectó una transmisión de pantalla no autorizada por parte de <b>{user_name}</b>. "
     "La señal fue cortada y la cuenta fue retirada de la sala de inmediato para proteger a la comunidad.\n\n"
-    "🇺🇸 <i>Unauthorized screen-share detected from <b>{user_name}</b>. Signal cut and the account "
-    "was removed from the room instantly to protect the community.</i>\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
 
@@ -191,7 +188,7 @@ DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
 DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
 if not DEFAULT_API_ID or not DEFAULT_API_HASH:
-    logger.warning("⚠️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
+    logger.warning("⚠️️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -240,6 +237,56 @@ _sentinel_launch_semaphore = asyncio.Semaphore(4)
 _pinned_vc_messages = {}
 _last_vc_notice = {}
 _vc_notice_locks = {}
+
+_call_rights_cache: dict[int, tuple[bool, float]] = {}
+_last_join_attempt: dict[int, float] = {}
+CALL_RIGHTS_TTL_SECONDS = 300
+JOIN_RETRY_SECONDS = 60
+
+
+async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
+    """Confirma que la cuenta del Centinela puede gestionar videochats antes de intentar moderar[cite: 11, 13]."""
+    now = time.time()
+    cached = _call_rights_cache.get(chat_id)
+    if cached and (now - cached[1]) < CALL_RIGHTS_TTL_SECONDS:
+        return cached[0]
+    try:
+        me = await client.get_chat_member(chat_id, "me")
+        status_val = str(getattr(me.status, "value", me.status)).lower()
+        if status_val == "owner":
+            allowed = True
+        elif status_val == "administrator":
+            priv = getattr(me, "privileges", None)
+            allowed = bool(priv and getattr(priv, "can_manage_video_chats", False))
+        else:
+            allowed = False
+    except Exception as e:
+        logger.debug(f"No se pudo verificar permisos de videochat en {chat_id}: {e}")
+        return cached[0] if cached else False
+    _call_rights_cache[chat_id] = (allowed, now)
+    return allowed
+
+
+def _invalidate_call_rights(chat_id: int) -> None:
+    _call_rights_cache.pop(chat_id, None)
+
+
+async def _fetch_all_participants(client: Client, call, max_pages: int = 20):
+    """Pagina GetGroupParticipants con next_offset para no perder usuarios en llamadas grandes[cite: 11, 13]."""
+    participants: list = []
+    users_map: dict = {}
+    offset = ""
+    for _ in range(max_pages):
+        res = await client.invoke(
+            GetGroupParticipants(call=call, ids=[], sources=[], offset=offset, limit=100)
+        )
+        participants.extend(getattr(res, "participants", []) or [])
+        for u in getattr(res, "users", []) or []:
+            users_map[u.id] = u
+        offset = getattr(res, "next_offset", "") or ""
+        if not offset:
+            break
+    return participants, users_map
 
 
 def _get_launch_lock(group_id: int) -> asyncio.Lock:
@@ -296,7 +343,7 @@ def _register_noise_strike(chat_id: int, user_id: int) -> bool:
     if len(history) >= NOISE_SPIKE_STRIKE_LIMIT:
         history.clear()
         _noise_unmute_history[key] = history
-        logger.warning(f"⚠️️ [Spike de ruido] Usuario {user_id} superó el umbral en grupo {chat_id}.")
+        logger.warning(f"⚠ [Spike de ruido] Usuario {user_id} superó el umbral en grupo {chat_id}.")
         return True
     return False
 
@@ -355,7 +402,7 @@ def build_vc_moderation_keyboard(
     custom_btn_text: str = None,
     custom_btn_url: str = None
 ) -> InlineKeyboardMarkup:
-    """Botonera limpia de un solo botón: texto 100% editable que cubre el enlace de destino."""
+    """Botonera limpia de un solo botón: texto 100% editable que cubre el enlace de destino[cite: 8]."""
     btn_label = custom_btn_text if custom_btn_text else ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
     pay_url = custom_btn_url.strip() if custom_btn_url else f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
 
@@ -431,7 +478,7 @@ async def _dispatch_radar_notice(
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
-    """Publica el aviso de atenuación al 2% con botón de MicVIP y auto-borrado."""
+    """Publica el aviso de atenuación al 2% con botón de MicVIP y auto-borrado dinámico[cite: 8, 9]."""
     if not _global_bot:
         return
 
@@ -535,15 +582,6 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
                 custom_btn_text=custom_btn,
                 custom_btn_url=custom_url
             )
-        elif tier == "free":
-            pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
-            btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
-            btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
-            next_lang = "en" if lang == "es" else "es"
-            markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=btn_activate, url=pay_url)],
-                [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
-            ])
         else:
             markup = build_vc_moderation_keyboard(chat_id=chat_id, bot_username=bot_username, lang=lang)
 
@@ -1027,34 +1065,40 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     continue
 
             if current_call:
-                night_active, night_action = await _is_night_active(chat_id)
+                night_active, _ = await _is_night_active(chat_id)
                 autolower_enabled = await get_autolower_status(chat_id)
                 if autolower_enabled != 1 and not night_active:
                     await asyncio.sleep(8)
                     continue
 
-                cooldown_until = _autolower_cooldowns.get(chat_id, 0)
-                if current_time < cooldown_until:
+                if current_time < _autolower_cooldowns.get(chat_id, 0):
                     await asyncio.sleep(15)
                     continue
 
-                if not is_joined_audio:
+                # Preflight: sin el permiso no se intenta ninguna mutación (evita 400 en cascada)[cite: 11, 13]
+                if not await _has_manage_calls_right(client, chat_id):
+                    logger.warning(f"🔐 [Centinela] Sin permiso de videochat en {chat_id}; se omiten las acciones de moderación[cite: 11, 13].")
+                    await asyncio.sleep(8)
+                    continue
+
+                # Join opcional y con backoff: un fallo ya NO marca la sesión como unida
+                if not is_joined_audio and (current_time - _last_join_attempt.get(chat_id, 0)) >= JOIN_RETRY_SECONDS:
+                    _last_join_attempt[chat_id] = current_time
                     try:
                         my_peer = await client.resolve_peer("me")
                         await client.invoke(
-                            JoinGroupCall(call=current_call, join_as=my_peer, muted=True, video_stopped=True, params=DataJSON(data="{}"))
+                            JoinGroupCall(
+                                call=current_call, join_as=my_peer,
+                                muted=True, video_stopped=True, params=DataJSON(data="{}")
+                            )
                         )
                         is_joined_audio = True
                         _forbidden_strikes[chat_id] = 0
-                    except Exception:
-                        is_joined_audio = True
+                    except Exception as join_err:
+                        is_joined_audio = False
+                        logger.debug(f"Join no aceptado en {chat_id} (se reintentará): {join_err}")
 
-                res = await client.invoke(
-                    GetGroupParticipants(call=current_call, ids=[], sources=[], offset="", limit=100)
-                )
-                
-                participants = getattr(res, "participants", [])
-                users_map = {u.id: u for u in getattr(res, "users", [])}
+                participants, users_map = await _fetch_all_participants(client, current_call)
                 active_users = set()
 
                 podcast_cfg = await get_podcast_config(chat_id)
@@ -1184,6 +1228,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         except Exception as e:
                             err_msg = str(e).upper()
                             if "GROUPCALL_FORBIDDEN" in err_msg:
+                                _invalidate_call_rights(chat_id)
                                 _register_forbidden_strike(chat_id, "silenciar un participante")
                                 await asyncio.sleep(25)
                                 break
@@ -1229,7 +1274,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
 
 async def vc_scheduler_loop():
-    logger.info("🗓️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
+    logger.info("🗓️️ [Programador VC] Sistema de programación semanal iniciado con soporte de zona horaria.")
     while True:
         try:
             now = _get_group_now()
