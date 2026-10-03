@@ -11,7 +11,7 @@ import logging
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, 
-    InlineKeyboardButton, CallbackQuery, WebAppInfo
+    InlineKeyboardButton, CallbackQuery
 )
 from aiogram.filters import Command, CommandObject
 import database.database as _db_module
@@ -48,6 +48,15 @@ SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().is
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
+
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 def is_super_admin(user_id: int) -> bool:
@@ -109,7 +118,7 @@ async def auto_delete_pair(cmd_msg: Message, bot_msg: Message, delay: int = 12):
 TEXTS = {
     "en": {
         "owner_only": "⛔ <b>Access Denied:</b> This protocol is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️️ <i>Cloud Media Management</i>",
+        "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
         "reload_success": (
             "🔄 <b>The Bunker Ecosystem Synchronized</b>\n\n"
             "• <b>Community:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
@@ -125,7 +134,7 @@ TEXTS = {
             "Configure alphanumeric customs, content locks, purge limits, and voice sentinels.\n\n"
             "© <i>Cloud Media Management</i>"
         ),
-        "btn_open_miniapp": "🌐 Mini App Command Center",
+        "btn_open_miniapp": "🌐 Open Command Center",
         "btn_open_pv": "⚙️ Open in DMs",
         "autolower_panel": (
             "🎛️ <b>Radar Console: AutoLower Acoustic Shield</b>\n\n"
@@ -138,7 +147,7 @@ TEXTS = {
         "status_active": "🟢 ACTIVE (Mics dialed down to 2% for unverified users)",
         "status_inactive": "🔴 DEACTIVATED (Open Mics at 100%)",
         "podcast_panel": (
-            "🎙️️ <b>Radar Console: Podcast Mode (Ducking)</b>\n\n"
+            "🎙️ <b>Radar Console: Podcast Mode (Ducking)</b>\n\n"
             "• <b>Active State:</b> {status}\n\n"
             "Select an action to change dynamic audio ducking:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -160,11 +169,11 @@ TEXTS = {
         "night_on_msg": "🌙 <b>Universal Night Mode:</b> 🟢 ACTIVATED. Perimeter restrictions applied.",
         "night_off_msg": "☀️ <b>Universal Night Mode:</b> 🔴 DEACTIVATED. Standard permissions restored.",
         "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️ <i>Cloud Media Management</i>",
-        "target_needed_warn": "⚠️ Target required. Reply to a message or use: <code>/warn [@user or ID]</code>\n\n🛡️ <i>Cloud Media Management</i>",
+        "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️️ <i>Cloud Media Management</i>",
+        "target_needed_warn": "⚠️ Target required. Reply to a message or use: <code>/warn [@user or ID] [reason]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_issued": "⚠️ <b>Warning Issued:</b> {target_tag} has received a formal strike ({current}/{limit}).\n• <b>Reason:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_punished": "⚖️ <b>Threshold Reached:</b> {target_tag} reached {limit}/{limit} strikes.\n• <b>Automated Action:</b> {action_name} executed.\n\n🛡️ <i>Cloud Media Management</i>",
-        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}. Full voice restored.\n\n🛡️ <i>Cloud Media Management</i>"
+        "warns_reset_done": "✅ All strikes have been cleared for {target_tag}. Full voice and text permissions restored.\n\n🛡️ <i>Cloud Media Management</i>"
     },
     "es": {
         "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -197,7 +206,7 @@ TEXTS = {
         "status_active": "🟢 ACTIVO (Reduciendo a 2% a no autorizados)",
         "status_inactive": "🔴 DESACTIVADO (Micrófonos Libres al 100%)",
         "podcast_panel": (
-            "🎙️ <b>Panel de Control: Modo Podcast (Ducking)</b>\n\n"
+            "🎙️️ <b>Panel de Control: Modo Podcast (Ducking)</b>\n\n"
             "• <b>Estado Actual:</b> {status}\n\n"
             "Selecciona una directiva para alterar la atenuación dinámica:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
@@ -218,12 +227,12 @@ TEXTS = {
         "status_inactive_shield": "🔴 DESACTIVADO",
         "night_on_msg": "🌙 <b>Modo Nocturno Universal:</b> 🟢 ACTIVADO. Restricciones perimetrales aplicadas.",
         "night_off_msg": "☀️ <b>Modo Nocturno Universal:</b> 🔴 DESACTIVADO. Permisos previos restaurados.",
-        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
+        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Objetivo requerido. Responde a un usuario, menciónalo con @ o pasa su ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_warn": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/warn [@usuario o ID] [motivo]</code>\n\n🛡️ <i>Cloud Media Management</i>",
-        "warn_issued": "⚠️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
+        "warn_issued": "⚠️️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_punished": "⚖️ <b>Límite de Faltas Alcanzado:</b> {target_tag} sumó {limit}/{limit} faltas.\n• <b>Castigo Automático:</b> Se aplicó {action_name} de inmediato.\n\n🛡️ <i>Cloud Media Management</i>",
-        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}. Voz restablecida al 100%.\n\n🛡️ <i>Cloud Media Management</i>"
+        "warns_reset_done": "✅ Todas las advertencias han sido restablecidas a cero para {target_tag}. Permisos y voz restablecidos al 100%.\n\n🛡️ <i>Cloud Media Management</i>"
     }
 }
 
@@ -277,7 +286,7 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
 # ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """Fuerza la recarga del perímetro y deja la tarjeta permanente de administración en el grupo (estilo GroupHelp)."""
+    """Fuerza la recarga del perímetro y sincroniza la administración en el grupo."""
     if message.chat.type == "private": 
         return
     
@@ -361,10 +370,10 @@ async def cmd_reload_group(message: Message, bot: Bot):
 
     bot_info = await bot.get_me()
     
-    # Teclado inline seguro para grupos (usando URL estándar para evitar BUTTON_TYPE_INVALID)
+    # Teclado inline seguro para grupos usando enlaces estándar
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
-        [InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={chat_id}")]
+        [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
+        [InlineKeyboardButton(text=t["btn_open_miniapp"], url=f"{WEBAPP_URL}?chat_id={chat_id}")]
     ])
 
     report_text = t["reload_success"].format(
@@ -374,7 +383,6 @@ async def cmd_reload_group(message: Message, bot: Bot):
         sentinel_status=sentinel_status
     )
     
-    # Envío seguro mediante message.answer (evita 'message to be replied not found' al borrar el comando)
     await message.answer(report_text, reply_markup=kb, parse_mode="HTML")
     try:
         await message.delete()
@@ -408,13 +416,14 @@ async def cmd_settings_group(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     
+    # En grupos se debe usar URL directa para evitar BUTTON_TYPE_INVALID
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_open_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={message.chat.id}"))],
+        [InlineKeyboardButton(text=t["btn_open_miniapp"], url=f"{WEBAPP_URL}?chat_id={message.chat.id}")],
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{message.chat.id}")]
     ])
     
     msg = await message.answer(t["settings_title"].format(title=html.escape(message.chat.title or "Comunidad")), reply_markup=kb, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 15))
+    _spawn(auto_delete_pair(message, msg, 15))
 
 
 # ==========================================================
@@ -446,7 +455,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     ])
     status_text = t["status_active"] if current_status == 1 else t["status_inactive"]
     msg = await message.answer(t["autolower_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 20))
+    _spawn(auto_delete_pair(message, msg, 20))
 
 
 @router.callback_query(F.data.startswith("gautolower_"))
@@ -507,7 +516,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_pod"] if current_status == 1 else t["status_inactive_pod"]
     msg = await message.answer(t["podcast_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 20))
+    _spawn(auto_delete_pair(message, msg, 20))
 
 
 @router.callback_query(F.data.startswith("gpodcast_"))
@@ -573,7 +582,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_shield"] if current_status == 1 else t["status_inactive_shield"]
     msg = await message.answer(t["shield_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 20))
+    _spawn(auto_delete_pair(message, msg, 20))
 
 
 @router.callback_query(F.data.startswith("gshield_"))
@@ -627,7 +636,7 @@ async def cmd_toggle_night(message: Message, bot: Bot):
 
     if not await is_user_creator(bot, message.chat.id, message.from_user.id):
         msg = await message.reply(t["owner_only"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        _spawn(auto_delete_pair(message, msg, 8))
         return
 
     chat_id = message.chat.id
@@ -639,7 +648,7 @@ async def cmd_toggle_night(message: Message, bot: Bot):
         await deactivate_universal_night_mode(chat_id)
         msg = await message.reply(t["night_off_msg"], parse_mode="HTML")
 
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, 12))
 
 
 # ==========================================================
@@ -660,20 +669,24 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     target_id, target_tag = await resolve_target(message, command, bot)
     if not target_id:
         msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 10))
+        _spawn(auto_delete_pair(message, msg, 10))
         return
 
     if is_super_admin(target_id) or await is_user_admin(bot, message.chat.id, target_id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        _spawn(auto_delete_pair(message, msg, 8))
         return
 
+    # Extracción inteligente de motivo:
+    # 1. Si responde a un mensaje, todos los argumentos escritos componen el motivo.
+    # 2. Si no es respuesta, el primer argumento fue el usuario y el resto es el motivo.
     reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
-    if command and command.args:
-        args_parts = command.args.split(maxsplit=1)
-        if len(args_parts) > 1 and not args_parts[0].isdigit() and not args_parts[0].startswith("@"):
+    if message.reply_to_message:
+        if command and command.args:
             reason = command.args.strip()
-        elif len(args_parts) > 1:
+    elif command and command.args:
+        args_parts = command.args.split(maxsplit=1)
+        if len(args_parts) > 1:
             reason = args_parts[1].strip()
 
     try:
@@ -689,10 +702,15 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             reason=reason
         )
         if outcome.get("status") in ("warned", "sanctioned", "immune"):
+            try:
+                await message.delete()
+            except Exception:
+                pass
             return
     except Exception as e:
         logger.debug(f"Aviso ejecutando ladder de warns: {e}")
 
+    # Fallback directo en caso de fallo en el despachador de grupos
     cfg = await get_warns_config(message.chat.id)
     limit = cfg.get("limit", 3)
     action = cfg.get("action", "mute")
@@ -734,12 +752,12 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             pass
         msg = await message.reply(t["warn_issued"].format(target_tag=target_tag, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
 
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, 12))
 
 
 @router.message(Command("resetwarns"))
 async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
-    """Limpia a cero el historial de faltas de un miembro y restaura su voz."""
+    """Limpia a cero el historial de faltas de un miembro y restaura permisos completos de texto y voz."""
     if message.chat.type == "private":
         return
 
@@ -752,7 +770,7 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
     target_id, target_tag = await resolve_target(message, command, bot)
     if not target_id:
         msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 10))
+        _spawn(auto_delete_pair(message, msg, 10))
         return
 
     await reset_user_strikes(message.chat.id, target_id)
@@ -764,21 +782,43 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
         except Exception:
             pass
 
+    # 1. Restaurar volumen acústico en la llamada
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=10000)
     except Exception:
         pass
 
+    # 2. Restaurar permisos de texto y multimedia en el chat general
+    try:
+        await bot.restrict_chat_member(
+            chat_id=message.chat.id,
+            user_id=target_id,
+            permissions=ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
+            )
+        )
+    except Exception as e:
+        logger.debug(f"Aviso restaurando permisos de chat para {target_id}: {e}")
+
     msg = await message.reply(t["warns_reset_done"].format(target_tag=target_tag), parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, 12))
 
 
 # ==========================================================
 # 🛑 REVOCACIÓN DE PASE VIP (EXCLUSIVO DUEÑO)
-# ==========================================================
+# ==========================================
 @router.message(Command("delvip"))
 async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
-    """Revoca la inmunidad acústica de un miembro y resetea su volumen al 2%."""
+    """Revoca la inmunidad acústica de un miembro, retira el título de administrador y resetea volumen al 2%."""
     if message.chat.type == "private": 
         return
         
@@ -787,26 +827,38 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
 
     if not await is_user_creator(bot, message.chat.id, message.from_user.id):
         msg = await message.reply(t["owner_only"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        _spawn(auto_delete_pair(message, msg, 8))
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
     if not target_id:
         msg = await message.reply(t["target_needed_vip"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 10))
+        _spawn(auto_delete_pair(message, msg, 10))
         return
 
     if is_super_admin(target_id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, 8))
+        _spawn(auto_delete_pair(message, msg, 8))
         return
         
     await revoke_vip_mic(target_id, message.chat.id)
     
+    # 1. Atenuación acústica de vuelta al 2%
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=200)
     except Exception as e:
         logger.warning(f"Aviso Centinela al revocar VIP en grupo {message.chat.id}: {e}")
 
+    # 2. Retiro de insignia/administrador simbólico si fue promovido por compra de pase
+    try:
+        await bot.promote_chat_member(
+            chat_id=message.chat.id, user_id=target_id,
+            can_manage_chat=False, can_change_info=False, can_delete_messages=False,
+            can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
+            can_promote_members=False, can_manage_video_chats=False
+        )
+    except Exception:
+        pass
+
     msg = await message.answer(t["vip_revoked"].format(target_tag=target_tag), parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, 12))
