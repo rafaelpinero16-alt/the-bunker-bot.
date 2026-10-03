@@ -83,14 +83,25 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
 
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
 
 DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
 DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
 
 if not DEFAULT_API_ID or not DEFAULT_API_HASH:
-    logger.warning("⚠️️ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
+    logger.warning("⚠ [Configuración] TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
 MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
 
 if MASTER_SESSION:
@@ -186,22 +197,30 @@ def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
         return current_hm >= start_hm or current_hm < end_hm
 
 
-def _extract_urls_to_markup(text: str, custom_btn_text: str = None, 
-                            custom_btn_url: str = None) -> tuple[str, InlineKeyboardMarkup | None]:
+def _extract_urls_to_markup(
+    text: str, 
+    custom_btn_text: str = None, 
+    custom_btn_url: str = None
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    """
+    Extrae URLs en texto plano, las retira del cuerpo del mensaje y genera la botonera.
+    Respeta la URL personalizada para que el botón cubra el enlace nativamente.
+    """
     buttons = []
     
     if custom_btn_url:
         label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
         buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
 
-    url_pattern = re.compile(r'https?://[^\s<>"]+')
+    # Regex protegido: no toca URLs que ya formen parte de hipervínculos HTML (href="...")
+    url_pattern = re.compile(r'(?<!href=["\'])(https?://[^\s<>"\']+)')
     found_urls = url_pattern.findall(text)
 
     cleaned_text = text
     for i, u in enumerate(found_urls):
         cleaned_text = cleaned_text.replace(u, "").strip()
         if not custom_btn_url or u != custom_btn_url:
-            btn_title = f"🔗 Enlace {i + 1}" if len(found_urls) > 1 else "🌐 Acceder"
+            btn_title = f"🔗 Enlace {i + 1}" if len(found_urls) > 1 else (custom_btn_text if custom_btn_text else "🌐 Acceder")
             buttons.append([InlineKeyboardButton(text=btn_title, url=u)])
 
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
@@ -272,7 +291,7 @@ VC_START_TEXTS = {
     "en": (
         "THE VOICE CHAT FOR ⚜️🔐The Búnker Chat🔐⚜️ HAS STARTED! EVERYONE IS WELCOME TO JOIN 🔥🐽💨🚀\n\n"
         "🔇 <b>A DEFAULT MAXIMUM VOLUME OF 2% HAS BEEN SET FOR ALL GENERAL MEMBERS JOINING THE VOICE CHAT.</b>\n\n"
-        "⚜️️ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
+        "⚜ WANT TO BECOME A VIP MEMBER AND UNLOCK 100% VOLUME ON YOUR 🎙️MIC🎙️ WHILE PARTICIPATING IN OUR VOICE CHAT?\n\n"
         "Use the buttons below to activate your /micvip with TELEGRAM STARS ↓ ↓ ↓\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     )
@@ -306,7 +325,7 @@ VC_SCHED_MESSAGES = {
     "start": (
         "📡 <b>Apertura Programada — The Bunker</b>\n\n"
         "El videochat de la comunidad ha sido abierto automáticamente según el cronograma ULTRA PRO.\n\n"
-        "🛡️️ <i>Cloud Media Management</i>"
+        "🛡️ <i>Cloud Media Management</i>"
     ),
     "end": (
         "📡 <b>Cierre Programado — The Bunker</b>\n\n"
@@ -321,15 +340,12 @@ def build_vc_moderation_keyboard(
     bot_username: str, 
     lang: str = "es", 
     price: int = 50, 
-    custom_btn_text: str = None
+    custom_btn_text: str = None,
+    custom_btn_url: str = None
 ) -> InlineKeyboardMarkup:
-    """Botonera limpia de un solo botón: texto 100% editable sin selector de idioma."""
-    if custom_btn_text:
-        btn_label = custom_btn_text
-    else:
-        btn_label = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
-
-    pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
+    """Botonera limpia de un solo botón: texto 100% editable que cubre el enlace de destino."""
+    btn_label = custom_btn_text if custom_btn_text else ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
+    pay_url = custom_btn_url.strip() if custom_btn_url else f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=btn_label, url=pay_url)]
@@ -368,6 +384,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
 
         custom_text = svc_cfg.get("vc_text")
         custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
+        custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
         
         try:
             autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
@@ -375,7 +392,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
             autodel_time = 30
         
         # 🎯 Etiquetado garantizado en cualquier modalidad:
-        # Si hay texto personalizado (PRO / ULTRA PRO), sustituye todos los marcadores habituales
         if custom_text:
             text = (
                 custom_text.replace("{user_name}", user_name)
@@ -384,7 +400,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
                 .replace("{name}", user_name)
             )
         else:
-            # Plantilla por defecto (Free) con etiquetado explícito
             text = (
                 f"⚜️ <b>The Bunker O.S.</b>\n\n"
                 f"🔇 {user_name}, <i>el búnker ha establecido por defecto tu volumen al 2%.</i>\n\n"
@@ -397,12 +412,13 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
             bot_username=bot_username, 
             lang=lang, 
             price=price, 
-            custom_btn_text=custom_btn
+            custom_btn_text=custom_btn,
+            custom_btn_url=custom_url
         )
         media_id = svc_cfg.get("vc_media_id")
         media_type = svc_cfg.get("vc_media_type")
 
-        cleaned_text, extracted_markup = _extract_urls_to_markup(text)
+        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
         final_markup = markup if markup else extracted_markup
 
         sent = None
@@ -426,7 +442,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
                             _last_vc_notice.pop(chat_id, None)
                     except Exception:
                         pass
-                asyncio.create_task(_auto_del_notice(sent, autodel_time))
+                _spawn(_auto_del_notice(sent, autodel_time))
             
     except Exception as e:
         logger.warning(f"Aviso despachando notificación de entrada a VC en {chat_id}: {e}")
@@ -437,39 +453,41 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
     if not _global_bot:
         return
     try:
+        svc_cfg = await get_sentinel_service_messages_config(chat_id)
+        if svc_cfg.get("vc_welcome_enabled", 1) == 0:
+            return
+
         bot_info = await _global_bot.get_me()
         bot_username = bot_info.username or "thebunkerapp_bot"
         tier = (await get_group_tier(chat_id) or "free").lower()
-        svc_cfg = await get_sentinel_service_messages_config(chat_id)
 
         custom_text = svc_cfg.get("vc_welcome_text")
         custom_btn = svc_cfg.get("vc_welcome_btn")
+        custom_url = svc_cfg.get("vc_welcome_btn_url")
         media_id = svc_cfg.get("vc_welcome_media_id") if tier == "ultra_pro" else None
         media_type = svc_cfg.get("vc_welcome_media_type") if tier == "ultra_pro" else None
-        autodel = svc_cfg.get("vc_welcome_autodel", 0)
+        autodel = svc_cfg.get("vc_welcome_autodel", 0) or 0
 
-        pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
-
-        # Lógica de Botonera:
-        # Modo Free: Botón estándar + toggle de idioma para usuarios regulares
-        if tier == "free" or not custom_btn:
+        # Si el creador definió botón o URL personalizada:
+        if custom_btn or custom_url:
+            markup = build_vc_moderation_keyboard(
+                chat_id=chat_id,
+                bot_username=bot_username,
+                lang=lang,
+                custom_btn_text=custom_btn,
+                custom_btn_url=custom_url
+            )
+        elif tier == "free":
+            pay_url = f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
             btn_activate = "⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"
-            if tier == "free":
-                btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
-                next_lang = "en" if lang == "es" else "es"
-                markup = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=btn_activate, url=pay_url)],
-                    [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
-                ])
-            else:
-                markup = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=btn_activate, url=pay_url)]
-                ])
-        else:
-            # Modo PRO / ULTRA PRO con botón personalizado
+            btn_lang_text = "🌐 Idioma: English 🇬🇧" if lang == "es" else "🌐 Language: Español 🇪🇸"
+            next_lang = "en" if lang == "es" else "es"
             markup = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=custom_btn, url=pay_url)]
+                [InlineKeyboardButton(text=btn_activate, url=pay_url)],
+                [InlineKeyboardButton(text=btn_lang_text, callback_data=f"vclang_toggle_{chat_id}_{next_lang}")]
             ])
+        else:
+            markup = build_vc_moderation_keyboard(chat_id=chat_id, bot_username=bot_username, lang=lang)
 
         # Texto del mensaje
         if tier in ("pro", "ultra_pro") and custom_text:
@@ -477,7 +495,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         else:
             text = VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
 
-        cleaned_text, extracted_markup = _extract_urls_to_markup(text)
+        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
         final_markup = markup if markup else extracted_markup
 
         sent = None
@@ -505,22 +523,24 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
                         await msg.delete()
                     except Exception:
                         pass
-                asyncio.create_task(_auto_del_welcome(sent, autodel))
+                _spawn(_auto_del_welcome(sent, autodel))
 
     except Exception as e:
         logger.warning(f"Aviso al despachar y fijar bienvenida de VC en {chat_id}: {e}")
 
 
-async def _resolve_reset_text(chat_id: int) -> tuple[str, str, str, str | None, int]:
-    """Retorna (texto, media_id, media_type, btn_text, autodel_seconds) para la optimización."""
+async def _resolve_reset_text(chat_id: int) -> tuple[str, str | None, str | None, str | None, str | None, int]:
+    """Retorna (texto, media_id, media_type, btn_text, btn_url, autodel_seconds) para la optimización."""
     svc_cfg = await get_sentinel_service_messages_config(chat_id)
     custom_text = svc_cfg.get("reset_text")
     text = custom_text if custom_text else OPTIMIZATION_TEXT
     media_id = svc_cfg.get("reset_media_id")
     media_type = svc_cfg.get("reset_media_type")
     btn_text = svc_cfg.get("reset_btn")
+    btn_url = svc_cfg.get("reset_btn_url")
     autodel = svc_cfg.get("reset_autodel", 20) or 20
-    return text, media_id, media_type, btn_text, autodel
+    return text, media_id, media_type, btn_text, btn_url, autodel
+
 
 async def _dispatch_radar_notice(
     chat_id: int,
@@ -567,14 +587,14 @@ async def _dispatch_radar_notice(
                 parse_mode="HTML"
             )
 
-        if sent and auto_delete_after:
+        if sent and auto_delete_after and auto_delete_after > 0:
             async def _auto_delete_notice(msg):
                 await asyncio.sleep(auto_delete_after)
                 try:
                     await msg.delete()
                 except Exception:
                     pass
-            asyncio.create_task(_auto_delete_notice(sent))
+            _spawn(_auto_delete_notice(sent))
 
         return sent
     except Exception as e:
@@ -962,22 +982,38 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 last_channel_check = current_time
 
+            # Protocolo de reinicio preventivo audiovisual cada 3.5 horas de transmisión continua
             if current_call and call_start_time > 0:
                 if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
                     if _global_bot:
                         try:
-                            radar_cfg = await get_radar_config(chat_id)
-                            reset_text = _resolve_reset_text(radar_cfg.get("reset_text"))
-                            await _dispatch_radar_notice(
-                                chat_id=chat_id,
-                                text=reset_text,
-                                media_id=radar_cfg.get("reset_media_id"),
-                                media_type=radar_cfg.get("reset_media_type"),
-                                auto_delete_after=20
-                            )
-                        except Exception:
-                            pass
+                            svc_cfg = await get_sentinel_service_messages_config(chat_id)
+                            if svc_cfg.get("reset_enabled", 1) == 1:
+                                text, media_id, media_type, btn_text, btn_url, autodel = await _resolve_reset_text(chat_id)
+                                reset_markup = None
+                                if btn_text or btn_url:
+                                    bot_info = await _global_bot.get_me()
+                                    reset_markup = build_vc_moderation_keyboard(
+                                        chat_id=chat_id,
+                                        bot_username=bot_info.username or "thebunkerapp_bot",
+                                        lang="es",
+                                        custom_btn_text=btn_text,
+                                        custom_btn_url=btn_url
+                                    )
+                                cleaned_text, extracted_markup = _extract_urls_to_markup(text, btn_text, btn_url)
+                                final_reset_markup = reset_markup if reset_markup else extracted_markup
+
+                                await _dispatch_radar_notice(
+                                    chat_id=chat_id,
+                                    text=cleaned_text,
+                                    media_id=media_id,
+                                    media_type=media_type,
+                                    auto_delete_after=autodel,
+                                    reply_markup=final_reset_markup
+                                )
+                        except Exception as reset_notice_err:
+                            logger.warning(f"Aviso despachando aviso de reset en {chat_id}: {reset_notice_err}")
 
                         try:
                             await _dispatch_sentinel_payload(chat_id, origin="optimizacion_3.5h")
@@ -1203,7 +1239,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                             auto_delete_after=30
                                         )
                                     else:
-                                        asyncio.create_task(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
+                                        _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
                                 except Exception:
                                     pass
 
@@ -1261,8 +1297,23 @@ async def vc_scheduler_loop():
                         await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
                         await update_vc_call_status(group_id, 1)
                         if _global_bot:
-                            await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["start"], parse_mode="HTML")
-                            asyncio.create_task(_dispatch_pinned_vc_welcome(group_id, lang="es"))
+                            svc_cfg = await get_sentinel_service_messages_config(group_id)
+                            if svc_cfg.get("sched_enabled", 1) == 1:
+                                sched_text = svc_cfg.get("sched_start_text") or VC_SCHED_MESSAGES["start"]
+                                sched_media_id = svc_cfg.get("sched_start_media_id")
+                                sched_media_type = svc_cfg.get("sched_start_media_type")
+                                sched_autodel = svc_cfg.get("sched_start_autodel", 0) or 0
+                                cleaned_sched_text, sched_markup = _extract_urls_to_markup(sched_text)
+
+                                await _dispatch_radar_notice(
+                                    chat_id=group_id,
+                                    text=cleaned_sched_text,
+                                    media_id=sched_media_id,
+                                    media_type=sched_media_type,
+                                    auto_delete_after=sched_autodel if sched_autodel > 0 else None,
+                                    reply_markup=sched_markup
+                                )
+                            _spawn(_dispatch_pinned_vc_welcome(group_id, lang="es"))
                             try:
                                 await _dispatch_sentinel_payload(group_id, origin="apertura_programada")
                             except Exception as payload_err:
@@ -1410,7 +1461,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             pass
         return False
     except PeerIdInvalid:
-        logger.error(f"⚠️ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
+        logger.error(f"⚠️️ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
         return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
@@ -1526,7 +1577,7 @@ async def pending_auth_cleanup_loop():
 async def init_assistant_master():
     global _default_my_id
     if assistant_app is None:
-        logger.warning("⚠️️ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
+        logger.warning("⚠ [Centinela Maestro Inactivo] Sin MASTER_SESSION; operando con Centinelas propios por comunidad.")
     else:
         try:
             if not assistant_app.is_connected:
@@ -1541,19 +1592,19 @@ async def init_assistant_master():
             if "AUTH_KEY_DUPLICATED" in err_msg or "406" in err_msg:
                 logger.warning("⚠️ [MASTER_SESSION Clave Duplicada] Telegram detectó uso simultáneo. El maestro continuará en reposo sin afectar a los centinelas dedicados.")
             else:
-                logger.warning(f"⚠️️ [Aviso Centinela Maestro]: {e}")
+                logger.warning(f"⚠ [Aviso Centinela Maestro]: {e}")
 
     await load_all_sentinels()
-    asyncio.create_task(radar_master_loop())
-    asyncio.create_task(vc_scheduler_loop())
-    asyncio.create_task(pending_auth_cleanup_loop())
-    asyncio.create_task(night_mode_autonomous_loop())
+    _spawn(radar_master_loop())
+    _spawn(vc_scheduler_loop())
+    _spawn(pending_auth_cleanup_loop())
+    _spawn(night_mode_autonomous_loop())
 
 
 def start_voice_radar(bot):
     global _global_bot
     _global_bot = bot
-    asyncio.create_task(init_assistant_master())
+    _spawn(init_assistant_master())
 
 
 async def close_all_sentinels():
