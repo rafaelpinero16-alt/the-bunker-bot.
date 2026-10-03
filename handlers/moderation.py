@@ -36,6 +36,15 @@ RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
@@ -43,7 +52,7 @@ def is_super_admin(user_id: int) -> bool:
 
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     """Verifica si el ejecutor cuenta con facultades de creador, administrador o Arquitecto."""
-    if is_super_admin(user_id):
+    if is_super_admin(user_id) or user_id == 1087968824:  # Group Anonymous Bot
         return True
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
@@ -54,7 +63,7 @@ async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 async def is_target_protected(bot: Bot, chat_id: int, target_id: int) -> bool:
     """Verifica si el objetivo posee inmunidad absoluta contra sanciones."""
-    if is_super_admin(target_id):
+    if is_super_admin(target_id) or target_id == 1087968824:
         return True
     try:
         if await is_whitelisted(target_id):
@@ -139,6 +148,7 @@ TEXTS = {
         "help_add_list": "To log a user or term, reply to their message with /{cmd} or type /{cmd} [ID or keyword].",
         "ban_success": "🚫 <b>{name}</b> has been permanently banned from the community.\n\n🛡️ <i>Cloud Media Management</i>",
         "ban_timed_success": "🚫 <b>{name}</b> has been banned for <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
+        "unban_success": "🔓 <b>{name}</b> has been unbanned and unblocked from the community.\n\n🛡️ <i>Cloud Media Management</i>",
         "kick_success": "👢 <b>{name}</b> has been kicked from the community.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_success": "🔇 <b>{name}</b> has been silenced for <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_perm": "🔇 <b>{name}</b> has been permanently silenced.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -147,7 +157,7 @@ TEXTS = {
         "warn_max_hit": "🚨 <b>Strike Limit Reached</b>\n\n<b>{name}</b> hit <b>{limit}/{limit}</b> warnings. Executing automated action: <code>{action}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_cleared": "🟢 Warnings reset for <b>{name}</b>. Full voice and chat restored.\n\n🛡️ <i>Cloud Media Management</i>",
         "wl_added": "⚪ <b>{name}</b> registered in Whitelist. Tactical immunity active 🟢\n\n🛡️ <i>Cloud Media Management</i>",
-        "wl_removed": "⚪ <b>{name}</b> removed from Whitelist. Tactical immunity revoked 🔴\n\n🛡️ <i>Cloud Media Management</i>",
+        "wl_removed": "⚪ <b>{name}</b> removed from Whitelist. Tactical immunity revoked 🔴\n\n🛡️️ <i>Cloud Media Management</i>",
         "wl_status": "⚪ <b>Active Whitelist:</b> Verified users exempt from security filters.\n\n🛡️ <i>Cloud Media Management</i>",
         "bl_added": "⚫ Keyword <code>{word}</code> registered in Blacklist. Auto-purge protocol active 🔴\n\n🛡️ <i>Cloud Media Management</i>",
         "bl_status": "⚫ <b>Active Blacklist:</b> {total} prohibited terms logged in database.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -177,6 +187,7 @@ TEXTS = {
         "help_add_list": "Para registrar una identidad o término, responde a un mensaje con /{cmd} o escribe /{cmd} [ID o palabra].",
         "ban_success": "🚫 <b>{name}</b> ha sido desterrado permanentemente de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "ban_timed_success": "🚫 <b>{name}</b> ha sido baneado por <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
+        "unban_success": "🔓 <b>{name}</b> ha sido desbaneado y desbloqueado de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "kick_success": "👢 <b>{name}</b> ha sido expulsado temporalmente del grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_success": "🔇 <b>{name}</b> ha sido silenciado por <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_perm": "🔇 <b>{name}</b> ha sido silenciado permanentemente.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -201,11 +212,24 @@ async def extract_target_user(message: Message, command: CommandObject):
     if command and command.args:
         arg = command.args.split()[0].strip()
         if arg.isdigit():
+            user_id = int(arg)
             try:
-                chat_member = await message.bot.get_chat_member(chat_id=message.chat.id, user_id=int(arg))
+                chat_member = await message.bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
                 return chat_member.user
             except Exception:
-                return None
+                try:
+                    user_chat = await message.bot.get_chat(user_id)
+                    return user_chat
+                except Exception:
+                    # Objeto ligero para permitir sanción/desbaneo de IDs externos
+                    class _SimpleUser:
+                        def __init__(self, uid):
+                            self.id = uid
+                            self.full_name = f"ID: {uid}"
+                            self.first_name = f"ID: {uid}"
+                            self.username = None
+                            self.is_bot = False
+                    return _SimpleUser(user_id)
         elif arg.startswith("@"):
             try:
                 user_chat = await message.bot.get_chat(arg)
@@ -243,7 +267,7 @@ async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKey
     except Exception:
         bot_info = await message.bot.get_me()
         warn = await message.reply(TEXTS[lang]["start_pm_warning"].format(bot_user=bot_info.username), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, warn, delay=10))
+        _spawn(auto_delete_pair(message, warn, delay=10))
 
 
 async def validate_moderation_target(message: Message, command: CommandObject, bot: Bot, cmd_name: str):
@@ -254,7 +278,9 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
+    # Reconocimiento de administradores anónimos en supergrupos
+    is_anon = bool(message.sender_chat and message.sender_chat.id == message.chat.id)
+    if not is_anon and not await is_operator_admin(bot, message.chat.id, message.from_user.id):
         try:
             await message.delete()
         except Exception:
@@ -264,23 +290,24 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
     target = await extract_target_user(message, command)
     if not target:
         msg = await message.reply(t["target_needed"].format(cmd=cmd_name), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=10))
+        _spawn(auto_delete_pair(message, msg, delay=10))
         return None, None, None
 
     bot_info = await bot.get_me()
     if target.id == bot_info.id:
         msg = await message.reply(t["bot_sanction"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=8))
+        _spawn(auto_delete_pair(message, msg, delay=8))
         return None, None, None
 
-    if target.id == message.from_user.id:
+    if not is_anon and target.id == message.from_user.id:
         msg = await message.reply(t["self_sanction"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=8))
+        _spawn(auto_delete_pair(message, msg, delay=8))
         return None, None, None
 
-    if await is_target_protected(bot, message.chat.id, target.id):
+    # En caso de desbaneo (/unban), se omite el bloqueo de objetivo protegido
+    if cmd_name != "unban" and await is_target_protected(bot, message.chat.id, target.id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=8))
+        _spawn(auto_delete_pair(message, msg, delay=8))
         return None, None, None
 
     limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, cmd_name, lang, bot)
@@ -329,6 +356,24 @@ async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["ban_title"].format(group_name=html.escape(chat_title), name=target_name)
     await send_remote_menu(message, lang, text, kb)
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message, command: CommandObject, bot: Bot):
+    """Levanta el baneo de un usuario y restaura su acceso a la comunidad."""
+    lang, t, target = await validate_moderation_target(message, command, bot, "unban")
+    if not target:
+        return
+
+    try:
+        await bot.unban_chat_member(chat_id=message.chat.id, user_id=target.id, only_if_banned=True)
+        raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
+        target_name = html.escape(raw_name)
+        text = t["unban_success"].format(name=target_name)
+        await send_remote_menu(message, lang, text, None)
+    except Exception as e:
+        msg = await message.reply(t["error"].format(error=e), parse_mode="HTML")
+        _spawn(auto_delete_pair(message, msg, delay=10))
 
 
 @router.message(Command("kick"))
@@ -393,12 +438,14 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
     if not target:
         return
 
+    # Extracción fiel del motivo según provenga de respuesta directa o argumentos
     reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
-    if command and command.args:
-        args_parts = command.args.split(maxsplit=1)
-        if len(args_parts) > 1 and not args_parts[0].isdigit() and not args_parts[0].startswith("@"):
+    if message.reply_to_message:
+        if command and command.args:
             reason = command.args.strip()
-        elif len(args_parts) > 1:
+    elif command and command.args:
+        args_parts = command.args.split(maxsplit=1)
+        if len(args_parts) > 1:
             reason = args_parts[1].strip()
 
     raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
@@ -425,18 +472,47 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
     except Exception as e:
         logger.debug(f"Aviso ejecutando ladder de advertencias desde moderation: {e}")
 
-    # Fallback si el enlace fallara
+    # Fallback robusto en caso de excepción
     cfg = await get_warns_config(message.chat.id)
     limit = cfg.get("limit", 3)
+    action = cfg.get("action", "mute")
     current_strikes = await add_user_strike(message.chat.id, target.id, reason=reason)
-    text = t["warn_issued"].format(name=target_mention, current=current_strikes, limit=limit, reason=reason)
-    msg = await message.reply(text, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, delay=12))
+
+    if current_strikes >= limit:
+        await reset_user_strikes(message.chat.id, target.id)
+        try:
+            if action == "ban":
+                await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
+            elif action == "kick":
+                await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id, until_date=int(time.time() + 35))
+                await bot.unban_chat_member(chat_id=message.chat.id, user_id=target.id)
+            elif action == "mute":
+                await bot.restrict_chat_member(
+                    chat_id=message.chat.id, 
+                    user_id=target.id,
+                    permissions=ChatPermissions(can_send_messages=False)
+                )
+            try:
+                await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=True, volume=0)
+            except Exception:
+                pass
+            msg = await message.reply(t["warn_max_hit"].format(name=target_mention, limit=limit, action=action.upper()), parse_mode="HTML")
+        except Exception as ex:
+            msg = await message.reply(f"❌ Error: {ex}", parse_mode="HTML")
+    else:
+        try:
+            vol = int(10000 * max(0, limit - current_strikes) / max(1, limit))
+            await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=False, volume=vol)
+        except Exception:
+            pass
+        msg = await message.reply(t["warn_issued"].format(name=target_mention, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
+
+    _spawn(auto_delete_pair(message, msg, delay=12))
 
 
 @router.message(Command("unwarn", "resetwarns"))
 async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
-    """Restablece a cero las advertencias acumuladas por un usuario y restaura su voz."""
+    """Restablece a cero las advertencias acumuladas por un usuario y restaura facultades de texto y voz."""
     if message.chat.type == "private":
         return
     lang = get_lang(message.from_user.language_code)
@@ -452,19 +528,39 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
     target = await extract_target_user(message, command)
     if not target:
         msg = await message.reply(t["target_needed"].format(cmd="unwarn"), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=10))
+        _spawn(auto_delete_pair(message, msg, delay=10))
         return
 
     await reset_user_strikes(message.chat.id, target.id)
+    
+    # 1. Restaurar volumen acústico en la llamada
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=False, volume=10000)
     except Exception:
         pass
 
+    # 2. Restaurar permisos completos de texto y multimedia en el chat general
+    permissions = ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True
+    )
+    try:
+        await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target.id, permissions=permissions)
+    except Exception as e:
+        logger.debug(f"Aviso restaurando permisos de chat en unwarn ({target.id}): {e}")
+
     raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
     text = t["warn_cleared"].format(name=html.escape(raw_name))
     msg = await message.reply(text, parse_mode="HTML")
-    asyncio.create_task(auto_delete_pair(message, msg, delay=12))
+    _spawn(auto_delete_pair(message, msg, delay=12))
 
 
 # ==========================================
@@ -519,11 +615,24 @@ async def cb_mod_execution(callback: CallbackQuery):
                 await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=until_timestamp)
                 dur = format_duration(minutes, lang)
                 await callback.message.edit_text(t["ban_timed_success"].format(name=target_name, duration=dur), parse_mode="HTML")
+            
+            # Sincronización del padrón local
+            try:
+                from handlers.groups import registry_forget
+                await registry_forget(group_id, target_id)
+            except Exception:
+                pass
         
         elif action == "kick":
             await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
             await callback.bot.unban_chat_member(chat_id=group_id, user_id=target_id)
             await callback.message.edit_text(t["kick_success"].format(name=target_name), parse_mode="HTML")
+            
+            try:
+                from handlers.groups import registry_forget
+                await registry_forget(group_id, target_id)
+            except Exception:
+                pass
         
         elif action == "mute":
             perms = ChatPermissions(
@@ -575,7 +684,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
     target = await extract_target_user(message, command)
     if not target:
         msg = await message.reply(t["target_needed"].format(cmd="unmute"), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=10))
+        _spawn(auto_delete_pair(message, msg, delay=10))
         return
 
     limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "unmute", lang, bot)
@@ -616,7 +725,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
         await send_remote_menu(message, lang, text, None)
     except Exception as e:
         msg = await message.reply(t["error"].format(error=e), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=10))
+        _spawn(auto_delete_pair(message, msg, delay=10))
 
 
 # ==========================================
@@ -695,7 +804,7 @@ async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
         await send_remote_menu(message, lang, text, None)
     else:
         msg = await message.reply(t["target_needed"].format(cmd="unwhitelist"), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, msg, delay=10))
+        _spawn(auto_delete_pair(message, msg, delay=10))
 
 
 # ==========================================
@@ -744,7 +853,7 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
                     "⚠️ El texto es demasiado largo para ser una palabra prohibida. Usa <code>/blacklist [palabra]</code>.\n\n🛡️ <i>Cloud Media Management</i>", 
                     parse_mode="HTML"
                 )
-                asyncio.create_task(auto_delete_pair(message, msg, delay=10))
+                _spawn(auto_delete_pair(message, msg, delay=10))
                 return
             await add_to_blacklist(word)
             text = t["bl_added"].format(word=html.escape(word))
@@ -755,7 +864,7 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
             if target:
                 if await is_target_protected(bot, message.chat.id, target.id):
                     msg = await message.reply(t["target_protected"], parse_mode="HTML")
-                    asyncio.create_task(auto_delete_pair(message, msg, delay=8))
+                    _spawn(auto_delete_pair(message, msg, delay=8))
                     return
 
                 await ban_user(target.id)
