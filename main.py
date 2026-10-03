@@ -2,8 +2,7 @@
 main.py — The Bunker OS (Aiogram 3.x / FastAPI / Pyrogram)
 
 Núcleo de arranque maestro, sincronización de enrutadores, pasarela Web API y
-administración concurrente de clones y Centinelas acústicos.
-Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints de Heatmaps, Reputación y Backups.
+administración concurrente de clones y Centinelas acústicos con tolerancia de red extendida.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from __future__ import annotations
@@ -87,6 +86,7 @@ except ImportError:
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
@@ -180,7 +180,6 @@ _BG_TASKS: Set[asyncio.Task] = set()
 
 
 def _spawn(coro) -> asyncio.Task:
-    """Ejecuta corrutinas en segundo plano reteniendo referencia fuerte para evitar recolección por GC."""
     task = asyncio.create_task(coro)
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
@@ -237,7 +236,6 @@ ws_manager = ConnectionManager()
 
 
 async def emit_radar_event(chat_id: int, event_type: str, data: dict = None):
-    """Emite un evento reactivo en milisegundos a todos los clientes conectados a la sala."""
     payload = {
         "event": event_type,
         "chat_id": str(chat_id),
@@ -275,7 +273,6 @@ async def health_check():
 
 
 def parse_telegram_user_id(init_data: str) -> int:
-    """Valida la firma HMAC del initData de Telegram WebApp y extrae el user_id legítimo."""
     if not init_data:
         return 0
     try:
@@ -289,7 +286,6 @@ def parse_telegram_user_id(init_data: str) -> int:
         computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(computed_hash, received_hash):
-            logging.warning("⚠️️ [initData] Firma inválida rechazada.")
             return 0
 
         auth_date = int(parsed.get("auth_date", 0))
@@ -298,13 +294,12 @@ def parse_telegram_user_id(init_data: str) -> int:
 
         user_json = json.loads(parsed.get("user", "{}"))
         return int(user_json.get("id", 0))
-    except Exception as e:
-        logging.debug(f"Error parseando initData: {e}")
+    except Exception:
         return 0
 
 
 SESSION_SECRET = hashlib.sha256(f"bunker-web-session::{BOT_TOKEN}".encode()).digest()
-SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días
+SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 
 
 def issue_session_token(user_id: int, first_name: str = "", username: str = "", photo_url: str = "") -> str:
@@ -1087,7 +1082,7 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
     
     lang_code = callback.from_user.language_code if callback.from_user else ""
     is_es = bool(lang_code and lang_code.startswith("es"))
-    text = "⚠️️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
+    text = "⚠️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
     
     try:
         await callback.answer(text, show_alert=True)
@@ -1259,36 +1254,39 @@ async def main():
     _spawn(run_fastapi_server())
     print(f"🌐 [API Backend & WebSockets]: Servidor activo en puerto {os.getenv('PORT', 8080)}.")
 
+    # 🛡️ Sesión HTTP con timeout extendido a 60s para evitar caídas por latencia de red hacia Telegram
+    session = AiohttpSession(timeout=60.0)
     master_bot = Bot(
         token=BOT_TOKEN, 
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     master_bot_instance = master_bot
     set_master_bot_id(master_bot.id)
-    try:
-        master_info = await master_bot.get_me()
-        set_master_bot_username(master_info.username or "")
-    except Exception as e:
-        print(f"⚠️ [Identidad Maestro]: {e}")
+
+    # Identidad con reintentos tolerantes de red
+    for attempt in range(1, 4):
+        try:
+            master_info = await master_bot.get_me()
+            set_master_bot_username(master_info.username or "")
+            print(f"🤖 [Identidad Maestro]: Online como @{master_info.username}")
+            break
+        except Exception as e:
+            print(f"⚠️ [Identidad Maestro - Intento {attempt}/3]: {e}")
+            await asyncio.sleep(3)
 
     # Registro formal de middlewares
     dp.message.middleware(AntiSpamMiddleware())
     dp.message.outer_middleware.register(ActivityTrackerMiddleware())
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
-    # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
     dp.include_router(payments.router)
-    # 2. user_private: consolas privadas, Sentinel Settings, sincronización y creador de planes
     dp.include_router(user_private.router)
-    # 3. moderation y admin_group: comandos ejecutivos y /reload antes de procesar el chat general
     dp.include_router(moderation.router)
     dp.include_router(admin_group.router)
-    # 4. ecosystem y vc_manager: telemetría y directivas de videollamada
     dp.include_router(ecosystem.router)
     dp.include_router(vc_manager.router)
-    # 5. groups: aduana captcha, anti-flood, gamificación y matriz perimetral
     dp.include_router(groups.router)
-    # 6. fallback_router: salvaguarda de callbacks huérfanos
     dp.include_router(fallback_router)
 
     # Inicialización del Radar Acústico MTProto y Centinelas dedicados
@@ -1297,11 +1295,9 @@ async def main():
     except Exception as e:
         print(f"⚠️ [Radar MTProto]: {e}")
 
-    # Inicialización del worker de difusión recurrente de planes en canales
     if hasattr(ecosystem, "start_channel_broadcast_worker"):
         _spawn(ecosystem.start_channel_broadcast_worker(master_bot))
 
-    # Carga concurrente de bots clones persistidos en SQLite
     try:
         stored_clones = await get_all_active_clone_tokens()
         for clone_token in stored_clones:
@@ -1310,7 +1306,16 @@ async def main():
         print(f"⚠️ [Clones BD]: {e}")
 
     try:
-        await master_bot.delete_webhook(drop_pending_updates=True)
+        # Limpieza tolerante de webhook con reintentos
+        for attempt in range(1, 4):
+            try:
+                await master_bot.delete_webhook(drop_pending_updates=True)
+                print("✅ [Webhook]: Limpiado correctamente.")
+                break
+            except Exception as wh_err:
+                print(f"⚠️ [Aviso Webhook - Intento {attempt}/3]: {wh_err}")
+                await asyncio.sleep(2)
+
         allowed_updates = dp.resolve_used_update_types()
         required_updates = [
             "message", "callback_query", "pre_checkout_query", 
