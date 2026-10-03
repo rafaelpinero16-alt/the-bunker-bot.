@@ -276,314 +276,48 @@ def init_db():
 
         _ensure_columns(cursor, "group_settings", settings_columns)
         
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS command_usage (
-                group_id INTEGER, 
-                command TEXT, 
-                usage_date TEXT, 
-                count INTEGER DEFAULT 0,
-                PRIMARY KEY (group_id, command, usage_date)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS vip_mic_passes (
-                user_id INTEGER, 
-                group_id INTEGER, 
-                expires_at TIMESTAMP,
-                PRIMARY KEY (user_id, group_id)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS command_usage (group_id INTEGER, command TEXT, usage_date TEXT, count INTEGER DEFAULT 0, PRIMARY KEY (group_id, command, usage_date))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS vip_mic_passes (user_id INTEGER, group_id INTEGER, expires_at TIMESTAMP, PRIMARY KEY (user_id, group_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vip_mic_passes ON vip_mic_passes (user_id, group_id, expires_at)")
-        
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS user_groups (
-                user_id INTEGER, 
-                group_id INTEGER, 
-                group_name TEXT,
-                chat_type TEXT DEFAULT 'supergroup',
-                PRIMARY KEY (user_id, group_id)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS group_tip_targets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id INTEGER,
-                target_value TEXT,
-                is_active INTEGER DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(group_id, target_value)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")
         _ensure_columns(cursor, "group_tip_targets", [("is_active", "INTEGER DEFAULT 1")])
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS bot_clones (
-                user_id INTEGER, 
-                group_id INTEGER, 
-                bot_token TEXT UNIQUE, 
-                bot_username TEXT,
-                status TEXT DEFAULT 'active', 
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, group_id)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS owner_sessions (
-                user_id INTEGER,
-                group_id INTEGER,
-                session_string TEXT NOT NULL,
-                phone_number TEXT,
-                api_id INTEGER,
-                api_hash TEXT,
-                status TEXT DEFAULT 'active',
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, group_id)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS vc_schedules (
-                group_id INTEGER PRIMARY KEY,
-                days TEXT DEFAULT '1,2,3,4,5,6,7',
-                start_time TEXT DEFAULT '20:00',
-                end_time TEXT DEFAULT '23:00',
-                status INTEGER DEFAULT 0,
-                call_active INTEGER DEFAULT 0
-            )
-        """)
-
+        cursor.execute("CREATE TABLE IF NOT EXISTS bot_clones (user_id INTEGER, group_id INTEGER, bot_token TEXT UNIQUE, bot_username TEXT, status TEXT DEFAULT 'active', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, group_id))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS owner_sessions (user_id INTEGER, group_id INTEGER, session_string TEXT NOT NULL, phone_number TEXT, api_id INTEGER, api_hash TEXT, status TEXT DEFAULT 'active', updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, group_id))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS vc_schedules (group_id INTEGER PRIMARY KEY, days TEXT DEFAULT '1,2,3,4,5,6,7', start_time TEXT DEFAULT '20:00', end_time TEXT DEFAULT '23:00', status INTEGER DEFAULT 0, call_active INTEGER DEFAULT 0)")
         _ensure_columns(cursor, "owner_sessions", [("last_error", "TEXT")])
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS panic_snapshots (
-                group_id INTEGER PRIMARY KEY,
-                lock_media INTEGER DEFAULT 0,
-                lock_links INTEGER DEFAULT 0,
-                lock_stickers INTEGER DEFAULT 0,
-                captcha_status INTEGER DEFAULT 0,
-                captcha_mode INTEGER DEFAULT 1,
-                captcha_time INTEGER DEFAULT 60,
-                antispam INTEGER DEFAULT 0,
-                antispam_delete INTEGER DEFAULT 0,
-                antiflood_msgs INTEGER DEFAULT 10,
-                antiflood_time INTEGER DEFAULT 15,
-                antiflood_action TEXT DEFAULT 'kick',
-                chat_permissions_json TEXT,
-                activated_by INTEGER,
-                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS night_snapshots (
-                group_id INTEGER PRIMARY KEY,
-                lock_media INTEGER DEFAULT 0,
-                lock_links INTEGER DEFAULT 0,
-                lock_stickers INTEGER DEFAULT 0,
-                lock_commands INTEGER DEFAULT 0,
-                activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS user_strikes (
-                group_id INTEGER,
-                user_id INTEGER,
-                strikes INTEGER DEFAULT 0,
-                last_strike_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_reason TEXT DEFAULT 'Regla violada',
-                PRIMARY KEY (group_id, user_id)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS panic_snapshots (group_id INTEGER PRIMARY KEY, lock_media INTEGER DEFAULT 0, lock_links INTEGER DEFAULT 0, lock_stickers INTEGER DEFAULT 0, captcha_status INTEGER DEFAULT 0, captcha_mode INTEGER DEFAULT 1, captcha_time INTEGER DEFAULT 60, antispam INTEGER DEFAULT 0, antispam_delete INTEGER DEFAULT 0, antiflood_msgs INTEGER DEFAULT 10, antiflood_time INTEGER DEFAULT 15, antiflood_action TEXT DEFAULT 'kick', chat_permissions_json TEXT, activated_by INTEGER, activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS night_snapshots (group_id INTEGER PRIMARY KEY, lock_media INTEGER DEFAULT 0, lock_links INTEGER DEFAULT 0, lock_stickers INTEGER DEFAULT 0, lock_commands INTEGER DEFAULT 0, activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS user_strikes (group_id INTEGER, user_id INTEGER, strikes INTEGER DEFAULT 0, last_strike_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_reason TEXT DEFAULT 'Regla violada', PRIMARY KEY (group_id, user_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_strikes ON user_strikes (group_id, user_id)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS speaker_queue (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id INTEGER,
-                user_id INTEGER,
-                full_name TEXT,
-                username TEXT,
-                stars_paid INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'waiting',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS speaker_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, user_id INTEGER, full_name TEXT, username TEXT, stars_paid INTEGER DEFAULT 0, status TEXT DEFAULT 'waiting', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS group_tips (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                group_id INTEGER,
-                user_id INTEGER,
-                stars_amount INTEGER,
-                message TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS group_tips (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, user_id INTEGER, stars_amount INTEGER, message TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_tips ON group_tips (group_id, user_id)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS flagged_userbots (
-                user_id INTEGER,
-                group_id INTEGER,
-                reason TEXT,
-                flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (user_id, group_id)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS flagged_userbots (user_id INTEGER, group_id INTEGER, reason TEXT, flagged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (user_id, group_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flagged_userbots ON flagged_userbots (group_id, user_id)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_settings (
-                channel_id INTEGER PRIMARY KEY,
-                sub_price INTEGER DEFAULT 0,
-                grace_days INTEGER DEFAULT 1,
-                auto_kick INTEGER DEFAULT 1,
-                notify_renewal INTEGER DEFAULT 1,
-                custom_welcome TEXT
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_plans (
-                plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id INTEGER NOT NULL,
-                plan_name TEXT NOT NULL,
-                duration_days INTEGER NOT NULL,
-                stars_price INTEGER NOT NULL,
-                status TEXT DEFAULT 'active',
-                promo_text TEXT,
-                media_id TEXT,
-                media_type TEXT,
-                target_link TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS channel_settings (channel_id INTEGER PRIMARY KEY, sub_price INTEGER DEFAULT 0, grace_days INTEGER DEFAULT 1, auto_kick INTEGER DEFAULT 1, notify_renewal INTEGER DEFAULT 1, custom_welcome TEXT)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS channel_plans (plan_id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, plan_name TEXT NOT NULL, duration_days INTEGER NOT NULL, stars_price INTEGER NOT NULL, status TEXT DEFAULT 'active', promo_text TEXT, media_id TEXT, media_type TEXT, target_link TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_channel ON channel_plans (channel_id, status)")
-
-        channel_plan_cols = [
-            ("status", "TEXT DEFAULT 'active'"),
-            ("promo_text", "TEXT"),
-            ("media_id", "TEXT"),
-            ("media_type", "TEXT"),
-            ("target_link", "TEXT"),
-            ("broadcast_chat_id", "INTEGER"),
-            ("broadcast_interval_hours", "INTEGER"),
-            ("next_broadcast_at", "TIMESTAMP"),
-            ("broadcast_enabled", "INTEGER DEFAULT 0")
-        ]
-        _ensure_columns(cursor, "channel_plans", channel_plan_cols)
-
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_channel_plans_broadcast "
-            "ON channel_plans (broadcast_enabled, next_broadcast_at)"
-        )
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_subscriptions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                channel_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                plan_id INTEGER,
-                stars_paid INTEGER NOT NULL,
-                invite_link TEXT,
-                subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                status TEXT DEFAULT 'active',
-                last_warned_at TIMESTAMP,
-                FOREIGN KEY(plan_id) REFERENCES channel_plans(plan_id),
-                UNIQUE(channel_id, user_id)
-            )
-        """)
+        _ensure_columns(cursor, "channel_plans", [
+            ("status", "TEXT DEFAULT 'active'"), ("promo_text", "TEXT"), ("media_id", "TEXT"), ("media_type", "TEXT"),
+            ("target_link", "TEXT"), ("broadcast_chat_id", "INTEGER"), ("broadcast_interval_hours", "INTEGER"),
+            ("next_broadcast_at", "TIMESTAMP"), ("broadcast_enabled", "INTEGER DEFAULT 0")
+        ])
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_broadcast ON channel_plans (broadcast_enabled, next_broadcast_at)")
+        cursor.execute("CREATE TABLE IF NOT EXISTS channel_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, user_id INTEGER NOT NULL, plan_id INTEGER, stars_paid INTEGER NOT NULL, invite_link TEXT, subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expires_at TIMESTAMP NOT NULL, status TEXT DEFAULT 'active', last_warned_at TIMESTAMP, FOREIGN KEY(plan_id) REFERENCES channel_plans(plan_id), UNIQUE(channel_id, user_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_subs_audit ON channel_subscriptions (status, expires_at)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_owner_registry (
-                user_id    INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                title      TEXT,
-                updated_at INTEGER,
-                PRIMARY KEY (user_id, channel_id)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS conversation_state_store (
-                bot_id     INTEGER NOT NULL,
-                user_id    INTEGER NOT NULL,
-                kind       TEXT    NOT NULL,
-                payload    TEXT,
-                updated_at INTEGER,
-                PRIMARY KEY (bot_id, user_id, kind)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chat_user_activity (
-                group_id INTEGER,
-                user_id INTEGER,
-                full_name TEXT,
-                username TEXT,
-                message_count INTEGER DEFAULT 0,
-                reply_count INTEGER DEFAULT 0,
-                is_admin INTEGER DEFAULT 0,
-                last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (group_id, user_id)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS channel_owner_registry (user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, title TEXT, updated_at INTEGER, PRIMARY KEY (user_id, channel_id))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS conversation_state_store (bot_id INTEGER NOT NULL, user_id INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT, updated_at INTEGER, PRIMARY KEY (bot_id, user_id, kind))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS chat_user_activity (group_id INTEGER, user_id INTEGER, full_name TEXT, username TEXT, message_count INTEGER DEFAULT 0, reply_count INTEGER DEFAULT 0, is_admin INTEGER DEFAULT 0, last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (group_id, user_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_user_activity ON chat_user_activity (group_id, message_count DESC)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chat_monthly_metrics (
-                group_id INTEGER,
-                month_key TEXT,
-                total_messages INTEGER DEFAULT 0,
-                total_users INTEGER DEFAULT 0,
-                PRIMARY KEY (group_id, month_key)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chat_user_reputation (
-                group_id INTEGER,
-                user_id INTEGER,
-                full_name TEXT,
-                username TEXT,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1,
-                last_xp_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (group_id, user_id)
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS chat_monthly_metrics (group_id INTEGER, month_key TEXT, total_messages INTEGER DEFAULT 0, total_users INTEGER DEFAULT 0, PRIMARY KEY (group_id, month_key))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS chat_user_reputation (group_id INTEGER, user_id INTEGER, full_name TEXT, username TEXT, xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, last_xp_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (group_id, user_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_reputation_xp ON chat_user_reputation (group_id, xp DESC)")
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS chat_hourly_activity (
-                group_id INTEGER,
-                day_of_week INTEGER,
-                hour_of_day INTEGER,
-                message_count INTEGER DEFAULT 0,
-                PRIMARY KEY (group_id, day_of_week, hour_of_day)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS ai_chat_context (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        cursor.execute("CREATE TABLE IF NOT EXISTS chat_hourly_activity (group_id INTEGER, day_of_week INTEGER, hour_of_day INTEGER, message_count INTEGER DEFAULT 0, PRIMARY KEY (group_id, day_of_week, hour_of_day))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS ai_chat_context (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_context_chat ON ai_chat_context (chat_id, created_at)")
-
         conn.commit()
 
     init_default_blacklist()
@@ -602,7 +336,6 @@ def init_default_blacklist():
         cursor = conn.cursor()
         cursor.executemany("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", [(w.lower().strip(),) for w in banned_words])
         conn.commit()
-
 
 @db_async
 def get_or_create_user(user_id: int, username: str, full_name: str):
@@ -921,7 +654,7 @@ def get_mic_vip_custom_config(group_id: int) -> dict:
                 price_val = row[1] if (row[1] is not None and row[1] > 0) else (row[0] if (row[0] is not None and row[0] > 0) else 50)
                 return {
                     "price": price_val,
-                    "tag": row[2] if row[2] else "⚜️MIC🎙️VIP⚜️️",
+                    "tag": row[2] if row[2] else "⚜️MIC🎙️VIP⚜️",
                     "text": row[3] if row[3] else ""
                 }
         except sqlite3.OperationalError:
@@ -995,7 +728,7 @@ def get_vip_badge_title(group_id: int) -> str:
             else:
                 title = "Pase VIP 24h 🎙️"
         except sqlite3.OperationalError:
-            title = "Pase VIP 24h 🎙️"
+            title = "Pase VIP 24h 🎙️️"
     return title[:16]
 
 
@@ -2767,232 +2500,6 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
         "group_id": group_id, "matrix": matrix,
         "days": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
     }
-
-
-@db_async
-def get_chat_dashboard_data(chat_id: int) -> dict:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT tier FROM approved_groups WHERE group_id = ?", (chat_id,))
-        row = cursor.fetchone()
-        tier = row[0] if row else "free"
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT log_channel_id, spam_detection_mode, timezone, chat_language, 
-                   active_modules_count, captcha_status, autolower, screen_shield_status, lock_links
-            FROM group_settings WHERE group_id = ?
-        """, (chat_id,))
-        row = cursor.fetchone()
-        
-        log_id = row[0] if row and row[0] else None
-        spam_mode = row[1] if row and row[1] else "smart"
-        tz = row[2] if row and row[2] else "Bogota (UTC-05)"
-        lang = row[3] if row and row[3] else "ES"
-        active_mods = row[4] if row and row[4] is not None else 11
-        
-        captcha_active = bool(row[5]) if row and row[5] is not None else True
-        autolower_active = bool(row[6]) if row and row[6] is not None else True
-        shield_active = bool(row[7]) if row and row[7] is not None else True
-        linklock_active = bool(row[8]) if row and row[8] is not None else False
-
-        return {
-            "chat_id": str(chat_id),
-            "plan": {"name": tier.capitalize(), "status": "active" if tier != "free" else "empty"},
-            "log_channel": {"enabled": log_id is not None, "channel_id": log_id},
-            "modules": {"active": active_mods, "total": 91},
-            "protection": {"enabled": True, "spam_mode": spam_mode, "timezone": tz, "language": lang},
-            "switches": {"captcha": captcha_active, "autolower": autolower_active, "shield": shield_active, "linklock": linklock_active},
-            "modules_errors": [],
-            "footer_metrics": {}
-        }
-
-
-@db_async
-def get_chat_timeseries_stats(chat_id: int) -> dict:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT month_key, total_messages, total_users
-            FROM chat_monthly_metrics WHERE group_id = ?
-            ORDER BY rowid DESC LIMIT 12
-        """, (chat_id,))
-        rows = cursor.fetchall()
-        
-        if not rows:
-            months = ["May '26", "Jun '26", "Jul '26", "Aug '26", "Sep '26"]
-            return {"months": months, "mau": [0, 0, 0, 0, 0], "messages": [0, 0, 0, 0, 0], "messages_per_user": [0, 0, 0, 0, 0]}
-
-        months = [r[0] for r in reversed(rows)]
-        messages = [r[1] for r in reversed(rows)]
-        mau = [r[2] for r in reversed(rows)]
-        msgs_per_user = [round(m / max(1, u), 1) for m, u in zip(messages, mau)]
-
-        return {"months": months, "mau": mau, "messages": messages, "messages_per_user": msgs_per_user}
-
-
-@db_async
-def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT user_id, full_name, username, message_count
-            FROM chat_user_activity WHERE group_id = ?
-            ORDER BY message_count DESC LIMIT ?
-        """, (chat_id, limit))
-        rows = cursor.fetchall()
-        
-        res = []
-        for idx, r in enumerate(rows, start=1):
-            act_level = 4 if r[3] > 300 else (3 if r[3] > 150 else (2 if r[3] > 50 else 1))
-            res.append({
-                "rank": idx,
-                "name": r[1] or f"User {r[0]}",
-                "badge": f"@{r[2]}" if r[2] else "",
-                "activity_level": act_level,
-                "messages": r[3]
-            })
-        return res
-
-
-@db_async
-def get_chat_admin_stats(chat_id: int) -> list:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT full_name, username, message_count, reply_count
-                FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
-                ORDER BY message_count DESC
-            """, (chat_id,))
-            rows = cursor.fetchall()
-        except sqlite3.OperationalError:
-            return []
-        
-        return [
-            {
-                "name": r[0] or f"Admin {r[1]}",
-                "role": "Administrator",
-                "messages": r[2],
-                "replies": r[3],
-                "actions": 0
-            }
-            for r in rows
-        ]
-
-
-@db_async
-def update_chat_operational_settings(chat_id: int, settings: dict):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        updates = []
-        params = []
-        
-        if "spam_mode" in settings:
-            updates.append("spam_detection_mode = ?")
-            params.append(settings["spam_mode"])
-        if "timezone" in settings:
-            updates.append("timezone = ?")
-            params.append(settings["timezone"])
-        if "language" in settings:
-            updates.append("chat_language = ?")
-            params.append(settings["language"])
-        if "log_channel_id" in settings:
-            updates.append("log_channel_id = ?")
-            params.append(settings["log_channel_id"])
-            
-        if "captcha" in settings:
-            updates.append("captcha_status = ?")
-            params.append(1 if settings["captcha"] else 0)
-        if "autolower" in settings:
-            updates.append("autolower = ?")
-            params.append(1 if settings["autolower"] else 0)
-        if "shield" in settings:
-            updates.append("screen_shield_status = ?")
-            params.append(1 if settings["shield"] else 0)
-        if "linklock" in settings:
-            updates.append("lock_links = ?")
-            params.append(1 if settings["linklock"] else 0)
-            
-        cursor.execute("""
-            INSERT INTO group_settings (group_id) VALUES (?)
-            ON CONFLICT(group_id) DO NOTHING
-        """, (chat_id,))
-        
-        if updates:
-            params.append(chat_id)
-            query = f"UPDATE group_settings SET {', '.join(updates)} WHERE group_id = ?"
-            cursor.execute(query, tuple(params))
-        conn.commit()
-
-
-@db_async
-def get_user_global_stats(user_id: int) -> dict:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", (user_id,))
-        total_chats = cursor.fetchone()[0]
-
-        cursor.execute("""
-            SELECT COUNT(s.id) FROM channel_subscriptions s
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ? AND s.status = 'active' AND s.expires_at > datetime('now')
-        """, (user_id,))
-        vip_subs = cursor.fetchone()[0]
-
-        cursor.execute("""
-            SELECT SUM(s.stars_paid) FROM channel_subscriptions s
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            WHERE ug.user_id = ?
-        """, (user_id,))
-        rev_stars = cursor.fetchone()[0] or 0
-
-        return {
-            "subscribers": vip_subs,
-            "revenue_stars": rev_stars,
-            "verified": total_chats,
-            "expelled": 0,
-            "purges": 0,
-            "perimeter": {
-                "captcha": "Activo 🟢",
-                "autolower": "2% Activo 🟢",
-                "shield": "Blindado 🟢",
-                "broadcast": "Worker Activo 🟢",
-                "captcha_active": True,
-                "autolower_active": True,
-                "shield_active": True,
-                "linklock_active": False
-            }
-        }
-
-
-@db_async
-def get_user_subscribers_audit(user_id: int) -> list:
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT s.user_id, p.plan_name, s.stars_paid, 
-                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left,
-                   u.username
-            FROM channel_subscriptions s
-            JOIN channel_plans p ON s.plan_id = p.plan_id
-            JOIN user_groups ug ON s.channel_id = ug.group_id
-            LEFT JOIN users u ON s.user_id = u.user_id
-            WHERE ug.user_id = ? AND s.status = 'active'
-            ORDER BY s.expires_at ASC
-        """, (user_id,))
-        rows = cursor.fetchall()
-        return [
-            {
-                "user_id": r[0],
-                "username": r[4] if r[4] else str(r[0]),
-                "plan_name": r[1],
-                "price": r[2],
-                "days_left": max(0, r[3]) if r[3] is not None else 0
-            }
-            for r in rows
-        ]
 
 
 @db_async
