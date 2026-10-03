@@ -80,6 +80,33 @@ FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, UserDeactivated, User
 
 logger = logging.getLogger("assistant_radar")
 
+SCREEN_SHIELD_ALERT_TEXT = (
+    "🛡️ <b>Escudo Antinota activado</b>\n\n"
+    "El participante {user_name} fue detectado con presentación o video no autorizado y fue removido del videochat.\n"
+    "La sala queda protegida y la presencia no autorizada queda bloqueada.\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
+VC_SCHED_MESSAGES = {
+    "start": (
+        "📡 <b>Videochat programada abierta</b>\n\n"
+        "La sala de voz queda activa por horario del Bunker y la supervisión perimetral está en línea.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+    "end": (
+        "📡 <b>Videochat programada cerrada</b>\n\n"
+        "La sala de voz queda temporalmente cerrada según el horario programado del Bunker.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+}
+
+GHOST_PURGE_ALERT_TEXT = (
+    "🧹 <b>Purgado de cuentas fantasma</b>\n\n"
+    "Se revisaron {found} cuentas eliminadas o fantasma y se purgaron {purged} con acción: {action}.\n\n"
+    "La limpieza se ejecutó con supervisión del Bunker y la comunidad queda reforzada.\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS Y SERVICIO
 # ==========================================
@@ -174,6 +201,35 @@ def _get_group_now(tz_name: str = None) -> datetime:
         return datetime.now()
 
 
+def _register_forbidden_strike(chat_id: int, action_label: str) -> int:
+    current = _forbidden_strikes.get(chat_id, 0) + 1
+    _forbidden_strikes[chat_id] = current
+    logger.warning(f"⚠️ [Strike prohibido] Grupo {chat_id}: {action_label} (intento {current}/{FORBIDDEN_STRIKE_LIMIT})")
+
+    if current >= FORBIDDEN_STRIKE_LIMIT:
+        _autolower_cooldowns[chat_id] = time.monotonic() + FORBIDDEN_COOLDOWN_SECONDS
+        logger.warning(
+            f"⏳ [Cooldown activado] Grupo {chat_id} bloqueado por {FORBIDDEN_COOLDOWN_SECONDS}s por exceso de acciones prohibidas."
+        )
+    return current
+
+
+def _register_noise_strike(chat_id: int, user_id: int) -> bool:
+    key = (chat_id, user_id)
+    now_ts = time.monotonic()
+    history = _noise_unmute_history.setdefault(key, [])
+    history = [ts for ts in history if now_ts - ts <= NOISE_SPIKE_WINDOW_SECONDS]
+    history.append(now_ts)
+    _noise_unmute_history[key] = history
+
+    if len(history) >= NOISE_SPIKE_STRIKE_LIMIT:
+        history.clear()
+        _noise_unmute_history[key] = history
+        logger.warning(f"⚠️ [Spike de ruido] Usuario {user_id} superó el umbral en grupo {chat_id}.")
+        return True
+    return False
+
+
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
     try:
         cfg = await get_night_mode_config(chat_id)
@@ -218,6 +274,111 @@ def _extract_urls_to_markup(
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
     markup = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     return cleaned_text, markup
+
+
+async def _dispatch_radar_notice(
+    chat_id: int,
+    text: str,
+    media_id: int | str | None = None,
+    media_type: str | None = None,
+    auto_delete_after: int | None = None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+):
+    if not _global_bot:
+        return None
+
+    try:
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+
+        if media_id and media_type:
+            type_key = media_type.lower()
+            if type_key in {"photo", "video", "animation", "document", "voice", "audio"}:
+                payload[type_key] = media_id
+
+        sent = await _global_bot.send_message(**payload)
+
+        if auto_delete_after and auto_delete_after > 0:
+            await asyncio.sleep(auto_delete_after)
+            try:
+                await _global_bot.delete_message(chat_id, sent.message_id)
+            except Exception:
+                pass
+
+        return sent
+    except Exception as exc:
+        logger.debug(f"Aviso enviando radar notice a {chat_id}: {exc}")
+        return None
+
+
+async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
+    if not _global_bot:
+        return None
+    notice = (
+        f"🎙️ <b>Participante en la sala</b>\n\n"
+        f"{user_name} fue detectado en la llamada de voz y su estado fue revisado por el radar del Bunker."
+    )
+    try:
+        return await _global_bot.send_message(chat_id=chat_id, text=notice, parse_mode="HTML")
+    except Exception as exc:
+        logger.debug(f"Aviso enviando VC notice a {chat_id}: {exc}")
+        return None
+
+
+async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
+    if not _global_bot:
+        return None
+    text = (
+        "📡 <b>Videochat activa</b>\n\n"
+        "La sala de voz está operativa y la supervisión perimetral del Bunker está en línea.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    )
+    try:
+        return await _global_bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+    except Exception as exc:
+        logger.debug(f"Aviso enviando welcome VC a {chat_id}: {exc}")
+        return None
+
+
+async def _dispatch_sentinel_payload(chat_id: int, origin: str = "manual"):
+    if not _global_bot:
+        return None
+
+    try:
+        cfg = await get_sentinel_payload_config(chat_id)
+    except Exception as exc:
+        logger.debug(f"Aviso consultando payload del centinela para {chat_id}: {exc}")
+        return None
+
+    if not cfg or cfg.get("enabled") != 1:
+        return None
+
+    payload_text = cfg.get("text")
+    if not payload_text:
+        return None
+
+    media_id = cfg.get("media_id")
+    media_type = cfg.get("media_type")
+    auto_delete_after = cfg.get("auto_delete_after")
+    try:
+        auto_delete_after = int(auto_delete_after) if auto_delete_after is not None else None
+    except (TypeError, ValueError):
+        auto_delete_after = None
+
+    cleaned_text, reply_markup = _extract_urls_to_markup(payload_text)
+    return await _dispatch_radar_notice(
+        chat_id=chat_id,
+        text=cleaned_text,
+        media_id=media_id,
+        media_type=media_type,
+        auto_delete_after=auto_delete_after if auto_delete_after and auto_delete_after > 0 else None,
+        reply_markup=reply_markup,
+    )
 
 
 _LEETSPEAK_PATTERNS = [
@@ -443,6 +604,39 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
 # ==========================================
 # 🛡️ BUCLE RESILIENTE DE MONITOREO DE GRUPOS
 # ==========================================
+async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
+    try:
+        admins = set()
+        try:
+            admin_members = await client.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS)
+            for member in admin_members:
+                if getattr(member, "user", None):
+                    admins.add(member.user.id)
+        except Exception:
+            pass
+
+        if bot_client_id:
+            admins.add(bot_client_id)
+
+        admin_caches[chat_id] = {"admins": admins, "ts": asyncio.get_event_loop().time()}
+        return admins
+    except Exception as e:
+        logger.debug(f"Aviso refrescando caché de administradores para {chat_id}: {e}")
+        return admin_caches.get(chat_id, {}).get("admins", set())
+
+
+async def _verify_active_membership(client: Client, chat_id: int) -> bool:
+    try:
+        member = await client.get_chat_member(chat_id, client.me.id if getattr(client, "me", None) else 0)
+        return bool(member and getattr(member, "status", None) not in (None, "left", "kicked"))
+    except Exception:
+        try:
+            chat = await client.get_chat(chat_id)
+            return getattr(chat, "type", None) in (ChatType.GROUP, ChatType.SUPERGROUP)
+        except Exception:
+            return False
+
+
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
     alerted_users = set()
     current_call = None
@@ -712,7 +906,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     if noise_spike:
                                         await _dispatch_radar_notice(
                                             chat_id=chat_id,
-                                            text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_mention),
+                                            text=SCREEN_SHIELD_ALERT_TEXT.format(user_name=user_mention),
                                             auto_delete_after=30
                                         )
                                     else:
@@ -1038,6 +1232,19 @@ async def radar_master_loop():
         await asyncio.sleep(45)
 
 
+async def cancel_phone_auth(uid: int):
+    """Cancela una sesión pendiente de autenticación por teléfono si aún existe."""
+    try:
+        session_data = pending_auth_sessions.pop(uid, None)
+        if not session_data:
+            return False
+        logger.info(f"🧹 [Auth Pendiente] Cancelando verificación telefónica de UID {uid} por expiración.")
+        return True
+    except Exception as e:
+        logger.debug(f"Aviso cancelando auth pendiente {uid}: {e}")
+        return False
+
+
 async def pending_auth_cleanup_loop():
     TTL_SECONDS = 600
     while True:
@@ -1126,6 +1333,24 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         return False
 
 
+async def _cut_video_and_remove(client: Client, current_call, chat_id: int, user_id: int, participant_peer):
+    if not client or not current_call or participant_peer is None:
+        return False
+    try:
+        await client.invoke(
+            EditGroupCallParticipant(
+                call=current_call,
+                participant=participant_peer,
+                muted=True,
+                volume=0
+            )
+        )
+        return True
+    except Exception as e:
+        logger.debug(f"Aviso cortando presentación de {user_id} en {chat_id}: {e}")
+        return False
+
+
 async def engage_screen_shield(group_id: int):
     await set_screen_shield_status(group_id, 1)
     logger.info(f"🎥 [Escudo Antinota] Activado y persistido para el grupo {group_id}")
@@ -1145,3 +1370,69 @@ async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
 async def disengage_podcast_ducking(group_id: int):
     await set_podcast_mode(group_id, 0)
     logger.info(f"🎙️ [Modo Podcast] Ducking desactivado y persistido en el grupo {group_id}")
+
+async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
+    """Purga de cuentas fantasma o eliminadas mediante MTProto o fallback de Bot API."""
+    sentinel_data = active_sentinels.get(chat_id)
+    client: Client = sentinel_data["client"] if sentinel_data else assistant_app
+
+    found = 0
+    purged = 0
+
+    if client and client.is_connected:
+        try:
+            async for member in client.get_chat_members(chat_id):
+                user = member.user
+                if user and getattr(user, "is_deleted", False):
+                    found += 1
+                    try:
+                        if action == "ban":
+                            await client.ban_chat_member(chat_id, user.id)
+                        else:
+                            await client.ban_chat_member(chat_id, user.id)
+                            await client.unban_chat_member(chat_id, user.id)
+                        purged += 1
+                    except Exception as p_err:
+                        logger.warning(f"Aviso purgando usuario {user.id} en {chat_id}: {p_err}")
+
+            await update_ghost_purge_scan_time(chat_id)
+            if _global_bot and purged > 0:
+                alert_text = GHOST_PURGE_ALERT_TEXT.format(
+                    found=found,
+                    purged=purged,
+                    action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
+                )
+                _spawn(_dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60))
+
+            return {"status": "success", "found": found, "purged": purged, "action": action}
+        except Exception as e:
+            logger.warning(f"Aviso en Ghost Purge MTProto para {chat_id}, activando fallback: {e}")
+
+    if _global_bot:
+        try:
+            await update_ghost_purge_scan_time(chat_id)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,))
+                tracked = cursor.fetchall()
+
+            for (uid,) in tracked:
+                try:
+                    chat_member = await _global_bot.get_chat_member(chat_id, uid)
+                    user = chat_member.user
+                    if getattr(user, "is_deleted", False) or (user.first_name and "Deleted Account" in user.first_name):
+                        found += 1
+                        if chat_member.status not in ("creator", "administrator"):
+                            await _global_bot.ban_chat_member(chat_id, uid)
+                            if action != "ban":
+                                await _global_bot.unban_chat_member(chat_id, uid)
+                            purged += 1
+                            await asyncio.sleep(0.1)
+                except Exception:
+                    continue
+
+            return {"status": "success", "found": found, "purged": purged, "action": action, "fallback": True}
+        except Exception as fb_err:
+            logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
+
+    return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}    
