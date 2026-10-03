@@ -3,6 +3,7 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
+Fase 2: IA Autónoma de Centinela (Grupos/Canales) + Filtrado Semántico en el Borde + Telemetría Gamificada.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -15,8 +16,9 @@ import html
 import re
 from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram import Client
-from pyrogram.enums import ChatMembersFilter, ChatType
+from pyrogram import Client, filters
+from pyrogram.handlers import MessageHandler
+from pyrogram.enums import ChatMembersFilter, ChatType, ChatAction
 from pyrogram.errors import (
     FloodWait, RPCError, Unauthorized,
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
@@ -51,10 +53,15 @@ from database.database import (
     update_ghost_purge_scan_time,
     get_mic_vip_price,
     get_group_tier,
-    get_sentinel_service_messages_config
+    get_sentinel_service_messages_config,
+    save_ai_chat_context,
+    get_ai_chat_context,
+    clear_ai_chat_context,
+    record_hourly_chat_activity,
+    add_user_reputation_xp
 )
 
-# 🤖 Integración de Mistral AI para el Guardián de Voz
+# 🤖 Integración de Mistral AI para el Guardián de Voz y Copiloto
 try:
     from importlib import import_module
     Mistral = import_module("mistralai").Mistral
@@ -212,7 +219,6 @@ def _extract_urls_to_markup(
         label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
         buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
 
-    # Regex protegido: no toca URLs que ya formen parte de hipervínculos HTML (href="...")
     url_pattern = re.compile(r'(?<!href=["\'])(https?://[^\s<>"\']+)')
     found_urls = url_pattern.findall(text)
 
@@ -226,6 +232,247 @@ def _extract_urls_to_markup(
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
     markup = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     return cleaned_text, markup
+
+
+# ==========================================================
+# 🤖 FASE 2: MOTOR CONVERSACIONAL Y FILTRADO SEMÁNTICO
+# ==========================================================
+_LEETSPEAK_PATTERNS = [
+    (re.compile(r'\bc[\W_]*p\b', re.IGNORECASE), "Material Ilícito Evasivo (CP)"),
+    (re.compile(r'\bp[\W_]*[e3][\W_]*d[\W_]*[o0]\b', re.IGNORECASE), "Violación Perimetral Infantil"),
+    (re.compile(r'\bk[\W_]*9\b', re.IGNORECASE), "Zoofilia Evasiva"),
+    (re.compile(r'(free\s+stars|stars\s+hack|claim\s+airdrop|leaked\s+pass)', re.IGNORECASE), "Patrón de Estafa/Phishing"),
+]
+
+
+async def semantic_scan_content(text: str, custom_prompt: str = "") -> dict:
+    """Escaneo híbrido: heurística rápida anti-leetspeak + clasificación semántica con IA."""
+    if not text:
+        return {"flagged": False, "reason": ""}
+
+    # 1. Filtro Heurístico en el Borde (Cero Latencia)
+    for pattern, reason in _LEETSPEAK_PATTERNS:
+        if pattern.search(text):
+            return {"flagged": True, "reason": reason}
+
+    # 2. Análisis Semántico Profundo (Mistral AI)
+    if not mistral_client or len(text.strip()) < 8:
+        return {"flagged": False, "reason": ""}
+
+    system_prompt = (
+        "Eres el Escudo Semántico de The Bunker OS. Analiza el siguiente texto de un chat de Telegram. "
+        "Determina si contiene pornografía infantil, zoofilia, estafas financieras fraudulentas extremas, "
+        "amenazas de muerte directas o leetspeak malicioso. "
+        "Responde estrictamente en formato JSON con dos campos: 'flagged' (true/false) y 'reason' (breve explicación)."
+    )
+
+    try:
+        response = await asyncio.to_thread(
+            mistral_client.chat.complete,
+            model="mistral-small-latest",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ],
+            response_format={"type": "json_object"}
+        )
+        data = json.loads(response.choices[0].message.content)
+        return {"flagged": bool(data.get("flagged")), "reason": data.get("reason", "Infracción semántica")}
+    except Exception as e:
+        logger.debug(f"Aviso en análisis semántico: {e}")
+        return {"flagged": False, "reason": ""}
+
+
+async def generate_sentinel_ai_response(
+    chat_id: int, 
+    user_id: int, 
+    user_name: str, 
+    message_text: str,
+    personality_tone: str = "guardian",
+    custom_prompt: str = ""
+) -> str:
+    """Genera una respuesta contextual de la IA del Centinela dentro de la comunidad."""
+    tones = {
+        "guardian": (
+            "Eres el Centinela Guardián de The Bunker OS (Cloud Media Management © 2026). "
+            "Tu tono es militar, táctico, vigilante, formal y conciso. Defiendes el orden, "
+            "la disciplina y la seguridad perimetral de la comunidad. No usas rodeos ni saludos innecesarios."
+        ),
+        "copilot": (
+            "Eres el Copiloto Inteligente de The Bunker OS. Tu tono es profesional, ágil, servicial "
+            "y ejecutivo. Ayudas a los miembros y anfitriones con información clara, precisa y productiva."
+        ),
+        "pr": (
+            "Eres el Relaciones Públicas y Anfitrión de The Bunker OS. Tu tono es cordial, entusiasta, "
+            "diplomático y enfocado en fomentar la participación respetuosa en el canal y la sala de voz."
+        )
+    }
+
+    tone_prompt = tones.get(personality_tone, tones["guardian"])
+    system_instruction = (
+        f"{tone_prompt}\n"
+        f"Directivas personalizadas del Creador: {custom_prompt if custom_prompt else 'Ninguna adicional'}\n"
+        "Reglas obligatorias:\n"
+        "- Responde en el idioma del usuario (generalmente español).\n"
+        "- Máximo 2 a 3 oraciones (máximo 80 palabras).\n"
+        "- Estrictamente adaptado a un chat comunitario en vivo."
+    )
+
+    if not mistral_client:
+        fallbacks = [
+            f"Perímetro seguro, {user_name}. Supervisión acústica y defensiva activa 24/7. 🛡️",
+            f"Recibido, {user_name}. El radar acústico mantiene la sala optimizada. Informa al Creador si requieres privilegios especiales.",
+            f"Transmisión estable y monitoreada, {user_name}. Los protocolos del Búnker están operando al 100%."
+        ]
+        return random.choice(fallbacks)
+
+    try:
+        context_history = await get_ai_chat_context(chat_id, limit=6)
+        messages = [{"role": "system", "content": system_instruction}]
+        for item in context_history:
+            messages.append({"role": item["role"], "content": item["content"]})
+        messages.append({"role": "user", "content": f"{user_name}: {message_text}"})
+
+        response = await asyncio.to_thread(
+            mistral_client.chat.complete,
+            model="mistral-small-latest",
+            messages=messages,
+            max_tokens=220,
+            temperature=0.7
+        )
+        reply_text = response.choices[0].message.content.strip()
+
+        # Almacenar en la memoria contextual
+        await save_ai_chat_context(chat_id, user_id, "user", message_text)
+        await save_ai_chat_context(chat_id, 0, "assistant", reply_text)
+
+        return reply_text
+    except Exception as ex:
+        logger.error(f"❌ [Error Generando Respuesta IA Centinela]: {ex}")
+        return f"Perímetro asegurado, {user_name}. Directiva de supervisión en línea. 🛡️"
+
+
+async def sentinel_incoming_message_dispatcher(client: Client, message):
+    """
+    Escuchador unificado de Pyrogram para Centinelas en Grupos y Canales:
+    - Gamificación y Telemetría horaria.
+    - Intervención Semántica del Guardián.
+    - Respuestas Autónomas de IA en salas Ultra Pro.
+    """
+    if not message.chat or message.chat.type == ChatType.PRIVATE:
+        return
+
+    chat_id = message.chat.id
+
+    # 1. Deduplicación: Si la sala tiene centinela dedicado, el maestro no procesa mensajes
+    if client == assistant_app and chat_id in active_sentinels:
+        dedicated = active_sentinels[chat_id]
+        if dedicated.get("client") != assistant_app:
+            return
+
+    # 2. Ignorar mensajes propios del centinela
+    if message.from_user and message.from_user.is_self:
+        return
+
+    from_user = message.from_user
+    user_id = from_user.id if from_user else 0
+    text_content = (message.text or message.caption or "").strip()
+
+    # 3. Telemetría y Gamificación en Tiempo Real (Fase 1 integrándose en vivo)
+    if user_id and not (from_user and from_user.is_bot):
+        _spawn(record_hourly_chat_activity(chat_id))
+        _spawn(add_user_reputation_xp(
+            group_id=chat_id,
+            user_id=user_id,
+            full_name=from_user.first_name or "",
+            username=from_user.username or ""
+        ))
+
+    tier = (await get_group_tier(chat_id) or "free").lower()
+    is_ultra = tier in ("ultra_pro", "ultra") or (user_id and is_super_admin(user_id))
+
+    if not is_ultra or not text_content:
+        return
+
+    ai_cfg = await get_ai_sentinel_config(chat_id)
+
+    # 4. Escudo Semántico de IA (Guardián Ultra Pro)
+    if ai_cfg.get("guardian_status") == 1 and user_id and not is_super_admin(user_id) and user_id not in SERVICE_ACCOUNT_IDS:
+        if not await is_whitelisted(user_id):
+            threat = await semantic_scan_content(text_content, custom_prompt=ai_cfg.get("custom_prompt", ""))
+            if threat.get("flagged"):
+                try:
+                    await message.delete()
+                except Exception:
+                    if _global_bot:
+                        try:
+                            await _global_bot.delete_message(chat_id, message.id)
+                        except Exception:
+                            pass
+
+                user_tag = f"@{from_user.username}" if from_user and from_user.username else (from_user.first_name if from_user else f"ID {user_id}")
+                alert_text = (
+                    f"🛡️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
+                    f"Mensaje de <b>{html.escape(user_tag)}</b> purgado preventivamente.\n"
+                    f"• <b>Detección:</b> <code>{html.escape(threat.get('reason'))}</code>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                )
+                _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20))
+                return
+
+    # 5. Respuestas Autónomas de la IA (Copiloto / PR Ultra Pro)
+    if ai_cfg.get("copilot_status") == 1:
+        me_username = (client.me.username or "").lower() if client.me else ""
+        text_lower = text_content.lower()
+
+        is_replied_to_me = bool(
+            message.reply_to_message 
+            and message.reply_to_message.from_user 
+            and message.reply_to_message.from_user.is_self
+        )
+        is_mentioned = (f"@{me_username}" in text_lower) if me_username else False
+        if not is_mentioned and "@alphacentinel" in text_lower:
+            is_mentioned = True
+
+        response_mode = ai_cfg.get("response_mode", "mention_only")
+        response_chance = ai_cfg.get("response_chance", 15)
+
+        should_reply = False
+        if is_replied_to_me or is_mentioned:
+            should_reply = True
+        elif response_mode == "always":
+            should_reply = True
+        elif response_mode == "chance" and random.randint(1, 100) <= response_chance:
+            should_reply = True
+
+        if should_reply:
+            try:
+                await client.send_chat_action(chat_id, ChatAction.TYPING)
+            except Exception:
+                pass
+
+            clean_prompt = text_content
+            if me_username:
+                clean_prompt = re.sub(rf"@{me_username}", "", clean_prompt, flags=re.IGNORECASE).strip()
+
+            user_display = from_user.first_name if from_user else "Miembro"
+            ai_reply = await generate_sentinel_ai_response(
+                chat_id=chat_id,
+                user_id=user_id,
+                user_name=user_display,
+                message_text=clean_prompt,
+                personality_tone=ai_cfg.get("personality_tone", "guardian"),
+                custom_prompt=ai_cfg.get("custom_prompt", "")
+            )
+
+            if ai_reply:
+                try:
+                    await message.reply_text(ai_reply, quote=True)
+                except Exception:
+                    try:
+                        await client.send_message(chat_id, ai_reply)
+                    except Exception as send_err:
+                        logger.warning(f"Aviso enviando réplica IA en {chat_id}: {send_err}")
 
 
 async def analyze_voice_toxicity(text_snippet: str, custom_prompt: str = "") -> dict:
@@ -391,7 +638,6 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         except (ValueError, TypeError):
             autodel_time = 30
         
-        # 🎯 Etiquetado garantizado en cualquier modalidad:
         if custom_text:
             text = (
                 custom_text.replace("{user_name}", user_name)
@@ -468,7 +714,6 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         media_type = svc_cfg.get("vc_welcome_media_type") if tier == "ultra_pro" else None
         autodel = svc_cfg.get("vc_welcome_autodel", 0) or 0
 
-        # Si el creador definió botón o URL personalizada:
         if custom_btn or custom_url:
             markup = build_vc_moderation_keyboard(
                 chat_id=chat_id,
@@ -489,7 +734,6 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         else:
             markup = build_vc_moderation_keyboard(chat_id=chat_id, bot_username=bot_username, lang=lang)
 
-        # Texto del mensaje
         if tier in ("pro", "ultra_pro") and custom_text:
             text = custom_text
         else:
@@ -1224,7 +1468,6 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             raw_u = user_obj.username if (user_obj and getattr(user_obj, "username", None)) else ""
                             first_name = html.escape(user_obj.first_name) if (user_obj and getattr(user_obj, "first_name", None)) else f"Usuario {u_id}"
                             
-                            # 🎯 Mención garantizada: con @username o mediante hipervínculo tg://user?id
                             if raw_u:
                                 user_mention = f"@{raw_u}"
                             else:
@@ -1429,6 +1672,11 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
     )
     
     try:
+        # Registro dinámico del motor conversacional y moderación semántica en Pyrogram
+        session_client.add_handler(
+            MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
+        )
+
         await session_client.start()
         me = await session_client.get_me()
 
@@ -1461,7 +1709,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             pass
         return False
     except PeerIdInvalid:
-        logger.error(f"⚠️️ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
+        logger.error(f"⚠ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
         return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
@@ -1581,6 +1829,10 @@ async def init_assistant_master():
     else:
         try:
             if not assistant_app.is_connected:
+                # Registro del escuchador para el centinela maestro
+                assistant_app.add_handler(
+                    MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
+                )
                 await assistant_app.start()
             me = await assistant_app.get_me()
             _default_my_id = me.id
