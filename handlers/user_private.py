@@ -20,7 +20,7 @@ from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, ChatPermissions,
     ReplyKeyboardMarkup, KeyboardButton, KeyboardButtonRequestChat,
-    ReplyKeyboardRemove, FSInputFile, InputMediaPhoto
+    ReplyKeyboardRemove, FSInputFile, InputMediaPhoto, BufferedInputFile
 )
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.filters import Command, CommandStart, CommandObject
@@ -62,7 +62,12 @@ from database.database import (
     set_ai_sentinel_config,
     get_sentinel_service_messages_config,
     set_sentinel_service_message,
+    export_group_configuration,
+    import_group_configuration,
+    get_top_reputation,
+    get_user_reputation
 )
+
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
     start_phone_auth, verify_phone_code, verify_2fa_password, cancel_phone_auth,
@@ -522,6 +527,8 @@ SENTINEL_CFG_STATES = {}
 WARN_CUSTOM_TEXT_STATES = {}
 WARN_CUSTOM_MEDIA_STATES = {}
 MIC_VIP_TEXT_STATES = {}
+BACKUP_IMPORT_STATES = {}
+REP_MULTIPLIER_STATES = {}
 
 # 🧯 Registro central de TODOS los estados conversacionales: permite liberarlos en bloque (navegación, /start,
 # /cancel) y garantiza que ningún menú privado quede bloqueado por una conversación huérfana.
@@ -532,7 +539,7 @@ ALL_STATE_DICTS = (
     TIPS_MEDIA_STATES, 
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
-    SENTINEL_CFG_STATES
+    SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES
 )
 
 # ⏳ Caducidad de asistentes multi-paso (segundos) y enfriamiento del mensaje de "sin acción pendiente".
@@ -939,8 +946,32 @@ TEXTS = {
         "btn_ai_copilot": "📝 Copilot AMA: {copilot_st}",
         "btn_ai_prompt": "✍️ Edit Custom AI Prompt",
         "ai_prompt_prompt": "✍️ <b>AI Prompt Editor:</b>\n\nSend the operational or behavioral instructions for your AI assistant:",
-        "ai_prompt_saved": "✅ <b>AI Prompt updated successfully!</b>",  # <--- ¡Verifica que esta coma exista!
-    },  # <--- Aquí cierra el bloque "en"
+        "ai_prompt_saved": "✅ <b>AI Prompt updated successfully!</b>",
+
+        # --- Ultra Pro: AI Extended, Gamification & Backup ---
+        "btn_rep_tools": "🎮 Gamification & XP Levels",
+        "btn_backup_tools": "🔐 Cryptographic Backup (.bunker)",
+        "rep_main": (
+            "🎮 <b>Gamification & XP Levels (Phase 4)</b>\n\n"
+            "Reward member participation, boost chat engagement, and unlock automated badges:\n\n"
+            "• <b>Status:</b> {st_badge}\n"
+            "• <b>Active Multiplier:</b> <code>{multiplier}x XP</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_main": (
+            "🔐 <b>Cryptographic Perimeter Vault (HMAC-SHA256)</b>\n\n"
+            "Export or restore your full community architecture (locks, captcha, schedules, and tips) "
+            "with tamper-proof cryptographic verification:\n\n"
+            "• <b>Community:</b> <code>{title}</code>\n"
+            "• <b>Format:</b> <code>.bunker (Encrypted JSON)</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_import_prompt": (
+            "📥 <b>Perimeter Vault: Import Configuration</b>\n\n"
+            "Send your <code>.bunker</code> backup file or paste the verified cryptographic JSON to apply all rules instantly:\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        )
+    },
     "es": {
         "owner_only_alert": "⛔ Acceso Denegado: Esta consola táctica está reservada única y exclusivamente para el Dueño de la comunidad o canal.",
         "welcome": (
@@ -1316,7 +1347,30 @@ TEXTS = {
      "btn_ai_copilot": "📝 Copilot AMA: {copilot_st}",
      "btn_ai_prompt": "✍️ Editar Prompt de IA",
      "ai_prompt_prompt": "✍️ <b>Editor de Prompt de IA:</b>\n\nEnvía las instrucciones operativas o de comportamiento para tu asistente de inteligencia artificial:",
-     "ai_prompt_saved": "✅ <b>¡Prompt de IA actualizado con éxito!</b>",
+      "ai_prompt_saved": "✅ <b>¡Prompt de IA actualizado con éxito!</b>",
+          # --- Ultra Pro: IA Extendida, Gamificación y Backup ---
+        "btn_rep_tools": "🎮 Gamificación & Niveles XP",
+        "btn_backup_tools": "🔐 Respaldo Criptográfico (.bunker)",
+        "rep_main": (
+            "🎮 <b>Gamificación y Niveles de Reputación XP (Fase 4)</b>\n\n"
+            "Fomenta la retención comunitaria otorgando experiencia por mensajes legítimos y desbloqueo de rangos:\n\n"
+            "• <b>Estado del Sistema:</b> {st_badge}\n"
+            "• <b>Multiplicador Activo:</b> <code>{multiplier}x XP</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_main": (
+            "🔐 <b>Bóveda Criptográfica Perimetral (HMAC-SHA256)</b>\n\n"
+            "Exporta o restaura toda la arquitectura de tu comunidad (cerraduras, captcha, filtros, cronogramas y propinas) "
+            "con validación criptográfica anti-manipulaciones:\n\n"
+            "• <b>Comunidad:</b> <code>{title}</code>\n"
+            "• <b>Formato:</b> <code>.bunker (JSON Firmado)</code>\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "backup_import_prompt": (
+            "📥 <b>Bóveda Perimetral: Importar Configuración</b>\n\n"
+            "Envía en este chat tu archivo de respaldo <code>.bunker</code> o pega el paquete JSON verificado para aplicar todas las reglas al instante:\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
     }
 }
 
@@ -1928,6 +1982,33 @@ async def _finalize_and_preview_channel_plan(
     else:
         await bot.send_message(chat_id, preview, reply_markup=keyboard, parse_mode="HTML")
 
+async def get_reputation_settings(group_id: int) -> dict:
+    """Lee el estado del motor de gamificación y multiplicador de XP del grupo."""
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT reputation_enabled, reputation_xp_multiplier FROM group_settings WHERE group_id = ?", (group_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "enabled": row[0] if row[0] is not None else 1,
+                    "multiplier": row[1] if row[1] is not None else 1.0
+                }
+            return {"enabled": 1, "multiplier": 1.0}
+    return await asyncio.to_thread(_sync)
+
+
+async def set_reputation_setting(group_id: int, field: str, value):
+    """Guarda parámetros de gamificación en group_settings."""
+    if field not in ("reputation_enabled", "reputation_xp_multiplier"):
+        return
+    def _sync():
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"UPDATE group_settings SET {field} = ? WHERE group_id = ?", (value, group_id))
+            conn.commit()
+    await asyncio.to_thread(_sync)        
+
 # ==========================================
 # 🧭 BLINDAJE DE NAVEGACIÓN CONTEXTUAL (CANAL VS GRUPO)
 # ==========================================
@@ -2279,7 +2360,11 @@ def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
     )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_ai_sentinel"], callback_data=f"ai_menu_{group_id}_{lang}")],
-        [InlineKeyboardButton(text="⚙️ " + ("Configuración del Centinela" if lang == "es" else "Sentinel Settings"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")], # <--- BOTÓN AÑADIDO
+        [InlineKeyboardButton(text="⚙️ " + ("Configuración del Centinela" if lang == "es" else "Sentinel Settings"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")],
+        [
+            InlineKeyboardButton(text=t["btn_rep_tools"], callback_data=f"rep_menu_{group_id}_{lang}"),
+            InlineKeyboardButton(text=t["btn_backup_tools"], callback_data=f"backup_menu_{group_id}_{lang}")
+        ],
         [InlineKeyboardButton(text="🚨 " + ("Botón de Pánico" if lang == "es" else "Panic Button"), callback_data=f"panic_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎥 " + ("Escudo Antinota" if lang == "es" else "Screen-Share Shield"), callback_data=f"shield_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],
@@ -3363,6 +3448,45 @@ async def handle_private_inputs(message: Message, bot: Bot):
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS.get(lang, TEXTS["es"])
 
+    # 🔐 BÓVEDA PERIMETRAL: IMPORTACIÓN DE RESPALDO CRIPTOGRÁFICO (.bunker / JSON)
+    if (bot.id, user_id) in BACKUP_IMPORT_STATES:
+        b_data = BACKUP_IMPORT_STATES.pop((bot.id, user_id))
+        group_id = b_data["group_id"]
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_back_ultra"], callback_data=f"backup_menu_{group_id}_{lang}")]
+        ])
+
+        json_content = None
+        if message.document:
+            try:
+                file_obj = await bot.get_file(message.document.file_id)
+                downloaded = await bot.download_file(file_obj.file_path)
+                json_content = downloaded.read().decode("utf-8")
+            except Exception as dl_err:
+                resp = await message.answer(f"❌ Error leyendo archivo: {dl_err}", reply_markup=back_kb, parse_mode="HTML")
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+        elif text_input and "payload" in text_input and "signature" in text_input:
+            json_content = text_input
+
+        if json_content:
+            success, report = await import_group_configuration(group_id, json_content)
+            if success:
+                resp = await message.answer(
+                    f"✅ <b>¡Respaldo perimetral restaurado con éxito!</b>\n\n"
+                    f"• <b>Comunidad ID:</b> <code>{group_id}</code>\n"
+                    f"• <b>Autenticación:</b> Firma criptográfica HMAC verificada 🟢\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
+                    reply_markup=back_kb, parse_mode="HTML"
+                )
+            else:
+                resp = await message.answer(f"❌ <b>Fallo al restaurar:</b> {report}", reply_markup=back_kb, parse_mode="HTML")
+        else:
+            resp = await message.answer("⚠️ Envía un archivo <code>.bunker</code> válido o pega el JSON con firma HMAC.", reply_markup=back_kb, parse_mode="HTML")
+
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
     # 0. CANCELACIÓN DEL SELECTOR DE CANALES (teclado de respuesta)
     if text_input in (TEXTS["es"]["btn_sync_cancel"], TEXTS["en"]["btn_sync_cancel"]):
         clear_user_states(bot.id, user_id)
@@ -3373,21 +3497,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             reply_markup=get_channels_keyboard(channels_now, lang), parse_mode="HTML"
         )
         return
-    # 🤖 PROMPT PERSONALIZADO DE INTELIGENCIA ARTIFICIAL (CENTINELA DE IA)
-    if (bot.id, user_id) in AI_PROMPT_STATES:
-        ai_data = AI_PROMPT_STATES.pop((bot.id, user_id))
-        group_id = ai_data["group_id"]
-        back_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"ai_menu_{group_id}_{lang}")]
-        ])
-        if text_input:
-            await set_ai_sentinel_config(group_id, "ai_custom_prompt", text_input[:1000])
-            resp = await message.answer(t["ai_prompt_saved"], reply_markup=back_kb, parse_mode="HTML")
-        else:
-            empty_prompt_msg = "⚠️ El prompt no puede estar vacío." if lang == "es" else "⚠️ Prompt cannot be empty."
-            resp = await message.answer(empty_prompt_msg + "\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
-        fire_and_forget_auto_delete([message, resp], delay=60)
-        return
+    
     # 🤖 PROMPT PERSONALIZADO DE INTELIGENCIA ARTIFICIAL (CENTINELA DE IA)
     if (bot.id, user_id) in AI_PROMPT_STATES:
         ai_data = AI_PROMPT_STATES.pop((bot.id, user_id))
@@ -5631,24 +5741,74 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 # 💎 ULTRA PRO — HERRAMIENTAS DE ÉLITE & CENTINELA DE IA
 # ==========================================
 def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: str = "g"):
-    """Build the AI Sentinel controls for the group's contextual panel."""
+    """Construye la botonera completa del Centinela de IA (Ultra Pro): Guardián, Copiloto, Tono y Modos."""
     t = TEXTS.get(lang, TEXTS["es"])
     guardian_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg.get("guardian_status") == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
     copilot_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg.get("copilot_status") == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-    back_data = f"cpanel_{group_id}_{lang}" if chat_type == "c" else f"gpanel_{group_id}_{lang}"
-    back_text = t["btn_back_channel"] if chat_type == "c" else t["btn_back_group"]
+
+    # Mapeo de personalidades
+    tones_labels = {
+        "guardian": "🛡️ Guardián Táctico" if lang == "es" else "🛡️ Tactical Guardian",
+        "copilot": "📝 Copiloto Ejecutivo" if lang == "es" else "📝 Executive Copilot",
+        "pr": "🤝 Anfitrión / PR" if lang == "es" else "🤝 Host / PR"
+    }
+    tone_str = tones_labels.get(ai_cfg.get("personality_tone"), tones_labels["guardian"])
+
+    # Mapeo de modos de respuesta
+    modes_labels = {
+        "mention_only": "🎯 Solo Mención" if lang == "es" else "🎯 Mentions Only",
+        "chance": f"🎲 Probabilidad ({ai_cfg.get('response_chance', 15)}%)",
+        "always": "⚡ Siempre Activo" if lang == "es" else "⚡ Always Active"
+    }
+    mode_str = modes_labels.get(ai_cfg.get("response_mode"), modes_labels["mention_only"])
+
+    back_btn = ultra_back_button(chat_type, group_id, lang)
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_ai_guardian"].format(guardian_st=guardian_st), callback_data=f"ai_toggle_guardian_{1 if ai_cfg.get('guardian_status') != 1 else 0}_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_ai_copilot"].format(copilot_st=copilot_st), callback_data=f"ai_toggle_copilot_{1 if ai_cfg.get('copilot_status') != 1 else 0}_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"🎭 {tone_str}", callback_data=f"ai_cycletone_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"⚙️ {mode_str}", callback_data=f"ai_cyclemode_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_ai_prompt"], callback_data=f"ai_prompt_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=back_text, callback_data=back_data)],
+        [back_btn]
     ])
 
+def get_reputation_keyboard(group_id: int, lang: str, rep_cfg: dict, chat_type: str = "g") -> InlineKeyboardMarkup:
+    """Botonera de control de Gamificación y Niveles XP."""
+    t = TEXTS.get(lang, TEXTS["es"])
+    is_on = (rep_cfg.get("enabled", 1) == 1)
+    st_btn = f"🎮 {'Sistema XP: 🟢' if is_on else 'Sistema XP: 🔴'}"
+    mult = rep_cfg.get("multiplier", 1.0)
+    back_btn = ultra_back_button(chat_type, group_id, lang)
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=st_btn, callback_data=f"rep_toggle_{group_id}_{lang}")],
+        [
+            InlineKeyboardButton(text="⚡ 1.0x", callback_data=f"rep_setmult_1.0_{group_id}_{lang}"),
+            InlineKeyboardButton(text="⚡ 1.5x", callback_data=f"rep_setmult_1.5_{group_id}_{lang}"),
+            InlineKeyboardButton(text="⚡ 2.0x", callback_data=f"rep_setmult_2.0_{group_id}_{lang}")
+        ],
+        [InlineKeyboardButton(text=f"🏆 {'Ver Cuadro de Honor (Top 10)' if lang == 'es' else 'View Leaderboard (Top 10)'}", callback_data=f"rep_viewtop_{group_id}_{lang}")],
+        [back_btn]
+    ])
+
+
+def get_backup_vault_keyboard(group_id: int, lang: str, chat_type: str = "g") -> InlineKeyboardMarkup:
+    """Botonera de exportación e importación criptográfica (.bunker)."""
+    t = TEXTS.get(lang, TEXTS["es"])
+    back_btn = ultra_back_button(chat_type, group_id, lang)
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📤 {'Exportar Respaldo (.bunker)' if lang == 'es' else 'Export Backup (.bunker)'}", callback_data=f"backup_export_{group_id}_{lang}")],
+        [InlineKeyboardButton(text=f"📥 {'Importar / Migrar Respaldo' if lang == 'es' else 'Import / Restore Backup'}", callback_data=f"backup_import_{group_id}_{lang}")],
+        [back_btn]
+    ])
 
 @router.callback_query(
     F.data.startswith("panic_") | F.data.startswith("shield_") |
     F.data.startswith("podcast_") | F.data.startswith("speakers_") |
-    F.data.startswith("payload_") | F.data.startswith("ai_")
+    F.data.startswith("payload_") | F.data.startswith("ai_") |
+    F.data.startswith("rep_") | F.data.startswith("backup_")
 )
 async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
     clear_user_states(bot.id, callback.from_user.id)
@@ -5663,13 +5823,13 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
     keyboard = None
 
     if module == "ai":
-        if sub == "menu":
+        if sub in ("menu", "prompt", "cycletone", "cyclemode"):
             group_id = int(data[2])
         elif sub == "toggle":
             sub_target = data[2]
             new_status = int(data[3])
             group_id = int(data[4])
-        elif sub == "prompt":
+        else:
             group_id = int(data[2])
 
         if not await verify_admin_privileges(callback, bot, group_id):
@@ -5698,11 +5858,118 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 prompt_prev = ai_cfg["custom_prompt"][:40] + "..." if len(ai_cfg["custom_prompt"]) > 40 else (ai_cfg["custom_prompt"] or (tr(lang, "Por defecto (Estándar)", "Default (Standard)")))
                 text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev) + PERIMETER_SIGNATURE
                 keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
+            elif sub == "cycletone":
+                ai_cfg = await get_ai_sentinel_config(group_id)
+                tone_cycle = {"guardian": "copilot", "copilot": "pr", "pr": "guardian"}
+                next_tone = tone_cycle.get(ai_cfg.get("personality_tone"), "guardian")
+                await set_ai_sentinel_config(group_id, "ai_personality_tone", next_tone)
+                await callback.answer(f"Personalidad: {next_tone.upper()}")
+                ai_cfg["personality_tone"] = next_tone
+                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=keyboard)
+                except Exception:
+                    pass
+                return
+            elif sub == "cyclemode":
+                ai_cfg = await get_ai_sentinel_config(group_id)
+                mode_cycle = {"mention_only": "chance", "chance": "always", "always": "mention_only"}
+                next_mode = mode_cycle.get(ai_cfg.get("response_mode"), "mention_only")
+                await set_ai_sentinel_config(group_id, "ai_response_mode", next_mode)
+                await callback.answer(f"Modo: {next_mode.upper()}")
+                ai_cfg["response_mode"] = next_mode
+                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=keyboard)
+                except Exception:
+                    pass
+                return
             elif sub == "prompt":
                 AI_PROMPT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
                 prompt = await callback.message.answer(t["ai_prompt_prompt"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"ai_menu_{group_id}_{lang}"), parse_mode="HTML")
                 fire_and_forget_auto_delete([prompt], delay=60)
                 return
+
+    elif module == "rep":
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+        chat_kind = await resolve_chat_kind(bot, group_id)
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = tr(lang, "🎮 <b>Gamificación y Niveles de Reputación</b>", "🎮 <b>Gamification & XP Levels</b>")
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title, chat_type=chat_kind)
+        elif sub == "menu":
+            rep_cfg = await get_reputation_settings(group_id)
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if rep_cfg["enabled"] == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            text = t["rep_main"].format(st_badge=st_badge, multiplier=rep_cfg["multiplier"])
+            keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)
+        elif sub == "toggle":
+            rep_cfg = await get_reputation_settings(group_id)
+            new_st = 0 if rep_cfg["enabled"] == 1 else 1
+            await set_reputation_setting(group_id, "reputation_enabled", new_st)
+            rep_cfg["enabled"] = new_st
+            await callback.answer(tr(lang, "Estado de XP actualizado.", "XP state updated."))
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if new_st == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            text = t["rep_main"].format(st_badge=st_badge, multiplier=rep_cfg["multiplier"])
+            keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)
+        elif sub == "setmult":
+            val = float(data[2])
+            group_id = int(data[3])
+            await set_reputation_setting(group_id, "reputation_xp_multiplier", val)
+            await callback.answer(f"Multiplicador: {val}x XP")
+            rep_cfg = await get_reputation_settings(group_id)
+            st_badge = tr(lang, "🟢 ACTIVADO", "🟢 ACTIVE") if rep_cfg["enabled"] == 1 else tr(lang, "🔴 DESACTIVADO", "🔴 DISABLED")
+            text = t["rep_main"].format(st_badge=st_badge, multiplier=val)
+            keyboard = get_reputation_keyboard(group_id, lang, rep_cfg, chat_type=chat_kind)
+        elif sub == "viewtop":
+            top_list = await get_top_reputation(group_id, limit=10)
+            lines = [f"#{idx+1} {html.escape(item['name'])} — Nivel {item['level']} ({item['xp']} XP)" for idx, item in enumerate(top_list)] or ["(Sin actividad registrada aún)"]
+            text = f"🏆 <b>Cuadro de Honor (Top 10):</b>\n\n" + "\n".join(lines) + PERIMETER_SIGNATURE
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"rep_menu_{group_id}_{lang}")]
+            ])
+
+    elif module == "backup":
+        group_id = int(data[2])
+        if not await verify_admin_privileges(callback, bot, group_id):
+            return
+        chat_kind = await resolve_chat_kind(bot, group_id)
+
+        tier = await get_effective_group_tier(group_id, callback.from_user.id)
+        if tier != "ultra_pro":
+            feature_title = tr(lang, "🔐 <b>Respaldo Criptográfico Perimetral</b>", "🔐 <b>Cryptographic Perimeter Backup</b>")
+            text, keyboard = build_ultra_lock_view(group_id, lang, feature_title, chat_type=chat_kind)
+        elif sub == "menu":
+            try:
+                g_title = (await bot.get_chat(group_id)).title or "Comunidad"
+            except Exception:
+                g_title = "Comunidad"
+            text = t["backup_main"].format(title=html.escape(g_title))
+            keyboard = get_backup_vault_keyboard(group_id, lang, chat_type=chat_kind)
+        elif sub == "export":
+            await callback.answer(tr(lang, "📦 Generando respaldo cifrado...", "📦 Generating encrypted backup..."))
+            package_str = await export_group_configuration(group_id)
+            clean_filename = f"bunker_vault_{abs(group_id)}_{int(time.time())}.bunker"
+            doc_file = BufferedInputFile(package_str.encode("utf-8"), filename=clean_filename)
+            caption = (
+                f"🔐 <b>Bóveda Perimetral — The Bunker OS</b>\n\n"
+                f"• <b>Comunidad:</b> <code>{group_id}</code>\n"
+                f"• <b>Firma Digital:</b> <code>HMAC-SHA256 (Válida 🟢)</code>\n\n"
+                f"<i>Guarda este archivo. Puedes restaurarlo en cualquier momento respondiendo con /importsettings o desde esta misma consola.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            )
+            back_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"backup_menu_{group_id}_{lang}")]
+            ])
+            await bot.send_document(chat_id=callback.from_user.id, document=doc_file, caption=caption, reply_markup=back_kb, parse_mode="HTML")
+            return
+        elif sub == "import":
+            BACKUP_IMPORT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
+            prompt = await callback.message.answer(t["backup_import_prompt"], reply_markup=_cancel_kb(t, f"backup_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt], delay=60)
+            return
 
     elif module == "panic":
         group_id = int(data[2])
@@ -5884,15 +6151,6 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             text = t["speakers_menu"].format(status_str=status_str, price=price, queue_count=0) + PERIMETER_SIGNATURE
             keyboard = get_speakers_keyboard(group_id, lang, 1, price, chat_type=chat_kind)
 
-    if text and keyboard:
-        try:
-            await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
-        except TelegramBadRequest:
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
     elif module == "payload":
         group_id = int(data[2])
         if not await verify_admin_privileges(callback, bot, group_id):
