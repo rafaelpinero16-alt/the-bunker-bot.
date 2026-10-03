@@ -287,7 +287,7 @@ def init_db():
             ("spam_detection_mode", "TEXT DEFAULT 'smart'"),
             ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
             ("chat_language", "TEXT DEFAULT 'ES'"),
-            ("active_modules_count", "INTEGER DEFAULT 11")
+            ("active_modules_count", "INTEGER DEFAULT 11"),
 
             # --- Fase 1: Gamificación y Centinela de IA Autónomo ---
             ("reputation_enabled", "INTEGER DEFAULT 1"),
