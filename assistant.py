@@ -25,7 +25,10 @@ from pyrogram.errors import (
     PhoneNumberInvalid, PasswordHashInvalid, PeerIdInvalid,
     AuthKeyUnregistered, UserDeactivated, UserDeactivatedBan
 )
-from pyrogram.raw.types import PeerUser, InputPeerUser, InputGroupCall, DataJSON
+from pyrogram.raw.types import (
+    PeerUser, InputPeerUser, InputGroupCall, DataJSON,
+    InputChannel, InputPeerChannel, InputPeerChat
+)
 from pyrogram.raw.functions.channels import GetFullChannel
 from pyrogram.raw.functions.messages import GetFullChat
 from pyrogram.raw.functions.phone import (
@@ -114,7 +117,7 @@ VC_START_TEXTS = {
     "es": (
         "EL VIDEO CHAT DE ⚜️🔐The Búnker Chat🔐⚜️ HA INICIADO CON ÉXITO AHORA, TODOS ESTÁN BIENVENIDOS A PARTICIPAR 🔥🐽💨🚀\n\n"
         "🔇 <b>SE HA ESTABLECIDO POR DEFECTO UN VOLUMEN MÁXIMO DEL 2% PARA TODOS LOS MIEMBROS EN GENERAL QUE INGRESAN AL VIDEO CHAT.</b>\n\n"
-        "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
+        "⚜️ ¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y DESBLOQUEAR EL 100% DEL VOLUMEN DE TU 🎙️MICRÓFONO🎙️️ AL PARTICIPAR EN NUESTRO VIDEO CHAT?\n\n"
         "Usa los siguientes botones para activar tu /micvip usando tus TELEGRAM STARS ↓ ↓ ↓\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     ),
@@ -160,7 +163,7 @@ VC_SCHED_MESSAGES = {
     "end": (
         "📡 <b>Cierre Programado — The Bunker</b>\n\n"
         "El ciclo programado de videochat ha concluido. La sala ha sido cerrada de forma ordenada.\n\n"
-        "🛡️️ <i>Cloud Media Management</i>"
+        "🛡️ <i>Cloud Media Management</i>"
     )
 }
 
@@ -204,7 +207,7 @@ if MASTER_SESSION:
     )
 else:
     assistant_app = None
-    logger.warning("⚠️️ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
+    logger.warning("⚠ [MASTER_SESSION no configurado] Operando con Centinelas dedicados por comunidad.")
 
 _global_bot = None
 _default_my_id = None
@@ -391,17 +394,20 @@ async def _dispatch_radar_notice(
 
     try:
         sent = None
+        # Telegram restringe los captions a 1024 caracteres
+        safe_caption = text[:1020] + "..." if len(text) > 1024 else text
+
         if media_id and media_type == "photo":
             sent = await _global_bot.send_photo(
-                chat_id=chat_id, photo=media_id, caption=text, reply_markup=reply_markup, parse_mode="HTML"
+                chat_id=chat_id, photo=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML"
             )
         elif media_id and media_type == "video":
             sent = await _global_bot.send_video(
-                chat_id=chat_id, video=media_id, caption=text, reply_markup=reply_markup, parse_mode="HTML"
+                chat_id=chat_id, video=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML"
             )
         elif media_id and media_type == "animation":
             sent = await _global_bot.send_animation(
-                chat_id=chat_id, animation=media_id, caption=text, reply_markup=reply_markup, parse_mode="HTML"
+                chat_id=chat_id, animation=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML"
             )
         else:
             sent = await _global_bot.send_message(
@@ -420,7 +426,13 @@ async def _dispatch_radar_notice(
         return sent
     except Exception as e:
         logger.warning(f"Aviso despachando radar notice en {chat_id}: {e}")
-        return None
+        # Fallback de emergencia a texto simple si falla el envío multimedia
+        try:
+            return await _global_bot.send_message(
+                chat_id=chat_id, text=text[:4000], reply_markup=reply_markup, parse_mode="HTML"
+            )
+        except Exception:
+            return None
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
@@ -615,6 +627,49 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     return sent
 
 
+# ==========================================
+# 🔍 RESOLUTOR MTPROTO DE LLAMADAS GRUPALES (BLINDADO)
+# ==========================================
+async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
+    """
+    Obtiene de forma segura el objeto InputGroupCall activo del chat usando los tipos
+    exactos de MTProto (InputChannel para canales/supergrupos o chat_id para grupos básicos).
+    """
+    try:
+        if peer is None:
+            peer = await client.resolve_peer(chat_id)
+
+        raw_call = None
+        if isinstance(peer, (InputPeerChannel, InputChannel)):
+            ch_id = getattr(peer, "channel_id", None)
+            ac_hash = getattr(peer, "access_hash", 0)
+            target_channel = InputChannel(channel_id=ch_id, access_hash=ac_hash)
+            full_chat_res = await client.invoke(GetFullChannel(channel=target_channel))
+            raw_call = getattr(full_chat_res.full_chat, "call", None)
+        elif isinstance(peer, InputPeerChat):
+            full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
+            raw_call = getattr(full_chat_res.full_chat, "call", None)
+        else:
+            resolved = await client.resolve_peer(chat_id)
+            if isinstance(resolved, (InputPeerChannel, InputChannel)):
+                target_channel = InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash)
+                full_chat_res = await client.invoke(GetFullChannel(channel=target_channel))
+                raw_call = getattr(full_chat_res.full_chat, "call", None)
+            elif isinstance(resolved, InputPeerChat):
+                full_chat_res = await client.invoke(GetFullChat(chat_id=resolved.chat_id))
+                raw_call = getattr(full_chat_res.full_chat, "call", None)
+
+        if raw_call:
+            return InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
+        return None
+    except Exception as e:
+        logger.debug(f"Aviso resolviendo llamada grupal activa en {chat_id}: {e}")
+        return None
+
+
+# ==========================================
+# 🤖 FASE 2: MOTOR CONVERSACIONAL Y FILTRADO SEMÁNTICO
+# ==========================================
 _LEETSPEAK_PATTERNS = [
     (re.compile(r'\bc[\W_]*p\b', re.IGNORECASE), "Material Ilícito Evasivo (CP)"),
     (re.compile(r'\bp[\W_]*[e3][\W_]*d[\W_]*[o0]\b', re.IGNORECASE), "Violación Perimetral Infantil"),
@@ -908,30 +963,15 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     active_sentinels.pop(chat_id, None)
                     return
 
+            # Detección precisa y continua de llamadas de voz mediante MTProto
             if not current_call or (current_time - last_channel_check > 45):
-                try:
-                    full_chat_res = await client.invoke(GetFullChannel(channel=peer))
-                    raw_call = full_chat_res.full_chat.call
-                except PeerIdInvalid:
-                    try:
-                        peer = await client.resolve_peer(chat_id)
-                        full_chat_res = await client.invoke(GetFullChannel(channel=peer))
-                        raw_call = full_chat_res.full_chat.call
-                    except Exception:
-                        raw_call = None
-                except Exception:
-                    try:
-                        full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
-                        raw_call = full_chat_res.full_chat.call
-                    except Exception:
-                        raw_call = None
+                raw_call_obj = await _get_raw_group_call(client, chat_id, peer)
 
-                if raw_call:
-                    new_call_id = raw_call.id
-                    if not current_call or current_call.id != new_call_id:
+                if raw_call_obj:
+                    if not current_call or current_call.id != raw_call_obj.id:
                         call_start_time = asyncio.get_event_loop().time()
                         _spawn(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
-                    current_call = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
+                    current_call = raw_call_obj
                     permission_warned = False
                 else:
                     current_call = None
@@ -1010,7 +1050,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 if not is_joined_audio:
                     try:
-                        my_peer = await client.resolve_peer(bot_client_id)
+                        my_peer = await client.resolve_peer("me")
                         await client.invoke(
                             JoinGroupCall(call=current_call, join_as=my_peer, muted=True, video_stopped=True, params=DataJSON(data="{}"))
                         )
@@ -1285,11 +1325,9 @@ async def vc_scheduler_loop():
 
                 elif not is_in_window and call_active == 1:
                     try:
-                        full_chat_res = await client.invoke(GetFullChannel(channel=peer))
-                        raw_call = full_chat_res.full_chat.call
-                        if raw_call:
-                            call_obj = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
-                            await client.invoke(DiscardGroupCall(call=call_obj))
+                        raw_call_obj = await _get_raw_group_call(client, group_id, peer)
+                        if raw_call_obj:
+                            await client.invoke(DiscardGroupCall(call=raw_call_obj))
                         await update_vc_call_status(group_id, 0)
                         if _global_bot:
                             await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["end"], parse_mode="HTML")
@@ -1390,18 +1428,16 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await session_client.start()
         me = await session_client.get_me()
 
+        # Obtener y cachear la entidad del chat directamente para evitar PeerIdInvalid
         try:
-            async for dialog in session_client.get_dialogs(limit=250):
-                if dialog.chat.id == group_id:
-                    break
-        except Exception as dialog_err:
-            logger.debug(f"Aviso al poblar la libreta de contactos para {group_id}: {dialog_err}")
-
-        is_member = await _verify_active_membership(session_client, group_id)
-        if not is_member:
-            logger.warning(f"⚠️ [Aviso] Telegram no pudo confirmar la membresía inmediatamente en {group_id}. Intentando conectar...")
-
-        peer = await session_client.resolve_peer(group_id)
+            chat_obj = await session_client.get_chat(group_id)
+            peer = await session_client.resolve_peer(chat_obj.id)
+        except Exception:
+            try:
+                peer = await session_client.resolve_peer(group_id)
+            except Exception as e:
+                logger.error(f"⚠️️ [Error al resolver Peer] Grupo {group_id}: {e}")
+                return False
 
         task = asyncio.create_task(monitor_single_group(group_id, peer, session_client, me.id, user_id))
         active_sentinels[group_id] = {
@@ -1417,9 +1453,6 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             await revoke_owner_session(user_id, group_id, reason=str(auth_err))
         except Exception:
             pass
-        return False
-    except PeerIdInvalid:
-        logger.error(f"⚠️ [Peer ID Inválido] El Centinela no encontró el grupo {group_id} en sus chats activos.")
         return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
@@ -1478,8 +1511,6 @@ async def load_all_sentinels():
             async with _sentinel_launch_semaphore:
                 try:
                     await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
-                except PeerIdInvalid:
-                    pass
                 except Exception:
                     pass
 
@@ -1604,20 +1635,13 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         return False
 
     try:
-        peer = await client.resolve_peer(chat_id)
-        try:
-            full_chat_res = await client.invoke(GetFullChannel(channel=peer))
-        except Exception:
-            full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
-            
-        raw_call = full_chat_res.full_chat.call
+        raw_call = await _get_raw_group_call(client, chat_id)
         if not raw_call:
             return False
 
-        call = InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
         participant_peer = await client.resolve_peer(user_id)
         await client.invoke(
-            EditGroupCallParticipant(call=call, participant=participant_peer, muted=muted, volume=volume)
+            EditGroupCallParticipant(call=raw_call, participant=participant_peer, muted=muted, volume=volume)
         )
         return True
     except Exception as e:
@@ -1801,8 +1825,7 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
         group_id = auth_data["group_id"]
         
         await cancel_phone_auth(user_id)
-        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data["phone"])
-        await register_or_update_sentinel(user_id, group_id, session_str)
+        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except SessionPasswordNeeded:
@@ -1831,8 +1854,7 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
         group_id = auth_data["group_id"]
 
         await cancel_phone_auth(user_id)
-        await save_owner_session(user_id, group_id, session_str, phone_number=auth_data.get("phone"))
-        await register_or_update_sentinel(user_id, group_id, session_str)
+        # Se retorna limpio para que user_private.py efectúe un registro y lanzamiento único
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except PasswordHashInvalid:
