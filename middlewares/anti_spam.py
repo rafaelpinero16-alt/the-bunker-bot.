@@ -2,7 +2,8 @@
 anti_spam.py — The Bunker OS (Aiogram 3.x)
 
 Middleware de inspección perimetral y seguridad global.
-Motor Híbrido: Detección proactiva CAS (Combot Anti-Spam) + Blacklist alfanumérica + Inmunidad táctica.
+Motor Híbrido: Detección proactiva CAS (Combot Anti-Spam) + Blacklist alfanumérica + 
+               Escudo Semántico en el Borde (Fase 2: Mistral AI Guardián) + Inmunidad táctica.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -17,7 +18,7 @@ import aiohttp
 from aiogram import BaseMiddleware
 from aiogram.types import ChatPermissions, Message
 
-from assistant import active_sentinels, set_participant_mic
+from assistant import active_sentinels, set_participant_mic, semantic_scan_content
 from database.database import (
     add_user_strike,
     add_warning,
@@ -26,6 +27,8 @@ from database.database import (
     get_or_create_user,
     get_session_by_group,
     get_warns_config,
+    get_group_tier,
+    get_ai_sentinel_config,
     is_vip_mic_active,
     is_whitelisted,
     reset_user_strikes,
@@ -43,6 +46,13 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
 
 _BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
 
 
 def is_super_admin(user_id: int) -> bool:
@@ -83,7 +93,6 @@ async def check_global_cas_spam(user_id: int) -> bool:
                 if response.status == 200:
                     data = await response.json()
                     res = data.get("result", {})
-                    # CAS API devuelve "offenses" (entero) o estructura de resultado
                     is_offender = bool(
                         data.get("ok") and (res.get("offenses") or res.get("offense") or bool(res))
                     )
@@ -158,7 +167,6 @@ def matches_blacklisted_term(word: str, text: str) -> bool:
     if not clean_word:
         return False
 
-    # Para términos cortos alfanuméricos (ej. 'cp', 'kill', 'pedo'), exigir coincidencia de palabra completa
     if clean_word.isalnum() and len(clean_word) <= 4:
         pattern = r'\b' + re.escape(clean_word) + r'\b'
         return bool(re.search(pattern, text))
@@ -180,15 +188,27 @@ class AntiSpamMiddleware(BaseMiddleware):
                     blacklist = await get_blacklist()
                 except Exception:
                     blacklist = []
+
+                channel_threat = False
                 for b_word in blacklist:
                     if matches_blacklisted_term(b_word, text_content):
-                        try:
-                            await event.delete()
-                            await event.bot.ban_chat_sender_chat(event.chat.id, event.sender_chat.id)
-                            logger.warning(f"🛡️ [Anti-Spam] Canal emisor {event.sender_chat.id} bloqueado por Blacklist en {event.chat.id}.")
-                        except Exception:
-                            pass
-                        return
+                        channel_threat = True
+                        break
+
+                if not channel_threat:
+                    # Escaneo semántico heurístico para canales externos
+                    semantic_check = await semantic_scan_content(text_content)
+                    if semantic_check.get("flagged"):
+                        channel_threat = True
+
+                if channel_threat:
+                    try:
+                        await event.delete()
+                        await event.bot.ban_chat_sender_chat(event.chat.id, event.sender_chat.id)
+                        logger.warning(f"🛡️ [Anti-Spam] Canal emisor {event.sender_chat.id} bloqueado por violación perimetral en {event.chat.id}.")
+                    except Exception:
+                        pass
+                    return
 
         # 3. 🛡️ Inmunidad Táctica para Administradores, Aliados y Centinelas
         if await is_immune(event):
@@ -230,7 +250,7 @@ class AntiSpamMiddleware(BaseMiddleware):
         except Exception as db_err:
             logger.debug(f"Aviso verificando usuario local {user_id}: {db_err}")
 
-        # 6. 🚨 Inspección y purga de términos prohibidos de la Blacklist
+        # 6. 🚨 Inspección Blacklist Alfanumérica + Escudo Semántico en el Borde (Fase 2)
         text_content = (event.text or event.caption or "").lower()
         if text_content:
             try:
@@ -239,10 +259,31 @@ class AntiSpamMiddleware(BaseMiddleware):
                 blacklist = []
 
             threat_found = False
+            threat_reason = "Término en Lista Negra"
+
+            # A) Cotejo rápido por lista negra local
             for b_word in blacklist:
                 if matches_blacklisted_term(b_word, text_content):
                     threat_found = True
                     break
+
+            # B) Escudo Semántico de IA (Detección de Leetspeak, Phishing y Violaciones Evasivas)
+            if not threat_found:
+                try:
+                    ai_cfg = await get_ai_sentinel_config(chat_id)
+                    tier = (await get_group_tier(chat_id) or "free").lower()
+                    is_ultra = tier in ("ultra_pro", "ultra")
+
+                    if is_ultra or ai_cfg.get("guardian_status") == 1:
+                        semantic_res = await semantic_scan_content(
+                            text_content, 
+                            custom_prompt=ai_cfg.get("custom_prompt", "")
+                        )
+                        if semantic_res.get("flagged"):
+                            threat_found = True
+                            threat_reason = semantic_res.get("reason", "Infracción Semántica Detectada")
+                except Exception as sem_err:
+                    logger.debug(f"Aviso en análisis semántico: {sem_err}")
 
             if threat_found:
                 try:
@@ -264,16 +305,16 @@ class AntiSpamMiddleware(BaseMiddleware):
                         target_username=clean_username,
                         target_mention=user_mention,
                         reply_to=None,
-                        reason="filter"
+                        reason=threat_reason
                     )
                     if outcome.get("status") in ("warned", "sanctioned", "immune"):
                         return
                 except Exception as ladder_err:
                     logger.debug(f"Aviso delegando a ladder de warns: {ladder_err}")
 
-                # 🛟 Fallback autónomo en caso de que no cargue la escalera externa
+                # 🛟 Fallback autónomo en caso de que la escalera externa no responda
                 try:
-                    strikes = await add_user_strike(chat_id, user_id, "Término en Lista Negra")
+                    strikes = await add_user_strike(chat_id, user_id, threat_reason)
                 except Exception:
                     strikes = await add_warning(user_id)
 
@@ -309,23 +350,25 @@ class AntiSpamMiddleware(BaseMiddleware):
                             )
                             action_desc = "silenciado en chat y voz / muted"
                     except Exception as e:
-                        logger.error(f"Error aplicando castigo por Blacklist: {e}")
+                        logger.error(f"Error aplicando castigo por infracción perimetral: {e}")
 
                     await reset_user_strikes(chat_id, user_id)
 
                     warning_text = (
                         f"🚫 <b>Protocolo de Sanción Ejecutado / Enforcement Active</b>\n\n"
                         f"{user_mention} ha sido {action_desc} tras acumular "
-                        f"<b>{strikes}/{limit}</b> advertencias por contenido prohibido.\n\n"
+                        f"<b>{strikes}/{limit}</b> advertencias.\n"
+                        f"• <b>Infracción:</b> <code>{html.escape(threat_reason)}</code>\n\n"
                         f"🇺🇸 <i>Strike limit reached. Automated perimeter sanctions applied across chat and audio streams.</i>\n\n"
                         f"🛡️ <i>Cloud Media Management</i>"
                     )
                 else:
                     warning_text = (
                         f"⚠️ <b>Advertencia Táctica / Security Strike ({strikes}/{limit})</b>\n\n"
-                        f"{user_mention}, tu mensaje contenía términos prohibidos y ha sido purgado.\n"
+                        f"{user_mention}, tu mensaje ha sido purgado por violación perimetral.\n"
+                        f"• <b>Infracción:</b> <code>{html.escape(threat_reason)}</code>\n\n"
                         f"Al acumular {limit} advertencias recibirás una sanción automática.\n\n"
-                        f"🇺🇸 <i>Prohibited keywords purged. Reaching {limit} strikes triggers automated expulsion or mute.</i>\n\n"
+                        f"🇺🇸 <i>Prohibited content purged. Reaching {limit} strikes triggers automated expulsion or mute.</i>\n\n"
                         f"🛡️ <i>Cloud Media Management</i>"
                     )
 
@@ -343,9 +386,7 @@ class AntiSpamMiddleware(BaseMiddleware):
                         except Exception:
                             pass
 
-                    del_task = asyncio.create_task(auto_delete_notice(warning_msg))
-                    _BG_TASKS.add(del_task)
-                    del_task.add_done_callback(_BG_TASKS.discard)
+                    _spawn(auto_delete_notice(warning_msg))
                 except Exception:
                     pass
 
