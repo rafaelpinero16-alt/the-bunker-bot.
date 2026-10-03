@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton, 
@@ -34,7 +35,8 @@ from database.database import (
     get_channel_settings,
     get_channel_plans,
     get_channel_live_telemetry,
-    get_db_connection
+    get_db_connection,
+    get_sentinel_service_messages_config
 )
 
 logger = logging.getLogger("ecosystem_handler")
@@ -46,6 +48,15 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
@@ -56,11 +67,10 @@ def get_lang(lang_code: str) -> str:
     return "es" if lang_code and lang_code.startswith("es") else "en"
 
 
-def _get_now_time():
-    """Retorna la fecha y hora actual en la zona comunitaria (América/Bogotá)."""
+def _get_now_time() -> datetime:
+    """Retorna la fecha y hora actual en la zona comunitaria configurada."""
     tz_str = os.getenv("BOT_TIMEZONE", "America/Bogota")
     try:
-        from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo(tz_str))
     except Exception:
         return datetime.now()
@@ -145,11 +155,16 @@ TEXTS = {
 
 
 def build_radar_markup(chat_id: int, lang: str, in_private: bool = False) -> InlineKeyboardMarkup:
-    """Construye el teclado del radar con acceso a la Mini App y botón de actualización."""
+    """Construye el teclado del radar garantizando compatibilidad con grupos (sin WebApp directo)."""
     t = TEXTS.get(lang, TEXTS["es"])
+    miniapp_btn = (
+        InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))
+        if in_private else
+        InlineKeyboardButton(text=t["btn_miniapp"], url=f"{WEBAPP_URL}?chat_id={chat_id}")
+    )
     rows = [
         [InlineKeyboardButton(text=t["btn_refresh"], callback_data=f"refresh_status_{chat_id}_{lang}_{1 if in_private else 0}")],
-        [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))]
+        [miniapp_btn]
     ]
     if in_private:
         rows.append([
@@ -170,8 +185,9 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
     """Permite auditar el estado del radar y centinela directamente vía comando."""
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
+    in_private = (message.chat.type == "private")
 
-    if message.chat.type != "private":
+    if not in_private:
         if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
             try:
                 await message.delete()
@@ -210,12 +226,11 @@ async def cmd_radar_telemetry(message: Message, bot: Bot):
         sentinel_name=sentinel_label
     )
 
-    in_private = (message.chat.type == "private")
     keyboard = build_radar_markup(chat_id, lang, in_private=in_private)
     sent = await message.answer(status_text, reply_markup=keyboard, parse_mode="HTML")
 
     if not in_private:
-        asyncio.create_task(auto_delete_pair(message, sent, delay=35))
+        _spawn(auto_delete_pair(message, sent, delay=35))
 
 
 # ==========================================================
@@ -385,8 +400,8 @@ def _sync_mark_vc_announced(group_id: int, date_str: str):
 async def start_meeting_announcement_worker(bot: Bot):
     """
     Worker perimetral en segundo plano (Fase 4):
-    Para grupos PRO y ULTRA PRO, evalúa el inicio del videochat semanal y despacha
-    un mensaje de precalentamiento con reglas, banner multimedia y botón inline.
+    Evalúa el inicio del videochat semanal y despacha el precalentamiento con reglas,
+    multimedia y botón interactivo respetando la configuración del Centinela.
     """
     logger.info("📢 [Meeting Announcer Worker]: Sistema de anuncios previos de VC iniciado.")
     while True:
@@ -407,6 +422,11 @@ async def start_meeting_announcement_worker(bot: Bot):
                 if tier not in ("pro", "ultra_pro", "ultra"):
                     continue
 
+                # 1. Comprobación cruzada con Sentinel Settings (Apertura programada)
+                sentinel_cfg = await get_sentinel_service_messages_config(group_id)
+                if sentinel_cfg.get("sched_enabled", 1) == 0:
+                    continue
+
                 ann_cfg = await asyncio.to_thread(_sync_get_announcement_data, group_id)
                 if ann_cfg.get("status") == 0:
                     continue
@@ -425,14 +445,15 @@ async def start_meeting_announcement_worker(bot: Bot):
 
                 # Si estamos dentro de la ventana de anticipación previa al inicio
                 if 0 <= diff_minutes <= mins_before and call_active == 0:
-                    custom_text = ann_cfg.get("text")
-                    media_id = ann_cfg.get("media_id")
-                    media_type = ann_cfg.get("media_type")
+                    custom_text = sentinel_cfg.get("sched_start_text") or ann_cfg.get("text")
+                    media_id = sentinel_cfg.get("sched_start_media_id") or ann_cfg.get("media_id")
+                    media_type = sentinel_cfg.get("sched_start_media_type") or ann_cfg.get("media_type")
+                    autodel_secs = sentinel_cfg.get("sched_start_autodel", 0)
 
                     try:
                         chat_info = await bot.get_chat(group_id)
                         chat_title = chat_info.title or "la comunidad"
-                        chat_user = chat_info.username
+                        chat_user = getattr(chat_info, "username", None)
                     except Exception:
                         chat_title = "la comunidad"
                         chat_user = None
@@ -448,26 +469,37 @@ async def start_meeting_announcement_worker(bot: Bot):
 
                     body = custom_text if custom_text else default_body
 
-                    # Botonera interactiva sin URLs en texto plano
+                    # Botonera interactiva segura (sin web_app en grupos)
                     join_btn = (
                         InlineKeyboardButton(text="🎙️ Abrir Sala / Videochat", url=f"https://t.me/{chat_user}")
                         if chat_user else
-                        InlineKeyboardButton(text="🌐 Mini App Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))
+                        InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={group_id}")
                     )
                     markup = InlineKeyboardMarkup(inline_keyboard=[[join_btn]])
 
+                    sent_msg = None
                     try:
                         if media_id and media_type == "photo":
-                            await bot.send_photo(chat_id=group_id, photo=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
+                            sent_msg = await bot.send_photo(chat_id=group_id, photo=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
                         elif media_id and media_type == "video":
-                            await bot.send_video(chat_id=group_id, video=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
+                            sent_msg = await bot.send_video(chat_id=group_id, video=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
                         elif media_id and media_type == "animation":
-                            await bot.send_animation(chat_id=group_id, animation=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
+                            sent_msg = await bot.send_animation(chat_id=group_id, animation=media_id, caption=body, reply_markup=markup, parse_mode="HTML")
                         else:
-                            await bot.send_message(chat_id=group_id, text=body, reply_markup=markup, parse_mode="HTML")
+                            sent_msg = await bot.send_message(chat_id=group_id, text=body, reply_markup=markup, parse_mode="HTML")
 
                         await asyncio.to_thread(_sync_mark_vc_announced, group_id, today_date_str)
-                        logger.info(f"📢 [Meeting Announcer] Aviso de VC despachado con éxito en {group_id} ({diff_minutes}m antes).")
+                        logger.info(f"📢 [Meeting Announcer] Aviso de VC despachado en {group_id} ({diff_minutes}m antes).")
+
+                        if sent_msg and autodel_secs > 0:
+                            async def _del_ann(msg_to_del, delay):
+                                await asyncio.sleep(delay)
+                                try:
+                                    await msg_to_del.delete()
+                                except Exception:
+                                    pass
+                            _spawn(_del_ann(sent_msg, autodel_secs))
+
                     except (TelegramForbiddenError, TelegramBadRequest) as p_err:
                         logger.warning(f"Aviso al despachar anuncio de reunión en {group_id}: {p_err}")
                     except TelegramRetryAfter as retry_err:
@@ -485,7 +517,7 @@ async def start_meeting_announcement_worker(bot: Bot):
 async def start_subscription_watchdog_worker(bot: Bot):
     """
     Supervisa continuamente los vencimientos de membresías VIP en canales:
-    1. Alerta de renovación a miembros con 48h de anticipación.
+    1. Alerta de renovación a miembros con 48h de anticipación conectando al plan comercial exacto.
     2. Aplica Auto-Kick y revocación tras vencer los días de gracia configurados.
     """
     logger.info("👁️ [Subscription Watchdog]: Auditor de membresías VIP y auto-kick iniciado.")
@@ -498,15 +530,24 @@ async def start_subscription_watchdog_worker(bot: Bot):
                 bot_username = bot_info.username or "thebunkerapp_bot"
                 for ch_id, u_id, exp_at, stars_paid, grace_days in expiring:
                     try:
+                        # Resuelve el plan activo específico del canal para enlazar directamente a la compra
+                        plans = await get_channel_plans(ch_id, only_active=True)
+                        if plans:
+                            first_plan = plans[0]
+                            plan_id = first_plan[0]
+                            renew_url = f"https://t.me/{bot_username}?start=chanplan_{plan_id}_{ch_id}"
+                        else:
+                            renew_url = f"https://t.me/{bot_username}?start=cset_{ch_id}"
+
                         warn_text = (
                             "⚠️ <b>Aviso de Renovación VIP — The Bunker Command OS</b>\n\n"
                             f"Tu acceso al canal VIP expira el: <code>{exp_at}</code>.\n"
-                            f"Dispones de <b>{grace_days} días</b> de gracia antes del Auto-Kick automático.\n\n"
+                            f"Dispones de <b>{grace_days} días</b> de gracia antes del retiro automático de acceso.\n\n"
                             "Renueva tu membresía con Telegram Stars para mantener tu acceso sin interrupciones.\n\n"
                             "🛡️ <i>Cloud Media Management</i>"
                         )
                         kb = InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="⭐ Renovar Acceso VIP", url=f"https://t.me/{bot_username}?start=sub_pro")]
+                            [InlineKeyboardButton(text="⭐ Renovar Acceso VIP", url=renew_url)]
                         ])
                         await bot.send_message(chat_id=u_id, text=warn_text, reply_markup=kb, parse_mode="HTML")
                         await mark_subscription_warned(ch_id, u_id)
@@ -562,8 +603,8 @@ async def start_channel_broadcast_worker(bot: Bot):
     con difusión recurrente activa y publica los anuncios con botones inline limpios.
     Inicia simultáneamente el Watchdog de membresías y el Anunciador de Videollamadas.
     """
-    asyncio.create_task(start_subscription_watchdog_worker(bot))
-    asyncio.create_task(start_meeting_announcement_worker(bot))
+    _spawn(start_subscription_watchdog_worker(bot))
+    _spawn(start_meeting_announcement_worker(bot))
     logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
     
     while True:
@@ -596,7 +637,7 @@ async def start_channel_broadcast_worker(bot: Bot):
 
                     caption = promo_text.strip() if promo_text else f"💎 <b>{plan_name}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR\n\n🛡️ <i>Cloud Media Management</i>"
 
-                    # Botones interactivos limpios (cero links en texto plano)
+                    # Botonera interactiva limpia (cero URLs en texto plano)
                     kb_rows = [
                         [InlineKeyboardButton(text=f"⭐ Adquirir por {stars_price} Stars", url=pay_link)]
                     ]
