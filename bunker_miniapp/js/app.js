@@ -1,13 +1,14 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
    app.js — Orquestador Central Modular, Enrutador de Eventos y Ciclo de Vida
+   Fase 5/6: Analítica en vivo (REST + WebSocket /ws/radar) y checkout con Telegram Stars.
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
 import { CONFIG, translations } from './config.js';
 import { state } from './state.js';
 import { tgApp } from './telegram.js';
-import { api } from './api.js';
+import { api, BunkerWebSocketClient } from './api.js';
 import { ui } from './ui.js';
 
 export const app = {
@@ -32,8 +33,11 @@ export const app = {
     init() {
         tgApp.initViewport();
         this.initTheme();
-        this.initTonConnect();
+        ui.ensureLiveStyles();
         ui.updateTranslations();
+        ui.setWsStatus('idle');
+        this.initLiveToastPreference();
+        this.initVisibilityHandling();
         this.initDraggableButton();
         this.initCharCounter();
         this.bindChannelSelectListener();
@@ -52,12 +56,18 @@ export const app = {
 
     initUrlRouting() {
         const urlParams = new URLSearchParams(window.location.search);
-        const chatId = urlParams.get('chat_id');
+        const isNumericId = (value) => /^-?\d+$/.test(String(value || ''));
+
+        // Comunidad por ?chat_id= (botones de /top, /heatmap y /metrics) o por startapp=<chat_id>
+        // (Direct Link de la Mini App en grupos, donde Telegram no admite botones web_app).
+        const startParam = tgApp.tg?.initDataUnsafe?.start_param || '';
+        const rawChat = urlParams.get('chat_id') || (isNumericId(startParam) ? startParam : '');
         const channelId = urlParams.get('channel_id');
 
-        if (chatId) {
-            state.selectedChatId = chatId;
+        if (isNumericId(rawChat)) {
+            state.selectedChatId = String(rawChat);
             state.activeContext = 'groups';
+            state.deepLinkTab = 'analytics';   // el botón "Abrir Dashboard en Vivo" debe aterrizar en la analítica
         } else if (channelId) {
             state.selectedChatId = channelId;
             state.activeContext = 'channels';
@@ -226,6 +236,12 @@ export const app = {
         ui.renderChatList('groups-list', state.data.groups, ui.t('no_groups'));
         ui.renderSubscriberList(state.data.subscribers);
 
+        // Analítica en vivo: los textos generados por JS se repintan en el nuevo idioma.
+        ui.setWsStatus(state.wsStatus);
+        ui.renderFeed();
+        ui.renderVoiceCard();
+        if (state.liveAnalytics) ui.renderAnalytics(state.liveAnalytics);
+
         if (state.selectedChatId && state.data.currentChatDashboard) {
             this.loadChatDashboard(state.selectedChatId);
         }
@@ -362,6 +378,7 @@ export const app = {
 
     logout() {
         if (confirm(state.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) {
+            this.disconnectLiveRadar();
             localStorage.removeItem('bunker_session_token');
             localStorage.removeItem('bunker_init_data');
             if (tgApp.tg) {
@@ -400,6 +417,7 @@ export const app = {
     },
 
     showLoginGate(msgKey = null) {
+        this.disconnectLiveRadar();
         document.getElementById('login-gate')?.classList.remove('hidden');
         document.getElementById('app-shell')?.classList.add('hidden');
         const statusEl = document.getElementById('login-status-msg');
@@ -423,7 +441,9 @@ export const app = {
         ]);
 
         if (state.selectedChatId) {
-            this.configureChat(state.selectedChatId);
+            const tab = state.deepLinkTab;
+            state.deepLinkTab = null;
+            this.configureChat(state.selectedChatId, tab ? { tab } : {});
         }
     },
 
@@ -597,8 +617,14 @@ export const app = {
         if (select && select.value) {
             this.onChannelSelectChange(select.value);
         } else if (select && select.options.length > 1) {
+            // Autoselección de cortesía del primer canal. No debe secuestrar la comunidad que el operador
+            // abrió por deep link (?chat_id= / startapp=): onChannelSelectChange sobrescribe selectedChatId.
+            const openedChat = state.selectedChatId;
             select.selectedIndex = 1;
             this.onChannelSelectChange(select.value);
+            if (openedChat && String(openedChat) !== String(select.value)) {
+                state.selectedChatId = openedChat;
+            }
         }
     },
 
@@ -611,6 +637,7 @@ export const app = {
         state.data.groups = (data && data.groups) || [];
         ui.renderChatList('groups-list', state.data.groups, ui.t('no_groups'));
         ui.populateSelect('group-owner-select', state.data.groups, ui.t('no_groups'));
+        ui.populateSelect('analytics-chat-select', state.data.groups, ui.t('no_groups'), 'group');
     },
 
     async loadSubscribers() {
@@ -628,22 +655,321 @@ export const app = {
         this.switchTab('plans');
     },
 
-    async configureChat(chatId) {
+    /**
+     * Selecciona una comunidad: carga su panel y arranca la analítica en vivo.
+     *  a) cierra el WebSocket anterior si el operador cambió de comunidad,
+     *  b) abre el cliente BunkerWebSocketClient de la nueva (sin esperar al REST),
+     *  c) el evento analytics_snapshot repinta el panel sin recargar la página,
+     *  d) pide la analítica por REST para pintar de inmediato mientras el socket conecta.
+     * opts.tab: pestaña de destino (por defecto 'bot-settings'; 'analytics' desde los botones del bot).
+     */
+    async configureChat(chatId, opts = {}) {
         if (!chatId) return;
+        chatId = String(chatId);
+
+        const epoch = ++state.chatEpoch;
         state.selectedChatId = chatId;
 
-        document.querySelectorAll('#group-owner-select').forEach(sel => {
+        document.querySelectorAll('#group-owner-select, #analytics-chat-select').forEach(sel => {
             sel.value = chatId;
         });
 
-        await Promise.all([
+        // La analítica en vivo solo existe para grupos: los canales no generan mensajes rastreables.
+        const isChannel = state.data.channels.some(c => String(c.id) === chatId);
+        const hasLiveForChat = Boolean(
+            state.wsClient && state.wsClient.chatId === chatId && state.wsClient.status !== 'denied'
+        );
+
+        if (isChannel) {
+            this.disconnectLiveRadar();
+        } else if (!hasLiveForChat) {
+            this.connectLiveRadar(chatId);
+        }
+
+        // Desde el botón del bot el operador espera ver la analítica ya: se muestra el cargador al instante.
+        if (opts.tab === 'analytics') this.switchTab('analytics');
+
+        const tasks = [
             this.loadChatDashboard(chatId),
             this.loadChatStats(chatId),
             this.loadChatAdminStats(chatId),
             this.loadChatTopUsers(chatId)
-        ]);
+        ];
+        if (!isChannel) tasks.push(this.loadCommunityAnalytics(chatId));
+        await Promise.all(tasks);
 
-        this.switchTab('bot-settings');
+        if (epoch !== state.chatEpoch) return;   // el operador cambió de comunidad mientras cargaba
+        if (opts.tab !== 'analytics') this.switchTab(opts.tab || 'bot-settings');
+    },
+
+    openAnalytics(chatId) {
+        if (!chatId) {
+            this.disconnectLiveRadar();
+            this.switchTab('analytics');
+            return Promise.resolve();
+        }
+        return this.configureChat(chatId, { tab: 'analytics' });
+    },
+
+    // ======================================================================
+    // 📡 RADAR EN VIVO — WebSocket + analítica unificada
+    // ======================================================================
+    connectLiveRadar(chatId) {
+        this.disconnectLiveRadar();   // una sola conexión: se cierra la de la comunidad anterior
+
+        const client = new BunkerWebSocketClient(chatId);
+        state.wsClient = client;
+        const isCurrent = () => state.wsClient === client;
+
+        client.on('status', ({ status }) => { if (isCurrent()) ui.setWsStatus(status); });
+        client.on('analytics_snapshot', (data) => { if (isCurrent()) this.applyAnalyticsSnapshot(data, 'ws'); });
+        client.on('initial_state', (data) => { if (isCurrent()) state.liveTelemetry = data; });
+        client.on('state_refresh', (data) => { if (isCurrent()) state.liveTelemetry = data; });
+        client.on('message', (data) => { if (isCurrent()) this.onLiveMessage(data); });
+        client.on('level_up', (data) => { if (isCurrent()) this.onLiveLevelUp(data); });
+        client.on('voice_presence', (data) => { if (isCurrent()) this.onVoicePresence(data); });
+        client.on('voice_call_started', (data) => { if (isCurrent()) this.onVoiceCall(true, data); });
+        client.on('voice_call_ended', (data) => { if (isCurrent()) this.onVoiceCall(false, data); });
+        client.on('stars_payment', (data) => { if (isCurrent()) this.onStarsPayment(data); });
+        client.on('settings_updated', () => { if (isCurrent()) this.scheduleDashboardReload(chatId); });
+        client.on('gap', () => { if (isCurrent()) this.scheduleAnalyticsRefresh(500); });
+        client.on('auth_failed', ({ code }) => { if (isCurrent()) this.onRadarAuthFailed(code); });
+        client.on('reconnected', () => {
+            if (!isCurrent()) return;
+            // Tras una caída se pierden eventos, pero el servidor envía un analytics_snapshot nuevo tras cada
+            // "hello": ese snapshot reconcilia el panel sin pedir nada. Volver del segundo plano no merece aviso.
+            if (Date.now() < this._silentUntil) return;
+            ui.showToast({ key: 'radar-reconnected', icon: '🟢', tone: 'success', ttl: 2500, title: ui.t('toast_reconnected') });
+        });
+
+        // Red de seguridad: un snapshot cada 5 min cubre el cambio de día aunque no haya mensajes.
+        this._idleRefreshTimer = setInterval(() => { if (isCurrent()) client.requestAnalytics(); }, 300000);
+
+        client.connect();
+        return client;
+    },
+
+    disconnectLiveRadar() {
+        clearTimeout(this._refreshTimer);
+        clearTimeout(this._dashboardTimer);
+        clearTimeout(this._hiddenTimer);
+        clearInterval(this._idleRefreshTimer);
+        this._refreshTimer = this._dashboardTimer = this._hiddenTimer = this._idleRefreshTimer = null;
+        this._silentUntil = 0;
+
+        const client = state.wsClient;
+        state.wsClient = null;               // antes de cerrar: el manejador "status" ya no pintará nada
+        if (client) client.close();
+
+        state.liveAnalytics = null;
+        state.liveTelemetry = null;
+        state.liveVoice = { active: false, callId: null, participants: 0, mics: 0 };
+        ui.clearToasts();
+        ui.setWsStatus('idle');
+        ui.resetAnalyticsView();
+        ui.renderVoiceCard();
+    },
+
+    analyticsErrorMessage(res) {
+        if (res.__status === 403) return ui.t('an_err_forbidden');
+        if (res.__status === 503 || res.__status === 504) return ui.t('an_err_unavailable');
+        if (res.__error === 'timeout' || res.__error === 'network') return ui.t('load_error');
+        return ui.t('an_err_unavailable');
+    },
+
+    /** GET /api/community/{chat_id}/analytics. fresh=true se salta la caché del servidor. */
+    async loadCommunityAnalytics(chatId, { fresh = false } = {}) {
+        const epoch = state.chatEpoch;
+        ui.setAnalyticsLoading(true);
+
+        const data = await api.fetchCommunityAnalytics(chatId, fresh);
+        if (epoch !== state.chatEpoch || String(state.selectedChatId) !== String(chatId)) return;   // respuesta obsoleta
+
+        if (data?.__error) {
+            // Con datos ya en pantalla, un fallo puntual de refresco no los tapa con un error.
+            if (!state.liveAnalytics) {
+                ui.renderAnalyticsError(this.analyticsErrorMessage(data), data.__status !== 403);
+            }
+            return;
+        }
+        this.applyAnalyticsSnapshot(data, 'rest');
+    },
+
+    /** Punto único de entrada de snapshots (REST o WebSocket). Descarta los obsoletos o de otra comunidad. */
+    applyAnalyticsSnapshot(data, source = 'ws') {
+        if (!data || typeof data !== 'object' || !data.summary) return false;
+        if (data.chat_id !== undefined && String(data.chat_id) !== String(state.selectedChatId)) return false;
+
+        const current = state.liveAnalytics;
+        if (current && Number(data.generated_at) < Number(current.generated_at)) return false;   // REST lento tras un snapshot más nuevo
+
+        state.liveAnalytics = data;
+        ui.renderAnalytics(data);
+        return true;
+    },
+
+    refreshAnalytics() {
+        if (!state.selectedChatId) return Promise.resolve();
+        tgApp.hapticImpact('light');
+        return this.loadCommunityAnalytics(state.selectedChatId, { fresh: true });
+    },
+
+    onRadarAuthFailed(code) {
+        if (state.liveAnalytics) return;
+        ui.renderAnalyticsError(ui.t(code === 4403 ? 'an_err_forbidden' : 'login_expired'), false);
+    },
+
+    /** Pide un snapshot nuevo tras actividad en vivo, con un mínimo entre peticiones. */
+    scheduleAnalyticsRefresh(delayMs = null) {
+        if (!state.wsClient || this._refreshTimer) return;
+        const minGap = CONFIG.ANALYTICS?.REFRESH_MIN_MS || 20000;
+        const sinceLast = Date.now() - (this._lastLiveRefresh || 0);
+        const wait = delayMs !== null ? delayMs : Math.max(1000, minGap - sinceLast);
+
+        this._refreshTimer = setTimeout(() => {
+            this._refreshTimer = null;
+            this._lastLiveRefresh = Date.now();
+            state.wsClient?.requestAnalytics();
+        }, wait);
+    },
+
+    scheduleDashboardReload(chatId) {
+        clearTimeout(this._dashboardTimer);
+        this._dashboardTimer = setTimeout(() => {
+            if (String(state.selectedChatId) === String(chatId)) this.loadChatDashboard(chatId);
+        }, 500);
+    },
+
+    /** Destello de KPI como máximo una vez cada 400 ms (comunidades con decenas de mensajes por segundo). */
+    flashThrottled(id) {
+        const now = Date.now();
+        if (now - (this._lastFlash || 0) < 400) return;
+        this._lastFlash = now;
+        ui.flash(id);
+    },
+
+    // --- Eventos en vivo ---------------------------------------------------
+    onLiveMessage(d) {
+        if (!d) return;
+        const kind = d.k || 'other';
+        const name = d.n || `ID ${d.u}`;
+
+        // Contadores optimistas: el siguiente snapshot los sustituye por el valor real.
+        const summary = state.liveAnalytics?.summary;
+        if (summary) {
+            summary.messages_today = (summary.messages_today || 0) + 1;
+            summary.messages_30d = (summary.messages_30d || 0) + 1;
+            ui.renderMessagesToday(summary);
+            this.flashThrottled('an-kpi-messages-today');
+        }
+
+        ui.pushFeedItem({ icon: ui.kindIcon(kind), key: 'feed_message', vars: { name, kind } });
+        ui.notifyLiveMessage({ name, kind });
+        this.scheduleAnalyticsRefresh();
+    },
+
+    onLiveLevelUp(d) {
+        if (!d) return;
+        const name = d.n || `ID ${d.u}`;
+        ui.pushFeedItem({ icon: '🏆', key: 'feed_level_up', vars: { name, level: d.l } });
+        ui.notifyLevelUp({ name, level: d.l, userId: d.u });
+        tgApp.hapticNotification('success');
+        this.scheduleAnalyticsRefresh(1500);   // el cuadro de honor cambia
+    },
+
+    onVoicePresence(d) {
+        if (!d) return;
+        state.liveVoice = {
+            ...state.liveVoice,
+            active: true,
+            participants: Number(d.n) || 0,
+            mics: Number(d.m) || 0
+        };
+        ui.renderVoiceCard();
+
+        if (Array.isArray(d.j) && d.j.length) {
+            const names = d.j.slice(0, 3).map(p => p.n || `ID ${p.u}`).join(', ');
+            ui.pushFeedItem({ icon: '🎙️', key: 'feed_voice_joined', vars: { names } });
+        }
+        if (Number(d.lt) > 0) {
+            ui.pushFeedItem({ icon: '🚪', key: 'feed_voice_left', vars: { n: d.lt } });
+        }
+    },
+
+    onVoiceCall(started, d) {
+        state.liveVoice = started
+            ? { active: true, callId: d?.call ?? null, participants: 0, mics: 0 }
+            : { active: false, callId: null, participants: 0, mics: 0 };
+        ui.renderVoiceCard();
+        ui.pushFeedItem({
+            icon: started ? '🎙️' : '🔇',
+            key: started ? 'toast_voice_started' : 'toast_voice_ended',
+            vars: {}
+        });
+        ui.notifyVoiceCall(started);
+        tgApp.hapticImpact('light');
+    },
+
+    onStarsPayment(d) {
+        if (!d) return;
+        const stars = Number(d.a) || 0;
+        const name = `ID ${d.u}`;   // el evento solo lleva el id del pagador
+
+        const summary = state.liveAnalytics?.summary;
+        if (summary) {
+            summary.stars_total = (summary.stars_total || 0) + stars;
+            summary.stars_today = (summary.stars_today || 0) + stars;
+            summary.stars_30d = (summary.stars_30d || 0) + stars;
+            summary.payments_count = (summary.payments_count || 0) + 1;
+            ui.renderStarsKpis(summary);
+            ui.flash('an-kpi-stars-total');
+        }
+
+        ui.pushFeedItem({ icon: '⭐', key: 'feed_payment', vars: { name, stars } });
+        ui.notifyStarsPayment({ name, stars });
+        tgApp.hapticNotification('success');
+        this.scheduleAnalyticsRefresh(2000);
+    },
+
+    // --- Preferencias y ciclo de vida de la pestaña ------------------------
+    initLiveToastPreference() {
+        let saved = null;
+        try { saved = localStorage.getItem('bunker_live_toasts'); } catch (e) { /* almacenamiento bloqueado */ }
+        state.liveToastsEnabled = saved !== '0';
+        ui.renderToastToggle();
+    },
+
+    toggleLiveToasts() {
+        state.liveToastsEnabled = !state.liveToastsEnabled;
+        try { localStorage.setItem('bunker_live_toasts', state.liveToastsEnabled ? '1' : '0'); } catch (e) { /* almacenamiento bloqueado */ }
+        ui.renderToastToggle();
+        if (!state.liveToastsEnabled) ui.clearToasts();
+        ui.showToast({
+            key: 'toast-pref',
+            force: true,
+            icon: state.liveToastsEnabled ? '🔔' : '🔕',
+            ttl: 2000,
+            title: ui.t(state.liveToastsEnabled ? 'an_toasts_on' : 'an_toasts_off')
+        });
+        tgApp.hapticSelection();
+    },
+
+    /** En segundo plano > 60 s se pausa el socket (ahorra batería y datos); al volver se reanuda y se reconcilia. */
+    initVisibilityHandling() {
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                clearTimeout(this._hiddenTimer);
+                this._hiddenTimer = setTimeout(() => state.wsClient?.pause(), CONFIG.WS?.HIDDEN_PAUSE_MS || 60000);
+                return;
+            }
+            clearTimeout(this._hiddenTimer);
+            this._hiddenTimer = null;
+            const client = state.wsClient;
+            if (client && client.status === 'paused') {
+                this._silentUntil = Date.now() + 15000;   // la reconexión al volver del segundo plano es silenciosa
+                client.resume();
+            }
+        });
     },
 
     async loadChatDashboard(chatId) {
@@ -906,106 +1232,19 @@ export const app = {
         }
     },
 
-    async initTonConnect() {
-        const TonConnectClass = window.TON_CONNECT_UI?.TonConnectUI || window.TonConnectUI;
-        if (!state.tonConnectUI && TonConnectClass) {
-            try {
-                state.tonConnectUI = new TonConnectClass({
-                    manifestUrl: CONFIG.TON_MANIFEST,
-                    uiPreferences: { theme: 'DARK' }
-                });
-
-                await state.tonConnectUI.connectionRestored;
-                ui.updateWalletUI(state.tonConnectUI.connected ? state.tonConnectUI.account : null);
-                state.tonConnectUI.onStatusChange(async (wallet) => ui.updateWalletUI(wallet?.account));
-            } catch (err) {
-                console.warn('[TON Connect]', err);
-            }
-        }
-    },
-
-    async connectWallet() {
-        try {
-            if (!state.tonConnectUI) await this.initTonConnect();
-            if (!state.tonConnectUI) return;
-
-            if (state.tonConnectUI.connected) {
-                if (confirm(state.currentLang === 'es' ? "¿Desconectar TON Wallet?" : "Disconnect TON Wallet?")) {
-                    await state.tonConnectUI.disconnect();
-                    ui.updateWalletUI(null);
-                }
-            } else {
-                await state.tonConnectUI.openModal();
-            }
-        } catch (e) {
-            console.error('Wallet error:', e);
-        }
-    },
-
-    async executeTonPayment(plan) {
-        const nanoAmount = CONFIG.PRICES[plan]?.ton || '600000000';
-        const tx = {
-            validUntil: Math.floor(Date.now() / 1000) + 300,
-            messages: [{ address: CONFIG.TON_WALLET, amount: nanoAmount }]
-        };
-        try {
-            const result = await state.tonConnectUI.sendTransaction(tx);
-            if (result) {
-                alert(state.currentLang === 'es' ? "✅ Transacción exitosa. ¡Activación procesada!" : "✅ Transaction successful.");
-                this.closeCheckout();
-            }
-        } catch (err) {
-            console.warn('Tx cancelada:', err);
-        }
-    },
-
-    pagarPlan(plan, method) {
+    /**
+     * Checkout exclusivo con Telegram Stars (XTR): abre el bot con el deep link de la suscripción y la
+     * factura se paga dentro de Telegram. `method` se conserva solo por compatibilidad con HTML en caché:
+     * cualquier valor distinto de 'stars' se trata como Stars (la plataforma no cobra por otros medios).
+     */
+    pagarPlan(plan, method = 'stars') {
+        if (!CONFIG.PRICES[plan]) return;
         state.selectedPlan = plan;
-        const priceInfo = CONFIG.PRICES[plan];
-        if (!priceInfo) return;
 
-        if (method === 'stars') {
-            const targetChat = state.selectedChatId ? `_${state.selectedChatId}` : '';
-            const param = plan === 'pro' ? `sub_pro${targetChat}` : `sub_ultra${targetChat}`;
-            tgApp.openTelegramLink(`https://t.me/${CONFIG.BOT_USERNAME}?start=${param}`);
-            setTimeout(() => tgApp.closeApp(), 300);
-        } else if (method === 'paypal') {
-            window.open(`https://paypal.me/Felipecosmic/${priceInfo.usd}`, '_blank');
-        } else if (method === 'ton') {
-            if (!state.tonConnectUI || !state.tonConnectUI.connected) {
-                alert(state.currentLang === 'es' ? "⚠️ Conecta tu TON Wallet primero." : "⚠️ Connect your TON Wallet first.");
-                this.connectWallet();
-                return;
-            }
-            this.executeTonPayment(plan);
-        } else if (method === 'external') {
-            const label = plan === 'pro' ? `PRO ($${priceInfo.usd}.00)` : `ULTRA PRO ($${priceInfo.usd}.00)`;
-            const planEl = document.getElementById('checkout-plan-name');
-            if (planEl) planEl.innerText = label;
-            document.getElementById('modal-external-checkout')?.classList.remove('hidden');
-        }
-    },
-
-    processOneClickPay(gateway) {
-        const priceUsd = `${CONFIG.PRICES[state.selectedPlan]?.usd || 3}.00`;
-        const links = {
-            skrill: `https://skrill.me/rq/Felipe%20Rafael/${priceUsd}/USD?key=7AR7OlqodIdbV_WU4hSXJ435Na1`,
-            binance: 'https://app.binance.com/uni-qr/request-to-pay?billOrderId=452405181270605824&billType=request_a_payment'
-        };
-        if (links[gateway]) {
-            window.open(links[gateway], '_blank', 'noopener,noreferrer');
-            this.closeCheckout();
-        }
-    },
-
-    openManualPayment() {
-        document.getElementById('modal-external-checkout')?.classList.add('hidden');
-        document.getElementById('modal-manual-payment')?.classList.remove('hidden');
-    },
-
-    closeCheckout() {
-        document.getElementById('modal-external-checkout')?.classList.add('hidden');
-        document.getElementById('modal-manual-payment')?.classList.add('hidden');
+        const targetChat = state.selectedChatId ? `_${state.selectedChatId}` : '';
+        const param = plan === 'pro' ? `sub_pro${targetChat}` : `sub_ultra${targetChat}`;
+        tgApp.openTelegramLink(`https://t.me/${CONFIG.BOT_USERNAME}?start=${param}`);
+        setTimeout(() => tgApp.closeApp(), 300);
     },
 
     copyText(text) {

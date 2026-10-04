@@ -1,17 +1,46 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
    config.js — Constantes de Entorno, Tarifas e Internacionalización (i18n)
+   Fase 5/6: Radar en vivo (WebSocket), analítica de comunidad y checkout
+   exclusivo con Telegram Stars (XTR).
    ========================================================================== */
 
 export const CONFIG = {
     BOT_USERNAME: 'thebunkerapp_bot',
     WEBAPP_URL: 'https://thebunkerapp2.netlify.app/',
     API_BASE: 'https://the-bunker-bot-production.up.railway.app',
-    TON_MANIFEST: 'https://the-bunker-bot-production.up.railway.app/tonconnect-manifest.json',
-    TON_WALLET: 'UQAAnX4bGBzI0ujk35-XChap_wZ7x67NeJ85C_M1YIvLbYUF',
+
+    // 📡 Radar en vivo: el WebSocket del backend vive en el mismo dominio de Railway
+    // (ruta /ws/radar/{chat_id}). Debe usar wss:// porque la Mini App se sirve por HTTPS.
+    WS_BASE: 'wss://the-bunker-bot-production.up.railway.app',
+
+    // Un único medio de pago: Telegram Stars (XTR). Sin pasarelas externas ni precios fiat.
     PRICES: {
-        pro:   { stars: 300, usd: 3, ton: '600000000' },
-        ultra: { stars: 600, usd: 6, ton: '1200000000' }
+        pro:   { stars: 300 },
+        ultra: { stars: 600 }
+    },
+
+    // ⚡ Parámetros del cliente WebSocket (BunkerWebSocketClient)
+    WS: {
+        // 'query' → ?init_data= / ?token= en la URL | 'frame' → primer frame {action:'auth'}
+        // (evita que las credenciales aparezcan en los logs de acceso del proxy).
+        AUTH_MODE: 'query',
+        HEARTBEAT_MS: 20000,        // ping cada 20 s (el servidor corta a los 90 s de silencio)
+        PONG_TIMEOUT_MS: 10000,     // sin ningún mensaje tras un ping → conexión muerta
+        BACKOFF_BASE_MS: 1000,      // reconexión exponencial: 1 s, 2 s, 4 s ... hasta el tope
+        BACKOFF_MAX_MS: 30000,
+        BACKOFF_FACTOR: 2,
+        RATE_LIMITED_MIN_MS: 30000, // cierre 4429 (sala llena / demasiadas sesiones)
+        HIDDEN_PAUSE_MS: 60000      // pausa la conexión si la Mini App lleva 60 s en segundo plano
+    },
+
+    // 📈 Analítica de comunidad
+    ANALYTICS: {
+        REST_TIMEOUT_MS: 12000,
+        REFRESH_MIN_MS: 20000,          // mínimo entre refrescos pedidos tras eventos en vivo
+        FEED_MAX_ITEMS: 30,
+        MESSAGE_TOAST_WINDOW_MS: 2500,  // agrupa los mensajes en vivo en un único aviso
+        TOAST_MAX_VISIBLE: 3
     }
 };
 
@@ -28,7 +57,7 @@ export const translations = {
         ultra_badge: "ACCESO ILIMITADO",
         ultra_title: "ULTRA PRO",
         ultra_desc: "Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.",
-        tactical_gateways: "PASARELAS TÁCTICAS",
+        plans_stars_only: "Pago 100% in-app con Telegram Stars (XTR). Activación inmediata.",
         active_context: "Entorno Activo:",
         stat_subs: "Suscriptores VIP",
         stat_revenue: "Ingresos Stars",
@@ -62,7 +91,8 @@ export const translations = {
         nav_channels: "Estudio de Canales",
         nav_groups: "Matriz de Grupos",
         nav_watchdog: "Auditor Suscripciones",
-        nav_plans: "Membresías & Pasarelas",
+        nav_plans: "Membresías & Stars",
+        nav_analytics: "Analítica en Vivo",
         nav_aff: "Red de Afiliados",
         studio_badge: "ESTUDIO DE BROADCAST",
         studio_title: "Ajustes del Canal",
@@ -94,7 +124,6 @@ export const translations = {
         profile_reg_date: "Fecha de Registro:",
         profile_account_status: "Estado de Cuenta:",
         btn_terminate_sessions: "Cerrar Todas las Sesiones Activas",
-        bank_transfer_title: "PAGO MANUAL BANCARIO",
         theme_light: "Claro",
         theme_dark: "Oscuro",
         menu_my_profile: "Mi Perfil",
@@ -115,7 +144,7 @@ export const translations = {
         instruction_steps_title: "🚀 Pasos iniciales:",
         instruction_step1: "1. Añade el bot como administrador en tu canal o grupo.",
         instruction_step2: "2. Sincroniza el ID desde el Estudio de Canales.",
-        instruction_step3: "3. Configura tarifas en XTR y pasarelas tácticas.",
+        instruction_step3: "3. Configura tus tarifas en Stars (XTR).",
         company_reg_title: "Registro de Compañía",
         company_reg_body: "Bienvenido a la página de registro de organización del servicio The Bunker OS. El registro consta de varios pasos: especifica los datos de la organización y verifica tus credenciales.",
         company_reg_start: "Iniciar registro",
@@ -150,7 +179,79 @@ export const translations = {
         btn_retry: "Reintentar conexión",
         action_clone_success: "¡Bot Clon desplegado y activo correctamente! 🟢",
         action_sentinel_success: "¡Centinela MTProto vinculado con éxito! 💎",
-        action_purge_started: "Ghost Purge iniciada en segundo plano 🧹"
+        action_purge_started: "Ghost Purge iniciada en segundo plano 🧹",
+
+        // 📈 Analítica en vivo
+        an_badge: "RADAR EN TIEMPO REAL",
+        an_title: "Analítica de Comunidad",
+        an_refresh: "Actualizar",
+        an_toasts_on: "Alertas en vivo activadas 🔔",
+        an_toasts_off: "Alertas en vivo silenciadas 🔕",
+        an_empty: "Selecciona una comunidad para ver su analítica en vivo.",
+        an_loading: "Compilando métricas...",
+        an_err_forbidden: "No tienes permisos de administración sobre esta comunidad.",
+        an_err_unavailable: "La analítica no está disponible en este momento.",
+        an_updated: "Actualizado",
+        an_kpi_dau: "Activos hoy (DAU)",
+        an_kpi_wau: "7 días (WAU)",
+        an_kpi_mau: "30 días (MAU)",
+        an_kpi_stickiness: "Stickiness DAU/MAU",
+        an_kpi_messages: "Mensajes hoy",
+        an_vs_yesterday: "vs. ayer a esta hora",
+        an_kpi_members: "Miembros",
+        an_members_tracked: "en padrón",
+        an_kpi_joins: "Altas 7d / 30d",
+        an_kpi_retention: "Retención de cohortes",
+        an_cohort_7d: "Cohorte 7 días",
+        an_cohort_30d: "Cohorte 30 días",
+        an_kpi_stars: "Recaudación Stars",
+        an_stars_today: "hoy",
+        an_stars_30d: "30 días",
+        an_payments: "pagos",
+        an_spark_messages: "Mensajes (30 días)",
+        an_spark_active: "Usuarios activos (30 días)",
+        an_spark_growth: "Altas de miembros (30 días)",
+        an_peak_label: "Pico",
+        an_heatmap_title: "Mapa de Calor 24/7",
+        an_heatmap_empty: "Aún sin actividad suficiente",
+        an_breakdown_title: "Desglose de Mensajes (30 días)",
+        an_leaderboard_title: "Cuadro de Honor — Top 10",
+        an_level: "Nivel",
+        an_msgs_30d: "msgs/30d",
+        an_lb_empty: "Aún sin actividad suficiente para el ranking",
+        an_voice_title: "Sala de Audio",
+        an_voice_idle: "Sin llamada activa",
+        an_voice_live: "Llamada en curso",
+        an_voice_present: "en sala",
+        an_voice_mics: "micrófonos abiertos",
+        an_feed_title: "Actividad en Vivo",
+        an_feed_empty: "Esperando eventos en vivo...",
+        kind_text: "texto",
+        kind_media: "multimedia",
+        kind_stickers_gifs: "sticker/GIF",
+        kind_commands: "comando",
+        kind_other: "otro",
+        ws_live: "EN VIVO",
+        ws_connecting: "Conectando…",
+        ws_reconnecting: "Reconectando…",
+        ws_offline: "Sin conexión",
+        ws_paused: "En pausa",
+        ws_denied: "Sin acceso",
+        ws_idle: "Radar inactivo",
+        toast_level_up_title: "¡Ascenso de nivel! 🏆",
+        toast_level_up_body: "{name} alcanzó el nivel {level}",
+        toast_msg_title_one: "Nuevo mensaje 💬",
+        toast_msg_title_many: "{n} mensajes nuevos 💬",
+        toast_voice_started: "Videochat iniciado 🎙️",
+        toast_voice_ended: "Videochat finalizado 🔇",
+        toast_payment_title: "Pago en Stars recibido ⭐",
+        toast_payment_body: "+{stars} Stars de {name}",
+        toast_reconnected: "Radar reconectado 🟢",
+        feed_message: "{name} · {kind}",
+        feed_level_up: "{name} subió al nivel {level}",
+        feed_voice_joined: "{names} entró a la sala",
+        feed_voice_left: "{n} salió(eron) de la sala",
+        feed_payment: "{name} pagó {stars} ⭐"
     },
     en: {
         plans_title: "Community Memberships",
@@ -164,7 +265,7 @@ export const translations = {
         ultra_badge: "UNLIMITED ACCESS",
         ultra_title: "ULTRA PRO",
         ultra_desc: "Advanced anti-ghost radar, max server priority, and direct support.",
-        tactical_gateways: "TACTICAL GATEWAYS",
+        plans_stars_only: "100% in-app payment with Telegram Stars (XTR). Instant activation.",
         active_context: "Active Context:",
         stat_subs: "VIP Subscribers",
         stat_revenue: "Stars Revenue",
@@ -198,7 +299,8 @@ export const translations = {
         nav_channels: "Channel Studio",
         nav_groups: "Group Matrix",
         nav_watchdog: "Sub Watchdog",
-        nav_plans: "Plans & Gateways",
+        nav_plans: "Plans & Stars",
+        nav_analytics: "Live Analytics",
         nav_aff: "Affiliate Network",
         studio_badge: "BROADCAST STUDIO",
         studio_title: "Channel Settings",
@@ -230,7 +332,6 @@ export const translations = {
         profile_reg_date: "Registration Date:",
         profile_account_status: "Account Status:",
         btn_terminate_sessions: "Terminate All Active Sessions",
-        bank_transfer_title: "MANUAL BANK WIRE",
         theme_light: "Light",
         theme_dark: "Dark",
         menu_my_profile: "My profile",
@@ -251,7 +352,7 @@ export const translations = {
         instruction_steps_title: "🚀 Initial steps:",
         instruction_step1: "1. Add the bot as admin in your channel or group.",
         instruction_step2: "2. Sync the ID from the Channel Studio.",
-        instruction_step3: "3. Configure XTR rates and tactical gateways.",
+        instruction_step3: "3. Configure your rates in Stars (XTR).",
         company_reg_title: "Company Registration",
         company_reg_body: "Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.",
         company_reg_start: "Start registration",
@@ -286,6 +387,78 @@ export const translations = {
         btn_retry: "Retry connection",
         action_clone_success: "Clone Bot successfully deployed and active! 🟢",
         action_sentinel_success: "MTProto Sentinel successfully linked! 💎",
-        action_purge_started: "Ghost Purge initiated in background 🧹"
+        action_purge_started: "Ghost Purge initiated in background 🧹",
+
+        // 📈 Live analytics
+        an_badge: "REAL-TIME RADAR",
+        an_title: "Community Analytics",
+        an_refresh: "Refresh",
+        an_toasts_on: "Live alerts on 🔔",
+        an_toasts_off: "Live alerts muted 🔕",
+        an_empty: "Select a community to see its live analytics.",
+        an_loading: "Compiling metrics...",
+        an_err_forbidden: "You do not have admin permissions over this community.",
+        an_err_unavailable: "Analytics are not available right now.",
+        an_updated: "Updated",
+        an_kpi_dau: "Active today (DAU)",
+        an_kpi_wau: "7 days (WAU)",
+        an_kpi_mau: "30 days (MAU)",
+        an_kpi_stickiness: "DAU/MAU stickiness",
+        an_kpi_messages: "Messages today",
+        an_vs_yesterday: "vs. yesterday at this hour",
+        an_kpi_members: "Members",
+        an_members_tracked: "tracked",
+        an_kpi_joins: "Joins 7d / 30d",
+        an_kpi_retention: "Cohort retention",
+        an_cohort_7d: "7-day cohort",
+        an_cohort_30d: "30-day cohort",
+        an_kpi_stars: "Stars revenue",
+        an_stars_today: "today",
+        an_stars_30d: "30 days",
+        an_payments: "payments",
+        an_spark_messages: "Messages (30 days)",
+        an_spark_active: "Active users (30 days)",
+        an_spark_growth: "New members (30 days)",
+        an_peak_label: "Peak",
+        an_heatmap_title: "24/7 Heatmap",
+        an_heatmap_empty: "Not enough activity yet",
+        an_breakdown_title: "Message Breakdown (30 days)",
+        an_leaderboard_title: "Honor Board — Top 10",
+        an_level: "Level",
+        an_msgs_30d: "msgs/30d",
+        an_lb_empty: "Not enough activity for the leaderboard yet",
+        an_voice_title: "Voice Room",
+        an_voice_idle: "No active call",
+        an_voice_live: "Call in progress",
+        an_voice_present: "in room",
+        an_voice_mics: "open mics",
+        an_feed_title: "Live Activity",
+        an_feed_empty: "Waiting for live events...",
+        kind_text: "text",
+        kind_media: "media",
+        kind_stickers_gifs: "sticker/GIF",
+        kind_commands: "command",
+        kind_other: "other",
+        ws_live: "LIVE",
+        ws_connecting: "Connecting…",
+        ws_reconnecting: "Reconnecting…",
+        ws_offline: "Offline",
+        ws_paused: "Paused",
+        ws_denied: "No access",
+        ws_idle: "Radar idle",
+        toast_level_up_title: "Level up! 🏆",
+        toast_level_up_body: "{name} reached level {level}",
+        toast_msg_title_one: "New message 💬",
+        toast_msg_title_many: "{n} new messages 💬",
+        toast_voice_started: "Voice chat started 🎙️",
+        toast_voice_ended: "Voice chat ended 🔇",
+        toast_payment_title: "Stars payment received ⭐",
+        toast_payment_body: "+{stars} Stars from {name}",
+        toast_reconnected: "Radar reconnected 🟢",
+        feed_message: "{name} · {kind}",
+        feed_level_up: "{name} reached level {level}",
+        feed_voice_joined: "{names} joined the room",
+        feed_voice_left: "{n} left the room",
+        feed_payment: "{name} paid {stars} ⭐"
     }
 };
