@@ -1065,7 +1065,13 @@ async def run_fastapi_server():
     port = int(os.getenv("PORT", 8080))
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
     server = uvicorn.Server(config)
-    await server.serve()
+    try:
+        await server.serve()
+    except asyncio.CancelledError:
+        pass
+    except Exception as ex:
+        logging.error(f"⚠️ [FastAPI Server Error]: {ex}")
+
     # ==========================================
 # ⚙️ GESTIÓN DE CALLBACKS Y CLONES DE AIOGRAM
 # ==========================================
@@ -1266,6 +1272,7 @@ async def main():
     try:
         master_info = await master_bot.get_me()
         set_master_bot_username(master_info.username or "")
+        print(f"🤖 [Identidad Maestro]: Online como @{master_info.username} (ID: {master_info.id})")
     except Exception as e:
         print(f"⚠️ [Identidad Maestro]: {e}")
 
@@ -1308,7 +1315,14 @@ async def main():
         print(f"⚠️ [Clones BD]: {e}")
 
     try:
-        await master_bot.delete_webhook(drop_pending_updates=True)
+        for _att in range(3):
+            try:
+                await master_bot.delete_webhook(drop_pending_updates=True)
+                break
+            except Exception as w_err:
+                logging.warning(f"Reintento de delete_webhook ({_att + 1}/3): {w_err}")
+                await asyncio.sleep(2)
+
         allowed_updates = dp.resolve_used_update_types()
         required_updates = [
             "message", "callback_query", "pre_checkout_query", 
@@ -1321,13 +1335,15 @@ async def main():
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
         for token in list(active_clone_tasks.keys()):
-            await stop_clone_polling_task(token)
-        await close_all_sentinels()
-        await master_bot.session.close()
-
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        print("⚠️ Bot detenido manualmente.")
+            try:
+                await stop_clone_polling_task(token)
+            except Exception:
+                pass
+        try:
+            await close_all_sentinels()
+        except Exception:
+            pass
+        try:
+            await master_bot.session.close()
+        except Exception:
+            pass

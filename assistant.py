@@ -131,7 +131,7 @@ VC_MEMBER_JOIN_TEXTS = {
         "🔇 {user_name}, el volumen de tu micrófono se ha establecido por defecto a un máximo del 2%.\n\n"
         "¿QUIERES CONVERTIRTE EN MIEMBRO VIP Y ACTIVAR EL VOLUMEN DE TU MICRÓFONO AL 100% DE CAPACIDAD?\n\n"
         "Usa los siguientes botones para obtener tu ⚜️MIC🎙️VIP⚜️\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
+        "🛡️️ <i>Cloud Media Management</i>"
     ),
     "en": (
         "A NEW MEMBER HAS JOINED THE BÚNKER CHAT VC.\n\n"
@@ -185,10 +185,27 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 
-DEFAULT_API_ID = int(os.getenv("TELEGRAM_API_ID", os.getenv("API_ID", "0")))
-DEFAULT_API_HASH = os.getenv("TELEGRAM_API_HASH", os.getenv("API_HASH", ""))
+def _get_env_api_id() -> int:
+    for var in ("TELEGRAM_API_ID", "API_ID", "TG_API_ID"):
+        val = os.getenv(var, "").strip().strip('"').strip("'")
+        digits = re.sub(r"[^\d]", "", val)
+        if digits:
+            return int(digits)
+    return 0
 
-MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip()
+
+def _get_env_api_hash() -> str:
+    for var in ("TELEGRAM_API_HASH", "API_HASH", "TG_API_HASH"):
+        val = os.getenv(var, "").strip().strip('"').strip("'")
+        if val:
+            return val
+    return ""
+
+
+DEFAULT_API_ID = _get_env_api_id()
+DEFAULT_API_HASH = _get_env_api_hash()
+
+MASTER_SESSION = os.getenv("MASTER_SESSION", "").strip().strip('"').strip("'")
 
 if MASTER_SESSION:
     assistant_app = Client(
@@ -251,7 +268,7 @@ async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
         user_target = client.me.id if getattr(client, "me", None) else "me"
         me = await client.get_chat_member(chat_id, user_target)
         status_val = str(getattr(me.status, "value", me.status)).lower()
-        if status_val == "owner":
+        if status_val in ("owner", "creator"):
             allowed = True
         elif status_val == "administrator":
             priv = getattr(me, "privileges", None)
@@ -709,7 +726,7 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
                             pass
                 user_tag = f"@{from_user.username}" if from_user and from_user.username else (from_user.first_name if from_user else f"ID {user_id}")
                 alert_text = (
-                    f"🛡️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
+                    f"🛡️️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
                     f"Mensaje de <b>{html.escape(user_tag)}</b> purgado preventivamente.\n"
                     f"• <b>Detección:</b> <code>{html.escape(threat.get('reason'))}</code>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
@@ -805,7 +822,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
     while True:
         if not client.is_connected:
             try:
-                await client.start()
+                await asyncio.wait_for(client.connect(), timeout=10.0)
             except FATAL_SESSION_ERRORS as auth_err:
                 logger.error(f"🔒 [Sesión Inválida] Centinela del grupo {chat_id} desautorizado: {auth_err}")
                 if user_id:
@@ -815,7 +832,12 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         pass
                 active_sentinels.pop(chat_id, None)
                 return
-            except Exception:
+            except Exception as e:
+                err_up = str(e).upper()
+                if any(x in err_up for x in ("AUTH_KEY", "UNAUTHORIZED", "SESSION_REVOKED", "USER_DEACTIVATED", "406")):
+                    logger.error(f"🔒 [Sesión Inválida MTProto] {e}")
+                    active_sentinels.pop(chat_id, None)
+                    return
                 await asyncio.sleep(5)
                 continue
 
@@ -1244,10 +1266,12 @@ async def radar_master_loop():
     """Bucle del maestro con corte automático definitivo ante clave duplicada para evitar colisiones."""
     global assistant_app
     while True:
+        if assistant_app is None:
+            break
         try:
-            if assistant_app and not assistant_app.is_connected:
+            if not assistant_app.is_connected:
                 try:
-                    await assistant_app.start()
+                    await asyncio.wait_for(assistant_app.start(), timeout=10.0)
                     logger.info("🤖 [Centinela Maestro Reconectado con Éxito]")
                 except FATAL_SESSION_ERRORS as auth_err:
                     logger.error(
@@ -1262,7 +1286,7 @@ async def radar_master_loop():
                     break
                 except Exception as e:
                     err_str = str(e).upper()
-                    if "AUTH_KEY_DUPLICATED" in err_str or "UNAUTHORIZED" in err_str or "406" in err_str:
+                    if any(k in err_str for k in ("AUTH_KEY", "UNAUTHORIZED", "406", "DUPLICATED")):
                         logger.error(f"🔒 [MASTER_SESSION Inválida]: {e}. Deteniendo Centinela Maestro.")
                         assistant_app = None
                         break
@@ -1309,7 +1333,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
         )
 
-        await session_client.start()
+        await asyncio.wait_for(session_client.start(), timeout=12.0)
         me = await session_client.get_me()
 
         try:
@@ -1427,16 +1451,21 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
     if not clean_phone.startswith("+"):
         clean_phone = f"+{clean_phone}"
 
-    if not DEFAULT_API_ID or not DEFAULT_API_HASH:
+    api_id = DEFAULT_API_ID
+    api_hash = DEFAULT_API_HASH
+    if not api_id or not api_hash:
         logger.error("❌ TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
-        return {"status": "error", "message": "Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH en variables de entorno."}
+        return {
+            "status": "error", 
+            "message": "Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH en las variables de entorno de Railway."
+        }
 
     logger.info(f"📱 [Auth Teléfono] Solicitando código para UID {user_id} ({clean_phone})...")
 
     client = Client(
         f"auth_temp_{user_id}_{group_id}_{int(time.time())}",
-        api_id=DEFAULT_API_ID,
-        api_hash=DEFAULT_API_HASH,
+        api_id=api_id,
+        api_hash=api_hash,
         in_memory=True
     )
 
@@ -1444,7 +1473,7 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
         connected = await _ensure_connected(client)
         if not connected:
             logger.error(f"❌ [Auth Teléfono] No se pudo conectar a Telegram para {clean_phone}.")
-            return {"status": "error", "message": "connection_lost"}
+            return {"status": "error", "message": "No se pudo conectar a los servidores de Telegram. Reintenta."}
 
         sent_code = await asyncio.wait_for(client.send_code(clean_phone), timeout=25.0)
         logger.info(f"📩 [Auth Teléfono] Código enviado exitosamente a {clean_phone} (hash: {sent_code.phone_code_hash})")
@@ -1465,7 +1494,7 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
                 await asyncio.wait_for(client.disconnect(), timeout=3.0)
             except Exception:
                 pass
-        return {"status": "error", "message": "Tiempo de espera agotado al conectar con Telegram. Intenta de nuevo."}
+        return {"status": "error", "message": "Tiempo de espera agotado (Timeout). Verifica tu conexión o formato del número (+código)."}
     except PhoneNumberInvalid:
         logger.warning(f"⚠️ [Auth Teléfono] Número inválido: {clean_phone}")
         if client.is_connected:
@@ -1608,7 +1637,7 @@ async def init_assistant_master():
                 assistant_app.add_handler(
                     MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
                 )
-                await assistant_app.start()
+                await asyncio.wait_for(assistant_app.start(), timeout=12.0)
             me = await assistant_app.get_me()
             _default_my_id = me.id
             logger.info(f"🤖 [Centinela Maestro Activo] Online como ID {_default_my_id} (@{me.username or me.first_name})")
@@ -1620,7 +1649,16 @@ async def init_assistant_master():
                 pass
             assistant_app = None
         except Exception as e:
-            logger.warning(f"⚠️ [Centinela Maestro]: Error de conexión inicial ({e})")
+            err_up = str(e).upper()
+            if any(k in err_up for k in ("AUTH_KEY", "UNAUTHORIZED", "406", "DUPLICATED")):
+                logger.error(f"🔒 [MASTER_SESSION Duplicada/Inválida]: {e}. Desactivando Centinela Maestro permanentemente.")
+                try:
+                    await assistant_app.stop()
+                except Exception:
+                    pass
+                assistant_app = None
+            else:
+                logger.warning(f"⚠️ [Centinela Maestro]: Error de conexión inicial ({e})")
 
     await load_all_sentinels()
     if assistant_app:

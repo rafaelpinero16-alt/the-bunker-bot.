@@ -3272,12 +3272,14 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         role = "CLON" if is_clone_bot(bot) else "MAESTRO"
         logging.info(f"🚀 [cmd_start INICIO] {role} | Bot ID: {bot_info.id} (@{bot_username}) | Usuario: {message.from_user.id}")
 
-        # 🧹 /start es siempre un punto de reinicio limpio: libera cualquier flujo conversacional colgado.
-        clear_user_states(bot.id, message.from_user.id)
-        try:
-            await cancel_phone_auth(message.from_user.id)
-        except Exception:
-            pass
+        # 🧹 Solo liberar flujos si el usuario NO está en pleno proceso de ingresar código/2FA
+        user_key = (bot.id, message.from_user.id)
+        if user_key not in SENTINEL_CODE_STATES and user_key not in SENTINEL_2FA_STATES:
+            clear_user_states(bot.id, message.from_user.id)
+            try:
+                await cancel_phone_auth(message.from_user.id)
+            except Exception:
+                pass
 
         lang = user_lang(message.from_user)
         t = TEXTS.get(lang, TEXTS["es"])
@@ -3743,44 +3745,63 @@ async def handle_private_inputs(message: Message, bot: Bot):
         return
     # 3. CENTINELA TELÉFONO
     if (bot.id, user_id) in SENTINEL_PHONE_STATES:
-        state_data = SENTINEL_PHONE_STATES.pop((bot.id, user_id))
+        state_data = SENTINEL_PHONE_STATES[(bot.id, user_id)]
         group_id = state_data["group_id"]
         status_msg = await message.answer(t["phone_requesting"], parse_mode="HTML")
-        res = await start_phone_auth(user_id, group_id, text_input)
+        
         try:
-            await status_msg.delete()
-        except Exception:
-            pass
+            res = await start_phone_auth(user_id, group_id, text_input)
+        except Exception as e:
+            res = {"status": "error", "message": str(e)}
+        finally:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
-        if res["status"] == "ok":
+        if res.get("status") == "ok":
+            # Transición limpia de estado: solo se retira cuando Telegram ya envió el código
+            SENTINEL_PHONE_STATES.pop((bot.id, user_id), None)
             SENTINEL_CODE_STATES[(bot.id, user_id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
-            resp = await message.answer(t["phone_sent"].format(phone=res['phone']), reply_markup=cancel_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
+            # No se auto-borra en 60s para darle tiempo al usuario de ver su código
+            await message.answer(t["phone_sent"].format(phone=res['phone']), reply_markup=cancel_kb, parse_mode="HTML")
         else:
+            # Si falla, se conserva el estado para permitir corrección directa
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
                 [(await origin_back_button(bot, group_id, lang))]
             ])
-            error_reason = tr(lang, "Número no válido.", "Invalid phone number.") if res.get("message") == "invalid_phone" else f"Telegram: {html.escape(str(res.get('message')))}"
+            raw_err = res.get("message", "Error de conexión")
+            error_reason = (
+                tr(lang, "Número no válido. Asegúrate de incluir el código internacional (ej. +57...).", 
+                         "Invalid phone number. Ensure you include the country code (e.g. +1...).") 
+                if raw_err == "invalid_phone" else f"Telegram: {html.escape(str(raw_err))}"
+            )
             resp = await message.answer(t["phone_error"].format(reason=error_reason), reply_markup=cancel_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
+            fire_and_forget_auto_delete([resp], delay=45)
         return
 
     # 4. CENTINELA CÓDIGO 5 DÍGITOS
     if (bot.id, user_id) in SENTINEL_CODE_STATES:
-        state_data = SENTINEL_CODE_STATES.pop((bot.id, user_id))
+        state_data = SENTINEL_CODE_STATES[(bot.id, user_id)]
         group_id = state_data["group_id"]
         status_msg = await message.answer(t["code_verifying"], parse_mode="HTML")
-        res = await verify_phone_code(user_id, text_input)
+        
         try:
-            await status_msg.delete()
-        except Exception:
-            pass
+            res = await verify_phone_code(user_id, text_input)
+        except Exception as e:
+            res = {"status": "error", "message": str(e)}
+        finally:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
-        if res["status"] == "success":
+        if res.get("status") == "success":
+            SENTINEL_CODE_STATES.pop((bot.id, user_id), None)
             session_str = res["session_string"]
             connected = await register_or_update_sentinel(user_id, group_id, session_str)
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -3788,38 +3809,46 @@ async def handle_private_inputs(message: Message, bot: Bot):
             ])
             if connected:
                 await save_owner_session(user_id, group_id, session_str)
-                resp = await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
+                await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
             else:
-                resp = await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
-        elif res["status"] == "2fa_required":
+                await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
+        elif res.get("status") == "2fa_required":
+            SENTINEL_CODE_STATES.pop((bot.id, user_id), None)
             SENTINEL_2FA_STATES[(bot.id, user_id)] = {"group_id": group_id, "lang": lang}
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
-            resp = await message.answer(t["twofa_required"], reply_markup=cancel_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
+            await message.answer(t["twofa_required"], reply_markup=cancel_kb, parse_mode="HTML")
         else:
+            # Si el código es incorrecto, no se destruye el estado para permitir volver a escribirlo
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
                 [(await origin_back_button(bot, group_id, lang))]
             ])
-            resp = await message.answer(t["code_invalid"], reply_markup=cancel_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([message, resp], delay=60)
+            raw_err = res.get("message", "invalid_code")
+            err_msg = t["code_invalid"] if raw_err == "invalid_code" else f"❌ Error: {html.escape(str(raw_err))}"
+            resp = await message.answer(err_msg, reply_markup=cancel_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([resp], delay=30)
         return
 
     # 5. CENTINELA 2FA
     if (bot.id, user_id) in SENTINEL_2FA_STATES:
-        state_data = SENTINEL_2FA_STATES.pop((bot.id, user_id))
+        state_data = SENTINEL_2FA_STATES[(bot.id, user_id)]
         group_id = state_data["group_id"]
         status_msg = await message.answer(t["twofa_verifying"], parse_mode="HTML")
-        res = await verify_2fa_password(user_id, text_input)
+        
         try:
-            await status_msg.delete()
-        except Exception:
-            pass
+            res = await verify_2fa_password(user_id, text_input)
+        except Exception as e:
+            res = {"status": "error", "message": str(e)}
+        finally:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
-        if res["status"] == "success":
+        if res.get("status") == "success":
+            SENTINEL_2FA_STATES.pop((bot.id, user_id), None)
             session_str = res["session_string"]
             connected = await register_or_update_sentinel(user_id, group_id, session_str)
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -3827,16 +3856,18 @@ async def handle_private_inputs(message: Message, bot: Bot):
             ])
             if connected:
                 await save_owner_session(user_id, group_id, session_str)
-                resp = await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
+                await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
             else:
-                resp = await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
+                await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
         else:
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
+                [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")],
                 [(await origin_back_button(bot, group_id, lang))]
             ])
-            resp = await message.answer(t["twofa_invalid"], reply_markup=cancel_kb, parse_mode="HTML")
-        fire_and_forget_auto_delete([message, resp], delay=60)
+            raw_err = res.get("message", "invalid_password")
+            err_msg = t["twofa_invalid"] if raw_err == "invalid_password" else f"❌ Error: {html.escape(str(raw_err))}"
+            resp = await message.answer(err_msg, reply_markup=cancel_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([resp], delay=30)
         return
 
     # 6. PROGRAMADOR VC
@@ -5026,11 +5057,10 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
-            # 🖼️ Despacha la tarjeta del Centinela 24/7 en lugar de solo texto plano
-            prompt = await send_card_message(bot, callback.from_user.id, "sentinel_info", lang, cancel_kb,
-                                             caption=t["sentinel_phone_guide"]) \
+            # Despacho de la tarjeta gráfica sin auto-borrado restrictivo para no apresurar al operador
+            await send_card_message(bot, callback.from_user.id, "sentinel_info", lang, cancel_kb,
+                                    caption=t["sentinel_phone_guide"]) \
                 or await callback.message.answer(t["sentinel_phone_guide"], reply_markup=cancel_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([prompt], delay=60)
             return
         elif sub == "cancel":
             for d in [CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES]:

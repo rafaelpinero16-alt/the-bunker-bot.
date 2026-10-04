@@ -1659,14 +1659,15 @@ def save_owner_session(user_id: int, group_id: int, session_string: str, phone_n
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO owner_sessions (user_id, group_id, session_string, phone_number, api_id, api_hash, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)
+            INSERT INTO owner_sessions (user_id, group_id, session_string, phone_number, api_id, api_hash, status, last_error, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, CURRENT_TIMESTAMP)
             ON CONFLICT(user_id, group_id) DO UPDATE SET 
                 session_string = excluded.session_string,
-                phone_number = excluded.phone_number,
-                api_id = excluded.api_id,
-                api_hash = excluded.api_hash,
+                phone_number = COALESCE(excluded.phone_number, owner_sessions.phone_number),
+                api_id = COALESCE(excluded.api_id, owner_sessions.api_id),
+                api_hash = COALESCE(excluded.api_hash, owner_sessions.api_hash),
                 status = 'active',
+                last_error = NULL,
                 updated_at = CURRENT_TIMESTAMP
         """, (user_id, group_id, session_string, phone_number, api_id, api_hash))
         conn.commit()
@@ -1677,9 +1678,15 @@ def get_owner_session(user_id: int, group_id: int = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if group_id is not None:
-            cursor.execute("SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND group_id = ? AND status = 'active'", (user_id, group_id))
+            cursor.execute(
+                "SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND group_id = ? AND status = 'active'", 
+                (user_id, group_id)
+            )
         else:
-            cursor.execute("SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND status = 'active'", (user_id,))
+            cursor.execute(
+                "SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND status = 'active'", 
+                (user_id,)
+            )
         return cursor.fetchone()
 
 
