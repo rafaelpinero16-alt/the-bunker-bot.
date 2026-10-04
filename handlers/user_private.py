@@ -3850,27 +3850,46 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 pass
 
         if res.get("status") == "success":
-            SENTINEL_2FA_STATES.pop((bot.id, user_id), None)
+            SENTINEL_CODE_STATES.pop((bot.id, user_id), None)
             session_str = res["session_string"]
+            
+            # Guardar la sesión y registrar el centinela activo
+            await save_owner_session(user_id, group_id, session_str)
             connected = await register_or_update_sentinel(user_id, group_id, session_str)
-            back_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [(await origin_back_button(bot, group_id, lang))]
-            ])
-            if connected:
-                await save_owner_session(user_id, group_id, session_str)
-                await message.answer(t["sentinel_success"], reply_markup=back_kb, parse_mode="HTML")
-            else:
-                await message.answer(t["sentinel_error"], reply_markup=back_kb, parse_mode="HTML")
-        else:
-            cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")],
-                [(await origin_back_button(bot, group_id, lang))]
-            ])
-            raw_err = res.get("message", "invalid_password")
-            err_msg = t["twofa_invalid"] if raw_err == "invalid_password" else f"❌ Error: {html.escape(str(raw_err))}"
-            resp = await message.answer(err_msg, reply_markup=cancel_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([resp], delay=30)
-        return
+            
+            chat_kind = await resolve_chat_kind(bot, group_id)
+            tier = await get_effective_group_tier(group_id, user_id)
+            
+            try:
+                g_name = html.escape((await bot.get_chat(group_id)).title or "Comunidad")
+            except Exception:
+                g_name = "Comunidad"
+                
+            clone_info = await get_bot_clone(user_id, group_id)
+            has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
+            status_clone = "Operativo 🟢" if has_clone else "No Configurado 🔴"
+            
+            # Aquí es donde el estado cambia a verde con sesión activa
+            sentinel_status = "Conectado 🟢" if connected else "Error de Conexión 🔴"
+            
+            panel_text = TEXTS[lang]["clone_main_title"].format(
+                group_name=g_name, 
+                tier=tier.upper(), 
+                status=status_clone, 
+                sentinel_status=sentinel_status
+            )
+            panel_keyboard = await get_clone_keyboard(group_id, user_id, lang, chat_type=chat_kind)
+            
+            # Envía el aviso de éxito y redibuja el panel con el botón en verde
+            success_notice = await message.answer(
+                f"💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\nEl nodo acústico perimetral está patrullando la sala.\n\n🛡️️ <i>Cloud Media Management</i>",
+                parse_mode="HTML"
+            )
+            fire_and_forget_auto_delete([message, success_notice], delay=10)
+            
+            # Redibuja la consola principal de clon/centinela actualizada
+            await message.answer(panel_text, reply_markup=panel_keyboard, parse_mode="HTML")
+            return
 
     # 6. PROGRAMADOR VC
     if (bot.id, user_id) in VC_SCHED_STATES:
