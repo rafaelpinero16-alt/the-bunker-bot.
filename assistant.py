@@ -1454,13 +1454,10 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
     api_id = DEFAULT_API_ID
     api_hash = DEFAULT_API_HASH
     if not api_id or not api_hash:
-        logger.error("❌ TELEGRAM_API_ID / TELEGRAM_API_HASH no configurados en el entorno.")
         return {
             "status": "error", 
-            "message": "Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH en las variables de entorno de Railway."
+            "message": "Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH en las variables de entorno."
         }
-
-    logger.info(f"📱 [Auth Teléfono] Solicitando código para UID {user_id} ({clean_phone})...")
 
     client = Client(
         f"auth_temp_{user_id}_{group_id}_{int(time.time())}",
@@ -1472,11 +1469,9 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
     try:
         connected = await _ensure_connected(client)
         if not connected:
-            logger.error(f"❌ [Auth Teléfono] No se pudo conectar a Telegram para {clean_phone}.")
-            return {"status": "error", "message": "No se pudo conectar a los servidores de Telegram. Reintenta."}
+            return {"status": "error", "message": "No se pudo conectar a los servidores de Telegram."}
 
         sent_code = await asyncio.wait_for(client.send_code(clean_phone), timeout=25.0)
-        logger.info(f"📩 [Auth Teléfono] Código enviado exitosamente a {clean_phone} (hash: {sent_code.phone_code_hash})")
 
         pending_auth_sessions[user_id] = {
             "client": client,
@@ -1486,6 +1481,21 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
             "ts": time.time()
         }
         return {"status": "ok", "phone": clean_phone}
+
+    except asyncio.TimeoutError:
+        if client.is_connected:
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=3.0)
+            except Exception:
+                pass
+        return {"status": "error", "message": "Tiempo de espera agotado (Timeout). Verifica el formato del número."}
+    except Exception as e:
+        if client.is_connected:
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=3.0)
+            except Exception:
+                pass
+        return {"status": "error", "message": str(e)}
 
     except asyncio.TimeoutError:
         logger.error(f"⏱️ [Auth Teléfono] Tiempo de espera agotado al conectar con Telegram para {clean_phone}.")

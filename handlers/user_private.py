@@ -3272,7 +3272,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         role = "CLON" if is_clone_bot(bot) else "MAESTRO"
         logging.info(f"🚀 [cmd_start INICIO] {role} | Bot ID: {bot_info.id} (@{bot_username}) | Usuario: {message.from_user.id}")
 
-        # 🧹 Solo liberar flujos si el usuario NO está en pleno proceso de ingresar código/2FA
+        # 🧹 Solo liberar flujos si el usuario NO está ingresando código de verificación o 2FA
         user_key = (bot.id, message.from_user.id)
         if user_key not in SENTINEL_CODE_STATES and user_key not in SENTINEL_2FA_STATES:
             clear_user_states(bot.id, message.from_user.id)
@@ -3283,6 +3283,8 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
 
         lang = user_lang(message.from_user)
         t = TEXTS.get(lang, TEXTS["es"])
+        
+        # ... (resto de la lógica original de bienvenida y deep-links))
 
         try:
             await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
