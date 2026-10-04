@@ -12,6 +12,15 @@ Fuentes:
 - `get_chat_heatmap_matrix` / `get_top_reputation` (database.database existentes):
   mapa de calor 24/7 histórico y reputación XP/nivel.
 
+Privacidad (Fase 2 · Retención y Purga):
+- Este módulo NUNCA almacena el texto de los mensajes; solo tipo, hora y conteos.
+- Los únicos datos personales son el nombre y @username de `analytics_user_profile` (para
+  mostrar el ranking) y el payload crudo de facturas en `analytics_stars_ledger`.
+- `prune_raw_analytics_history` los elimina por ventana de retención (24 h por defecto) y se
+  ejecuta cada 48–72 h, con el último ciclo persistido en SQLite para sobrevivir a redeploys:
+  ningún dato crudo supera las 72 h de antigüedad. Se conservan los identificadores
+  seudónimos, conteos agregados, matrices de calor y métricas DAU/WAU/MAU.
+
 Concurrencia:
 - Nada toca SQLite en el event loop: lecturas y escrituras van por asyncio.to_thread.
 - Cada hilo del pool reutiliza su propia conexión (threading.local) en modo WAL.
@@ -69,6 +78,20 @@ ANALYTICS_SUBQUERY_TIMEOUT = max(0.2, _env_float("ANALYTICS_SUBQUERY_TIMEOUT", 1
 ANALYTICS_BUFFER_MAX_KEYS = max(1000, _env_int("ANALYTICS_BUFFER_MAX_KEYS", 50000))
 
 DAY_SECONDS = 86400
+HOUR_SECONDS = 3600
+
+
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+# Fase 2 · Retención de datos crudos: ventana de conservación y periodicidad de la purga.
+# Con la ventana por defecto (24 h) y el intervalo por defecto (48 h), ningún dato crudo
+# supera las 72 h de antigüedad en el peor caso.
+ANALYTICS_PII_RETENTION_HOURS = _clamp_float(_env_float("ANALYTICS_PII_RETENTION_HOURS", 24.0), 1.0, 72.0)
+ANALYTICS_PII_PURGE_INTERVAL_HOURS = _clamp_float(_env_float("ANALYTICS_PII_PURGE_INTERVAL_HOURS", 48.0), 48.0, 72.0)
+ANALYTICS_PII_CHECK_SECONDS = 15 * 60
+_META_LAST_PII_PURGE = "last_pii_purge_ts"
 
 
 def _resolve_tz():
@@ -206,6 +229,10 @@ _SCHEMA_SQL = (
     "charge_id TEXT PRIMARY KEY, group_id INTEGER NOT NULL, user_id INTEGER NOT NULL DEFAULT 0, "
     "amount INTEGER NOT NULL, payload TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)",
     "CREATE INDEX IF NOT EXISTS idx_stars_ledger_group ON analytics_stars_ledger (group_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_user_profile_last_seen ON analytics_user_profile (last_seen)",
+    # Metadatos operativos (p. ej. instante de la última purga, que debe sobrevivir a redeploys).
+    "CREATE TABLE IF NOT EXISTS analytics_meta ("
+    "meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)",
 )
 
 
@@ -329,6 +356,78 @@ def _prune_old_rows_sync(cutoff_day: str) -> None:
         conn.execute("DELETE FROM analytics_user_daily WHERE day < ?", (cutoff_day,))
 
 
+# ==========================================
+# 🧹 FASE 2 · PURGA DE DATOS CRUDOS / PII
+# ==========================================
+def _read_meta_sync(key: str) -> Optional[str]:
+    with _read_tx() as conn:
+        row = conn.execute("SELECT meta_value FROM analytics_meta WHERE meta_key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def _prune_raw_analytics_sync(cutoff_ts: int, now_ts: int) -> Dict[str, int]:
+    """
+    Una sola transacción BEGIN IMMEDIATE:
+      • DELETE de perfiles (nombre real + @username) sin actividad desde `cutoff_ts`.
+      • Vaciado del payload crudo de facturas Stars anteriores a `cutoff_ts`
+        (se conservan charge_id, user_id, group_id, importe y fecha: trazabilidad financiera).
+      • Registro del instante de la purga en analytics_meta.
+    Con secure_delete activo SQLite sobrescribe con ceros las páginas liberadas y, tras el
+    commit, un checkpoint TRUNCATE vacía el WAL para que las copias antiguas no persistan.
+    """
+    conn = _get_conn()
+    conn.execute("PRAGMA secure_delete=ON")
+    try:
+        with _write_tx() as tx:
+            profiles = tx.execute(
+                "DELETE FROM analytics_user_profile WHERE last_seen < ?", (int(cutoff_ts),)
+            ).rowcount
+            payloads = tx.execute(
+                "UPDATE analytics_stars_ledger SET payload = '' "
+                "WHERE created_at < ? AND payload <> ''", (int(cutoff_ts),)
+            ).rowcount
+            tx.execute(
+                "INSERT INTO analytics_meta (meta_key, meta_value) VALUES (?, ?) "
+                "ON CONFLICT(meta_key) DO UPDATE SET meta_value = excluded.meta_value",
+                (_META_LAST_PII_PURGE, str(int(now_ts))),
+            )
+    finally:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("PRAGMA secure_delete=OFF")
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return {"profiles_deleted": max(0, int(profiles or 0)), "payloads_cleared": max(0, int(payloads or 0))}
+
+
+async def prune_raw_analytics_history(retention_hours: Optional[float] = None) -> Dict[str, Any]:
+    """
+    Purga de datos crudos e identificables de la capa analítica.
+
+    Elimina nombres reales, @usernames y payloads crudos con antigüedad superior a
+    `retention_hours` (ANALYTICS_PII_RETENTION_HOURS por defecto). NO toca los identificadores
+    seudónimos (user_id), los conteos agregados por hora/día/tipo, las matrices de calor ni
+    las métricas de retención DAU/WAU/MAU. Se ejecuta en asyncio.to_thread dentro de
+    BEGIN IMMEDIATE, sin bloquear el event loop.
+    """
+    hours = ANALYTICS_PII_RETENTION_HOURS if retention_hours is None else _clamp_float(float(retention_hours), 0.0, 72.0)
+    now_ts = int(time.time())
+    cutoff_ts = now_ts - int(hours * HOUR_SECONDS)
+    started = time.perf_counter()
+    result = await asyncio.to_thread(_prune_raw_analytics_sync, cutoff_ts, now_ts)
+    invalidate_analytics_cache()
+    result.update({
+        "retention_hours": hours,
+        "cutoff_ts": cutoff_ts,
+        "executed_at": now_ts,
+        "duration_ms": round((time.perf_counter() - started) * 1000.0, 1),
+    })
+    logger.info(
+        "🧹 [Analytics] Purga PII: %s perfiles eliminados, %s payloads vaciados (retención %.0f h, %.1f ms).",
+        result["profiles_deleted"], result["payloads_cleared"], hours, result["duration_ms"],
+    )
+    return result
+
+
 class AnalyticsBuffer:
     """
     Acumula contadores en memoria (solo desde el event loop, sin locks) y los vuelca
@@ -344,6 +443,8 @@ class AnalyticsBuffer:
         self._task: Optional[asyncio.Task] = None
         self._urgent: Optional[asyncio.Task] = None
         self._last_prune_day: Optional[str] = None
+        self._pii_next_check = 0.0
+        self._pii_last_purge_ts: Optional[int] = None
 
     def pending(self) -> int:
         return len(self._hourly) + len(self._users)
@@ -406,12 +507,33 @@ class AnalyticsBuffer:
         except Exception as ex:
             logger.debug("Aviso en poda analítica: %s", ex)
 
+    async def _maybe_purge_pii(self) -> None:
+        """Lanza la purga PII si pasó el intervalo (48–72 h) desde la última, persistida en SQLite."""
+        now_mono = time.monotonic()
+        if now_mono < self._pii_next_check:
+            return
+        self._pii_next_check = now_mono + ANALYTICS_PII_CHECK_SECONDS
+        try:
+            if self._pii_last_purge_ts is None:
+                stored = await asyncio.to_thread(_read_meta_sync, _META_LAST_PII_PURGE)
+                self._pii_last_purge_ts = int(stored) if stored and stored.isdigit() else 0
+            due_at = self._pii_last_purge_ts + int(ANALYTICS_PII_PURGE_INTERVAL_HOURS * HOUR_SECONDS)
+            if int(time.time()) < due_at:
+                return
+            # Vuelca el búfer antes de purgar para que la purga vea el last_seen más reciente.
+            await self.flush()
+            result = await prune_raw_analytics_history()
+            self._pii_last_purge_ts = int(result.get("executed_at") or time.time())
+        except Exception as ex:
+            logger.warning("⚠️ [Analytics] Purga PII pendiente; se reintenta en el próximo chequeo: %s", ex)
+
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(ANALYTICS_FLUSH_SECONDS)
             try:
                 await self.flush()
                 await self._maybe_prune()
+                await self._maybe_purge_pii()
             except asyncio.CancelledError:
                 raise
             except Exception as ex:

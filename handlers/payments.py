@@ -1,14 +1,25 @@
 """
 payments.py — The Bunker OS (Aiogram 3.x)
 
-Pasarela de pagos oficial con Telegram Stars (XTR).
+Facturación oficial EXCLUSIVA con Telegram Stars (XTR).
 Gestiona la facturación automatizada de licencias PRO/ULTRA PRO, pases VIP de micrófono,
 membresías de canales con enlaces criptográficos de un solo uso, cola de speakers y propinas.
+
+Fase 3 · Exclusividad financiera y SLA de pagos:
+- Sin pasarelas externas (PayPal, Binance Pay, TON, Stripe ni fiat): todo bien o servicio
+  digital se adquiere in-app con Telegram Stars, conforme a las políticas de Telegram,
+  Apple App Store (Guideline 3.1.1) y Google Play Payments.
+- Pre-checkout en memoria: registro de ofertas emitidas + caché de planes; ninguna consulta
+  a disco bloquea la confirmación (SLA < 2 s, objetivo < 50 ms).
+- Libro mayor `stars_payment_ledger`: telegram_payment_charge_id, user_id, chat_id e importe
+  de cada pago, con estado de reembolso, para trazabilidad y conciliación.
+- `process_star_refund()`: devolución transparente vía refundStarPayment, idempotente.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
 import sys
 import asyncio
+import contextlib
 import html
 import importlib
 import logging
@@ -86,21 +97,20 @@ WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
 # ==========================================
 # 💰 TARIFAS Y CONFIGURACIÓN DE FACTURACIÓN
 # ==========================================
-PRICE_PRO_STARS = 300          # 300 Stars Telegram (~$3.00 USD)
-PRICE_ULTRAPRO_STARS = 600     # 600 Stars Telegram (~$6.00 USD)
+# Moneda única de la plataforma: Telegram Stars (XTR). Fuente de verdad de precios,
+# también consumida por handlers/user_private.py.
+STARS_CURRENCY = "XTR"
+PRICE_PRO_STARS = 300          # Licencia PRO (30 días)
+PRICE_ULTRAPRO_STARS = 600     # Licencia ULTRA PRO (30 días)
 DEFAULT_PRICE_VIP_MIC = 50     # Tarifa base en Stars para pase 24h
 DEFAULT_PRICE_SPEAKER = 25     # Tarifa base turno prioritario AMA
 DEFAULT_TIP_AMOUNT = 10        # Tarifa sugerida de propina
 
-# Pasarelas de Pago Oficiales - Cloud Media Management
-PAYPAL_LINK = "https://paypal.me/Felipecosmic"
-BINANCE_PAY_LINK = "https://app.binance.com/uni-qr/request-to-pay?billOrderId=452404659499556864&billType=request_a_payment"
-TON_MINI_APP_LINK = "https://t.me/thebunkerapp_bot?start=miniapp_ton"
 ASSISTANT_INVITE_URL = "https://t.me/Alphacentinel?startgroup=true"
 
 
 def get_lang(lang_code: str) -> str:
-    """Detecta el idioma del operador para renderizar la pasarela adecuada."""
+    """Detecta el idioma del operador para renderizar la facturación en Stars."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
 
 
@@ -431,7 +441,247 @@ async def record_channel_subscription(**kwargs):
 
 
 # ==========================================
-# 🌐 DICCIONARIO BILINGÜE DE FACTURACIÓN Y PASARELAS
+# ⚡ FASE 3 · REGISTRO DE OFERTAS Y CACHÉ EN MEMORIA (SLA PRE-CHECKOUT < 2 s)
+# ==========================================
+# Telegram exige responder al pre_checkout_query en < 10 s; el objetivo de la plataforma es
+# < 2 s. Toda factura emitida por este proceso queda registrada aquí (payload → importe), de
+# modo que la validación previa al cobro es una búsqueda O(1) en RAM, sin E/S de disco.
+# Nota de seguridad: el payload y el importe de una factura los fija el bot al emitirla y el
+# usuario no puede alterarlos; la validación solo protege contra ofertas desactualizadas.
+OFFER_TTL_SECONDS = 72 * 3600
+OFFER_REGISTRY_MAX = 20000
+CHANNEL_PLAN_CACHE_TTL = 60.0
+PRECHECKOUT_DB_BUDGET_SECONDS = 1.2
+PRECHECKOUT_SLA_SECONDS = 2.0
+
+_ISSUED_OFFERS: dict[str, tuple[int, float]] = {}            # payload -> (importe XTR, instante)
+_CHANNEL_PLAN_CACHE: dict[int, tuple[float, dict | None]] = {}  # plan_id -> (instante, plan)
+
+
+def _register_offer(payload: str, amount: int) -> None:
+    """Registra en memoria una factura emitida (llamar justo antes de send_invoice)."""
+    now = time.monotonic()
+    _ISSUED_OFFERS[payload] = (int(amount), now)
+    if len(_ISSUED_OFFERS) > OFFER_REGISTRY_MAX:
+        cutoff = now - OFFER_TTL_SECONDS
+        for key in [k for k, (_, ts) in _ISSUED_OFFERS.items() if ts < cutoff]:
+            _ISSUED_OFFERS.pop(key, None)
+        if len(_ISSUED_OFFERS) > OFFER_REGISTRY_MAX:
+            for key in sorted(_ISSUED_OFFERS, key=lambda k: _ISSUED_OFFERS[k][1])[: OFFER_REGISTRY_MAX // 2]:
+                _ISSUED_OFFERS.pop(key, None)
+
+
+def _offer_matches(payload: str, amount: int):
+    """True/False si la oferta es conocida; None si no consta (p. ej. tras un reinicio)."""
+    entry = _ISSUED_OFFERS.get(payload)
+    if entry is None or time.monotonic() - entry[1] > OFFER_TTL_SECONDS:
+        return None
+    return entry[0] == int(amount)
+
+
+def _cache_channel_plan(plan_id: int, plan) -> None:
+    _CHANNEL_PLAN_CACHE[int(plan_id)] = (time.monotonic(), dict(plan) if plan else None)
+
+
+def _cached_channel_plan(plan_id: int, max_age: float = CHANNEL_PLAN_CACHE_TTL):
+    """(hit, plan): hit=False si no hay entrada fresca en caché."""
+    entry = _CHANNEL_PLAN_CACHE.get(int(plan_id))
+    if entry is None or time.monotonic() - entry[0] > max_age:
+        return False, None
+    return True, entry[1]
+
+
+async def get_channel_plan_cached(plan_id: int):
+    """Lectura de plan con caché de 60 s (la fuente de verdad sigue siendo la base de datos)."""
+    hit, plan = _cached_channel_plan(plan_id)
+    if hit:
+        return plan
+    plan = await get_channel_plan(plan_id)
+    _cache_channel_plan(plan_id, plan)
+    return plan
+
+
+def invalidate_channel_plan_cache(plan_id: int | None = None) -> None:
+    """Llamar al pausar, editar o borrar un plan para que el pre-checkout lo note al instante."""
+    if plan_id is None:
+        _CHANNEL_PLAN_CACHE.clear()
+        for key in [k for k in _ISSUED_OFFERS if k.startswith("chan_sub_")]:
+            _ISSUED_OFFERS.pop(key, None)
+        return
+    _CHANNEL_PLAN_CACHE.pop(int(plan_id), None)
+    for key in [k for k in _ISSUED_OFFERS if k.startswith("chan_sub_")]:
+        parts = key.split("_")
+        if len(parts) > 3 and parts[3] == str(plan_id):
+            _ISSUED_OFFERS.pop(key, None)
+
+
+async def _refresh_channel_plan_cache(plan_id: int) -> None:
+    try:
+        _cache_channel_plan(plan_id, await asyncio.wait_for(get_channel_plan(plan_id), timeout=10))
+    except Exception as ex:
+        logger.debug(f"Aviso refrescando caché del plan {plan_id}: {ex}")
+
+
+async def send_stars_invoice(bot: Bot, chat_id: int, title: str, description: str, payload: str,
+                             amount: int, reply_markup: InlineKeyboardMarkup | None = None):
+    """Único punto de emisión de facturas: siempre XTR, siempre registrada en memoria."""
+    amount = int(amount)
+    _register_offer(payload, amount)
+    return await bot.send_invoice(
+        chat_id=chat_id,
+        title=title,
+        description=description,
+        payload=payload,
+        provider_token="",
+        currency=STARS_CURRENCY,
+        prices=[LabeledPrice(label=title, amount=amount)],
+        reply_markup=reply_markup
+    )
+
+
+# ==========================================
+# 📒 FASE 3 · LIBRO MAYOR DE PAGOS STARS (TRAZABILIDAD)
+# ==========================================
+_LEDGER_SCHEMA_READY = False
+
+
+def _payload_chat_id(payload: str) -> int:
+    """chat_id de la comunidad asociada a cada familia de payload."""
+    try:
+        parts = (payload or "").split("_")
+        if payload.startswith("chan_sub_"):
+            return int(parts[2])
+        if payload.startswith("vip_mic_"):
+            return int(parts[2])
+        if payload.startswith("sub_"):
+            return int(parts[2])
+        if payload.startswith(("speaker_", "tip_")):
+            return int(parts[1])
+    except (IndexError, ValueError):
+        pass
+    return 0
+
+
+def _ensure_ledger_schema(conn) -> None:
+    global _LEDGER_SCHEMA_READY
+    if _LEDGER_SCHEMA_READY:
+        return
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS stars_payment_ledger ("
+        "telegram_payment_charge_id TEXT PRIMARY KEY, "
+        "provider_payment_charge_id TEXT NOT NULL DEFAULT '', "
+        "user_id INTEGER NOT NULL, "
+        "chat_id INTEGER NOT NULL DEFAULT 0, "
+        "stars_amount INTEGER NOT NULL, "
+        "currency TEXT NOT NULL DEFAULT 'XTR', "
+        "payload TEXT NOT NULL DEFAULT '', "
+        "status TEXT NOT NULL DEFAULT 'paid', "
+        "refund_reason TEXT NOT NULL DEFAULT '', "
+        "created_at INTEGER NOT NULL, "
+        "refunded_at INTEGER)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_ledger_user ON stars_payment_ledger (user_id, created_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_ledger_chat ON stars_payment_ledger (chat_id, created_at)")
+    _LEDGER_SCHEMA_READY = True
+
+
+def _sync_ledger_record(charge_id: str, provider_charge_id: str, user_id: int, chat_id: int,
+                        stars_amount: int, currency: str, payload: str) -> bool:
+    db_module = _get_db_module()
+    with db_module.get_db_connection() as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_ledger_schema(conn)
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO stars_payment_ledger "
+                "(telegram_payment_charge_id, provider_payment_charge_id, user_id, chat_id, "
+                "stars_amount, currency, payload, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'paid', ?)",
+                (charge_id, provider_charge_id or "", int(user_id), int(chat_id), int(stars_amount),
+                 currency or STARS_CURRENCY, (payload or "")[:128], int(time.time()))
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def _sync_ledger_mark_refund(charge_id: str, user_id: int, status: str, reason: str) -> None:
+    db_module = _get_db_module()
+    with db_module.get_db_connection() as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_ledger_schema(conn)
+            conn.execute(
+                "UPDATE stars_payment_ledger SET status = ?, refund_reason = ?, "
+                "refunded_at = CASE WHEN ? = 'refunded' THEN ? ELSE refunded_at END "
+                "WHERE telegram_payment_charge_id = ? AND user_id = ?",
+                (status, (reason or "")[:200], status, int(time.time()), charge_id, int(user_id))
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
+async def record_star_payment(message: Message) -> bool:
+    """
+    Persiste el pago en el libro mayor ANTES de entregar el beneficio: charge_id oficial de
+    Telegram, user_id, chat_id de la comunidad e importe en Stars. Idempotente por charge_id.
+    """
+    sp = message.successful_payment
+    try:
+        return await asyncio.to_thread(
+            _sync_ledger_record,
+            sp.telegram_payment_charge_id,
+            getattr(sp, "provider_payment_charge_id", "") or "",
+            message.from_user.id,
+            _payload_chat_id(sp.invoice_payload or ""),
+            int(sp.total_amount),
+            sp.currency,
+            sp.invoice_payload or "",
+        )
+    except Exception as ex:
+        logger.error(f"❌ [Ledger Stars] No se pudo registrar el cargo {sp.telegram_payment_charge_id}: {ex}")
+        return False
+
+
+async def process_star_refund(bot: Bot, user_id: int, charge_id: str, reason: str = "") -> bool:
+    """
+    Devuelve un pago en Stars (Bot API refundStarPayment) y lo refleja en el libro mayor.
+    Idempotente: si Telegram indica que el cargo ya fue reembolsado, se considera éxito.
+    Usar ante caídas del servicio, entregas fallidas o cancelaciones legítimas.
+    """
+    if not charge_id or not user_id:
+        return False
+    refunded = False
+    status = "refund_failed"
+    try:
+        refunded = bool(await bot.refund_star_payment(user_id=int(user_id), telegram_payment_charge_id=charge_id))
+        status = "refunded" if refunded else "refund_failed"
+    except TelegramBadRequest as ex:
+        if "ALREADY_REFUNDED" in str(ex).upper():
+            refunded, status = True, "refunded"
+        else:
+            logger.error(f"❌ [Reembolso Stars] Rechazado por Telegram ({charge_id}): {ex}")
+    except Exception as ex:
+        logger.error(f"❌ [Reembolso Stars] Error ejecutando el reembolso de {charge_id}: {ex}")
+
+    try:
+        await asyncio.to_thread(_sync_ledger_mark_refund, charge_id, user_id, status, reason)
+    except Exception as ex:
+        logger.warning(f"⚠️ [Ledger Stars] No se pudo anotar el estado de reembolso de {charge_id}: {ex}")
+
+    if refunded:
+        logger.info(f"↩️ [Reembolso Stars] Cargo {charge_id} devuelto a {user_id}. Motivo: {reason or 'no especificado'}")
+    return refunded
+
+
+# ==========================================
+# 🌐 DICCIONARIO BILINGÜE DE FACTURACIÓN (SOLO TELEGRAM STARS)
 # ==========================================
 TEXTS = {
     "en": {
@@ -448,14 +698,11 @@ TEXTS = {
             "• <b>Community ID:</b> <code>{chat_id}</code>\n"
             "• <b>Operational Tier:</b> <code>BASIC (Free Tier)</code>\n\n"
             "Upgrade your network to remove daily rate limits, activate automated cleansers, or deploy autonomous clone architectures:\n\n"
-            "<i>Select your payment gateway below to activate instantly:</i>\n\n"
+            "⭐ <i>Payment is 100% in-app with Telegram Stars (XTR). Activation is instant once Telegram confirms the charge.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_pro_stars": "⭐ Upgrade to PRO (300 XTR)",
         "btn_ultra_stars": "💎 Upgrade to ULTRA PRO (600 XTR)",
-        "btn_paypal": "💳 PayPal ($3 / $6 USD)",
-        "btn_binance": "🟡 Binance Pay (Instant)",
-        "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_miniapp": "🌐 Open Command Center",
         "btn_back": "🔙 Back to Main Menu",
         "btn_back_group": "🔙 Back to Panel",
@@ -532,14 +779,11 @@ TEXTS = {
             "• <b>Entorno ID:</b> <code>{chat_id}</code>\n"
             "• <b>Nivel Operativo:</b> <code>BÁSICO (Plan Gratuito)</code>\n\n"
             "Eleva tu entorno para eliminar topes de comandos diarios, activar purgas automatizadas y desplegar clones autónomos:\n\n"
-            "<i>Selecciona tu pasarela preferida para activar al instante:</i>\n\n"
+            "⭐ <i>El pago es 100% in-app con Telegram Stars (XTR). La activación es inmediata cuando Telegram confirma el cobro.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_pro_stars": "⭐ Mejorar a PRO (300 XTR)",
         "btn_ultra_stars": "💎 Mejorar a ULTRA PRO (600 XTR)",
-        "btn_paypal": "💳 PayPal ($3 / $6 USD)",
-        "btn_binance": "🟡 Binance Pay (Instantáneo)",
-        "btn_ton": "💎 TON Wallet (Mini App)",
         "btn_miniapp": "🌐 Abrir Command Center",
         "btn_back": "🔙 Volver al Menú Principal",
         "btn_back_group": "🔙 Volver al Panel",
@@ -659,15 +903,9 @@ async def send_stars_tip_invoice(bot: Bot, user_id: int, group_id: int, amount: 
         pass
     kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
 
-    await bot.send_invoice(
-        chat_id=user_id,
-        title=title,
-        description=description,
-        payload=payload,
-        provider_token="",
-        currency="XTR",
-        prices=[LabeledPrice(label=title, amount=amount)],
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+    await send_stars_invoice(
+        bot, user_id, title, description, payload, amount,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
     )
 
 
@@ -720,13 +958,6 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
             [
                 InlineKeyboardButton(text=t["btn_pro_stars"], callback_data=f"inv_pro_{chat_id}_{lang}"),
                 InlineKeyboardButton(text=t["btn_ultra_stars"], callback_data=f"inv_ultra_{chat_id}_{lang}")
-            ],
-            [
-                InlineKeyboardButton(text=t["btn_paypal"], url=PAYPAL_LINK),
-                InlineKeyboardButton(text=t["btn_binance"], url=BINANCE_PAY_LINK)
-            ],
-            [
-                InlineKeyboardButton(text=t["btn_ton"], url=TON_MINI_APP_LINK)
             ],
             [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")]
@@ -797,7 +1028,6 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 return
 
             _, back_cb = await resolve_chat_context(bot, chat_id_target)
-            prices = [LabeledPrice(label=title, amount=price)]
             back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")
 
             markup = InlineKeyboardMarkup(inline_keyboard=[
@@ -805,16 +1035,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 [back_btn]
             ])
 
-            await bot.send_invoice(
-                chat_id=message.chat.id,
-                title=title,
-                description=desc,
-                payload=payload,
-                provider_token="",
-                currency="XTR",
-                prices=prices,
-                reply_markup=markup
-            )
+            await send_stars_invoice(bot, message.chat.id, title, desc, payload, price, reply_markup=markup)
         except Exception as e:
             logger.error(f"Error generando factura de suscripción en start: {e}")
             await message.answer(t["err_inv"], parse_mode="HTML")
@@ -832,6 +1053,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             channel_id = int(parts[2])
 
             target_plan = await get_channel_plan(plan_id)
+            _cache_channel_plan(plan_id, target_plan)
             if not target_plan or target_plan.get("channel_id") != channel_id or target_plan.get("status") != "active":
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
@@ -866,8 +1088,6 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             desc = (f"Acceso exclusivo al canal por {duration_days} días." if not promo_text else promo_text[:250])[:255]
             payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
 
-            prices = [LabeledPrice(label=title, amount=stars_price)]
-
             kb_rows = [
                 [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)]
             ]
@@ -878,16 +1098,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
             markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
-            await bot.send_invoice(
-                chat_id=message.chat.id,
-                title=title,
-                description=desc,
-                payload=payload,
-                provider_token="",
-                currency="XTR",
-                prices=prices,
-                reply_markup=markup
-            )
+            await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(stars_price), reply_markup=markup)
         except Exception as e:
             logger.error(f"Error generando factura de membresía de canal: {e}")
             await message.answer(t["err_inv"], parse_mode="HTML")
@@ -910,22 +1121,12 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             desc = custom_desc[:255] if custom_desc else t["inv_vip_d"]
             payload = f"vip_mic_{chat_id}"
 
-            prices = [LabeledPrice(label=title, amount=final_price)]
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({final_price} XTR)", pay=True)],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
 
-            await bot.send_invoice(
-                chat_id=message.chat.id,
-                title=title,
-                description=desc,
-                payload=payload,
-                provider_token="",
-                currency="XTR",
-                prices=prices,
-                reply_markup=markup
-            )
+            await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(final_price), reply_markup=markup)
         except Exception as e:
             logger.error(f"Error generando factura de Micrófono VIP: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
@@ -944,22 +1145,12 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             desc = t["inv_speaker_d"]
             payload = f"speaker_{chat_id}"
 
-            prices = [LabeledPrice(label=title, amount=speaker_price)]
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({speaker_price} XTR)", pay=True)],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
 
-            await bot.send_invoice(
-                chat_id=message.chat.id,
-                title=title,
-                description=desc,
-                payload=payload,
-                provider_token="",
-                currency="XTR",
-                prices=prices,
-                reply_markup=markup
-            )
+            await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(speaker_price), reply_markup=markup)
         except Exception as e:
             logger.error(f"Error generando factura de Speaker Priority: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
@@ -1038,23 +1229,13 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
             return
 
         _, back_cb = await resolve_chat_context(bot, chat_id)
-        prices = [LabeledPrice(label=title, amount=price)]
         markup = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
         ])
 
         try:
-            await bot.send_invoice(
-                chat_id=callback.message.chat.id,
-                title=title,
-                description=desc,
-                payload=payload,
-                provider_token="",
-                currency="XTR",
-                prices=prices,
-                reply_markup=markup
-            )
+            await send_stars_invoice(bot, callback.message.chat.id, title, desc, payload, int(price), reply_markup=markup)
         except Exception as e:
             logger.error(f"Error despachando factura mediante callback: {e}")
             await callback.message.answer(t["err_inv"], parse_mode="HTML")
@@ -1156,48 +1337,106 @@ async def process_custom_tip_input(message: Message, bot: Bot):
 # ==========================================
 # 🛡️ VALIDACIÓN DE PRE-CHECKOUT FILTRADA
 # ==========================================
+PRECHECKOUT_DECLINE_MESSAGE = (
+    "La oferta cambió o ya no está disponible. Solicita una nueva factura. / "
+    "This offer changed; please request a new invoice."
+)
+
+
+async def _validate_channel_offer(payload: str, channel_id: int, plan_id: int, amount: int) -> bool:
+    """
+    Orden de validación sin bloquear el SLA:
+      1. Caché de planes fresca (≤ 60 s) → decisión en RAM.
+      2. Oferta emitida por este proceso → aprobada en RAM; la caché se refresca en segundo plano.
+      3. Oferta desconocida (reinicio) → lectura de disco acotada a 1,2 s; si se agota el
+         presupuesto se aprueba, porque la factura la emitió el propio bot y el importe es
+         inalterable por el usuario (la entrega reembolsa si el plan ya no existe).
+    """
+    hit, plan = _cached_channel_plan(plan_id)
+    if hit:
+        return bool(
+            plan and plan.get("channel_id") == channel_id and plan.get("status") == "active"
+            and amount == int(plan.get("stars_price") or 0)
+        )
+    known = _offer_matches(payload, amount)
+    if known is not None:
+        _spawn(_refresh_channel_plan_cache(plan_id))
+        return known
+    try:
+        plan = await asyncio.wait_for(get_channel_plan(plan_id), timeout=PRECHECKOUT_DB_BUDGET_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(f"⏱️ [Pre-Checkout] Presupuesto de disco agotado para {payload!r}; se aprueba la oferta emitida por el bot.")
+        _spawn(_refresh_channel_plan_cache(plan_id))
+        return True
+    _cache_channel_plan(plan_id, plan)
+    return bool(
+        plan and plan.get("channel_id") == channel_id and plan.get("status") == "active"
+        and amount == int(plan.get("stars_price") or 0)
+    )
+
+
+def _validate_offer_in_memory(payload: str, amount: int):
+    """
+    Validación pura en CPU para todas las familias excepto chan_sub_ (que puede requerir el plan).
+    Devuelve True/False o None si la familia necesita _validate_channel_offer.
+    """
+    if payload.startswith("sub_"):
+        parts = payload.split("_")
+        expected = {"pro": PRICE_PRO_STARS, "ultra": PRICE_ULTRAPRO_STARS}.get(parts[1])
+        return expected is not None and int(parts[2]) < 0 and amount == expected
+    if payload.startswith("chan_sub_"):
+        return None
+    if payload.startswith("vip_mic_"):
+        chat_ok = int(payload.split("_")[2]) < 0
+    elif payload.startswith("speaker_"):
+        chat_ok = int(payload.split("_")[1]) < 0
+    elif payload.startswith("tip_"):
+        chat_ok = int(payload.split("_")[1]) < 0 and amount <= MAX_TIP_STARS
+    else:
+        return False
+    if not chat_ok:
+        return False
+    # Si la oferta consta en memoria, el importe debe coincidir exactamente con el emitido.
+    known = _offer_matches(payload, amount)
+    return True if known is None else known
+
+
 @router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_)"))
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     """
-    Telegram exige responder en menos de 10 s. Se valida que la factura siga siendo coherente
-    (moneda, comunidad válida, precio vigente del plan) antes de cobrar; así no hace falta
-    reembolsar después por un plan pausado o un precio modificado.
+    SLA < 2 s (Telegram corta a los 10 s y el usuario ve un error de pago).
+    La validación ocurre en memoria: moneda XTR, comunidad válida, precio vigente de licencias
+    y coincidencia con la oferta emitida. Solo un chan_sub_ desconocido tras un reinicio toca
+    disco, con un presupuesto máximo de 1,2 s.
     """
+    started = time.monotonic()
     payload = pre_checkout_query.invoice_payload or ""
     amount = int(pre_checkout_query.total_amount or 0)
     ok = False
     try:
-        if pre_checkout_query.currency != "XTR" or amount < 1:
+        if pre_checkout_query.currency != STARS_CURRENCY or amount < 1:
             ok = False
-        elif payload.startswith("sub_"):
-            parts = payload.split("_")
-            expected = {"pro": PRICE_PRO_STARS, "ultra": PRICE_ULTRAPRO_STARS}.get(parts[1])
-            ok = expected is not None and int(parts[2]) < 0 and amount == expected
-        elif payload.startswith("chan_sub_"):
-            parts = payload.split("_")
-            channel_id, plan_id = int(parts[2]), int(parts[3])
-            plan = await asyncio.wait_for(get_channel_plan(plan_id), timeout=5)
-            ok = bool(
-                plan and plan.get("channel_id") == channel_id and plan.get("status") == "active"
-                and amount == int(plan.get("stars_price") or 0)
-            )
-        elif payload.startswith("vip_mic_"):
-            ok = int(payload.split("_")[2]) < 0
-        elif payload.startswith("speaker_"):
-            ok = int(payload.split("_")[1]) < 0
-        elif payload.startswith("tip_"):
-            ok = int(payload.split("_")[1]) < 0 and amount <= MAX_TIP_STARS
+        else:
+            decision = _validate_offer_in_memory(payload, amount)
+            if decision is None:
+                parts = payload.split("_")
+                decision = await _validate_channel_offer(payload, int(parts[2]), int(parts[3]), amount)
+            ok = bool(decision)
     except Exception as ex:
         logger.warning(f"⚠️ [Pre-Checkout] Payload no válido {payload!r}: {ex}")
         ok = False
 
-    if ok:
-        await pre_checkout_query.answer(ok=True)
-    else:
-        await pre_checkout_query.answer(
-            ok=False,
-            error_message="La oferta cambió o ya no está disponible. Solicita una nueva factura. / This offer changed; please request a new invoice."
-        )
+    try:
+        if ok:
+            await pre_checkout_query.answer(ok=True)
+        else:
+            await pre_checkout_query.answer(ok=False, error_message=PRECHECKOUT_DECLINE_MESSAGE)
+    finally:
+        elapsed = time.monotonic() - started
+        if elapsed > PRECHECKOUT_SLA_SECONDS:
+            logger.warning(f"🐢 [Pre-Checkout] SLA excedido: {elapsed:.2f}s para {payload!r} (ok={ok}).")
+        else:
+            logger.debug(f"⚡ [Pre-Checkout] {payload!r} respondido en {elapsed * 1000:.0f} ms (ok={ok}).")
 
 
 # ==========================================
@@ -1216,8 +1455,16 @@ async def process_successful_payment(message: Message, bot: Bot):
         logger.warning(f"⚠️ [Pago Duplicado Ignorado] charge_id={charge_id} usuario={user_id}. Beneficio ya concedido.")
         return
 
+    # 📒 Trazabilidad: el cargo queda en el libro mayor ANTES de entregar el beneficio.
+    await record_star_payment(message)
+    logger.info(
+        f"💳 [Pago Stars] charge_id={charge_id} user_id={user_id} "
+        f"chat_id={_payload_chat_id(payload)} stars={message.successful_payment.total_amount} payload={payload!r}"
+    )
+
     # CASO 1: SUSCRIPCIONES PRO / ULTRA PRO (GRUPOS Y CANALES)
     if payload.startswith("sub_"):
+        license_granted = False
         try:
             parts = payload.split("_")
             plan_type = parts[1]
@@ -1226,6 +1473,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
             granted_tier, granted_days = await compute_license_grant(chat_id, tier_db, base_days=30)
             await approve_group(group_id=chat_id, tier=granted_tier, duration_days=granted_days)
+            license_granted = True
             logger.info(f"⭐ [Licencia] {chat_id} → {granted_tier} por {granted_days} días (compra: {tier_db}).")
             if granted_tier != tier_db:
                 plan_type = "ultra"
@@ -1256,15 +1504,19 @@ async def process_successful_payment(message: Message, bot: Bot):
                     reply_markup=confirm_markup
                 )
         except Exception as e:
-            logger.error(f"Error procesando la entrega de suscripción adquirida (Iniciando reembolso automático): {e}")
-            try:
-                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
-            except Exception as ref_err:
-                logger.error(f"Error crítico al ejecutar reembolso de Stars para suscripción: {ref_err}")
-            await message.answer(t["err_inv"], parse_mode="HTML")
+            if license_granted:
+                # La licencia YA está activa: solo falló la confirmación. Reembolsar aquí dejaría
+                # al cliente con el servicio y su dinero, o le revocaría un plan pagado.
+                logger.error(f"Licencia {payload!r} concedida pero falló la confirmación al usuario {user_id}: {e}")
+            else:
+                logger.error(f"Error procesando la entrega de suscripción adquirida (Iniciando reembolso automático): {e}")
+                await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de licencia fallida: {e}")
+                with contextlib.suppress(Exception):
+                    await message.answer(t["err_inv"], parse_mode="HTML")
 
     # CASO 2: MEMBRESÍAS DE CANAL Y ENTREGA EXCLUSIVA POR BOTONES
     elif payload.startswith("chan_sub_"):
+        membership_delivered = False
         try:
             parts = payload.split("_")
             channel_id = int(parts[2])
@@ -1273,6 +1525,8 @@ async def process_successful_payment(message: Message, bot: Bot):
             stars_paid = message.successful_payment.total_amount
 
             target_plan = await get_channel_plan(plan_id)
+            if not target_plan or target_plan.get("channel_id") != channel_id:
+                raise ValueError(f"El plan {plan_id} ya no existe para el canal {channel_id}")
             target_link = target_plan.get("target_link") if target_plan else None
             ch_settings = await get_channel_settings(channel_id)
             custom_welcome = ch_settings.get("custom_welcome") if ch_settings else ""
@@ -1320,21 +1574,25 @@ async def process_successful_payment(message: Message, bot: Bot):
                 f"🛡️ <i>Cloud Media Management</i>"
             )
             await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
+            membership_delivered = True
             logger.info(f"✅ [Membresía Activada]: Usuario {user_id} en canal {channel_id} por {duration_days} días ({stars_paid} Stars).")
         except Exception as e:
-            logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
-            try:
-                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
-            except Exception as ref_err:
-                logger.error(f"Error crítico al ejecutar reembolso de Stars para membresía de canal: {ref_err}")
-            await message.answer(t["err_inv"], parse_mode="HTML")
+            if membership_delivered:
+                logger.error(f"Membresía {payload!r} entregada; error posterior no crítico para {user_id}: {e}")
+            else:
+                logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
+                await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de membresía fallida: {e}")
+                with contextlib.suppress(Exception):
+                    await message.answer(t["err_inv"], parse_mode="HTML")
 
     # CASO 3: PASES VIP DE MICRÓFONO PERSONALIZADOS (24 HORAS)
     elif payload.startswith("vip_mic_"):
+        benefit_granted = False
         try:
             chat_id = int(payload.split("_")[2])
 
             await grant_vip_mic(user_id=user_id, group_id=chat_id)
+            benefit_granted = True
 
             try:
                 await set_participant_mic(
@@ -1392,15 +1650,17 @@ async def process_successful_payment(message: Message, bot: Bot):
             markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
             await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
         except Exception as e:
+            if benefit_granted:
+                logger.error(f"Pase VIP {payload!r} concedido; falló un paso posterior no crítico para {user_id}: {e}")
+                return
             logger.error(f"Error procesando la entrega del pase VIP de micrófono (Iniciando reembolso automático): {e}")
-            try:
-                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
-            except Exception as ref_err:
-                logger.error(f"Error crítico al ejecutar reembolso de Stars para pase VIP: {ref_err}")
-            await message.answer(t["err_inv"], parse_mode="HTML")
+            await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de pase VIP fallida: {e}")
+            with contextlib.suppress(Exception):
+                await message.answer(t["err_inv"], parse_mode="HTML")
 
     # CASO 4: COLA DE SPEAKERS AMA
     elif payload.startswith("speaker_"):
+        benefit_granted = False
         try:
             chat_id = int(payload.split("_")[1])
             stars_paid = message.successful_payment.total_amount
@@ -1408,6 +1668,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             username = message.from_user.username or ""
 
             await add_to_speaker_queue(chat_id, user_id, full_name, username, stars_paid)
+            benefit_granted = True
             position = await get_user_speaker_position(chat_id, user_id)
 
             kb_rows = []
@@ -1425,21 +1686,24 @@ async def process_successful_payment(message: Message, bot: Bot):
             await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
             logger.info(f"🎙️ [Speaker Encolado]: Usuario {user_id} en posición #{position} para grupo {chat_id} ({stars_paid} Stars).")
         except Exception as e:
+            if benefit_granted:
+                logger.error(f"Turno de speaker {payload!r} registrado; falló un paso posterior no crítico para {user_id}: {e}")
+                return
             logger.error(f"Error procesando turno de speaker (Iniciando reembolso automático): {e}")
-            try:
-                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
-            except Exception as ref_err:
-                logger.error(f"Error crítico al ejecutar reembolso de Stars para speaker: {ref_err}")
-            await message.answer(t["err_inv"], parse_mode="HTML")
+            await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de speaker fallida: {e}")
+            with contextlib.suppress(Exception):
+                await message.answer(t["err_inv"], parse_mode="HTML")
 
     # CASO 5: PROPINAS STARS (TIPS ENGINE)
     elif payload.startswith("tip_"):
+        benefit_granted = False
         try:
             parts = payload.split("_")
             chat_id = int(parts[1])
             stars_paid = message.successful_payment.total_amount
 
             await record_group_tip(chat_id, user_id, stars_paid)
+            benefit_granted = True
 
             # Despacho de agradecimiento si existe la función en user_private
             try:
@@ -1494,9 +1758,10 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             logger.info(f"🌟 [Propina Procesada]: Usuario {user_id} donó {stars_paid} Stars a la comunidad {chat_id}.")
         except Exception as e:
+            if benefit_granted:
+                logger.error(f"Propina {payload!r} registrada; falló un paso posterior no crítico para {user_id}: {e}")
+                return
             logger.error(f"Error procesando propina (Iniciando reembolso automático): {e}")
-            try:
-                await bot.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
-            except Exception as ref_err:
-                logger.error(f"Error crítico al ejecutar reembolso de Stars para propina: {ref_err}")
-            await message.answer(t["err_inv"], parse_mode="HTML")
+            await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de propina fallida: {e}")
+            with contextlib.suppress(Exception):
+                await message.answer(t["err_inv"], parse_mode="HTML")

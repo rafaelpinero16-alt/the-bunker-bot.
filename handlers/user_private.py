@@ -4,8 +4,10 @@ user_private.py — Consola privada de The Bunker OS (Aiogram 3.x) · Cloud Medi
 Revisión de resiliencia y blindaje:
   1. Estados conversacionales seguros ante reinicios de RAM (TTL, liberación en bloque, fallback anti-bloqueo, /cancel).
   2. Sincronización Activa de Canales estilo GroupHelp (verificación en vivo + registro autorreparable + selector nativo).
-  3. Navegación contextual estricta: canal → cpanel | grupo → gpanel, también en pasarelas de pago y herramientas ULTRA.
+  3. Navegación contextual estricta: canal → cpanel | grupo → gpanel, también en el checkout y herramientas ULTRA.
   4. Identidad visual: botones inline, soporte bilingüe ES/EN y firma perimetral "Cloud Media Management".
+  5. Fase 3 · Exclusividad financiera: PRO, ULTRA PRO, MicVIP y membresías se adquieren solo con
+     Telegram Stars (XTR) in-app; sin pasarelas externas ni precios fiat (Telegram, Apple 3.1.1, Google Play).
 """
 import os
 import sys
@@ -88,6 +90,26 @@ from .groups import (
     clear_speaker_queue, get_speaker_queue
 )
 
+# 💳 Fase 3 · Exclusividad financiera: los planes se cobran SOLO en Telegram Stars (XTR).
+# Los precios provienen de handlers/payments.py (única fuente de verdad); payments.py no
+# importa este módulo en tiempo de carga, por lo que no hay importación circular.
+try:
+    from .payments import PRICE_PRO_STARS, PRICE_ULTRAPRO_STARS, invalidate_channel_plan_cache
+except Exception:  # pragma: no cover - respaldo si payments no está disponible
+    PRICE_PRO_STARS, PRICE_ULTRAPRO_STARS = 300, 600
+
+    def invalidate_channel_plan_cache(plan_id=None) -> None:
+        return None
+
+# Las tarjetas HUD de las vistas de cobro son imágenes; si su arte original mostraba
+# pasarelas externas, desactívalas con PAYMENT_HUD_CARDS=0 hasta reemplazar los assets.
+PAYMENT_HUD_CARDS = os.getenv("PAYMENT_HUD_CARDS", "1").strip().lower() in ("1", "true", "yes", "on", "si", "sí")
+
+
+def plan_price_stars(tier_level: str) -> int:
+    return PRICE_ULTRAPRO_STARS if tier_level == "ultra" else PRICE_PRO_STARS
+
+
 router = Router()
 
 
@@ -150,9 +172,9 @@ CARD_IMAGES = {
     "info_core":         {"es": "nucleo.sistema.jfif",        "en": "information.jfif"},
     # 17 y 18: Matriz de Seguridad (Panel Individual de Grupo)
     "security_matrix":   {"es": "matriz.seguridad.jfif",      "en": "security.matrix.jfif"},
-    # 19 y 20: Pasarela de Pago Plan PRO (300 Stars)
+    # 19 y 20: Checkout Plan PRO (solo Telegram Stars)
     "pay_pro":           {"es": "pro.es.jfif",                "en": "pro.en.jfif"},
-    # 21 y 22: Pasarela de Pago Plan ULTRA PRO (600 Stars)
+    # 21 y 22: Checkout Plan ULTRA PRO (solo Telegram Stars)
     "pay_ultra":         {"es": "ultra.pro.subscrib.jfif",    "en": "ultra.pro.subscrip.jfif"},
     # 23 y 24: Funciones Operativas del Centinela
     "sentinel":          {"es": "config.centinela.jfif",      "en": "setting.centinel.jfif"},
@@ -690,17 +712,17 @@ TEXTS = {
         "group_panel_title": "🛡️ <b>Security Matrix:</b> {group_name}\n\nSelect a tactical module to alter community parameters.",
         "channel_panel_title": "📡 <b>Broadcast Studio:</b> {channel_name}\n\nSelect a module to manage lives, memberships, or studio automation.{perm_warning}",
         "pay_pro_title": (
-            "⭐ <b>PRO Plan Subscription — {group_name} (300 Stars)</b>\n\n"
+            "⭐ <b>PRO Plan Subscription — {group_name} ({stars} Stars)</b>\n\n"
             "Upgrade your community to elite operational status:\n\n"
             "• ⚡ <b>Unlimited Bot Commands:</b> Bypass the 3 daily uses limit.\n"
             "• 🗑️ <b>Automated Purge Center:</b> Service logs and chat clutter cleanup.\n"
             "• 🤖 <b>Advanced Captcha Pro:</b> Custom welcome copy and timeout parameters.\n"
             "• 🛡️ <b>Granular Anti-Spam:</b> Advanced shielding against channels, bots, and links.\n\n"
-            "<i>Select your payment gateway below:</i>\n\n"
+            "⭐ <i>Price: <b>{stars} Stars (XTR)</b> · 30 days. Paid 100% in-app with Telegram Stars; activation is instant.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pay_ultra_title": (
-            "💎 <b>ULTRA PRO Subscription — {group_name} (600 Stars)</b>\n\n"
+            "💎 <b>ULTRA PRO Subscription — {group_name} ({stars} Stars)</b>\n\n"
             "Total command, decentralized automation, and high-tier monetization:\n\n"
             "• 🌟 <b>All PRO Plan features included.</b>\n"
             "• 🧬 <b>Bot Clone Architecture:</b> Run an exclusive replica under your own token.\n"
@@ -709,7 +731,7 @@ TEXTS = {
             "• 🔇 <b>Smart AutoLower Radar:</b> Unverified mics get dialed down to 2% in milliseconds.\n"
             "• 💰 <b>Telegram Stars Monetization:</b> 100% revenue into your balance.\n"
             "• 📢 <b>Channel Membreships Engine:</b> Single-use cryptographic invite links & auto-kick.\n\n"
-            "<i>Select your payment gateway below:</i>\n\n"
+            "⭐ <i>Price: <b>{stars} Stars (XTR)</b> · 30 days. Paid 100% in-app with Telegram Stars; activation is instant.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_back": "🔙 Back to Main Menu",
@@ -1103,23 +1125,23 @@ TEXTS = {
         "group_panel_title": "🛡️ <b>Matriz de Seguridad:</b> {group_name}\n\nSelecciona un módulo para alterar los parámetros de la comunidad.",
         "channel_panel_title": "📡 <b>Estudio de Transmisión:</b> {channel_name}\n\nSelecciona un módulo para configurar transmisiones en vivo, suscripciones o automatizaciones.{perm_warning}",
         "pay_pro_title": (
-            "⭐ <b>Suscripción Plan PRO — {group_name} (300 Stars)</b>\n\n"
+            "⭐ <b>Suscripción Plan PRO — {group_name} ({stars} Stars)</b>\n\n"
             "• ⚡ <b>Comandos de Bot Ilimitados.</b>\n"
             "• 🗑️ <b>Purga Automatizada de mensajes de servicio.</b>\n"
             "• 🤖 <b>Aduana Captcha Pro Avanzada.</b>\n"
             "• 🛡️ <b>Anti-Spam Granular Total.</b>\n\n"
-            "<i>Selecciona tu pasarela preferida:</i>\n\n"
+            "⭐ <i>Precio: <b>{stars} Stars (XTR)</b> · 30 días. Pago 100% in-app con Telegram Stars; activación inmediata.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "pay_ultra_title": (
-            "💎 <b>Suscripción ULTRA PRO — {group_name} (600 Stars)</b>\n\n"
+            "💎 <b>Suscripción ULTRA PRO — {group_name} ({stars} Stars)</b>\n\n"
             "• 🌟 <b>Todas las ventajas del Plan PRO incluidas.</b>\n"
             "• 🧬 <b>Arquitectura Bot Clone:</b> Tu réplica bajo tu propio token.\n"
             "• 🎙️ <b>Centinela de Voz Dedicado:</b> Moderación acústica en videollamadas vía teléfono.\n"
             "• 🏷️ <b>Etiquetas Nativas VIP y Radar AutoLower al 2%.</b>\n"
             "• 💰 <b>Monetización Stars directa a tu balance.</b>\n"
             "• 📢 <b>Motor de Membresías en Canales:</b> Enlaces de 1 solo uso y expulsión automática.\n\n"
-            "<i>Selecciona tu pasarela preferida:</i>\n\n"
+            "⭐ <i>Precio: <b>{stars} Stars (XTR)</b> · 30 días. Pago 100% in-app con Telegram Stars; activación inmediata.</i>\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
         "btn_back": "🔙 Volver al Menú Principal",
@@ -2829,16 +2851,17 @@ async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, act
     return sent, failed
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat_type: str = "g"):
+    """
+    Botonera de cobro EXCLUSIVA en Telegram Stars (XTR): un único botón genera la factura
+    nativa in-app (sendInvoice con currency=XTR). Sin enlaces a pasarelas externas ni precios
+    fiat, conforme a Telegram, Apple App Store (3.1.1) y Google Play Payments.
+    """
     t = TEXTS.get(lang, TEXTS["es"])
-    stars_price = "300 XTR" if tier_level == "pro" else "600 XTR"
+    stars_price = f"{plan_price_stars(tier_level)} XTR"
     stars_label = f"⭐ Pagar con Stars ({stars_price})" if lang == "es" else f"⭐ Pay with Stars ({stars_price})"
 
     keyboard_rows = [
-        [InlineKeyboardButton(text=stars_label, callback_data=f"inv_{tier_level}_{group_id}_{lang}")],
-        [
-            InlineKeyboardButton(text="💳 PayPal", url="https://paypal.me/Felipecosmic"),
-            InlineKeyboardButton(text="🟡 Binance Pay", url="https://app.binance.com/uni-qr/request-to-pay?billOrderId=452404659499556864&billType=request_a_payment")
-        ]
+        [InlineKeyboardButton(text=stars_label, callback_data=f"inv_{tier_level}_{group_id}_{lang}")]
     ]
 
     if tier_level == "ultra":
@@ -3298,7 +3321,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         lang = user_lang(message.from_user)
         t = TEXTS.get(lang, TEXTS["es"])
         
-        # ... (resto de la lógica original de bienvenida y deep-links))
+        # Registro del usuario y despacho de la bienvenida / deep-links.
 
         try:
             await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
@@ -5863,9 +5886,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         except Exception:
             g_name = "Comunidad" if lang == "es" else "Community"
         chat_kind = await resolve_chat_kind(bot, group_id)
-        text = t[f"pay_{tier_level}_title"].format(group_name=g_name)
+        text = t[f"pay_{tier_level}_title"].format(group_name=g_name, stars=plan_price_stars(tier_level))
         keyboard = get_payment_keyboard(group_id, lang, tier_level=tier_level, chat_type=chat_kind)
-        card_key = f"pay_{tier_level}"
+        card_key = f"pay_{tier_level}" if PAYMENT_HUD_CARDS else None
 
     elif action == "vcsched":
         sub = data[1]
@@ -7521,6 +7544,8 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             return
 
         new_status = await toggle_channel_plan_status(plan_id)
+        # El pre-checkout valida contra caché en memoria: un plan pausado debe dejar de cobrarse ya.
+        invalidate_channel_plan_cache(plan_id)
         status_label = tr(lang, "🟢 Plan activado.", "🟢 Plan activated.") if new_status == "active" else tr(lang, "🔴 Plan pausado.", "🔴 Plan paused.")
         await callback.answer(status_label)
 
@@ -7751,6 +7776,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         plans = await get_channel_plans(channel_id, only_active=False)
         if plan_id in {p[0] for p in plans}:
             await delete_channel_plan(plan_id)
+            invalidate_channel_plan_cache(plan_id)
             await callback.answer(tr(lang, "🗑️ Plan eliminado.", "🗑️ Plan deleted."))
 
         text, kb = await _render_plans_menu(bot, channel_id, lang)
