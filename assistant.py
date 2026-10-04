@@ -3,6 +3,7 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
+Fase 5: Cambios de la sala de audio (inicio/fin de llamada, altas/bajas, micrófonos) emitidos al radar WebSocket.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -63,6 +64,14 @@ from database.database import (
     record_hourly_chat_activity,
     add_user_reputation_xp
 )
+
+try:
+    from radar_bus import publish_radar_event, radar_hub  # type: ignore[import-not-found]  # pyright: ignore[reportMissingImports]
+except ImportError:  # radar_bus is optional at runtime in some environments
+    def publish_radar_event(*args, **kwargs):
+        return None
+
+    radar_hub = None
 
 # 🤖 Integración de Mistral AI para el Guardián de Voz y Copiloto
 try:
@@ -1471,6 +1480,52 @@ async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reaso
             await _safe_stop_client(client, label=f"grupo {chat_id}")
 
 
+VOICE_PRESENCE_MIN_INTERVAL = 12.0
+
+
+def _publish_voice_presence(chat_id: int, participants, users_map, state: dict) -> None:
+    """
+    Calcula el diff de la sala de audio y lo emite al radar solo si cambió algo.
+    Payload compacto: n = presentes, m = micrófonos abiertos, j = altas, l = bajas.
+    """
+    present: set = set()
+    unmuted = 0
+    for p in participants or []:
+        if getattr(p, "left", False):
+            continue
+        peer_obj = getattr(p, "peer", None)
+        if not isinstance(peer_obj, PeerUser):
+            continue
+        present.add(peer_obj.user_id)
+        if not getattr(p, "muted", True):
+            unmuted += 1
+
+    previous = state.get("present", set())
+    joined = present - previous
+    left = previous - present
+    changed = bool(joined or left) or unmuted != state.get("unmuted", -1)
+    state["present"] = present
+    state["unmuted"] = unmuted
+    state["last_fetch"] = time.monotonic()
+    if not changed:
+        return
+
+    joined_payload = []
+    for uid in list(joined)[:20]:
+        user_obj = (users_map or {}).get(uid)
+        name = (getattr(user_obj, "first_name", None) or "") if user_obj else ""
+        joined_payload.append({"u": uid, "n": name[:32]})
+
+    publish_radar_event(chat_id, "voice_presence", {
+        "n": len(present),
+        "m": unmuted,
+        "j": joined_payload,
+        "l": list(left)[:50],
+        "jt": len(joined),
+        "lt": len(left),
+    })
+
+
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
     alerted_users = set()
     current_call = None
@@ -1480,6 +1535,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
     reconnect_backoff = 5.0
     seen_users: set = set()
+    announced_call_id = None
+    voice_state: dict = {"present": set(), "unmuted": -1, "last_fetch": 0.0}
 
     while True:
         if not client.is_connected:
@@ -1519,6 +1576,18 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
             if not current_call or (current_time - last_channel_check > 15):
                 raw_call_obj = await _get_raw_group_call(client, chat_id, peer, raise_errors=True)
+                # ⚡ Radar en vivo: inicio / fin / rotación de la llamada
+                raw_call_id = int(raw_call_obj.id) if raw_call_obj else None
+                if raw_call_id != announced_call_id:
+                    if announced_call_id is not None:
+                        publish_radar_event(chat_id, "voice_call_ended", {
+                            "call": announced_call_id,
+                            "reason": "replaced" if raw_call_id else "ended",
+                        })
+                    if raw_call_id is not None:
+                        publish_radar_event(chat_id, "voice_call_started", {"call": raw_call_id})
+                    announced_call_id = raw_call_id
+                    voice_state = {"present": set(), "unmuted": -1, "last_fetch": 0.0}
                 if raw_call_obj:
                     if not current_call or current_call.id != raw_call_obj.id:
                         call_start_time = time.monotonic()
@@ -1592,6 +1661,20 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 night_active, _ = await _is_night_active(chat_id)
                 autolower_enabled = await get_autolower_status(chat_id)
                 if autolower_enabled != 1 and not night_active:
+                    # Sin Auto-Lower el radar no lee participantes; solo se consulta si
+                    # hay un Dashboard conectado escuchando esta sala.
+                    if (
+                        radar_hub.has_listeners(chat_id)
+                        and (time.monotonic() - voice_state.get("last_fetch", 0.0)) >= VOICE_PRESENCE_MIN_INTERVAL
+                    ):
+                        voice_state["last_fetch"] = time.monotonic()
+                        try:
+                            live_parts, live_users = await _fetch_all_participants(client, current_call)
+                            _publish_voice_presence(chat_id, live_parts, live_users, voice_state)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as presence_err:
+                            logger.debug(f"Aviso leyendo presencia de voz en {chat_id}: {presence_err}")
                     await asyncio.sleep(8)
                     continue
 
@@ -1620,6 +1703,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 participants, users_map = await _fetch_all_participants(client, current_call)
                 active_users = set()
+                _publish_voice_presence(chat_id, participants, users_map, voice_state)
 
                 podcast_cfg = await get_podcast_config(chat_id)
                 host_is_speaking = False

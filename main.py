@@ -4,6 +4,7 @@ main.py — The Bunker OS (Aiogram 3.x / FastAPI / Pyrogram)
 Núcleo de arranque maestro, sincronización de enrutadores, pasarela Web API y
 administración concurrente de clones y Centinelas acústicos.
 Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints de Heatmaps, Reputación y Backups.
+Fase 5: Analítica en Caliente nivel Combot (GET /api/community/{chat_id}/analytics + /ws/radar/{chat_id} blindado).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from __future__ import annotations
@@ -56,6 +57,7 @@ try:
         WebSocket, WebSocketDisconnect, Query
     )
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
+    from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
 except ImportError:
     class _FastAPIStub:
         def __init__(self, *args, **kwargs): pass
@@ -98,6 +100,7 @@ except ImportError:
     Query = lambda *args, **kwargs: None  # type: ignore[assignment]
     HTTPException = _HTTPExceptionStub  # type: ignore[misc]
     CORSMiddleware = _CORSMiddlewareStub  # type: ignore[misc]
+    JSONResponse = lambda content=None, status_code=200, headers=None, **kwargs: content  # type: ignore[assignment, misc]
 
 try:
     import uvicorn  # type: ignore[import-not-found]
@@ -168,6 +171,45 @@ from database.database import (
     export_group_configuration,
     import_group_configuration
 )
+try:
+    from database.analytics import (  # type: ignore[import-not-found]
+        analytics_buffer,
+        classify_message,
+        extract_group_id_from_payload,
+        get_community_full_analytics,
+        record_stars_payment,
+        start_analytics_flusher,
+        stop_analytics_flusher,
+    )
+except ImportError:  # pragma: no cover - se usa en entornos minimalistas o con módulos ausentes.
+    analytics_buffer = None
+
+    def classify_message(*args, **kwargs):
+        return None
+
+    def extract_group_id_from_payload(*args, **kwargs):
+        return None
+
+    def get_community_full_analytics(*args, **kwargs):
+        return {}
+
+    def record_stars_payment(*args, **kwargs):
+        return None
+
+    def start_analytics_flusher(*args, **kwargs):
+        return None
+
+    def stop_analytics_flusher(*args, **kwargs):
+        return None
+
+try:
+    from radar_bus import publish_radar_event, radar_hub  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - módulo opcional disponible solo en algunos entornos.
+    def publish_radar_event(*args, **kwargs):
+        return None
+
+    radar_hub = None
+
 from handlers import (
     admin_group,
     ecosystem,
@@ -177,6 +219,7 @@ from handlers import (
     user_private,
     vc_manager
 )
+from handlers import metrics as community_metrics
 from handlers.user_private import (
     get_active_user_channels,
     get_active_user_groups,
@@ -246,69 +289,18 @@ def _spawn(coro, name: Optional[str] = None) -> asyncio.Task:
 
 
 # ==========================================
-# ⚡ GESTOR DE CONEXIONES WEBSOCKET (FASE 3)
+# ⚡ GESTOR DE CONEXIONES WEBSOCKET (FASE 3 → FASE 5)
 # ==========================================
-class ConnectionManager:
-    """Administra conexiones reactivas WebSocket por chat_id para telemetría en tiempo real."""
-    SEND_TIMEOUT_SECONDS = 5.0
-
-    def __init__(self):
-        self.active_connections: dict[int, set[WebSocket]] = {}
-        self._lock = asyncio.Lock()
-
-    async def _safe_send(self, chat_id: int, ws: WebSocket, message: dict) -> None:
-        try:
-            await asyncio.wait_for(ws.send_json(message), timeout=self.SEND_TIMEOUT_SECONDS)
-        except Exception:
-            await self.disconnect(chat_id, ws)
-
-    async def connect(self, chat_id: int, websocket: WebSocket):
-        await websocket.accept()
-        async with self._lock:
-            if chat_id not in self.active_connections:
-                self.active_connections[chat_id] = set()
-            self.active_connections[chat_id].add(websocket)
-
-    async def disconnect(self, chat_id: int, websocket: WebSocket):
-        async with self._lock:
-            if chat_id in self.active_connections:
-                self.active_connections[chat_id].discard(websocket)
-                if not self.active_connections[chat_id]:
-                    self.active_connections.pop(chat_id, None)
-
-    async def broadcast(self, chat_id: int, message: dict):
-        async with self._lock:
-            connections = list(self.active_connections.get(chat_id, []))
-        if connections:
-            await asyncio.gather(*(self._safe_send(chat_id, ws, message) for ws in connections))
-
-    async def broadcast_global(self, message: dict):
-        async with self._lock:
-            all_connections = [
-                (cid, ws)
-                for cid, conns in self.active_connections.items()
-                for ws in list(conns)
-            ]
-        if all_connections:
-            await asyncio.gather(*(self._safe_send(cid, ws, message) for cid, ws in all_connections))
-
-    def total_connections(self) -> int:
-        return sum(len(conns) for conns in self.active_connections.values())
-
-
-ws_manager = ConnectionManager()
+# El gestor vive en radar_bus.py para que groups/assistant/ecosystem publiquen sin
+# importar main.py. `ws_manager` conserva la API anterior (connect, disconnect,
+# broadcast, broadcast_global, total_connections, active_connections).
+ws_manager = radar_hub
 
 
 async def emit_radar_event(chat_id: int, event_type: str, data: dict = None):
-    """Emite un evento reactivo en milisegundos a todos los clientes conectados a la sala."""
-    payload = {
-        "event": event_type,
-        "chat_id": str(chat_id),
-        "timestamp": int(time.time()),
-        "data": data or {}
-    }
+    """Emite un evento reactivo a todos los clientes de la sala (encolado, no bloqueante)."""
     try:
-        await ws_manager.broadcast(int(chat_id), payload)
+        publish_radar_event(int(chat_id), event_type, data or {})
     except Exception as ex:
         logger.debug("Aviso emitiendo evento WS (%s): %s", chat_id, ex)
 
@@ -485,6 +477,49 @@ async def assert_chat_ownership(user_id: int, chat_id: int):
     owned_ids = {int(c[0]) for c in owned_channels} | {int(g[0]) for g in owned_groups}
     if chat_id not in owned_ids:
         raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
+
+
+_ADMIN_ACCESS_CACHE: Dict[tuple, tuple] = {}
+_ADMIN_ACCESS_CACHE_MAX = 20000
+
+
+async def _is_live_chat_admin(user_id: int, chat_id: int) -> bool:
+    """Verifica en Telegram si el usuario es creador/administrador (caché 5 min / 1 min negativa)."""
+    key = (int(chat_id), int(user_id))
+    now = time.monotonic()
+    cached = _ADMIN_ACCESS_CACHE.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+    if master_bot_instance is None:
+        return False
+    try:
+        member = await asyncio.wait_for(master_bot_instance.get_chat_member(chat_id, user_id), timeout=4)
+        status = getattr(member.status, "value", member.status)
+        verdict = status in ("creator", "administrator")
+        ttl = 300.0 if verdict else 60.0
+    except Exception:
+        verdict, ttl = False, 30.0
+    if len(_ADMIN_ACCESS_CACHE) >= _ADMIN_ACCESS_CACHE_MAX:
+        _ADMIN_ACCESS_CACHE.clear()
+    _ADMIN_ACCESS_CACHE[key] = (verdict, now + ttl)
+    return verdict
+
+
+async def assert_chat_access(user_id: int, chat_id: int):
+    """
+    Acceso a la analítica: propietario registrado (assert_chat_ownership) o cualquier
+    administrador vivo del chat. Así el botón de /metrics funciona para todo el staff,
+    no solo para quien añadió el bot.
+    """
+    try:
+        await assert_chat_ownership(user_id, chat_id)
+        return
+    except HTTPException as exc:
+        if getattr(exc, "status_code", None) != 403:
+            raise
+    if await _is_live_chat_admin(user_id, chat_id):
+        return
+    raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
 
 
 def _get_global_channels_sync():
@@ -1090,87 +1125,364 @@ async def api_affiliates(
 
 
 # ==========================================
-# ⚡ WEBSOCKET DE TELEMETRÍA REACTIVA EN VIVO (FASE 3)
+# 📈 FASE 5: ANALÍTICA COMPLETA DE COMUNIDAD (REST)
 # ==========================================
+ANALYTICS_API_TIMEOUT = float(os.getenv("ANALYTICS_API_TIMEOUT", "2.5") or 2.5)
+LIVE_MEMBERS_TTL = 300.0
+_LIVE_MEMBER_CACHE: Dict[int, tuple] = {}
+_LIVE_MEMBER_REFRESHING: Set[int] = set()
+
+
+async def _refresh_live_member_count(chat_id: int) -> None:
+    try:
+        if master_bot_instance is None:
+            return
+        try:
+            count = int(await asyncio.wait_for(master_bot_instance.get_chat_member_count(chat_id), timeout=5))
+        except Exception:
+            previous = _LIVE_MEMBER_CACHE.get(chat_id)
+            count = previous[1] if previous else None
+        _LIVE_MEMBER_CACHE[chat_id] = (time.monotonic(), count)
+    finally:
+        _LIVE_MEMBER_REFRESHING.discard(chat_id)
+
+
+def _cached_live_member_count(chat_id: int) -> Optional[int]:
+    """Nunca espera a Telegram: devuelve el último valor y refresca en segundo plano si caducó."""
+    entry = _LIVE_MEMBER_CACHE.get(chat_id)
+    stale = entry is None or (time.monotonic() - entry[0]) > LIVE_MEMBERS_TTL
+    if stale and chat_id not in _LIVE_MEMBER_REFRESHING and master_bot_instance is not None:
+        _LIVE_MEMBER_REFRESHING.add(chat_id)
+        _spawn(_refresh_live_member_count(chat_id), name=f"live_members:{chat_id}")
+    return entry[1] if entry else None
+
+
+def _decorate_analytics(chat_id: int, data: dict) -> dict:
+    """Copia superficial con datos en vivo (no se muta el objeto cacheado)."""
+    payload = dict(data)
+    summary = dict(payload.get("summary") or {})
+    summary["members_live"] = _cached_live_member_count(chat_id)
+    payload["summary"] = summary
+    payload["live"] = {
+        "ws_path": f"/ws/radar/{chat_id}",
+        "listeners": radar_hub.listener_count(chat_id),
+        "seq": radar_hub.current_seq(chat_id),
+    }
+    return payload
+
+
+@api_router.get("/community/{chat_id}/analytics")
+async def api_community_full_analytics(
+    chat_id: str,
+    fresh: bool = False,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """
+    Analítica completa en un único JSON: resumen, crecimiento/retención, mapa de
+    calor 7x24 (listo para ApexCharts y Chart.js), cuadro de honor y desglose por
+    tipo de mensaje. Caché por chat de pocos segundos + cómputo compartido.
+    """
+    started = time.perf_counter()
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    await assert_chat_access(user_id, numeric_id)
+
+    try:
+        data = await asyncio.wait_for(
+            get_community_full_analytics(numeric_id, max_age=0.0 if fresh else None),
+            timeout=ANALYTICS_API_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="La compilación analítica excedió el tiempo límite.")
+    except Exception as e:
+        logger.error(f"❌ [API Analytics Error] {numeric_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=503, detail="Analítica temporalmente no disponible.")
+
+    payload = _decorate_analytics(numeric_id, data)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Cache-Control": "no-store",
+            "Server-Timing": f"app;dur={elapsed_ms:.1f}",
+            "X-Bunker-Signature": "Cloud Media Management",
+        },
+    )
+
+
+# ==========================================
+# ⚡ WEBSOCKET DE TELEMETRÍA REACTIVA EN VIVO (FASE 3 → FASE 5, BLINDADO)
+# ==========================================
+WS_AUTH_TIMEOUT = float(os.getenv("WS_AUTH_TIMEOUT", "10") or 10)
+WS_IDLE_TIMEOUT = float(os.getenv("WS_IDLE_TIMEOUT", "90") or 90)
+WS_MAX_INBOUND_BYTES = 4096
+WS_RATE_CAPACITY = 20.0
+WS_RATE_REFILL_PER_SEC = 2.0
+WS_RATE_MAX_VIOLATIONS = 10
+WS_REFRESH_COOLDOWN = 2.0
+WS_ALLOWED_ORIGINS = {
+    o.strip().rstrip("/") for o in os.getenv("WS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+}
+RADAR_EVENTS = {
+    "message", "level_up", "voice_call_started", "voice_call_ended", "voice_presence",
+    "stars_payment", "settings_updated",
+}
+
+# Códigos de cierre de aplicación (4000-4999) legibles por la Mini App.
+WS_CLOSE_BAD_REQUEST = 4400
+WS_CLOSE_UNAUTHORIZED = 4401
+WS_CLOSE_FORBIDDEN = 4403
+WS_CLOSE_TIMEOUT = 4408
+WS_CLOSE_RATE_LIMIT = 4429
+
+
+def _ws_user_from_credentials(token: Optional[str], init_data: Optional[str]) -> int:
+    """Solo credenciales firmadas: token de sesión HMAC o initData de Telegram."""
+    if token:
+        payload = verify_session_token(token)
+        if payload and payload.get("uid"):
+            try:
+                return int(payload["uid"])
+            except (TypeError, ValueError):
+                pass
+        if "hash=" in token:
+            uid = parse_telegram_user_id(token)
+            if uid:
+                return uid
+    if init_data:
+        uid = parse_telegram_user_id(init_data)
+        if uid:
+            return uid
+    if ALLOW_INSECURE_AUTH_FALLBACK and (token or init_data):
+        return resolve_user_id(init_data, f"Bearer {token}" if token else None)
+    return 0
+
+
+async def _ws_receive_text(websocket: WebSocket, timeout: float) -> Optional[str]:
+    """Recibe un frame (texto o binario UTF-8). None = el cliente se desconectó."""
+    message = await asyncio.wait_for(websocket.receive(), timeout=timeout)
+    if message.get("type") == "websocket.disconnect":
+        return None
+    if message.get("text") is not None:
+        return message["text"]
+    raw = message.get("bytes")
+    if raw is not None:
+        return raw.decode("utf-8", errors="replace")
+    return ""
+
+
+async def _ws_reject(websocket: WebSocket, code: int, reason: str) -> None:
+    with contextlib.suppress(Exception):
+        await websocket.send_json({"event": "error", "code": code, "reason": reason, "timestamp": int(time.time())})
+    with contextlib.suppress(Exception):
+        await websocket.close(code=code, reason=reason)
+
+
+async def _ws_close_registered(client, websocket: WebSocket, code: int, reason: str) -> None:
+    """Cierre de un cliente ya registrado: el aviso viaja por su cola (sin envíos concurrentes)."""
+    radar_hub.send_to(client, {"event": "error", "code": code, "reason": reason, "timestamp": int(time.time())})
+    await asyncio.sleep(0.05)
+    with contextlib.suppress(Exception):
+        await websocket.close(code=code, reason=reason)
+
+
+def _ws_envelope(chat_id: int, event: str, data: Any) -> dict:
+    return {
+        "v": 2,
+        "event": event,
+        "chat_id": str(chat_id),
+        "seq": radar_hub.current_seq(chat_id),
+        "timestamp": int(time.time()),
+        "data": data,
+    }
+
+
+async def _ws_send_snapshots(client, chat_id: int, include_legacy: bool = True, legacy_event: str = "initial_state") -> None:
+    """Snapshot de telemetría heredada + analítica completa, encolados en el escritor del cliente."""
+    async def _legacy():
+        try:
+            return await asyncio.wait_for(get_community_live_telemetry(chat_id), timeout=3)
+        except Exception as e:
+            logger.debug(f"Aviso snapshot telemetría WS ({chat_id}): {e}")
+            return None
+
+    async def _analytics():
+        try:
+            data = await asyncio.wait_for(get_community_full_analytics(chat_id), timeout=ANALYTICS_API_TIMEOUT)
+            return _decorate_analytics(chat_id, data)
+        except Exception as e:
+            logger.debug(f"Aviso snapshot analítico WS ({chat_id}): {e}")
+            return None
+
+    legacy, analytics = await asyncio.gather(_legacy() if include_legacy else asyncio.sleep(0), _analytics())
+    if include_legacy and legacy is not None:
+        radar_hub.send_to(client, _ws_envelope(chat_id, legacy_event, legacy))
+    if analytics is not None:
+        radar_hub.send_to(client, _ws_envelope(chat_id, "analytics_snapshot", analytics))
+
+
+@app.websocket("/ws/radar/{chat_id}")
+@app.websocket("/api/ws/radar/{chat_id}")
 @app.websocket("/ws/live-radar/{chat_id}")
 @app.websocket("/api/ws/live-radar/{chat_id}")
-async def websocket_live_radar(
+async def websocket_radar(
     websocket: WebSocket,
     chat_id: str,
     token: str = Query(None),
     init_data: str = Query(None)
 ):
-    """Canal bidireccional reactivo en tiempo real para Mini App y Dashboard."""
+    """
+    Canal bidireccional en caliente para la Mini App y el Dashboard.
+
+    Autenticación (una de dos):
+      a) ?token=<session_token> o ?init_data=<initData urlencoded>
+      b) sin query: primer frame {"action":"auth","init_data":"..."} o {"action":"auth","token":"..."}
+         en menos de WS_AUTH_TIMEOUT segundos (evita credenciales en logs de URL).
+    Acciones del cliente: "ping" | {"action":"ping"} | {"action":"refresh"} |
+      {"action":"analytics"} | {"action":"subscribe","events":[...]}.
+    Cierres: 4400 petición inválida · 4401 sin autenticar · 4403 sin permisos ·
+      4408 inactividad/timeout · 4429 límite de conexiones o de frecuencia.
+    """
+    await websocket.accept()
+
+    origin = (websocket.headers.get("origin") or "").rstrip("/")
+    if WS_ALLOWED_ORIGINS and origin not in WS_ALLOWED_ORIGINS:
+        await _ws_reject(websocket, WS_CLOSE_FORBIDDEN, "origin_not_allowed")
+        return
+
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        await websocket.close(code=1003)
+        await _ws_reject(websocket, WS_CLOSE_BAD_REQUEST, "invalid_chat_id")
         return
 
-    # 1. Autenticación de la sesión WebSocket (token de sesión firmado o initData firmado)
-    user_id = 0
-    user_payload = verify_session_token(token) if token else None
-    if user_payload and user_payload.get("uid"):
-        try:
-            user_id = int(user_payload["uid"])
-        except (TypeError, ValueError):
-            user_id = 0
+    # 1. Autenticación
+    user_id = _ws_user_from_credentials(token, init_data)
     if not user_id:
-        user_id = resolve_user_id(
-            x_telegram_init_data=init_data or (token if token and "hash=" in token else None),
-            authorization=f"Bearer {token}" if token else None
-        )
-
-    if not user_id:
-        await websocket.close(code=1008)
-        return
-
-    if not is_super_admin(user_id) and user_id != CREATOR_FALLBACK_ID:
         try:
-            await assert_chat_ownership(user_id, numeric_id)
-        except Exception:
-            await websocket.close(code=1008)
+            first = await _ws_receive_text(websocket, WS_AUTH_TIMEOUT)
+        except asyncio.TimeoutError:
+            await _ws_reject(websocket, WS_CLOSE_TIMEOUT, "auth_timeout")
             return
+        except Exception:
+            return
+        if first is None:
+            return
+        if first and len(first) <= 16384 and first.lstrip().startswith("{"):
+            try:
+                auth_msg = json.loads(first)
+            except ValueError:
+                auth_msg = {}
+            if isinstance(auth_msg, dict) and auth_msg.get("action") == "auth":
+                user_id = _ws_user_from_credentials(auth_msg.get("token"), auth_msg.get("init_data"))
+    if not user_id:
+        await _ws_reject(websocket, WS_CLOSE_UNAUTHORIZED, "unauthorized")
+        return
 
-    await ws_manager.connect(numeric_id, websocket)
-
-    # 2. Despacho inmediato del snapshot de estado al conectar
+    # 2. Autorización sobre la sala
     try:
-        snapshot = await get_community_live_telemetry(numeric_id)
-        await websocket.send_json({
-            "event": "initial_state",
-            "chat_id": str(numeric_id),
-            "timestamp": int(time.time()),
-            "data": snapshot
-        })
+        await assert_chat_access(user_id, numeric_id)
+    except HTTPException:
+        await _ws_reject(websocket, WS_CLOSE_FORBIDDEN, "forbidden")
+        return
     except Exception as e:
-        logger.debug(f"Aviso enviando snapshot inicial WS ({numeric_id}): {e}")
+        logger.debug(f"Aviso verificando acceso WS ({numeric_id}): {e}")
+        await _ws_reject(websocket, WS_CLOSE_FORBIDDEN, "forbidden")
+        return
 
-    # 3. Bucle de escucha reactivo con soporte de heartbeat (ping / pong)
+    reject_reason = radar_hub.can_accept(numeric_id, user_id)
+    if reject_reason:
+        await _ws_reject(websocket, WS_CLOSE_RATE_LIMIT, reject_reason)
+        return
+
+    client = await radar_hub.connect(numeric_id, websocket, user_id=user_id, accept=False)
+
+    # 3. Saludo + snapshots iniciales (en segundo plano: el lector arranca ya)
+    radar_hub.send_to(client, _ws_envelope(numeric_id, "hello", {
+        "user_id": user_id,
+        "events": sorted(RADAR_EVENTS),
+        "idle_timeout": WS_IDLE_TIMEOUT,
+        "signature": "Cloud Media Management",
+    }))
+    snapshot_task = _spawn(_ws_send_snapshots(client, numeric_id), name=f"ws_snapshot:{numeric_id}")
+
+    # 4. Bucle lector con límite de tamaño, token bucket e inactividad
+    tokens = WS_RATE_CAPACITY
+    last_refill = time.monotonic()
+    violations = 0
+    last_refresh = 0.0
     try:
-        while True:
-            client_msg = await websocket.receive_text()
-            if client_msg == "ping":
-                await websocket.send_json({"event": "pong", "timestamp": int(time.time())})
-            elif client_msg.startswith("{"):
-                try:
-                    parsed_req = json.loads(client_msg)
-                    if parsed_req.get("action") == "refresh":
-                        snapshot = await get_community_live_telemetry(numeric_id)
-                        await websocket.send_json({
-                            "event": "state_refresh",
-                            "chat_id": str(numeric_id),
-                            "timestamp": int(time.time()),
-                            "data": snapshot
-                        })
-                except Exception:
-                    pass
+        while not client.closed:
+            try:
+                raw = await _ws_receive_text(websocket, WS_IDLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                await _ws_close_registered(client, websocket, WS_CLOSE_TIMEOUT, "idle_timeout")
+                break
+            if raw is None:
+                break
+
+            now_mono = time.monotonic()
+            tokens = min(WS_RATE_CAPACITY, tokens + (now_mono - last_refill) * WS_RATE_REFILL_PER_SEC)
+            last_refill = now_mono
+            if tokens < 1.0:
+                violations += 1
+                if violations >= WS_RATE_MAX_VIOLATIONS:
+                    await _ws_close_registered(client, websocket, WS_CLOSE_RATE_LIMIT, "rate_limited")
+                    break
+                continue
+            tokens -= 1.0
+
+            if len(raw) > WS_MAX_INBOUND_BYTES:
+                await _ws_close_registered(client, websocket, 1009, "frame_too_large")
+                break
+
+            text = raw.strip()
+            if text == "ping":
+                radar_hub.send_to(client, {"event": "pong", "timestamp": int(time.time())})
+                continue
+            if not text.startswith("{"):
+                continue
+            try:
+                request = json.loads(text)
+            except ValueError:
+                radar_hub.send_to(client, {"event": "error", "reason": "invalid_json", "timestamp": int(time.time())})
+                continue
+            if not isinstance(request, dict):
+                continue
+
+            action = str(request.get("action") or "")
+            if action == "ping":
+                radar_hub.send_to(client, {"event": "pong", "timestamp": int(time.time())})
+            elif action in ("refresh", "analytics"):
+                if now_mono - last_refresh < WS_REFRESH_COOLDOWN:
+                    continue
+                last_refresh = now_mono
+                _spawn(
+                    _ws_send_snapshots(client, numeric_id, include_legacy=(action == "refresh"), legacy_event="state_refresh"),
+                    name=f"ws_refresh:{numeric_id}"
+                )
+            elif action == "subscribe":
+                events = request.get("events")
+                if isinstance(events, list):
+                    wanted = {str(e) for e in events[:32]} & RADAR_EVENTS
+                    radar_hub.set_filter(client, wanted or None)
+                    radar_hub.send_to(client, _ws_envelope(numeric_id, "subscribed", {"events": sorted(wanted) or sorted(RADAR_EVENTS)}))
+            elif action == "auth":
+                continue
+            else:
+                radar_hub.send_to(client, {"event": "error", "reason": "unknown_action", "timestamp": int(time.time())})
     except WebSocketDisconnect:
         pass
     except Exception as ws_err:
         logger.debug(f"Aviso en conexión WebSocket ({numeric_id}): {ws_err}")
     finally:
-        await ws_manager.disconnect(numeric_id, websocket)
+        if not snapshot_task.done():
+            snapshot_task.cancel()
+        await radar_hub.disconnect(numeric_id, websocket)
 
 
 app.include_router(api_router, prefix="/api")
@@ -1207,7 +1519,7 @@ async def run_fastapi_server():
     if not _websocket_backend_available():
         logger.warning(
             "⚠️ [FastAPI] No hay librería WebSocket instalada (websockets/wsproto). "
-            "Instala 'uvicorn[standard]' o 'websockets' para activar /ws/live-radar."
+            "Instala 'uvicorn[standard]' o 'websockets' para activar /ws/radar y /ws/live-radar."
         )
     port = _resolve_port()
     config = uvicorn.Config(
@@ -1496,15 +1808,65 @@ class ActivityTrackerMiddleware(BaseMiddleware):
         except Exception as ex:
             logger.debug(f"Aviso registrando actividad ({event.chat.id}): {ex}")
 
+    @staticmethod
+    def _analytics(event: Message) -> None:
+        """Síncrono y sin I/O: suma al búfer analítico y emite el payload compacto al radar."""
+        try:
+            kind = classify_message(event)
+            if kind is None:
+                return
+            user = event.from_user
+            full_name = user.full_name or "Usuario"
+            ts = event.date.timestamp() if getattr(event, "date", None) else None
+            analytics_buffer.record(event.chat.id, user.id, kind, full_name, user.username or "", ts=ts)
+            if radar_hub.has_listeners(event.chat.id):
+                publish_radar_event(event.chat.id, "message", {
+                    "u": user.id,
+                    "n": full_name[:48],
+                    "k": kind,
+                    "m": event.message_id,
+                    "r": 1 if event.reply_to_message else 0,
+                })
+        except Exception as ex:
+            logger.debug(f"Aviso en analítica en caliente ({event.chat.id}): {ex}")
+
+    @staticmethod
+    async def _record_payment(event: Message) -> None:
+        payment = event.successful_payment
+        try:
+            if (payment.currency or "").upper() != "XTR":
+                return
+            if event.chat.type in ("group", "supergroup", "channel"):
+                group_id = event.chat.id
+            else:
+                group_id = extract_group_id_from_payload(payment.invoice_payload)
+            if not group_id:
+                return
+            payer_id = event.from_user.id if event.from_user else 0
+            inserted = await record_stars_payment(
+                group_id=group_id,
+                user_id=payer_id,
+                amount=payment.total_amount,
+                charge_id=payment.telegram_payment_charge_id,
+                payload=payment.invoice_payload or "",
+                currency=payment.currency,
+            )
+            if inserted:
+                publish_radar_event(group_id, "stars_payment", {"u": payer_id, "a": int(payment.total_amount)})
+        except Exception as ex:
+            logger.debug(f"Aviso registrando pago Stars en analítica: {ex}")
+
     async def __call__(self, handler, event: Message, data: dict):
-        if (
-            isinstance(event, Message)
-            and event.chat
-            and event.chat.type in ("group", "supergroup")
-            and event.from_user
-            and not event.from_user.is_bot
-        ):
-            _spawn(self._track(event), name="activity_tracker")
+        if isinstance(event, Message) and event.chat:
+            if event.successful_payment:
+                _spawn(self._record_payment(event), name="stars_ledger")
+            if (
+                event.chat.type in ("group", "supergroup")
+                and event.from_user
+                and not event.from_user.is_bot
+            ):
+                _spawn(self._track(event), name="activity_tracker")
+                self._analytics(event)
         return await handler(event, data)
 
 
@@ -1517,6 +1879,8 @@ async def main():
     # 0. Base de datos primero: todo lo demás depende del esquema.
     init_db()
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
+    start_analytics_flusher()
+    logger.info("📈 [Analítica en Caliente]: Búfer de volcado por lotes activo.")
 
     if ALLOW_INSECURE_AUTH_FALLBACK:
         logger.warning("🚨 [Seguridad] ALLOW_INSECURE_AUTH_FALLBACK=1: la API acepta peticiones sin firma. NO usar en producción.")
@@ -1551,6 +1915,8 @@ async def main():
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
     # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
     dp.include_router(payments.router)
+    # 1b. community_metrics: /metrics · /stats (grupos) y /metrics (privado) con Dashboard en Vivo
+    dp.include_router(community_metrics.router)
     # 2. user_private: consolas privadas, Sentinel Settings, sincronización y creador de planes
     dp.include_router(user_private.router)
     # 3. moderation y admin_group: comandos ejecutivos y /reload antes de procesar el chat general
@@ -1610,7 +1976,9 @@ async def main():
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
         logger.info("🛑 [Apagado]: Liberando recursos...")
-        # 1. Cerrar la API para no aceptar más tráfico
+        # 1. Cerrar salas WebSocket y la API para no aceptar más tráfico
+        with contextlib.suppress(Exception):
+            await radar_hub.close_all()
         try:
             await stop_fastapi_server()
             with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError, Exception):
@@ -1625,6 +1993,9 @@ async def main():
         if pending:
             with contextlib.suppress(Exception):
                 await asyncio.wait(pending, timeout=5)
+        # 2b. Volcado final del búfer analítico (no se pierden los últimos segundos)
+        with contextlib.suppress(Exception):
+            await stop_analytics_flusher()
         # 3. Detener clones y Centinelas MTProto
         for token in list(active_clone_tasks.keys()):
             try:

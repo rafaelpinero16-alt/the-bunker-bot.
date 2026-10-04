@@ -4,6 +4,7 @@ groups.py — The Bunker OS (Aiogram 3.x)
 Núcleo de seguridad perimetral para grupos y supergrupos.
 Motor Híbrido: Detección MTProto + Padrón Local Bot API + Protección Total por Niveles (Free / PRO / ULTRA PRO).
 Fase 4: Gamificación Tokenizada (XP / Niveles / /rank / /top) + Analítica Heatmap 24x7.
+Fase 5: Ascensos de nivel emitidos en caliente al radar WebSocket de la Mini App.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import time
@@ -56,6 +57,12 @@ from database.database import (
 )
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
+
+try:
+    from radar_bus import publish_radar_event  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional runtime dependency
+    def publish_radar_event(*args, **kwargs):
+        return None
 
 try:
     from middlewares.anti_spam import check_global_cas_spam
@@ -1902,6 +1909,13 @@ async def _process_message_reputation(bot: Bot, message: Message):
 
     if rep_result.get("leveled_up"):
         new_lvl = rep_result.get("level", 1)
+        # ⚡ Radar en vivo: ascenso de nivel (payload compacto, sin I/O)
+        publish_radar_event(group_id, "level_up", {
+            "u": user_id,
+            "n": full_name[:48],
+            "l": new_lvl,
+            "x": rep_result.get("xp", 0),
+        })
         clean_name = html.escape(full_name)
         mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
         levelup_text = (
