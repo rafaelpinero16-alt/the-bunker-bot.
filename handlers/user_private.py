@@ -3267,6 +3267,10 @@ def _not_payments_route(message: Message) -> bool:
 @router.message(CommandStart(), F.chat.type == "private", _not_payments_route)
 async def cmd_start(message: Message, bot: Bot, command: CommandObject):
     try:
+        try:
+            await message.delete()
+        except Exception:
+            pass
         bot_info = await bot.get_me()
         bot_username = bot_info.username or "BunkerBot"
         role = "CLON" if is_clone_bot(bot) else "MAESTRO"
@@ -3356,6 +3360,7 @@ async def cmd_cancel(message: Message, bot: Bot):
         await cancel_phone_auth(message.from_user.id)
     except Exception:
         pass
+    clear_user_states(bot.id, message.from_user.id)
     lang = user_lang(message.from_user)
     t = TEXTS.get(lang, TEXTS["es"])
     await _dismiss_reply_keyboard(message)
