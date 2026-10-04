@@ -3554,6 +3554,121 @@ async def handle_private_inputs(message: Message, bot: Bot):
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
+        # 2. Nombre del Botón y Enlace Embebido
+        elif field_type == "btn":
+            if text_val:
+                btn_text = text_val
+                btn_url = None
+                if "|" in text_val:
+                    parts = text_val.split("|", 1)
+                    btn_text = parts[0].strip()[:35]
+                    url_candidate = parts[1].strip()
+                    if url_candidate.startswith("http://") or url_candidate.startswith("https://") or url_candidate.startswith("t.me/"):
+                        btn_url = url_candidate if url_candidate.startswith("http") else f"https://{url_candidate}"
+
+                col_name = f"{prefix}_btn_text"
+                await set_sentinel_service_message(group_id, col_name, btn_text[:35])
+                if btn_url is not None:
+                    url_col = f"{prefix}_btn_url"
+                    await set_sentinel_service_message(group_id, url_col, btn_url)
+
+                resp = await message.answer(
+                    f"✅ <b>{tr(lang, 'Botón configurado para', 'Button configured for')} {target.upper()}!</b>\n"
+                    f"🏷️ <b>Texto:</b> <code>{html.escape(btn_text)}</code>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>",
+                    reply_markup=back_kb, parse_mode="HTML"
+                )
+            else:
+                resp = await message.answer(tr(lang, "⚠️ El texto del botón no puede estar vacío.", "⚠️️ Button label cannot be empty."), reply_markup=back_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        # 3. Edición de Mensaje / Copy y Multimedia (Soporte Pro y Ultra Pro)
+        elif field_type == "msg":
+            media_id = None
+            media_type = None
+            if message.photo:
+                media_id = message.photo[-1].file_id
+                media_type = "photo"
+            elif message.video:
+                media_id = message.video.file_id
+                media_type = "video"
+            elif message.animation:
+                media_id = message.animation.file_id
+                media_type = "animation"
+
+            if media_id and tier != "ultra_pro":
+                resp = await message.answer(
+                    tr(lang, "💎 El envío de multimedia (fotos/videos/GIFs) requiere nivel ULTRA PRO.", "💎 Sending media requires ULTRA PRO tier.") + PERIMETER_SIGNATURE,
+                    reply_markup=back_kb, parse_mode="HTML"
+                )
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
+            if not text_val and not media_id:
+                resp = await message.answer(
+                    tr(lang, "⚠️ Debes enviar un texto o un archivo multimedia válido.", "⚠️ You must send text or a valid media asset.") + PERIMETER_SIGNATURE,
+                    reply_markup=back_kb, parse_mode="HTML"
+                )
+                fire_and_forget_auto_delete([message, resp], delay=60)
+                return
+
+            col_text_map = {
+                "vc": "vc_join_custom_text",
+                "micvip": "mic_vip_custom_text",
+                "reset": "reset_notice_custom_text",
+                "sched": "vc_sched_start_custom_text",
+                "vcwelcome": "vc_welcome_custom_text"
+            }
+            col_media_id_map = {
+                "vc": "vc_join_custom_media_id",
+                "micvip": "mic_vip_custom_media_id",
+                "reset": "reset_notice_custom_media_id",
+                "sched": "vc_sched_start_custom_media_id",
+                "vcwelcome": "vc_welcome_custom_media_id"
+            }
+            col_media_type_map = {
+                "vc": "vc_join_custom_media_type",
+                "micvip": "mic_vip_custom_media_type",
+                "reset": "reset_notice_custom_media_type",
+                "sched": "vc_sched_start_custom_media_type",
+                "vcwelcome": "vc_welcome_custom_media_type"
+            }
+
+            if text_val:
+                await set_sentinel_service_message(group_id, col_text_map[target], text_val[:1000])
+            if media_id and tier == "ultra_pro":
+                await set_sentinel_service_message(group_id, col_media_id_map[target], media_id)
+                await set_sentinel_service_message(group_id, col_media_type_map[target], media_type)
+
+            resp = await message.answer(
+                f"✅ <b>{tr(lang, 'Mensaje actualizado para', 'Notice updated for')} {target.upper()}!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                reply_markup=back_kb, parse_mode="HTML"
+            )
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
+        # Mapeo de prefijos de columnas de base de datos
+        prefix_map = {
+            "vc": "vc_join",
+            "micvip": "mic_vip",
+            "reset": "reset_notice",
+            "sched": "vc_sched_start",
+            "vcwelcome": "vc_welcome"
+        }
+        prefix = prefix_map.get(target, "vc_join")
+
+        # 1. Tiempo de Auto-Borrado
+        if field_type == "autodel":
+            if text_val.isdigit() and int(text_val) >= 0:
+                col_name = f"{prefix}_autodel_seconds"
+                await set_sentinel_service_message(group_id, col_name, int(text_val))
+                resp = await message.answer(f"✅ <b>Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+            else:
+                resp = await message.answer("⚠️ Ingresa un número entero de segundos (0 para no borrar).", reply_markup=back_kb, parse_mode="HTML")
+            fire_and_forget_auto_delete([message, resp], delay=60)
+            return
+
         # 2. Nombre del Botón y Enlace Embebido (Sintaxis: Texto | URL)
         elif field_type == "btn":
             if text_val:
