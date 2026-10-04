@@ -660,7 +660,7 @@ def get_mic_vip_custom_config(group_id: int) -> dict:
                 }
         except sqlite3.OperationalError:
             pass
-        return {"price": 50, "tag": "⚜️MIC🎙️VIP⚜️", "text": ""}
+        return {"price": 50, "tag": "⚜️MIC🎙️️VIP⚜️", "text": ""}
 
 
 @db_async
@@ -1886,7 +1886,7 @@ def deactivate_panic(group_id: int) -> dict:
             UPDATE group_settings SET
                 panic_active = 0, lock_media = ?, lock_links = ?, lock_stickers = ?,
                 captcha_status = ?, captcha_mode = ?, captcha_time = ?,
-                antispam = ?, antispam_delete = ?, antiflood_msgs = ?, antiflood_time,
+                antispam = ?, antispam_delete = ?, antiflood_msgs = ?, antiflood_time = ?,
                 antiflood_action = ?
             WHERE group_id = ?
         """, (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
@@ -2376,13 +2376,25 @@ def record_chat_activity(group_id: int, user_id: int, full_name: str, username: 
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO chat_user_activity (group_id, user_id, full_name, username, message_count, reply_count, is_admin, last_active)
-            VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(group_id, user_id) DO UPDATE SET
-                full_name = excluded.full_name, username = excluded.username,
-                message_count = message_count + 1, reply_count = reply_count + excluded.reply_count,
-                is_admin = excluded.is_admin, last_active = CURRENT_TIMESTAMP
-        """, (group_id, user_id, full_name, username or "", 1 if is_reply else 0, 1 if is_admin else 0))
+            SELECT 1 FROM chat_user_activity WHERE group_id = ? AND user_id = ?
+        """, (group_id, user_id))
+        exists = cursor.fetchone() is not None
+
+        if exists:
+            cursor.execute("""
+                UPDATE chat_user_activity SET
+                    full_name = ?, username = ?,
+                    message_count = message_count + 1,
+                    reply_count = reply_count + ?,
+                    is_admin = ?,
+                    last_active = CURRENT_TIMESTAMP
+                WHERE group_id = ? AND user_id = ?
+            """, (full_name, username or "", 1 if is_reply else 0, 1 if is_admin else 0, group_id, user_id))
+        else:
+            cursor.execute("""
+                INSERT INTO chat_user_activity (group_id, user_id, full_name, username, message_count, reply_count, is_admin, last_active)
+                VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
+            """, (group_id, user_id, full_name, username or "", 1 if is_reply else 0, 1 if is_admin else 0))
 
         cursor.execute("""
             INSERT INTO chat_monthly_metrics (group_id, month_key, total_messages, total_users)
@@ -2431,12 +2443,22 @@ def add_user_reputation_xp(
         leveled_up = new_level > current_level
 
         cursor.execute("""
-            INSERT INTO chat_user_reputation (group_id, user_id, full_name, username, xp, level, last_xp_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(group_id, user_id) DO UPDATE SET
-                full_name = excluded.full_name, username = excluded.username,
-                xp = ?, level = ?, last_xp_at = CURRENT_TIMESTAMP
-        """, (group_id, user_id, full_name, username or "", new_xp, new_level, new_xp, new_level))
+            SELECT 1 FROM chat_user_reputation WHERE group_id = ? AND user_id = ?
+        """, (group_id, user_id))
+        exists = cursor.fetchone() is not None
+
+        if exists:
+            cursor.execute("""
+                UPDATE chat_user_reputation SET
+                    full_name = ?, username = ?,
+                    xp = ?, level = ?, last_xp_at = CURRENT_TIMESTAMP
+                WHERE group_id = ? AND user_id = ?
+            """, (full_name, username or "", new_xp, new_level, group_id, user_id))
+        else:
+            cursor.execute("""
+                INSERT INTO chat_user_reputation (group_id, user_id, full_name, username, xp, level, last_xp_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (group_id, user_id, full_name, username or "", new_xp, new_level))
         conn.commit()
 
         return {
@@ -2494,11 +2516,20 @@ def record_hourly_chat_activity(group_id: int, dt: datetime = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO chat_hourly_activity (group_id, day_of_week, hour_of_day, message_count)
-            VALUES (?, ?, ?, 1)
-            ON CONFLICT(group_id, day_of_week, hour_of_day) DO UPDATE SET
-                message_count = message_count + 1
+            SELECT 1 FROM chat_hourly_activity WHERE group_id = ? AND day_of_week = ? AND hour_of_day = ?
         """, (group_id, day_of_week, hour_of_day))
+        exists = cursor.fetchone() is not None
+
+        if exists:
+            cursor.execute("""
+                UPDATE chat_hourly_activity SET message_count = message_count + 1
+                WHERE group_id = ? AND day_of_week = ? AND hour_of_day = ?
+            """, (group_id, day_of_week, hour_of_day))
+        else:
+            cursor.execute("""
+                INSERT INTO chat_hourly_activity (group_id, day_of_week, hour_of_day, message_count)
+                VALUES (?, ?, ?, 1)
+            """, (group_id, day_of_week, hour_of_day))
         conn.commit()
 
 
@@ -2519,6 +2550,8 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
         "group_id": group_id, "matrix": matrix,
         "days": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
     }
+
+
 # ==========================================
 # 📊 ANALÍTICA, DASHBOARDS Y TELEMETRÍA (FASTAPI)
 # ==========================================
@@ -2744,7 +2777,9 @@ def get_user_subscribers_audit(user_id: int) -> list:
             }
             for r in rows
         ]
-    # ==========================================
+
+
+# ==========================================
 # 💳 PAGOS Y BÓVEDA CRIPTOGRÁFICA (.BUNKER)
 # ==========================================
 @db_async
