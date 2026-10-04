@@ -501,6 +501,10 @@ def _extract_urls_to_markup(text: str, custom_btn_text: str = None, custom_btn_u
 
 
 def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_btn_text: str = None, custom_btn_url: str = None):
+    # 🚫 Si el operador no ha configurado un botón personalizado, no se muestra NADA por defecto.
+    if not custom_btn_text and not custom_btn_url:
+        return None
+
     btn_label = custom_btn_text if custom_btn_text else ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
     pay_url = custom_btn_url.strip() if custom_btn_url else f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
 
@@ -555,8 +559,10 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
     if not _global_bot:
         return
     svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    # 🚫 Si el módulo de entrada a VC está desactivado, no se envía absolutamente nada.
     if svc_cfg.get("vc_enabled", 1) == 0:
         return
+    ...
 
     now = time.time()
     if now - _vc_notice_locks.get(chat_id, 0) < 3:
@@ -1250,7 +1256,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     elif noise_spike:
                         desired_muted, desired_volume = True, 0
                     else:
-                        desired_muted, desired_volume = True, 200
+                        desired_muted, desired_volume = False, 200
 
                     action_needed = (
                         noise_spike
