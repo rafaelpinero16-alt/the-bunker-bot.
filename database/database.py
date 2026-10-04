@@ -24,6 +24,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("database")
@@ -431,6 +432,34 @@ def init_db():
         cursor.execute("CREATE TABLE IF NOT EXISTS channel_settings (channel_id INTEGER PRIMARY KEY, sub_price INTEGER DEFAULT 0, grace_days INTEGER DEFAULT 1, auto_kick INTEGER DEFAULT 1, notify_renewal INTEGER DEFAULT 1, custom_welcome TEXT)")
         cursor.execute("CREATE TABLE IF NOT EXISTS channel_plans (plan_id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, plan_name TEXT NOT NULL, duration_days INTEGER NOT NULL, stars_price INTEGER NOT NULL, status TEXT DEFAULT 'active', promo_text TEXT, media_id TEXT, media_type TEXT, target_link TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_channel ON channel_plans (channel_id, status)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gamification_announcements (
+                chat_id INTEGER PRIMARY KEY,
+                status INTEGER DEFAULT 0,
+                interval_minutes INTEGER DEFAULT 360,
+                text_es TEXT,
+                text_en TEXT,
+                media_id TEXT,
+                media_type TEXT,
+                btn_text_es TEXT,
+                btn_text_en TEXT,
+                btn_url TEXT,
+                card_lang TEXT DEFAULT 'es',
+                auto_delete_after INTEGER DEFAULT 0,
+                last_sent_at TIMESTAMP,
+                next_send_at TIMESTAMP,
+                last_message_id INTEGER,
+                fail_count INTEGER DEFAULT 0,
+                created_by INTEGER,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gami_due ON gamification_announcements (status, next_send_at)")
+        _ensure_columns(cursor, "gamification_announcements", [
+            ("card_lang", "TEXT DEFAULT 'es'"), ("auto_delete_after", "INTEGER DEFAULT 0"),
+            ("last_message_id", "INTEGER"), ("fail_count", "INTEGER DEFAULT 0"),
+            ("created_by", "INTEGER"), ("updated_at", "TIMESTAMP"),
+        ])
         _ensure_columns(cursor, "channel_plans", [
             ("status", "TEXT DEFAULT 'active'"), ("promo_text", "TEXT"), ("media_id", "TEXT"), ("media_type", "TEXT"),
             ("target_link", "TEXT"), ("broadcast_chat_id", "INTEGER"), ("broadcast_interval_hours", "INTEGER"),
@@ -3135,6 +3164,423 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
     except Exception as ex:
         logger.exception("❌ [DB] Falló import_group_configuration")
         return False, f"Error durante la restauración: {ex}"
+
+
+# ==========================================================
+# 🎮 ANUNCIOS RECURRENTES DE GAMIFICACIÓN INTERACTIVA
+# ==========================================================
+GAMI_INTERVAL_MIN_MINUTES = 30
+GAMI_INTERVAL_MAX_MINUTES = 10080          # 7 días
+GAMI_DEFAULT_INTERVAL_MINUTES = 360        # 6 horas
+GAMI_TEXT_MAX_CHARS = 3500
+GAMI_BUTTON_TEXT_MAX_CHARS = 40
+GAMI_URL_MAX_CHARS = 512
+GAMI_AUTODEL_MAX_SECONDS = 86400
+GAMI_MAX_CONSECUTIVE_FAILURES = 5
+GAMI_LEASE_MINUTES = 10                    # Reserva de envío: evita duplicados si el proceso se reinicia a mitad
+GAMI_MEDIA_TYPES = {"photo", "video", "animation"}
+GAMI_CARD_LANGS = {"es", "en", "both"}
+GAMI_SIGNATURE = "🛡️ <i>Cloud Media Management</i>"
+
+_GAMI_COLUMNS = (
+    "chat_id", "status", "interval_minutes", "text_es", "text_en", "media_id", "media_type",
+    "btn_text_es", "btn_text_en", "btn_url", "card_lang", "auto_delete_after",
+    "last_sent_at", "next_send_at", "last_message_id", "fail_count", "created_by", "updated_at"
+)
+_GAMI_EDITABLE_FIELDS = {
+    "status", "interval_minutes", "text_es", "text_en", "media_id", "media_type",
+    "btn_text_es", "btn_text_en", "btn_url", "card_lang", "auto_delete_after", "created_by"
+}
+
+GAMI_DEFAULT_TEXTS = {
+    "es": (
+        "🎮 <b>¡Gana XP y sube de rango!</b>\n\n"
+        "Cada mensaje respetuoso en la comunidad suma experiencia. Desbloquea niveles, "
+        "escala en la tabla de honor y presume tu rango.\n\n"
+        "• <code>/rank</code> — consulta tu nivel\n"
+        "• <code>/top</code> — tabla de líderes"
+    ),
+    "en": (
+        "🎮 <b>Earn XP and rank up!</b>\n\n"
+        "Every respectful message in the community earns experience. Unlock levels, "
+        "climb the leaderboard and show off your rank.\n\n"
+        "• <code>/rank</code> — check your level\n"
+        "• <code>/top</code> — leaderboard"
+    ),
+}
+GAMI_DEFAULT_BUTTON_TEXTS = {"es": "🚀 Participar", "en": "🚀 Join in"}
+
+_GAMI_TME_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+_GAMI_TME_PATH_RE = re.compile(r"^[A-Za-z0-9_+\-/=?&.%]{1,256}$")
+_GAMI_HOST_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.[A-Za-z]{2,63}$")
+
+
+def normalize_announcement_url(raw) -> str | None:
+    """
+    Valida y normaliza el destino del botón del anuncio. Acepta:
+      • @usuario / usuario de grupo o canal público           → https://t.me/usuario
+      • t.me/..., telegram.me/... (invitaciones +hash, joinchat, mensajes /c/...) → https://t.me/...
+      • URLs web http(s) con dominio válido (sin credenciales ni espacios)
+    Rechaza esquemas peligrosos (javascript:, data:, file:, tg:...), IPs locales y textos inválidos.
+    Devuelve la URL lista para un InlineKeyboardButton o None si no es segura.
+    """
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value or len(value) > GAMI_URL_MAX_CHARS or any(ch.isspace() for ch in value):
+        return None
+
+    if value.startswith("@"):
+        username = value[1:]
+        return f"https://t.me/{username}" if _GAMI_TME_USERNAME_RE.match(username) else None
+
+    lowered = value.lower()
+    for prefix in ("https://", "http://"):
+        if lowered.startswith(prefix):
+            break
+    else:
+        if lowered.startswith(("t.me/", "telegram.me/", "www.t.me/")):
+            value = "https://" + value
+            lowered = value.lower()
+        elif _GAMI_TME_USERNAME_RE.match(value):
+            return f"https://t.me/{value}"
+        elif "://" in value or lowered.startswith(("javascript:", "data:", "file:", "tg:", "mailto:")):
+            return None
+        else:
+            value = "https://" + value
+            lowered = value.lower()
+
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    if parsed.username or parsed.password or "@" in parsed.netloc:
+        return None
+    host = (parsed.hostname or "").lower()
+
+    if host in ("t.me", "telegram.me", "www.t.me", "www.telegram.me"):
+        path = parsed.path.lstrip("/")
+        full_path = path + (f"?{parsed.query}" if parsed.query else "")
+        if not path or not _GAMI_TME_PATH_RE.match(full_path):
+            return None
+        return f"https://t.me/{full_path}"
+
+    if host in ("localhost",) or host.endswith(".local") or host.endswith(".internal"):
+        return None
+    if not _GAMI_HOST_RE.match(host):
+        return None   # Se exige un dominio público (sin IPs ni nombres internos)
+    if parsed.port is not None and parsed.port not in (80, 443):
+        return None
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "", parsed.query, parsed.fragment))
+
+
+def normalize_announcement_button_text(raw) -> str | None:
+    """Texto del botón: 1–40 caracteres, una sola línea."""
+    if raw is None:
+        return None
+    value = " ".join(str(raw).split())
+    if not value:
+        return None
+    return value[:GAMI_BUTTON_TEXT_MAX_CHARS]
+
+
+def _gami_defaults(chat_id: int) -> dict:
+    return {
+        "chat_id": chat_id, "status": 0, "interval_minutes": GAMI_DEFAULT_INTERVAL_MINUTES,
+        "text_es": None, "text_en": None, "media_id": None, "media_type": None,
+        "btn_text_es": None, "btn_text_en": None, "btn_url": None, "card_lang": "es",
+        "auto_delete_after": 0, "last_sent_at": None, "next_send_at": None,
+        "last_message_id": None, "fail_count": 0, "created_by": None, "updated_at": None,
+        "exists": False,
+    }
+
+
+def _gami_row_to_dict(row) -> dict:
+    data = dict(zip(_GAMI_COLUMNS, row))
+    base = _gami_defaults(data["chat_id"])
+    for key, value in data.items():
+        if value is not None:
+            base[key] = value
+    base["exists"] = True
+    return base
+
+
+def _gami_validate(field: str, value):
+    """Normaliza y valida cada campo editable. Lanza ValueError si el valor no es aceptable."""
+    if field == "status":
+        return 1 if int(value) == 1 else 0
+    if field == "interval_minutes":
+        return max(GAMI_INTERVAL_MIN_MINUTES, min(GAMI_INTERVAL_MAX_MINUTES, int(value)))
+    if field in ("text_es", "text_en"):
+        if value is None:
+            return None
+        text = str(value).strip()
+        if len(text) > GAMI_TEXT_MAX_CHARS:
+            raise ValueError("text_too_long")
+        return text or None
+    if field == "media_id":
+        return str(value).strip() if value else None
+    if field == "media_type":
+        if value is None:
+            return None
+        media_type = str(value).strip().lower()
+        if media_type not in GAMI_MEDIA_TYPES:
+            raise ValueError("invalid_media_type")
+        return media_type
+    if field in ("btn_text_es", "btn_text_en"):
+        return normalize_announcement_button_text(value)
+    if field == "btn_url":
+        if value is None:
+            return None
+        normalized = normalize_announcement_url(value)
+        if not normalized:
+            raise ValueError("invalid_url")
+        return normalized
+    if field == "card_lang":
+        lang = str(value or "es").strip().lower()
+        if lang not in GAMI_CARD_LANGS:
+            raise ValueError("invalid_lang")
+        return lang
+    if field == "auto_delete_after":
+        return max(0, min(GAMI_AUTODEL_MAX_SECONDS, int(value or 0)))
+    if field == "created_by":
+        return int(value) if value else None
+    raise ValueError("invalid_field")
+
+
+@db_async
+def get_gamification_announcement(chat_id: int) -> dict:
+    """Configuración del anuncio de gamificación (con valores por defecto si aún no existe)."""
+    with get_db_connection() as conn:
+        row = conn.execute(
+            f"SELECT {', '.join(_GAMI_COLUMNS)} FROM gamification_announcements WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
+    return _gami_row_to_dict(row) if row else _gami_defaults(chat_id)
+
+
+@db_async
+def set_gamification_announcement_field(chat_id: int, field: str, value) -> bool:
+    """
+    Guarda un campo del anuncio. Devuelve False si el campo o el valor no son válidos.
+    • Activar el anuncio lo programa para el siguiente ciclo del worker (≈1 min) y reinicia los fallos.
+    • Cambiar la frecuencia recalcula el próximo envío desde el último envío realizado.
+    """
+    if field not in _GAMI_EDITABLE_FIELDS:
+        return False
+    try:
+        clean_value = _gami_validate(field, value)
+    except (TypeError, ValueError):
+        return False
+
+    column = _ident(field)
+    with _write_transaction() as conn:
+        conn.execute(
+            f"INSERT INTO gamification_announcements (chat_id, {column}, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            f"ON CONFLICT(chat_id) DO UPDATE SET {column} = excluded.{column}, updated_at = CURRENT_TIMESTAMP",
+            (chat_id, clean_value)
+        )
+        if field == "status" and clean_value == 1:
+            conn.execute(
+                "UPDATE gamification_announcements SET next_send_at = datetime('now', '+1 minutes'), fail_count = 0 "
+                "WHERE chat_id = ?",
+                (chat_id,)
+            )
+        elif field == "interval_minutes":
+            conn.execute(
+                "UPDATE gamification_announcements SET next_send_at = "
+                "datetime(COALESCE(last_sent_at, datetime('now')), ?) WHERE chat_id = ?",
+                (_sql_modifier(clean_value, "minutes"), chat_id)
+            )
+        conn.commit()
+    return True
+
+
+@db_async
+def set_gamification_announcement_media(chat_id: int, media_id: str | None, media_type: str | None) -> bool:
+    """Guarda (o elimina, con None) el multimedia del anuncio en una sola operación atómica."""
+    if media_id and (media_type or "").lower() not in GAMI_MEDIA_TYPES:
+        return False
+    clean_id = str(media_id).strip() if media_id else None
+    clean_type = media_type.lower() if (clean_id and media_type) else None
+    with _write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO gamification_announcements (chat_id, media_id, media_type, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(chat_id) DO UPDATE SET media_id = excluded.media_id, media_type = excluded.media_type, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (chat_id, clean_id, clean_type)
+        )
+        conn.commit()
+    return True
+
+
+@db_async
+def clear_gamification_announcement_button(chat_id: int) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE gamification_announcements SET btn_text_es = NULL, btn_text_en = NULL, btn_url = NULL, "
+            "updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?",
+            (chat_id,)
+        )
+        conn.commit()
+
+
+@db_async
+def schedule_gamification_announcement_now(chat_id: int) -> bool:
+    """Adelanta el próximo envío al siguiente ciclo del worker (solo si el anuncio está activo)."""
+    with get_db_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE gamification_announcements SET next_send_at = datetime('now'), fail_count = 0 "
+            "WHERE chat_id = ? AND status = 1",
+            (chat_id,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+@db_async
+def reset_gamification_announcement(chat_id: int) -> None:
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM gamification_announcements WHERE chat_id = ?", (chat_id,))
+        conn.commit()
+
+
+@db_async
+def get_due_gamification_announcements(limit: int = 20) -> list:
+    """
+    Reserva y devuelve los anuncios activos cuyo envío ya venció. Cada fila reservada se aplaza
+    GAMI_LEASE_MINUTES dentro de la misma transacción (BEGIN IMMEDIATE): aunque el worker se
+    reinicie a mitad de ciclo o coexistan dos procesos, ninguna tarjeta se publica dos veces.
+    """
+    limit = max(1, min(100, int(limit)))
+    with _write_transaction() as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(_GAMI_COLUMNS)} FROM gamification_announcements "
+            "WHERE status = 1 AND (next_send_at IS NULL OR next_send_at <= datetime('now')) "
+            "ORDER BY COALESCE(next_send_at, '1970-01-01') ASC LIMIT ?",
+            (limit,)
+        ).fetchall()
+        if rows:
+            conn.executemany(
+                "UPDATE gamification_announcements SET next_send_at = datetime('now', ?) WHERE chat_id = ?",
+                [(_sql_modifier(GAMI_LEASE_MINUTES, "minutes"), row[0]) for row in rows]
+            )
+        conn.commit()
+    return [_gami_row_to_dict(row) for row in rows]
+
+
+@db_async
+def mark_gamification_announcement_sent(chat_id: int, message_id: int | None, interval_minutes: int) -> None:
+    interval = max(GAMI_INTERVAL_MIN_MINUTES, min(GAMI_INTERVAL_MAX_MINUTES, int(interval_minutes)))
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE gamification_announcements SET last_sent_at = datetime('now'), "
+            "next_send_at = datetime('now', ?), last_message_id = ?, fail_count = 0 WHERE chat_id = ?",
+            (_sql_modifier(interval, "minutes"), message_id, chat_id)
+        )
+        conn.commit()
+
+
+@db_async
+def reschedule_gamification_announcement(chat_id: int, minutes: int) -> None:
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE gamification_announcements SET next_send_at = datetime('now', ?) WHERE chat_id = ?",
+            (_sql_modifier(max(1, int(minutes)), "minutes"), chat_id)
+        )
+        conn.commit()
+
+
+@db_async
+def register_gamification_announcement_failure(chat_id: int, permanent: bool = False) -> bool:
+    """
+    Registra un fallo de envío. Devuelve True si el anuncio quedó desactivado (fallo permanente
+    o GAMI_MAX_CONSECUTIVE_FAILURES seguidos). Los fallos transitorios se reintentan con espera
+    exponencial (15 min, 30 min, 60 min… hasta 6 h).
+    """
+    with _write_transaction() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(fail_count, 0) FROM gamification_announcements WHERE chat_id = ?",
+            (chat_id,)
+        ).fetchone()
+        if not row:
+            return False
+        failures = int(row[0]) + 1
+        disable = permanent or failures >= GAMI_MAX_CONSECUTIVE_FAILURES
+        if disable:
+            conn.execute(
+                "UPDATE gamification_announcements SET status = 0, fail_count = ?, next_send_at = NULL WHERE chat_id = ?",
+                (failures, chat_id)
+            )
+        else:
+            backoff = min(360, 15 * (2 ** (failures - 1)))
+            conn.execute(
+                "UPDATE gamification_announcements SET fail_count = ?, next_send_at = datetime('now', ?) WHERE chat_id = ?",
+                (failures, _sql_modifier(backoff, "minutes"), chat_id)
+            )
+        conn.commit()
+    return disable
+
+
+def _gami_pick(primary, secondary):
+    return primary if primary else secondary
+
+
+def compose_gamification_card(cfg: dict) -> dict:
+    """
+    Construye el contenido final de la tarjeta (independiente de Aiogram):
+      text, button_text, button_url, media_id, media_type.
+    Idioma gobernado por card_lang: "es", "en" o "both" (bilingüe en una sola tarjeta).
+    Si falta el texto del idioma pedido se usa el otro; si no hay ninguno, la plantilla oficial.
+    La firma institucional se añade siempre que el texto no la incluya.
+    """
+    card_lang = (cfg.get("card_lang") or "es").lower()
+    text_es = (cfg.get("text_es") or "").strip()
+    text_en = (cfg.get("text_en") or "").strip()
+
+    if card_lang == "both":
+        part_es = text_es or GAMI_DEFAULT_TEXTS["es"]
+        part_en = text_en or GAMI_DEFAULT_TEXTS["en"]
+        text = part_es if part_es == part_en else f"🇪🇸 {part_es}\n\n➖➖➖➖➖\n\n🇬🇧 {part_en}"
+    elif card_lang == "en":
+        text = _gami_pick(text_en, text_es) or GAMI_DEFAULT_TEXTS["en"]
+    else:
+        text = _gami_pick(text_es, text_en) or GAMI_DEFAULT_TEXTS["es"]
+
+    if "Cloud Media Management" not in text:
+        text = f"{text}\n\n{GAMI_SIGNATURE}"
+
+    button_url = cfg.get("btn_url") or None
+    button_text = None
+    if button_url:
+        btn_es = (cfg.get("btn_text_es") or "").strip()
+        btn_en = (cfg.get("btn_text_en") or "").strip()
+        if card_lang == "both":
+            if btn_es and btn_en and btn_es != btn_en:
+                button_text = f"{btn_es} | {btn_en}"
+            else:
+                button_text = btn_es or btn_en or f"{GAMI_DEFAULT_BUTTON_TEXTS['es']} | {GAMI_DEFAULT_BUTTON_TEXTS['en']}"
+        elif card_lang == "en":
+            button_text = _gami_pick(btn_en, btn_es) or GAMI_DEFAULT_BUTTON_TEXTS["en"]
+        else:
+            button_text = _gami_pick(btn_es, btn_en) or GAMI_DEFAULT_BUTTON_TEXTS["es"]
+        button_text = button_text[:64]
+
+    media_id = cfg.get("media_id") or None
+    media_type = (cfg.get("media_type") or "").lower() or None
+    if media_type not in GAMI_MEDIA_TYPES:
+        media_id, media_type = None, None
+
+    return {
+        "text": text,
+        "button_text": button_text,
+        "button_url": button_url,
+        "media_id": media_id,
+        "media_type": media_type,
+    }
 
 
 try:

@@ -48,7 +48,11 @@ from database.database import (
     add_user_reputation_xp,
     get_user_reputation,
     get_top_reputation,
-    get_chat_heatmap_matrix
+    get_chat_heatmap_matrix,
+    # 🎮 Anuncio recurrente de gamificación
+    get_gamification_announcement,
+    set_gamification_announcement_field,
+    schedule_gamification_announcement_now
 )
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
@@ -2075,6 +2079,136 @@ async def cmd_chat_heatmap(message: Message, bot: Bot):
             pass
     except Exception as e:
         logger.debug(f"Aviso en /heatmap: {e}")
+
+
+# ==========================================
+# 🎮 ANUNCIO RECURRENTE DE GAMIFICACIÓN (ACCESO DESDE EL GRUPO)
+# ==========================================
+_GAMI_GROUP_TEXTS = {
+    "es": {
+        "status": (
+            "🎮 <b>Anuncio Recurrente de Gamificación</b>\n\n"
+            "• <b>Licencia:</b> {tier}\n"
+            "• <b>Estado:</b> {status}\n"
+            "• <b>Frecuencia:</b> cada {interval}\n"
+            "• <b>Próximo envío:</b> {next}\n\n"
+            "Configura texto bilingüe, multimedia y botón interactivo desde la consola privada.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "locked": (
+            "🎮 <b>Anuncio Recurrente de Gamificación</b>\n\n"
+            "🔒 Disponible desde el plan <b>PRO ⭐</b> (ULTRA PRO 💎 añade multimedia y frecuencia desde 30 min).\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_open": "⚙️ Configurar en privado",
+        "on": "🟢 Activo",
+        "off": "🔴 Inactivo",
+        "none": "—",
+        "now_ok": "🚀 La tarjeta se publicará en el próximo ciclo (≈1 min).\n\n🛡️ <i>Cloud Media Management</i>",
+        "now_inactive": "⚠️ El anuncio está inactivo. Actívalo desde la consola privada.\n\n🛡️ <i>Cloud Media Management</i>",
+        "off_ok": "🔴 Anuncio de gamificación desactivado.\n\n🛡️ <i>Cloud Media Management</i>",
+        "admin_only": "⛔ Solo los administradores pueden gestionar el anuncio de gamificación.\n\n🛡️ <i>Cloud Media Management</i>",
+    },
+    "en": {
+        "status": (
+            "🎮 <b>Recurring Gamification Announcement</b>\n\n"
+            "• <b>License:</b> {tier}\n"
+            "• <b>Status:</b> {status}\n"
+            "• <b>Frequency:</b> every {interval}\n"
+            "• <b>Next send:</b> {next}\n\n"
+            "Configure bilingual text, media and the interactive button from the private console.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "locked": (
+            "🎮 <b>Recurring Gamification Announcement</b>\n\n"
+            "🔒 Available from the <b>PRO ⭐</b> plan (ULTRA PRO 💎 adds media and frequency from 30 min).\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ),
+        "btn_open": "⚙️ Configure privately",
+        "on": "🟢 Active",
+        "off": "🔴 Inactive",
+        "none": "—",
+        "now_ok": "🚀 The card will be published in the next cycle (≈1 min).\n\n🛡️ <i>Cloud Media Management</i>",
+        "now_inactive": "⚠️ The announcement is inactive. Enable it from the private console.\n\n🛡️ <i>Cloud Media Management</i>",
+        "off_ok": "🔴 Gamification announcement disabled.\n\n🛡️ <i>Cloud Media Management</i>",
+        "admin_only": "⛔ Only administrators can manage the gamification announcement.\n\n🛡️ <i>Cloud Media Management</i>",
+    },
+}
+
+
+def _gami_group_interval_label(minutes: int, lang: str) -> str:
+    minutes = int(minutes or 0)
+    if minutes and minutes % 1440 == 0:
+        days = minutes // 1440
+        return f"{days} día" + ("s" if days > 1 else "") if lang == "es" else f"{days} day" + ("s" if days > 1 else "")
+    if minutes and minutes % 60 == 0:
+        return f"{minutes // 60} h"
+    return f"{minutes} min"
+
+
+@router.message(Command("gamification", "gamificacion", "anuncio"), F.chat.type.in_({"group", "supergroup"}))
+async def gamification_announcement_command(message: Message, bot: Bot):
+    """
+    /gamification            → estado del anuncio + acceso directo a la consola privada.
+    /gamification now|ahora  → adelanta la próxima publicación al siguiente ciclo del worker.
+    /gamification off        → desactiva el anuncio de inmediato.
+    Uso exclusivo de administradores; la edición completa (texto ES/EN, multimedia, botón, frecuencia)
+    se realiza en la consola privada, que vuelve a verificar la propiedad de la comunidad.
+    """
+    group_id = message.chat.id
+    lang = "es"
+    if message.from_user and message.from_user.language_code and not message.from_user.language_code.startswith("es"):
+        lang = "en"
+    gt = _GAMI_GROUP_TEXTS[lang]
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not await _message_author_is_admin(bot, message):
+        warn = await message.answer(gt["admin_only"], parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, 8))
+        return
+
+    args = (message.text or "").split()[1:]
+    sub = args[0].lower() if args else ""
+
+    if sub in ("now", "ahora"):
+        scheduled = await schedule_gamification_announcement_now(group_id)
+        reply = await message.answer(gt["now_ok"] if scheduled else gt["now_inactive"], parse_mode="HTML")
+        _spawn(auto_delete_msg(reply, 15))
+        return
+
+    if sub in ("off", "apagar", "desactivar"):
+        await set_gamification_announcement_field(group_id, "status", 0)
+        logger.info(f"🎮 [Gamificación] Anuncio desactivado desde el grupo {group_id}.")
+        reply = await message.answer(gt["off_ok"], parse_mode="HTML")
+        _spawn(auto_delete_msg(reply, 15))
+        return
+
+    tier = str(await get_group_tier(group_id) or "free").lower()
+    try:
+        bot_username = (await bot.get_me()).username or ""
+    except Exception:
+        bot_username = ""
+    open_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=gt["btn_open"], url=f"https://t.me/{bot_username}?start=gami_{group_id}")
+    ]]) if bot_username else None
+
+    if tier not in ("pro", "ultra_pro", "ultra"):
+        text = gt["locked"]
+    else:
+        cfg = await get_gamification_announcement(group_id)
+        text = gt["status"].format(
+            tier="ULTRA PRO 💎" if "ultra" in tier else "PRO ⭐",
+            status=gt["on"] if cfg.get("status") == 1 else gt["off"],
+            interval=_gami_group_interval_label(cfg.get("interval_minutes") or 360, lang),
+            next=f"{cfg['next_send_at']} UTC" if (cfg.get("status") == 1 and cfg.get("next_send_at")) else gt["none"],
+        )
+
+    reply = await message.answer(text, reply_markup=open_kb, parse_mode="HTML")
+    _spawn(auto_delete_msg(reply, 30))
 
 
 # ==========================================

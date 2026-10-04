@@ -9,6 +9,7 @@ The Bunker Command OS © 2026 — Cloud Media Management
 import os
 import sys
 import html
+import re
 import sqlite3
 import asyncio
 import logging
@@ -40,7 +41,12 @@ from database.database import (
     get_channel_plans,
     get_channel_live_telemetry,
     get_db_connection,
-    get_sentinel_service_messages_config
+    get_sentinel_service_messages_config,
+    get_due_gamification_announcements,
+    mark_gamification_announcement_sent,
+    reschedule_gamification_announcement,
+    register_gamification_announcement_failure,
+    compose_gamification_card
 )
 
 logger = logging.getLogger("ecosystem_handler")
@@ -830,6 +836,167 @@ async def start_vip_badge_expiry_worker(bot: Bot):
         await asyncio.sleep(300)
 
 
+# ==========================================================
+# 🎮 DIFUSIÓN RECURRENTE: ANUNCIOS DE GAMIFICACIÓN INTERACTIVA
+# ==========================================================
+GAMI_BATCH_SIZE = 20                 # Tarjetas máximas por ciclo del Broadcast Worker (60 s)
+GAMI_SEND_SPACING_SECONDS = 0.5      # Separación entre envíos (muy por debajo del límite global de 30 msg/s)
+GAMI_MIN_INTERVAL_BY_RANK = {1: 180, 2: 30}   # PRO: cada ≥3 h | ULTRA PRO: cada ≥30 min
+_GAMI_PERMANENT_ERROR_MARKERS = (
+    "chat not found", "bot was kicked", "bot is not a member", "not enough rights",
+    "have no rights", "need administrator rights", "chat_write_forbidden", "chat_admin_required",
+    "user is deactivated", "group chat was upgraded", "chat was deleted", "channel_private",
+    "bot was blocked", "peer_id_invalid",
+)
+_GAMI_PARSE_ERROR_MARKERS = ("can't parse entities", "unsupported start tag", "can't find end", "unmatched end tag")
+_GAMI_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _gami_tier_rank(tier) -> int:
+    normalized = str(tier or "free").strip().lower().replace("-", "_").replace(" ", "_")
+    if "ultra" in normalized or normalized in ("enterprise", "elite", "unlimited"):
+        return 2
+    if normalized == "pro":
+        return 1
+    return 0
+
+
+def _gami_plain_text(text: str) -> str:
+    """Versión sin etiquetas HTML (respaldo si el formato del administrador es inválido)."""
+    return html.unescape(_GAMI_TAG_RE.sub("", text or ""))
+
+
+def build_gamification_markup(card: dict) -> InlineKeyboardMarkup | None:
+    if card.get("button_url") and card.get("button_text"):
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=card["button_text"], url=card["button_url"])
+        ]])
+    return None
+
+
+async def send_gamification_card(bot: Bot, chat_id: int, card: dict, parse_mode: str | None = "HTML") -> list:
+    """
+    Publica la tarjeta (multimedia + texto + botón inline). Devuelve los mensajes enviados.
+    • Si el texto cabe en el caption (≤1024), va dentro del multimedia.
+    • Si no cabe, se publica el multimedia y a continuación el texto con el botón.
+    • Si el HTML del administrador es inválido, ese mismo paso se reintenta en texto plano
+      (sin duplicar el multimedia ya publicado).
+    """
+    markup = build_gamification_markup(card)
+    text = card.get("text") or ""
+    media_id = card.get("media_id")
+    media_type = card.get("media_type")
+    senders = {"photo": bot.send_photo, "video": bot.send_video, "animation": bot.send_animation}
+
+    def _is_parse_error(err: Exception) -> bool:
+        return bool(parse_mode) and any(marker in str(err).lower() for marker in _GAMI_PARSE_ERROR_MARKERS)
+
+    sent: list = []
+    if media_id and media_type in senders:
+        send_media = senders[media_type]
+        media_kwargs = {media_type: media_id}
+        if len(text) <= 1024:
+            try:
+                sent.append(await send_media(chat_id=chat_id, caption=text, parse_mode=parse_mode, reply_markup=markup, **media_kwargs))
+            except TelegramBadRequest as err:
+                if not _is_parse_error(err):
+                    raise
+                logger.warning(f"⚠️ [Gamificación] HTML inválido en {chat_id}; caption reenviado como texto plano.")
+                sent.append(await send_media(chat_id=chat_id, caption=_gami_plain_text(text)[:1024], parse_mode=None, reply_markup=markup, **media_kwargs))
+            return sent
+        sent.append(await send_media(chat_id=chat_id, **media_kwargs))
+
+    try:
+        sent.append(await bot.send_message(chat_id=chat_id, text=text[:4096], parse_mode=parse_mode, reply_markup=markup))
+    except TelegramBadRequest as err:
+        if not _is_parse_error(err):
+            raise
+        logger.warning(f"⚠️ [Gamificación] HTML inválido en {chat_id}; texto reenviado como texto plano.")
+        sent.append(await bot.send_message(chat_id=chat_id, text=_gami_plain_text(text)[:4096], parse_mode=None, reply_markup=markup))
+    return sent
+
+
+async def _gami_auto_delete(messages: list, delay: int):
+    await asyncio.sleep(delay)
+    for msg in messages:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+
+async def _dispatch_gamification_announcements(bot: Bot) -> int:
+    """
+    Evalúa y publica los anuncios de gamificación vencidos. Se ejecuta en cada ciclo del
+    Broadcast Worker. Respeta la licencia vigente (PRO ≥3 h, ULTRA PRO ≥30 min; el multimedia
+    es exclusivo de ULTRA PRO), espacia los envíos y obedece los FloodWait de Telegram.
+    Devuelve cuántas tarjetas se publicaron.
+    """
+    due = await get_due_gamification_announcements(limit=GAMI_BATCH_SIZE)
+    if not due:
+        return 0
+
+    published = 0
+    for index, cfg in enumerate(due):
+        chat_id = cfg["chat_id"]
+        try:
+            rank = _gami_tier_rank(await get_group_tier(chat_id))
+        except Exception:
+            rank = 0
+        if rank < 1:
+            # Licencia vencida o plan gratuito: se pausa sin perder la configuración.
+            await reschedule_gamification_announcement(chat_id, 360)
+            logger.info(f"⏸️ [Gamificación] {chat_id} sin licencia PRO/ULTRA PRO vigente; envío aplazado 6 h.")
+            continue
+
+        interval = max(GAMI_MIN_INTERVAL_BY_RANK.get(rank, 180), int(cfg.get("interval_minutes") or 360))
+        card = compose_gamification_card(cfg)
+        if rank < 2:
+            card["media_id"], card["media_type"] = None, None
+
+        try:
+            sent_messages = await send_gamification_card(bot, chat_id, card)
+        except TelegramRetryAfter as rate_err:
+            wait_s = int(getattr(rate_err, "retry_after", 5) or 5)
+            logger.warning(f"⏳ [Gamificación] FloodWait {wait_s}s en {chat_id}; se reprograma el envío.")
+            await reschedule_gamification_announcement(chat_id, max(2, wait_s // 60 + 1))
+            await asyncio.sleep(min(wait_s + 1, 60))
+            continue
+        except (TelegramForbiddenError, TelegramBadRequest) as send_err:
+            err_text = str(send_err).lower()
+            permanent = isinstance(send_err, TelegramForbiddenError) or any(m in err_text for m in _GAMI_PERMANENT_ERROR_MARKERS)
+            disabled = await register_gamification_announcement_failure(chat_id, permanent=permanent)
+            logger.warning(
+                f"⚠️ [Gamificación] Envío fallido en {chat_id}: {send_err}"
+                + (" — anuncio desactivado." if disabled else " — se reintentará más tarde.")
+            )
+            if disabled:
+                _notify_radar_ws(chat_id, "gamification_disabled", {"reason": str(send_err)[:200]})
+            continue
+        except Exception as send_err:
+            await register_gamification_announcement_failure(chat_id, permanent=False)
+            logger.error(f"❌ [Gamificación] Error inesperado publicando en {chat_id}: {send_err}")
+            continue
+
+        last_id = sent_messages[-1].message_id if sent_messages else None
+        await mark_gamification_announcement_sent(chat_id, last_id, interval)
+        published += 1
+        logger.info(f"🎮 [Gamificación] Tarjeta publicada en {chat_id}; próxima en {interval} min.")
+        _notify_radar_ws(chat_id, "gamification_announced", {"next_in_minutes": interval})
+
+        try:
+            autodel = int(cfg.get("auto_delete_after") or 0)
+        except (TypeError, ValueError):
+            autodel = 0
+        if autodel > 0 and sent_messages:
+            _spawn(_gami_auto_delete(sent_messages, autodel), name=f"gami_autodel:{chat_id}")
+
+        if index < len(due) - 1:
+            await asyncio.sleep(GAMI_SEND_SPACING_SECONDS)
+
+    return published
+
+
 # ==========================================
 # 📡 BACKGROUND WORKER: DIFUSIÓN RECURRENTE DE PLANES
 # ==========================================
@@ -840,7 +1007,7 @@ async def start_channel_broadcast_worker(bot: Bot):
         _spawn(start_meeting_announcement_worker(bot), name="meeting_announcer"),
         _spawn(start_vip_badge_expiry_worker(bot), name="vip_badge_watchdog"),
     ]
-    logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes iniciado.")
+    logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes y anuncios de gamificación iniciado.")
     try:
         await _channel_broadcast_loop(bot)
     finally:
@@ -914,5 +1081,13 @@ async def _channel_broadcast_loop(bot: Bot):
             raise
         except Exception as ex:
             logger.error(f"❌ [Broadcast Worker Error]: {ex}")
+
+        # 🎮 Anuncios recurrentes de gamificación (mismo ciclo del Broadcast Worker)
+        try:
+            await _dispatch_gamification_announcements(bot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as gami_err:
+            logger.error(f"❌ [Gamificación Worker Error]: {gami_err}")
 
         await asyncio.sleep(60)

@@ -26,6 +26,13 @@ from aiogram.types.web_app_info import WebAppInfo
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from database.database import (
+    get_gamification_announcement, set_gamification_announcement_field,
+    set_gamification_announcement_media, clear_gamification_announcement_button,
+    schedule_gamification_announcement_now, reset_gamification_announcement,
+    normalize_announcement_url, normalize_announcement_button_text, compose_gamification_card,
+    GAMI_DEFAULT_BUTTON_TEXTS, GAMI_DEFAULT_INTERVAL_MINUTES, GAMI_TEXT_MAX_CHARS,
+)
+from database.database import (
     get_or_create_user, get_user_groups, get_user_channels,
     get_group_tier, get_user_global_tier,
     get_antispam_filter, set_antispam_filter,
@@ -531,6 +538,7 @@ WARN_CUSTOM_MEDIA_STATES = {}
 MIC_VIP_TEXT_STATES = {}
 BACKUP_IMPORT_STATES = {}
 REP_MULTIPLIER_STATES = {}
+GAMI_STATES = {}          # 🎮 Edición del anuncio recurrente de gamificación
 
 # 🧯 Registro central de TODOS los estados conversacionales: permite liberarlos en bloque (navegación, /start,
 # /cancel) y garantiza que ningún menú privado quede bloqueado por una conversación huérfana.
@@ -541,7 +549,7 @@ ALL_STATE_DICTS = (
     TIPS_MEDIA_STATES, 
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
-    SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES
+    SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES
 )
 
 # ⏳ Caducidad de asistentes multi-paso (segundos) y enfriamiento del mensaje de "sin acción pendiente".
@@ -2316,7 +2324,8 @@ def get_channel_panel_keyboard(channel_id: int, lang: str):
             InlineKeyboardButton(text="💎 " + ("Payload Multimedia" if lang == "es" else "Media Payload"), callback_data=f"payload_menu_{channel_id}_{lang}")
         ],
         [
-            InlineKeyboardButton(text="🧬 " + ("Clon & Centinela" if lang == "es" else "Clone & Sentinel"), callback_data=f"gset_clone_{channel_id}_{lang}")
+            InlineKeyboardButton(text="🧬 " + ("Clon & Centinela" if lang == "es" else "Clone & Sentinel"), callback_data=f"gset_clone_{channel_id}_{lang}"),
+            InlineKeyboardButton(text="🎮 " + ("Anuncio Gamificación" if lang == "es" else "Gamification Ad"), callback_data=f"gami_menu_{channel_id}_{lang}")
         ],
         [
             InlineKeyboardButton(text=f"🌐 {'English' if lang == 'es' else 'Español'}", callback_data=f"langcpanel_{channel_id}_{toggle_lang}"),
@@ -3197,6 +3206,7 @@ def get_eco_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text=t["btn_tips"], callback_data=f"tips_menu_{group_id}_{lang}"),
             InlineKeyboardButton(text=t["btn_night_mode"], callback_data=f"night_menu_{group_id}_{lang}") # <--- ¡Añadido aquí!
         ],
+        [InlineKeyboardButton(text=tr(lang, "🎮 Anuncio de Gamificación", "🎮 Gamification Announcement"), callback_data=f"gami_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{group_id}_{lang}")]
     ])
 
@@ -3294,6 +3304,18 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
         except Exception as db_ex:
             logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
+
+        # 🎮 Deep link desde /gamification en el grupo: abre el panel del anuncio recurrente.
+        if command.args and command.args.startswith("gami_"):
+            try:
+                gami_chat_id = int(command.args.split("_", 1)[1])
+            except (ValueError, IndexError):
+                gami_chat_id = 0
+            if gami_chat_id:
+                if not await verify_admin_privileges_msg(message, bot, gami_chat_id):
+                    return
+                await send_gamification_panel(bot, message.from_user.id, gami_chat_id, lang)
+                return
 
         if command.args and command.args.startswith("gset_"):
             try:
@@ -3451,6 +3473,722 @@ async def handle_channel_shared(message: Message, bot: Bot):
     ])
     await message.answer(t["chsync_ok"].format(title=html.escape(title or str(channel_id))), reply_markup=ok_kb, parse_mode="HTML")
 
+# ==========================================================
+# 🎮 CONSOLA: ANUNCIOS RECURRENTES DE GAMIFICACIÓN INTERACTIVA
+# ==========================================================
+GAMI_INTERVAL_OPTIONS = {
+    "pro": (180, 360, 720, 1440, 2880),                 # PRO: cada ≥ 3 h
+    "ultra_pro": (30, 60, 120, 180, 360, 720, 1440),    # ULTRA PRO: cada ≥ 30 min
+}
+GAMI_AUTODEL_OPTIONS = (0, 300, 1800, 3600, 21600, 86400)
+
+GAMI_TEXTS = {
+    "es": {
+        "title": "🎮 <b>Anuncio Recurrente de Gamificación</b>",
+        "locked": (
+            "🎮 <b>Anuncio Recurrente de Gamificación</b>\n\n"
+            "🔒 Esta función está disponible a partir del plan <b>PRO</b>:\n"
+            "• <b>PRO ⭐</b> — texto bilingüe y botón interactivo, cada 3 h o más.\n"
+            "• <b>ULTRA PRO 💎</b> — además multimedia (foto, video o GIF) y frecuencia desde 30 min."
+        ),
+        "body": (
+            "🎮 <b>Anuncio Recurrente de Gamificación</b>\n\n"
+            "• <b>Comunidad:</b> {chat}\n"
+            "• <b>Licencia:</b> {tier}\n"
+            "• <b>Estado:</b> {status}\n"
+            "• <b>Frecuencia:</b> cada {interval}\n"
+            "• <b>Idioma de la tarjeta:</b> {card_lang}\n"
+            "• <b>Texto ES:</b> {text_es}\n"
+            "• <b>Texto EN:</b> {text_en}\n"
+            "• <b>Multimedia:</b> {media}\n"
+            "• <b>Botón:</b> {button}\n"
+            "• <b>Auto-borrado:</b> {autodel}\n"
+            "• <b>Último envío:</b> {last}\n"
+            "• <b>Próximo envío:</b> {next}\n\n"
+            "<i>{hint}</i>"
+        ),
+        "hint_pro": "Plan PRO: frecuencia mínima de 3 h. El multimedia requiere ULTRA PRO.",
+        "hint_ultra": "ULTRA PRO: multimedia y frecuencia desde 30 min habilitados.",
+        "status_on": "🟢 Activo",
+        "status_off": "🔴 Inactivo",
+        "status_failing": "🟠 Reintentando ({n} fallos)",
+        "custom": "✅ Personalizado",
+        "default": "⚪ Plantilla oficial",
+        "none": "—",
+        "no_button": "Sin botón",
+        "autodel_off": "Desactivado",
+        "never": "Aún no enviado",
+        "lang_es": "🇪🇸 Español",
+        "lang_en": "🇬🇧 English",
+        "lang_both": "🌐 Bilingüe (ES + EN)",
+        "media_photo": "🖼️ Foto",
+        "media_video": "🎬 Video",
+        "media_animation": "🎞️ GIF",
+        "media_locked": "🔒 Solo ULTRA PRO",
+        "btn_activate": "🟢 Activar anuncio",
+        "btn_deactivate": "🔴 Desactivar anuncio",
+        "btn_interval": "⏱️ Frecuencia",
+        "btn_cardlang": "🌐 Idioma: {label}",
+        "btn_text_es": "✍️ Texto ES",
+        "btn_text_en": "✍️ Texto EN",
+        "btn_media": "🖼️ Multimedia",
+        "btn_media_del": "🗑️ Quitar multimedia",
+        "btn_btn_es": "🔘 Botón ES",
+        "btn_btn_en": "🔘 Botón EN",
+        "btn_btn_url": "🔗 Enlace del botón",
+        "btn_btn_del": "🗑️ Quitar botón",
+        "btn_autodel": "🧹 Auto-borrado",
+        "btn_preview": "👁️ Vista previa",
+        "btn_send_now": "🚀 Publicar ahora",
+        "btn_reset": "♻️ Restablecer",
+        "btn_back_gami": "🔙 Volver al anuncio",
+        "btn_cancel": "❌ Cancelar",
+        "btn_upgrade_pro": "⭐ Mejorar a PRO",
+        "btn_upgrade_ultra": "💎 Mejorar a ULTRA PRO",
+        "interval_title": "⏱️ <b>Frecuencia del anuncio</b>\n\nElige cada cuánto se publicará la tarjeta interactiva:",
+        "autodel_title": "🧹 <b>Auto-borrado</b>\n\nCada tarjeta publicada puede eliminarse sola tras el tiempo elegido:",
+        "prompt_text_es": (
+            "✍️ <b>Texto en Español</b>\n\n"
+            "Escribe el texto del anuncio (máx. 3500 caracteres). Puedes usar el formato nativo de Telegram "
+            "(negrita, cursiva, enlaces) o etiquetas HTML.\n\n"
+            "Envía <code>-</code> para volver a la plantilla oficial."
+        ),
+        "prompt_text_en": (
+            "✍️ <b>Texto en Inglés</b>\n\n"
+            "Escribe la versión en inglés del anuncio (máx. 3500 caracteres). Formato nativo o HTML.\n\n"
+            "Envía <code>-</code> para volver a la plantilla oficial."
+        ),
+        "prompt_media": (
+            "🖼️ <b>Multimedia del anuncio</b>\n\n"
+            "Envía una <b>foto</b>, un <b>video</b> o un <b>GIF</b>. Si el texto supera 1024 caracteres, "
+            "se publicará el multimedia seguido del texto con el botón."
+        ),
+        "prompt_btn_es": "🔘 <b>Texto del botón (Español)</b>\n\nEscribe el nombre del botón (máx. 40 caracteres).\nEnvía <code>-</code> para usar el texto predeterminado.",
+        "prompt_btn_en": "🔘 <b>Texto del botón (Inglés)</b>\n\nEscribe el nombre del botón en inglés (máx. 40 caracteres).\nEnvía <code>-</code> para usar el texto predeterminado.",
+        "prompt_btn_url": (
+            "🔗 <b>Enlace del botón</b>\n\n"
+            "Formatos admitidos:\n"
+            "• <code>@micanal</code> o <code>t.me/migrupo</code>\n"
+            "• Invitaciones: <code>t.me/+AbCdEf…</code>\n"
+            "• Webs: <code>https://misitio.com/promo</code>\n\n"
+            "Se rechazan enlaces inseguros (javascript:, IPs locales, credenciales)."
+        ),
+        "saved": "✅ Cambios guardados.",
+        "err_text_long": "⚠️ El texto supera 3500 caracteres. Acórtalo e inténtalo de nuevo.",
+        "err_html": "⚠️ El formato HTML no es válido ({error}). Revisa las etiquetas e inténtalo de nuevo.",
+        "err_need_text": "⚠️ Envía un mensaje de texto.",
+        "err_media": "⚠️ Envía una foto, un video o un GIF.",
+        "err_media_locked": "🔒 El multimedia del anuncio es exclusivo de ULTRA PRO.",
+        "err_url": "⚠️ Enlace no válido o inseguro. Usa @usuario, un enlace t.me/… o una URL https:// pública.",
+        "err_btn_text": "⚠️ El texto del botón no puede estar vacío.",
+        "err_tier": "🔒 Necesitas un plan PRO o ULTRA PRO activo para esta comunidad.",
+        "err_bot_absent": "⚠️ El bot no puede publicar en esta comunidad. Añádelo como administrador con permiso para enviar mensajes.",
+        "toggled_on": "🟢 Anuncio activado: la primera tarjeta se publicará en el próximo ciclo (≈1 min).",
+        "toggled_off": "🔴 Anuncio desactivado.",
+        "send_now_ok": "🚀 Publicación programada para el próximo ciclo (≈1 min).",
+        "send_now_inactive": "⚠️ Activa el anuncio antes de publicarlo.",
+        "preview_sent": "👁️ Vista previa enviada a este chat.",
+        "preview_error": "⚠️ No se pudo generar la vista previa: {error}",
+        "reset_done": "♻️ Configuración restablecida.",
+        "expired": "⏱️ La edición expiró. Abre de nuevo el panel del anuncio.",
+    },
+    "en": {
+        "title": "🎮 <b>Recurring Gamification Announcement</b>",
+        "locked": (
+            "🎮 <b>Recurring Gamification Announcement</b>\n\n"
+            "🔒 This feature is available from the <b>PRO</b> plan:\n"
+            "• <b>PRO ⭐</b> — bilingual text and interactive button, every 3 h or more.\n"
+            "• <b>ULTRA PRO 💎</b> — plus media (photo, video or GIF) and frequency from 30 min."
+        ),
+        "body": (
+            "🎮 <b>Recurring Gamification Announcement</b>\n\n"
+            "• <b>Community:</b> {chat}\n"
+            "• <b>License:</b> {tier}\n"
+            "• <b>Status:</b> {status}\n"
+            "• <b>Frequency:</b> every {interval}\n"
+            "• <b>Card language:</b> {card_lang}\n"
+            "• <b>ES text:</b> {text_es}\n"
+            "• <b>EN text:</b> {text_en}\n"
+            "• <b>Media:</b> {media}\n"
+            "• <b>Button:</b> {button}\n"
+            "• <b>Auto-delete:</b> {autodel}\n"
+            "• <b>Last sent:</b> {last}\n"
+            "• <b>Next send:</b> {next}\n\n"
+            "<i>{hint}</i>"
+        ),
+        "hint_pro": "PRO plan: minimum frequency of 3 h. Media requires ULTRA PRO.",
+        "hint_ultra": "ULTRA PRO: media and frequency from 30 min enabled.",
+        "status_on": "🟢 Active",
+        "status_off": "🔴 Inactive",
+        "status_failing": "🟠 Retrying ({n} failures)",
+        "custom": "✅ Custom",
+        "default": "⚪ Official template",
+        "none": "—",
+        "no_button": "No button",
+        "autodel_off": "Disabled",
+        "never": "Not sent yet",
+        "lang_es": "🇪🇸 Español",
+        "lang_en": "🇬🇧 English",
+        "lang_both": "🌐 Bilingual (ES + EN)",
+        "media_photo": "🖼️ Photo",
+        "media_video": "🎬 Video",
+        "media_animation": "🎞️ GIF",
+        "media_locked": "🔒 ULTRA PRO only",
+        "btn_activate": "🟢 Enable announcement",
+        "btn_deactivate": "🔴 Disable announcement",
+        "btn_interval": "⏱️ Frequency",
+        "btn_cardlang": "🌐 Language: {label}",
+        "btn_text_es": "✍️ ES text",
+        "btn_text_en": "✍️ EN text",
+        "btn_media": "🖼️ Media",
+        "btn_media_del": "🗑️ Remove media",
+        "btn_btn_es": "🔘 ES button",
+        "btn_btn_en": "🔘 EN button",
+        "btn_btn_url": "🔗 Button link",
+        "btn_btn_del": "🗑️ Remove button",
+        "btn_autodel": "🧹 Auto-delete",
+        "btn_preview": "👁️ Preview",
+        "btn_send_now": "🚀 Publish now",
+        "btn_reset": "♻️ Reset",
+        "btn_back_gami": "🔙 Back to announcement",
+        "btn_cancel": "❌ Cancel",
+        "btn_upgrade_pro": "⭐ Upgrade to PRO",
+        "btn_upgrade_ultra": "💎 Upgrade to ULTRA PRO",
+        "interval_title": "⏱️ <b>Announcement frequency</b>\n\nChoose how often the interactive card will be published:",
+        "autodel_title": "🧹 <b>Auto-delete</b>\n\nEach published card can delete itself after the selected time:",
+        "prompt_text_es": (
+            "✍️ <b>Spanish text</b>\n\n"
+            "Write the Spanish version of the announcement (max. 3500 characters). Native Telegram formatting "
+            "(bold, italic, links) or HTML tags are supported.\n\n"
+            "Send <code>-</code> to restore the official template."
+        ),
+        "prompt_text_en": (
+            "✍️ <b>English text</b>\n\n"
+            "Write the announcement text (max. 3500 characters). Native formatting or HTML.\n\n"
+            "Send <code>-</code> to restore the official template."
+        ),
+        "prompt_media": (
+            "🖼️ <b>Announcement media</b>\n\n"
+            "Send a <b>photo</b>, a <b>video</b> or a <b>GIF</b>. If the text exceeds 1024 characters, "
+            "the media will be posted followed by the text with the button."
+        ),
+        "prompt_btn_es": "🔘 <b>Button text (Spanish)</b>\n\nWrite the Spanish button label (max. 40 characters).\nSend <code>-</code> to use the default label.",
+        "prompt_btn_en": "🔘 <b>Button text (English)</b>\n\nWrite the button label (max. 40 characters).\nSend <code>-</code> to use the default label.",
+        "prompt_btn_url": (
+            "🔗 <b>Button link</b>\n\n"
+            "Supported formats:\n"
+            "• <code>@mychannel</code> or <code>t.me/mygroup</code>\n"
+            "• Invites: <code>t.me/+AbCdEf…</code>\n"
+            "• Websites: <code>https://mysite.com/promo</code>\n\n"
+            "Unsafe links (javascript:, local IPs, credentials) are rejected."
+        ),
+        "saved": "✅ Changes saved.",
+        "err_text_long": "⚠️ The text exceeds 3500 characters. Shorten it and try again.",
+        "err_html": "⚠️ Invalid HTML formatting ({error}). Check the tags and try again.",
+        "err_need_text": "⚠️ Please send a text message.",
+        "err_media": "⚠️ Send a photo, a video or a GIF.",
+        "err_media_locked": "🔒 Announcement media is exclusive to ULTRA PRO.",
+        "err_url": "⚠️ Invalid or unsafe link. Use @username, a t.me/… link or a public https:// URL.",
+        "err_btn_text": "⚠️ The button text cannot be empty.",
+        "err_tier": "🔒 You need an active PRO or ULTRA PRO plan for this community.",
+        "err_bot_absent": "⚠️ The bot cannot post in this community. Add it as an administrator allowed to send messages.",
+        "toggled_on": "🟢 Announcement enabled: the first card will be published in the next cycle (≈1 min).",
+        "toggled_off": "🔴 Announcement disabled.",
+        "send_now_ok": "🚀 Publication scheduled for the next cycle (≈1 min).",
+        "send_now_inactive": "⚠️ Enable the announcement before publishing it.",
+        "preview_sent": "👁️ Preview sent to this chat.",
+        "preview_error": "⚠️ Could not generate the preview: {error}",
+        "reset_done": "♻️ Configuration reset.",
+        "expired": "⏱️ The edit session expired. Open the announcement panel again.",
+    },
+}
+
+
+def _gami_t(lang: str) -> dict:
+    return GAMI_TEXTS.get(lang, GAMI_TEXTS["es"])
+
+
+def _gami_tier_key(tier) -> str:
+    normalized = str(tier or "free").strip().lower().replace("-", "_").replace(" ", "_")
+    if "ultra" in normalized:
+        return "ultra_pro"
+    if normalized == "pro":
+        return "pro"
+    return "free"
+
+
+def _gami_interval_label(minutes: int, lang: str) -> str:
+    minutes = int(minutes or 0)
+    if minutes and minutes % 1440 == 0:
+        days = minutes // 1440
+        return tr(lang, f"{days} día" + ("s" if days > 1 else ""), f"{days} day" + ("s" if days > 1 else ""))
+    if minutes and minutes % 60 == 0:
+        hours = minutes // 60
+        return tr(lang, f"{hours} h", f"{hours} h")
+    return f"{minutes} min"
+
+
+def _gami_autodel_label(seconds: int, lang: str) -> str:
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return _gami_t(lang)["autodel_off"]
+    return _gami_interval_label(seconds // 60, lang) if seconds % 60 == 0 else f"{seconds} s"
+
+
+def _gami_card_lang_label(card_lang: str, lang: str) -> str:
+    gt = _gami_t(lang)
+    return {"es": gt["lang_es"], "en": gt["lang_en"], "both": gt["lang_both"]}.get(card_lang or "es", gt["lang_es"])
+
+
+def _gami_cb(action: str, chat_id: int, lang: str, value=None) -> str:
+    return f"gami_{action}_{chat_id}_{value}_{lang}" if value is not None else f"gami_{action}_{chat_id}_{lang}"
+
+
+async def _gami_panel_text(bot: Bot, chat_id: int, lang: str, cfg: dict, tier_key: str) -> str:
+    gt = _gami_t(lang)
+    try:
+        chat_title = html.escape((await bot.get_chat(chat_id)).title or str(chat_id))
+    except Exception:
+        chat_title = f"<code>{chat_id}</code>"
+
+    if cfg.get("status") == 1 and int(cfg.get("fail_count") or 0) > 0:
+        status = gt["status_failing"].format(n=int(cfg.get("fail_count") or 0))
+    else:
+        status = gt["status_on"] if cfg.get("status") == 1 else gt["status_off"]
+
+    media_type = cfg.get("media_type")
+    if tier_key != "ultra_pro":
+        media = gt["media_locked"]
+    elif cfg.get("media_id") and media_type:
+        media = gt.get(f"media_{media_type}", media_type)
+    else:
+        media = gt["none"]
+
+    if cfg.get("btn_url"):
+        label = (cfg.get("btn_text_es") if lang == "es" else cfg.get("btn_text_en")) or cfg.get("btn_text_es") or cfg.get("btn_text_en") \
+            or GAMI_DEFAULT_BUTTON_TEXTS.get(lang, GAMI_DEFAULT_BUTTON_TEXTS["es"])
+        button = f"{html.escape(label)} → <code>{html.escape(cfg['btn_url'])}</code>"
+    else:
+        button = gt["no_button"]
+
+    tier_label = {"ultra_pro": "ULTRA PRO 💎", "pro": "PRO ⭐"}.get(tier_key, "FREE")
+    return gt["body"].format(
+        chat=chat_title,
+        tier=tier_label,
+        status=status,
+        interval=_gami_interval_label(cfg.get("interval_minutes") or GAMI_DEFAULT_INTERVAL_MINUTES, lang),
+        card_lang=_gami_card_lang_label(cfg.get("card_lang"), lang),
+        text_es=gt["custom"] if cfg.get("text_es") else gt["default"],
+        text_en=gt["custom"] if cfg.get("text_en") else gt["default"],
+        media=media,
+        button=button,
+        autodel=_gami_autodel_label(cfg.get("auto_delete_after") or 0, lang),
+        last=f"{cfg['last_sent_at']} UTC" if cfg.get("last_sent_at") else gt["never"],
+        next=f"{cfg['next_send_at']} UTC" if (cfg.get("status") == 1 and cfg.get("next_send_at")) else gt["none"],
+        hint=gt["hint_ultra"] if tier_key == "ultra_pro" else gt["hint_pro"],
+    ) + PERIMETER_SIGNATURE
+
+
+async def get_gamification_keyboard(bot: Bot, chat_id: int, lang: str, cfg: dict, tier_key: str) -> InlineKeyboardMarkup:
+    gt = _gami_t(lang)
+    back = await origin_back_button(bot, chat_id, lang)
+    if tier_key == "free":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=gt["btn_upgrade_pro"], callback_data=f"pay_pro_{chat_id}_{lang}")],
+            [InlineKeyboardButton(text=gt["btn_upgrade_ultra"], callback_data=f"pay_ultra_{chat_id}_{lang}")],
+            [back],
+        ])
+
+    rows = [
+        [InlineKeyboardButton(
+            text=gt["btn_deactivate"] if cfg.get("status") == 1 else gt["btn_activate"],
+            callback_data=_gami_cb("toggle", chat_id, lang)
+        )],
+        [
+            InlineKeyboardButton(text=gt["btn_interval"], callback_data=_gami_cb("intmenu", chat_id, lang)),
+            InlineKeyboardButton(
+                text=gt["btn_cardlang"].format(label=(cfg.get("card_lang") or "es").upper()),
+                callback_data=_gami_cb("cardlang", chat_id, lang)
+            ),
+        ],
+        [
+            InlineKeyboardButton(text=gt["btn_text_es"], callback_data=_gami_cb("txtes", chat_id, lang)),
+            InlineKeyboardButton(text=gt["btn_text_en"], callback_data=_gami_cb("txten", chat_id, lang)),
+        ],
+    ]
+    if tier_key == "ultra_pro":
+        media_row = [InlineKeyboardButton(text=gt["btn_media"], callback_data=_gami_cb("media", chat_id, lang))]
+        if cfg.get("media_id"):
+            media_row.append(InlineKeyboardButton(text=gt["btn_media_del"], callback_data=_gami_cb("delmedia", chat_id, lang)))
+        rows.append(media_row)
+    rows.append([
+        InlineKeyboardButton(text=gt["btn_btn_es"], callback_data=_gami_cb("btnes", chat_id, lang)),
+        InlineKeyboardButton(text=gt["btn_btn_en"], callback_data=_gami_cb("btnen", chat_id, lang)),
+    ])
+    url_row = [InlineKeyboardButton(text=gt["btn_btn_url"], callback_data=_gami_cb("btnurl", chat_id, lang))]
+    if cfg.get("btn_url"):
+        url_row.append(InlineKeyboardButton(text=gt["btn_btn_del"], callback_data=_gami_cb("delbtn", chat_id, lang)))
+    rows.append(url_row)
+    rows.append([InlineKeyboardButton(text=gt["btn_autodel"], callback_data=_gami_cb("delmenu", chat_id, lang))])
+    rows.append([
+        InlineKeyboardButton(text=gt["btn_preview"], callback_data=_gami_cb("preview", chat_id, lang)),
+        InlineKeyboardButton(text=gt["btn_send_now"], callback_data=_gami_cb("sendnow", chat_id, lang)),
+    ])
+    rows.append([InlineKeyboardButton(text=gt["btn_reset"], callback_data=_gami_cb("reset", chat_id, lang))])
+    rows.append([back])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _gami_build_panel(bot: Bot, chat_id: int, user_id: int, lang: str) -> tuple:
+    tier_key = _gami_tier_key(await get_effective_group_tier(chat_id, user_id))
+    if tier_key == "free":
+        cfg = await get_gamification_announcement(chat_id)
+        return _gami_t(lang)["locked"] + PERIMETER_SIGNATURE, await get_gamification_keyboard(bot, chat_id, lang, cfg, tier_key)
+    cfg = await get_gamification_announcement(chat_id)
+    return await _gami_panel_text(bot, chat_id, lang, cfg, tier_key), await get_gamification_keyboard(bot, chat_id, lang, cfg, tier_key)
+
+
+async def send_gamification_panel(bot: Bot, user_id: int, chat_id: int, lang: str):
+    """Envía el panel del anuncio como mensaje nuevo (deep link, /gamification o tras una edición)."""
+    text, keyboard = await _gami_build_panel(bot, chat_id, user_id, lang)
+    return await bot.send_message(chat_id=user_id, text=text, reply_markup=keyboard, parse_mode="HTML")
+
+
+def _gami_compose_for_tier(cfg: dict, tier_key: str) -> dict:
+    card = compose_gamification_card(cfg)
+    if tier_key != "ultra_pro":
+        card["media_id"], card["media_type"] = None, None
+    return card
+
+
+async def _gami_bot_can_post(bot: Bot, chat_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
+    except Exception:
+        return False
+    status = str(getattr(member.status, "value", member.status)).lower()
+    if status in ("left", "kicked", "banned"):
+        return False
+    if await resolve_chat_kind(bot, chat_id) == "c":
+        return status == "creator" or bool(getattr(member, "can_post_messages", False))
+    if status == "restricted":
+        return bool(getattr(member, "can_send_messages", False))
+    return True
+
+
+@router.callback_query(F.data.startswith("gami_"))
+async def cb_gamification_console(callback: CallbackQuery, bot: Bot):
+    """Consola privada del anuncio recurrente de gamificación (ownership + licencia verificados)."""
+    parts = (callback.data or "").split("_")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+    action = parts[1]
+    lang = parts[-1] if parts[-1] in ("es", "en") else user_lang(callback.from_user)
+    try:
+        chat_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
+    value = parts[3] if len(parts) >= 5 else None
+    gt = _gami_t(lang)
+    user_id = callback.from_user.id
+
+    # Toda navegación libera conversaciones pendientes (mismo criterio que el resto de la consola).
+    clear_user_states(bot.id, user_id)
+
+    if not await verify_admin_privileges(callback, bot, chat_id):
+        return
+
+    tier_key = _gami_tier_key(await get_effective_group_tier(chat_id, user_id))
+    if tier_key == "free" and action != "menu":
+        await callback.answer(gt["err_tier"], show_alert=True)
+        text, keyboard = await _gami_build_panel(bot, chat_id, user_id, lang)
+        await safe_edit_text(callback, text, reply_markup=keyboard)
+        return
+
+    async def _refresh(alert: str = None, show_alert: bool = False):
+        text, keyboard = await _gami_build_panel(bot, chat_id, user_id, lang)
+        await safe_edit_text(callback, text, reply_markup=keyboard)
+        try:
+            await callback.answer(alert or "", show_alert=show_alert)
+        except Exception:
+            pass
+
+    def _cancel_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=gt["btn_cancel"], callback_data=_gami_cb("menu", chat_id, lang))]
+        ])
+
+    def _prompt(field: str, prompt_key: str):
+        GAMI_STATES[(bot.id, user_id)] = {"chat_id": chat_id, "field": field, "lang": lang, "ts": time.time()}
+        return safe_edit_text(callback, gt[prompt_key] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb())
+
+    if action == "menu":
+        await _refresh()
+        return
+
+    if action == "toggle":
+        cfg = await get_gamification_announcement(chat_id)
+        if cfg.get("status") == 1:
+            await set_gamification_announcement_field(chat_id, "status", 0)
+            await _refresh(gt["toggled_off"])
+            return
+        if not await _gami_bot_can_post(bot, chat_id):
+            await callback.answer(gt["err_bot_absent"], show_alert=True)
+            return
+        if not cfg.get("exists"):
+            await set_gamification_announcement_field(chat_id, "card_lang", lang)
+            await set_gamification_announcement_field(chat_id, "created_by", user_id)
+        min_interval = GAMI_INTERVAL_OPTIONS[tier_key][0]
+        if int(cfg.get("interval_minutes") or GAMI_DEFAULT_INTERVAL_MINUTES) < min_interval:
+            await set_gamification_announcement_field(chat_id, "interval_minutes", min_interval)
+        await set_gamification_announcement_field(chat_id, "status", 1)
+        logging.info(f"🎮 [Gamificación] Anuncio activado en {chat_id} por {user_id}.")
+        await _refresh(gt["toggled_on"], show_alert=True)
+        return
+
+    if action == "intmenu":
+        cfg = await get_gamification_announcement(chat_id)
+        current = int(cfg.get("interval_minutes") or GAMI_DEFAULT_INTERVAL_MINUTES)
+        options = GAMI_INTERVAL_OPTIONS[tier_key]
+        rows, row = [], []
+        for minutes in options:
+            mark = "✅ " if minutes == current else ""
+            row.append(InlineKeyboardButton(
+                text=f"{mark}{_gami_interval_label(minutes, lang)}",
+                callback_data=_gami_cb("setint", chat_id, lang, minutes)
+            ))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton(text=gt["btn_back_gami"], callback_data=_gami_cb("menu", chat_id, lang))])
+        await safe_edit_text(callback, gt["interval_title"] + PERIMETER_SIGNATURE, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback.answer()
+        return
+
+    if action == "setint":
+        try:
+            minutes = int(value)
+        except (TypeError, ValueError):
+            await callback.answer()
+            return
+        # El valor llega en el callback (manipulable): solo se aceptan opciones de la licencia vigente.
+        if minutes not in GAMI_INTERVAL_OPTIONS[tier_key]:
+            await callback.answer(gt["err_tier"], show_alert=True)
+            return
+        await set_gamification_announcement_field(chat_id, "interval_minutes", minutes)
+        await _refresh(gt["saved"])
+        return
+
+    if action == "cardlang":
+        cfg = await get_gamification_announcement(chat_id)
+        cycle = {"es": "en", "en": "both", "both": "es"}
+        await set_gamification_announcement_field(chat_id, "card_lang", cycle.get(cfg.get("card_lang") or "es", "es"))
+        await _refresh(gt["saved"])
+        return
+
+    if action == "delmenu":
+        cfg = await get_gamification_announcement(chat_id)
+        current = int(cfg.get("auto_delete_after") or 0)
+        rows, row = [], []
+        for seconds in GAMI_AUTODEL_OPTIONS:
+            mark = "✅ " if seconds == current else ""
+            row.append(InlineKeyboardButton(
+                text=f"{mark}{_gami_autodel_label(seconds, lang)}",
+                callback_data=_gami_cb("setdel", chat_id, lang, seconds)
+            ))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([InlineKeyboardButton(text=gt["btn_back_gami"], callback_data=_gami_cb("menu", chat_id, lang))])
+        await safe_edit_text(callback, gt["autodel_title"] + PERIMETER_SIGNATURE, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await callback.answer()
+        return
+
+    if action == "setdel":
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            await callback.answer()
+            return
+        if seconds not in GAMI_AUTODEL_OPTIONS:
+            await callback.answer()
+            return
+        await set_gamification_announcement_field(chat_id, "auto_delete_after", seconds)
+        await _refresh(gt["saved"])
+        return
+
+    if action == "txtes":
+        await _prompt("text_es", "prompt_text_es")
+        await callback.answer()
+        return
+    if action == "txten":
+        await _prompt("text_en", "prompt_text_en")
+        await callback.answer()
+        return
+    if action == "btnes":
+        await _prompt("btn_text_es", "prompt_btn_es")
+        await callback.answer()
+        return
+    if action == "btnen":
+        await _prompt("btn_text_en", "prompt_btn_en")
+        await callback.answer()
+        return
+    if action == "btnurl":
+        await _prompt("btn_url", "prompt_btn_url")
+        await callback.answer()
+        return
+    if action == "media":
+        if tier_key != "ultra_pro":
+            await callback.answer(gt["err_media_locked"], show_alert=True)
+            return
+        await _prompt("media", "prompt_media")
+        await callback.answer()
+        return
+
+    if action == "delmedia":
+        await set_gamification_announcement_media(chat_id, None, None)
+        await _refresh(gt["saved"])
+        return
+
+    if action == "delbtn":
+        await clear_gamification_announcement_button(chat_id)
+        await _refresh(gt["saved"])
+        return
+
+    if action == "preview":
+        cfg = await get_gamification_announcement(chat_id)
+        card = _gami_compose_for_tier(cfg, tier_key)
+        try:
+            from .ecosystem import send_gamification_card
+            await send_gamification_card(bot, user_id, card)
+            await callback.answer(gt["preview_sent"])
+        except Exception as ex:
+            logging.warning(f"⚠️ [Gamificación] Vista previa fallida en {chat_id}: {ex}")
+            await callback.answer(gt["preview_error"].format(error=str(ex)[:120]), show_alert=True)
+        return
+
+    if action == "sendnow":
+        if await schedule_gamification_announcement_now(chat_id):
+            await _refresh(gt["send_now_ok"], show_alert=True)
+        else:
+            await callback.answer(gt["send_now_inactive"], show_alert=True)
+        return
+
+    if action == "reset":
+        await reset_gamification_announcement(chat_id)
+        await _refresh(gt["reset_done"])
+        return
+
+    await callback.answer()
+
+
+async def _handle_gamification_input(message: Message, bot: Bot, lang: str) -> None:
+    """Procesa la respuesta del administrador a un prompt de la consola del anuncio."""
+    user_id = message.from_user.id
+    state = GAMI_STATES.get((bot.id, user_id)) or {}
+    chat_id = state.get("chat_id")
+    field = state.get("field")
+    lang = state.get("lang") or lang
+    gt = _gami_t(lang)
+    retry_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=gt["btn_cancel"], callback_data=_gami_cb("menu", chat_id, lang))]
+    ])
+
+    if not chat_id or not field or time.time() - state.get("ts", 0) > STATE_TTL_SECONDS:
+        GAMI_STATES.pop((bot.id, user_id), None)
+        resp = await message.answer(gt["expired"] + PERIMETER_SIGNATURE, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=30)
+        return
+
+    # Defensa en profundidad: la propiedad y la licencia se verifican de nuevo al recibir el dato.
+    if not await is_legitimate_owner(bot, user_id, chat_id):
+        GAMI_STATES.pop((bot.id, user_id), None)
+        await message.answer(TEXTS.get(lang, TEXTS["es"])["owner_only_alert"])
+        return
+    tier_key = _gami_tier_key(await get_effective_group_tier(chat_id, user_id))
+    if tier_key == "free":
+        GAMI_STATES.pop((bot.id, user_id), None)
+        await message.answer(gt["err_tier"] + PERIMETER_SIGNATURE, parse_mode="HTML")
+        return
+
+    async def _error(key: str, **fmt):
+        resp = await message.answer(gt[key].format(**fmt) + PERIMETER_SIGNATURE, reply_markup=retry_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=45)
+
+    raw_text = (message.text or "").strip()
+
+    if field in ("text_es", "text_en"):
+        if not message.text:
+            await _error("err_need_text")
+            return
+        if raw_text == "-":
+            new_value = None
+        else:
+            # Con formato nativo de Telegram se conserva vía html_text; sin entidades, se admite HTML manual.
+            new_value = (message.html_text if message.entities else message.text).strip()
+            if len(new_value) > GAMI_TEXT_MAX_CHARS:
+                await _error("err_text_long")
+                return
+            try:
+                probe = await bot.send_message(chat_id=user_id, text=new_value, parse_mode="HTML")
+                fire_and_forget_auto_delete([probe], delay=1)
+            except TelegramBadRequest as html_err:
+                await _error("err_html", error=html.escape(str(html_err))[:200])
+                return
+        await set_gamification_announcement_field(chat_id, field, new_value)
+
+    elif field in ("btn_text_es", "btn_text_en"):
+        if not message.text:
+            await _error("err_need_text")
+            return
+        if raw_text == "-":
+            new_value = None
+        else:
+            new_value = normalize_announcement_button_text(raw_text)
+            if not new_value:
+                await _error("err_btn_text")
+                return
+        await set_gamification_announcement_field(chat_id, field, new_value)
+
+    elif field == "btn_url":
+        normalized = normalize_announcement_url(raw_text)
+        if not normalized:
+            await _error("err_url")
+            return
+        await set_gamification_announcement_field(chat_id, "btn_url", normalized)
+
+    elif field == "media":
+        if tier_key != "ultra_pro":
+            GAMI_STATES.pop((bot.id, user_id), None)
+            await _error("err_media_locked")
+            return
+        if message.animation:
+            media_id, media_type = message.animation.file_id, "animation"
+        elif message.photo:
+            media_id, media_type = message.photo[-1].file_id, "photo"
+        elif message.video:
+            media_id, media_type = message.video.file_id, "video"
+        else:
+            await _error("err_media")
+            return
+        await set_gamification_announcement_media(chat_id, media_id, media_type)
+    else:
+        GAMI_STATES.pop((bot.id, user_id), None)
+        return
+
+    GAMI_STATES.pop((bot.id, user_id), None)
+    logging.info(f"🎮 [Gamificación] Campo '{field}' actualizado en {chat_id} por {user_id}.")
+    saved = await message.answer(gt["saved"], parse_mode="HTML")
+    fire_and_forget_auto_delete([message, saved], delay=8)
+    await send_gamification_panel(bot, user_id, chat_id, lang)
+
+
 @router.message(F.chat.type == "private", _not_payments_route)
 async def handle_private_inputs(message: Message, bot: Bot):
     user_id = message.from_user.id
@@ -3458,6 +4196,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS.get(lang, TEXTS["es"])
+
+    # 🎮 ANUNCIO RECURRENTE DE GAMIFICACIÓN (texto bilingüe, multimedia, botón y enlace)
+    if (bot.id, user_id) in GAMI_STATES:
+        await _handle_gamification_input(message, bot, lang)
+        return
 
     # 🔐 BÓVEDA PERIMETRAL: IMPORTACIÓN DE RESPALDO CRIPTOGRÁFICO (.bunker / JSON)
     if (bot.id, user_id) in BACKUP_IMPORT_STATES:
@@ -6393,7 +7136,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
 # ==========================================
 # ⚙️ GESTIÓN BILINGÜE Y SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
 # ==========================================
-SENTINEL_CFG_STATES = {}
+# SENTINEL_CFG_STATES se declara una sola vez junto al resto de estados (registro ALL_STATE_DICTS).
 
 async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
@@ -6477,6 +7220,9 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
     return text, kb
 
 
+# ==========================================
+# ⚙️ GESTIÓN BILINGÜE Y SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
+# ==========================================
 @router.callback_query(F.data.startswith("sentinelcfg_"))
 async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
@@ -6538,19 +7284,21 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
     # 3. Reset por defecto (🗑️)
     elif sub == "default":
         prefix_map = {
-            "vc": "vc_join", "micvip": "mic_vip", "reset": "reset_notice",
-            "sched": "vc_sched_start", "vcwelcome": "vc_welcome"
+            "vc": "vc_join",
+            "micvip": "mic_vip",
+            "reset": "reset_notice",
+            "sched": "vc_sched_start",
+            "vcwelcome": "vc_welcome"
         }
         p = prefix_map.get(target_msg, "vc_join")
-        col_prefix = f"{p}_custom" if target_msg in ("vc", "micvip", "reset") else p
 
-        await set_sentinel_service_message(group_id, f"{col_prefix}_text", None)
-        await set_sentinel_service_message(group_id, f"{col_prefix}_media_id", None)
-        await set_sentinel_service_message(group_id, f"{col_prefix}_media_type", None)
-        if target_msg in ("vc", "micvip", "reset", "vcwelcome"):
-            await set_sentinel_service_message(group_id, f"{p}_btn_text", None)
-            await set_sentinel_service_message(group_id, f"{p}_btn_url", None)  # 🧹 Limpieza de URL
-        
+        # Columnas exactas de base de datos
+        await set_sentinel_service_message(group_id, f"{p}_custom_text", None)
+        await set_sentinel_service_message(group_id, f"{p}_custom_media_id", None)
+        await set_sentinel_service_message(group_id, f"{p}_custom_media_type", None)
+        await set_sentinel_service_message(group_id, f"{p}_btn_text", None)
+        await set_sentinel_service_message(group_id, f"{p}_btn_url", None)
+
         default_secs = 20 if target_msg == "reset" else (30 if target_msg in ("vc", "micvip") else 0)
         await set_sentinel_service_message(group_id, f"{p}_autodel_seconds", default_secs)
         await set_sentinel_service_message(group_id, f"{p}_enabled", 1)
@@ -6583,7 +7331,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         elif target_msg == "sched":
             content = cfg.get("sched_start_text") or tr(lang, "*(Usando aviso estándar de apertura programada)*", "*(Using default scheduled start notice)*")
             m_id, m_type = cfg.get("sched_start_media_id"), cfg.get("sched_start_media_type")
-            btn = tr(lang, "Sin botón", "No button")
+            btn = cfg.get("sched_start_btn") or tr(lang, "Sin botón", "No button")
             autodel = cfg.get("sched_start_autodel", 0)
             is_enabled = cfg.get("sched_enabled", 1) == 1
         else:
@@ -6602,22 +7350,25 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
             f"• <b>{tr(lang, 'Estado del Servicio', 'Service Status')}:</b> <code>{st_label}</code>\n"
             f"• <b>{tr(lang, 'Texto del Botón', 'Button Label')}:</b> <code>{btn}</code>\n"
             f"• <b>{tr(lang, 'Auto-borrado', 'Auto-delete')}:</b> <code>{autodel_label}</code>\n\n"
-            f"🛡️️ <i>Cloud Media Management</i>"
+            f"🛡️ <i>Cloud Media Management</i>"
         )
         back_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"sentinelcfg_menu_{group_id}_{lang}")]
         ])
+
         try:
             await callback.message.delete()
         except Exception:
             pass
 
-        if m_id and m_type == "photo":
-            await bot.send_photo(chat_id=callback.from_user.id, photo=m_id, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
-        elif m_id and m_type == "video":
-            await bot.send_video(chat_id=callback.from_user.id, video=m_id, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
-        elif m_id and m_type == "animation":
-            await bot.send_animation(chat_id=callback.from_user.id, animation=m_id, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
+        if m_id and m_type in ("photo", "video", "animation"):
+            if len(preview_text) <= 1024:
+                send_method = getattr(bot, f"send_{m_type}")
+                await send_method(chat_id=callback.from_user.id, **{m_type: m_id}, caption=preview_text, reply_markup=back_kb, parse_mode="HTML")
+            else:
+                send_method = getattr(bot, f"send_{m_type}")
+                await send_method(chat_id=callback.from_user.id, **{m_type: m_id})
+                await bot.send_message(chat_id=callback.from_user.id, text=preview_text, reply_markup=back_kb, parse_mode="HTML")
         else:
             await bot.send_message(chat_id=callback.from_user.id, text=preview_text, reply_markup=back_kb, parse_mode="HTML")
 
@@ -6629,15 +7380,16 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
             return
 
         SENTINEL_CFG_STATES[(bot.id, callback.from_user.id)] = {
-            "group_id": group_id, 
-            "target": target_msg, 
-            "field": field_name, 
-            "lang": lang
+            "group_id": group_id,
+            "target": target_msg,
+            "field": field_name,
+            "lang": lang,
+            "ts": time.time()
         }
 
         if field_name == "autodel":
             prompt_txt = (
-                f"⏱️ <b>{tr(lang, 'Tiempo de Auto-Borrado', 'Auto-Delete Timer')} ({target_msg.upper()}):</b>\n\n"
+                f"⏱️️ <b>{tr(lang, 'Tiempo de Auto-Borrado', 'Auto-Delete Timer')} ({target_msg.upper()}):</b>\n\n"
                 f"{tr(lang, 'Envía un número entero en segundos (0 para no borrar automáticamente):', 'Send an integer in seconds (0 to keep permanently):')}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
@@ -6661,13 +7413,13 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         prompt = await callback.message.answer(prompt_txt, reply_markup=_cancel_kb(t, f"sentinelcfg_menu_{group_id}_{lang}"), parse_mode="HTML")
         fire_and_forget_auto_delete([prompt], delay=60)
 
-    # ==========================================
+
+# ==========================================
 # 📢 FASE 6: DISPATCHER DE PLANES DE CANAL (CONTROL COMERCIAL & VISTA PREVIA)
 # ==========================================
 async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
     """Construye el panel de planes con botoneras en cascada: [Ver] + [🟢/🔴] [📢] [🗑️]."""
     t = TEXTS.get(lang, TEXTS["es"])
-    # Trae todos los planes (activos y pausados) para administración total
     plans = await get_channel_plans(channel_id, only_active=False)
     sub_count = await get_active_subscribers_count(channel_id)
 
@@ -6707,8 +7459,7 @@ async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
                 ),
             ])
     else:
-        empty_hint = "<i>(No hay planes configurados aún. Toca «Crear Nuevo Plan»)</i>" if lang == "es" else "<i>(No plans configured yet. Tap «Create New Plan»)</i>"
-        kb_rows.append([InlineKeyboardButton(text="ℹ️ " + tr(lang, "Sin planes activos", "No plans active"), callback_data="noop")])
+        kb_rows.append([InlineKeyboardButton(text="ℹ️️ " + tr(lang, "Sin planes activos", "No plans active"), callback_data="noop")])
 
     text = (
         f"💎 <b>Gestión de Membresías — {c_name}</b>\n\n"
@@ -6781,7 +7532,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
     elif sub == "view":
         plan = await get_channel_plan(plan_id)
         if not plan:
-            await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️️ Plan not found."), show_alert=True)
+            await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
             return
 
         bot_info = await bot.get_me()
@@ -6806,19 +7557,20 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         inline_rows.append([InlineKeyboardButton(text="🔙 " + tr(lang, "Volver a Planes", "Back to Plans"), callback_data=f"chplans_menu_{channel_id}_{lang}")])
         preview_kb = InlineKeyboardMarkup(inline_keyboard=inline_rows)
 
-        # Enviar con media o texto según corresponda
         m_id, m_type = plan.get("media_id"), plan.get("media_type")
         try:
             await callback.message.delete()
         except Exception:
             pass
 
-        if m_id and m_type == "photo":
-            await bot.send_photo(chat_id=callback.from_user.id, photo=m_id, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
-        elif m_id and m_type == "video":
-            await bot.send_video(chat_id=callback.from_user.id, video=m_id, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
-        elif m_id and m_type == "animation":
-            await bot.send_animation(chat_id=callback.from_user.id, animation=m_id, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
+        if m_id and m_type in ("photo", "video", "animation"):
+            if len(caption_body) <= 1024:
+                send_method = getattr(bot, f"send_{m_type}")
+                await send_method(chat_id=callback.from_user.id, **{m_type: m_id}, caption=caption_body, reply_markup=preview_kb, parse_mode="HTML")
+            else:
+                send_method = getattr(bot, f"send_{m_type}")
+                await send_method(chat_id=callback.from_user.id, **{m_type: m_id})
+                await bot.send_message(chat_id=callback.from_user.id, text=caption_body, reply_markup=preview_kb, parse_mode="HTML")
         else:
             await bot.send_message(chat_id=callback.from_user.id, text=caption_body, reply_markup=preview_kb, parse_mode="HTML")
 
@@ -6836,7 +7588,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         for g_id, g_name in groups:
             share_rows.append([InlineKeyboardButton(text=f"👥 {g_name[:24]}", callback_data=f"chplans_postto_{plan_id}_{channel_id}_{g_id}_{lang}")])
         for c_id, c_name in channels:
-            if c_id != channel_id:  # no mostrar el mismo canal de origen
+            if c_id != channel_id:
                 share_rows.append([InlineKeyboardButton(text=f"📢 {c_name[:24]}", callback_data=f"chplans_postto_{plan_id}_{channel_id}_{c_id}_{lang}")])
 
         share_rows.append([InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"chplans_menu_{channel_id}_{lang}")])
@@ -6877,12 +7629,14 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
         m_id, m_type = plan.get("media_id"), plan.get("media_type")
         try:
-            if m_id and m_type == "photo":
-                await bot.send_photo(chat_id=target_chat_id, photo=m_id, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
-            elif m_id and m_type == "video":
-                await bot.send_video(chat_id=target_chat_id, video=m_id, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
-            elif m_id and m_type == "animation":
-                await bot.send_animation(chat_id=target_chat_id, animation=m_id, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
+            if m_id and m_type in ("photo", "video", "animation"):
+                if len(post_body) <= 1024:
+                    send_method = getattr(bot, f"send_{m_type}")
+                    await send_method(chat_id=target_chat_id, **{m_type: m_id}, caption=post_body, reply_markup=post_kb, parse_mode="HTML")
+                else:
+                    send_method = getattr(bot, f"send_{m_type}")
+                    await send_method(chat_id=target_chat_id, **{m_type: m_id})
+                    await bot.send_message(chat_id=target_chat_id, text=post_body, reply_markup=post_kb, parse_mode="HTML")
             else:
                 await bot.send_message(chat_id=target_chat_id, text=post_body, reply_markup=post_kb, parse_mode="HTML")
 
@@ -6955,7 +7709,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             info_text = (
                 "ℹ️ No hay una creación de plan en curso para omitir (el servidor pudo haberse reiniciado)."
                 if lang == "es" else
-                "ℹ️️ There's no plan creation in progress to skip (the server may have restarted)."
+                "ℹ️ There's no plan creation in progress to skip (the server may have restarted)."
             ) + PERIMETER_SIGNATURE
             info_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_create_plan"], callback_data=f"chplans_add_{channel_id}_{lang}")],
@@ -7002,7 +7756,8 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         text, kb = await _render_plans_menu(bot, channel_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
-        # ==========================================
+
+# ==========================================
 # 💖 AGRADECIMIENTO OFICIAL DE PROPINAS STARS
 # ==========================================
 async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "es") -> None:
@@ -7012,7 +7767,7 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
         f"🌟 <b>¡Muchas gracias por tu contribución!</b>\n\n"
         f"Tu aporte voluntario de <b>{stars} Telegram Stars (XTR)</b> ha sido recibido y acreditado con éxito en la tesorería de la comunidad.\n\n"
         f"Tu apoyo impulsa la infraestructura del Búnker y el mantenimiento de nuestras transmisiones y herramientas de élite.\n\n"
-        f"🛡️️ <i>Cloud Media Management</i>"
+        f"🛡️ <i>Cloud Media Management</i>"
     ) if lang == "es" else (
         f"🌟 <b>Thank you so much for your contribution!</b>\n\n"
         f"Your voluntary contribution of <b>{stars} Telegram Stars (XTR)</b> has been successfully received and credited to the community treasury.\n\n"
@@ -7023,8 +7778,12 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
     rows = []
     try:
         chat_info = await bot.get_chat(group_id)
+        chat_title = getattr(chat_info, "title", None) or ("la comunidad" if lang == "es" else "the community")
+        btn_label = f"🔙 Volver a {chat_title[:20]}" if lang == "es" else f"🔙 Return to {chat_title[:20]}"
         if chat_info and getattr(chat_info, "username", None):
-            rows.append([InlineKeyboardButton(text=t["btn_back_group"], url=f"https://t.me/{chat_info.username}")])
+            rows.append([InlineKeyboardButton(text=btn_label, url=f"https://t.me/{chat_info.username}")])
+        elif chat_info and getattr(chat_info, "invite_link", None):
+            rows.append([InlineKeyboardButton(text=btn_label, url=chat_info.invite_link)])
     except Exception:
         pass
     rows.append([InlineKeyboardButton(text=t["btn_saas"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))])
