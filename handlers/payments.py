@@ -7,6 +7,7 @@ membresías de canales con enlaces criptográficos de un solo uso, cola de speak
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
+import sys
 import asyncio
 import html
 import importlib
@@ -29,6 +30,49 @@ router = Router()
 
 # Diccionario de estado conversacional para capturar montos manuales de Stars
 CUSTOM_TIP_STATES: dict[tuple[int, int], int] = {}  # (bot_id, user_id) -> group_id
+_CUSTOM_TIP_TS: dict[tuple[int, int], float] = {}   # (bot_id, user_id) -> instante de apertura
+CUSTOM_TIP_TTL_SECONDS = 600
+MAX_TIP_STARS = 10000                               # Tope de Telegram por factura en XTR
+
+_BG_TASKS: set = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Tarea en segundo plano con referencia fuerte (evita que el GC la cancele)."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
+def _open_custom_tip(bot_id: int, user_id: int, group_id: int) -> None:
+    key = (bot_id, user_id)
+    CUSTOM_TIP_STATES[key] = group_id
+    _CUSTOM_TIP_TS[key] = time.monotonic()
+
+
+def _close_custom_tip(bot_id: int, user_id: int):
+    key = (bot_id, user_id)
+    _CUSTOM_TIP_TS.pop(key, None)
+    return CUSTOM_TIP_STATES.pop(key, None)
+
+
+def _awaiting_custom_tip(message: Message, bot: Bot) -> bool:
+    """
+    Filtro del handler de monto libre. CRÍTICO: antes el handler capturaba TODO texto privado
+    y retornaba sin hacer nada cuando no había propina pendiente. Como este router se incluye
+    primero, la consola de user_private.py jamás recibía las respuestas de sus asistentes.
+    """
+    if not message.from_user:
+        return False
+    key = (bot.id, message.from_user.id)
+    if key not in CUSTOM_TIP_STATES:
+        return False
+    opened = _CUSTOM_TIP_TS.get(key, 0.0)
+    if time.monotonic() - opened > CUSTOM_TIP_TTL_SECONDS:
+        _close_custom_tip(bot.id, message.from_user.id)
+        return False
+    return True
 
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
@@ -60,27 +104,61 @@ def get_lang(lang_code: str) -> str:
     return "es" if lang_code and lang_code.startswith("es") else "en"
 
 
+def _user_private_module():
+    """Acceso diferido a handlers.user_private (fuente de verdad de la identidad maestro/clon)."""
+    return sys.modules.get("handlers.user_private") or sys.modules.get(f"{__package__}.user_private" if __package__ else "")
+
+
+def _master_bot_id() -> int:
+    up_mod = _user_private_module()
+    if up_mod is not None:
+        resolver = getattr(up_mod, "_resolve_master_bot_id", None)
+        if callable(resolver):
+            try:
+                resolved = int(resolver() or 0)
+                if resolved:
+                    return resolved
+            except Exception:
+                pass
+    head = os.getenv("BOT_TOKEN", "").split(":", 1)[0].strip()
+    return int(head) if head.isdigit() else 0
+
+
 def is_clone_bot(bot: Bot) -> bool:
-    """Detecta si la instancia actual es un bot clon del maestro."""
-    bot_username = (getattr(bot, "username", "") or "").strip().lstrip("@").lower()
-    master_username = (get_master_bot_username() or "").strip().lstrip("@").lower()
-    if not bot_username or not master_username:
-        return False
-    return bot_username != master_username
+    """
+    Detecta si la instancia actual es un bot clon del maestro comparando bot.id con el ID del
+    token maestro. (La versión anterior leía bot.username, atributo que aiogram no expone, y
+    siempre devolvía False: los clones cobraban licencias en su propio balance.)
+    """
+    master_id = _master_bot_id()
+    return bool(master_id) and getattr(bot, "id", 0) != master_id
 
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    try:
+        return int(user_id) in SUPER_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def get_master_bot_username() -> str | None:
     """Devuelve el nombre de usuario del Bot Maestro configurado para redirigir pagos."""
+    up_mod = _user_private_module()
+    if up_mod is not None:
+        getter = getattr(up_mod, "get_master_bot_username", None)
+        if callable(getter):
+            try:
+                runtime_username = (getter() or "").strip().lstrip("@")
+                if runtime_username:
+                    return runtime_username
+            except Exception:
+                pass
     username = (
         os.getenv("MASTER_BOT_USERNAME")
         or os.getenv("MASTER_BOT_USERNAME_TG")
         or os.getenv("MASTER_BOT")
         or os.getenv("MASTER_BOT_USER")
-        or "Alphacentinel"
+        or "thebunkerapp_bot"
     ).strip().lstrip("@")
     return username or None
 
@@ -99,13 +177,13 @@ async def is_user_creator(bot: Bot, chat_id: int, user_id: int) -> bool:
 async def auto_delete_pair(msg1: Message, msg2: Message, delay: int = 15):
     """Auto-destrucción dual para mantener el chat grupal libre de clutter visual."""
     await asyncio.sleep(delay)
-    try: 
+    try:
         await msg1.delete()
-    except Exception: 
+    except Exception:
         pass
-    try: 
+    try:
         await msg2.delete()
-    except Exception: 
+    except Exception:
         pass
 
 
@@ -149,37 +227,60 @@ def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
 # ==========================================
 # 🗄️ RESOLUTORES DINÁMICOS DE BASE DE DATOS
 # ==========================================
+_DB_MODULE = None
+
+
+def _get_db_module():
+    """
+    Resuelve el módulo de persistencia. La versión anterior intentaba `handlers.database`
+    (inexistente): TODAS las llamadas fallaban y se ocultaban en silencio — licencias sin
+    aprobar, pases VIP sin registrar, idempotencia solo en RAM.
+    """
+    global _DB_MODULE
+    if _DB_MODULE is not None:
+        return _DB_MODULE
+    last_error = None
+    for name in ("database.database", f"{__package__}.database" if __package__ else None):
+        if not name:
+            continue
+        try:
+            _DB_MODULE = importlib.import_module(name)
+            return _DB_MODULE
+        except ImportError as ex:
+            last_error = ex
+    raise ImportError(f"No se encontró el módulo de base de datos: {last_error}")
+
+
 async def _call_db_fn(function_name: str, *args, **kwargs):
     """Resuelve funciones de persistencia de forma lazy evitando dependencias circulares."""
-    package = __package__ or __name__.rpartition(".")[0]
-    db_module = (
-        importlib.import_module(".database", package=package)
-        if package else importlib.import_module("database.database")
-    )
+    db_module = _get_db_module()
     func = getattr(db_module, function_name, None)
     if func is None:
         raise AttributeError(f"{function_name} not found in database module")
     return await func(*args, **kwargs)
 
 
+_SEEN_PAYMENTS: dict = {}
+_SEEN_PAYMENTS_MAX = 5000
+
+
 async def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
     key = f"{charge_id}:{user_id}:{payload}"
-    if not hasattr(mark_payment_processed, "_seen"):
-        mark_payment_processed._seen = set()
-
-    if key in mark_payment_processed._seen:
+    if key in _SEEN_PAYMENTS:
         return False
 
     try:
         result = await _call_db_fn("mark_payment_processed", charge_id, user_id, payload)
         if result is False:
             return False
-        mark_payment_processed._seen.add(key)
-        return True
-    except Exception:
-        pass
+    except Exception as ex:
+        # Sin base de datos se conserva al menos la idempotencia en memoria.
+        logger.error(f"❌ [Pagos] No se pudo persistir el cargo {charge_id}: {ex}")
 
-    mark_payment_processed._seen.add(key)
+    _SEEN_PAYMENTS[key] = time.time()
+    if len(_SEEN_PAYMENTS) > _SEEN_PAYMENTS_MAX:
+        for old_key in sorted(_SEEN_PAYMENTS, key=_SEEN_PAYMENTS.get)[: _SEEN_PAYMENTS_MAX // 2]:
+            _SEEN_PAYMENTS.pop(old_key, None)
     return True
 
 
@@ -192,6 +293,61 @@ async def get_group_tier(chat_id: int) -> str:
 
 async def approve_group(group_id: int, tier: str, duration_days: int = 30):
     return await _call_db_fn("approve_group", group_id=group_id, tier=tier, duration_days=duration_days)
+
+
+def _sync_current_license(chat_id: int):
+    db_module = _get_db_module()
+    with db_module.get_db_connection() as conn:
+        return conn.execute(
+            "SELECT tier, CAST(ROUND(julianday(expires_at) - julianday('now')) AS INTEGER) "
+            "FROM approved_groups WHERE group_id = ? AND expires_at IS NOT NULL",
+            (chat_id,)
+        ).fetchone()
+
+
+async def compute_license_grant(chat_id: int, purchased_tier: str, base_days: int = 30) -> tuple[str, int]:
+    """
+    Calcula el nivel y los días a conceder sin que el cliente pierda tiempo pagado:
+      • Renovación del mismo nivel → se suman los días restantes.
+      • PRO → ULTRA PRO → los días PRO restantes se prorratean a la mitad (ULTRA cuesta el doble).
+      • Compra de PRO con ULTRA PRO vigente → se conserva ULTRA PRO y se suman 15 días.
+    Antes cada pago reiniciaba la vigencia a 30 días desde hoy (renovar antes de tiempo
+    hacía perder los días restantes).
+    """
+    try:
+        row = await asyncio.to_thread(_sync_current_license, chat_id)
+    except Exception as ex:
+        logger.warning(f"⚠️ [Licencias] No se pudo leer la vigencia actual de {chat_id}: {ex}")
+        row = None
+
+    if not row or row[1] is None or int(row[1]) <= 0:
+        return purchased_tier, base_days
+
+    current_tier, remaining = str(row[0] or "free"), int(row[1])
+    if current_tier == purchased_tier:
+        return purchased_tier, base_days + remaining
+    if current_tier == "pro" and purchased_tier == "ultra_pro":
+        return "ultra_pro", base_days + remaining // 2
+    if current_tier == "ultra_pro" and purchased_tier == "pro":
+        return "ultra_pro", remaining + base_days // 2
+    return purchased_tier, base_days
+
+
+def _sync_record_vip_badge(chat_id: int, user_id: int) -> None:
+    """Registra que ESTE bot promovió al usuario solo por el título VIP (para revertirlo al expirar)."""
+    db_module = _get_db_module()
+    with db_module.get_db_connection() as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS vip_badge_promotions ("
+            "group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+            "promoted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (group_id, user_id))"
+        )
+        conn.execute(
+            "INSERT INTO vip_badge_promotions (group_id, user_id, promoted_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(group_id, user_id) DO UPDATE SET promoted_at = CURRENT_TIMESTAMP",
+            (chat_id, user_id)
+        )
+        conn.commit()
 
 
 async def get_speaker_price(chat_id: int) -> int | None:
@@ -304,7 +460,7 @@ TEXTS = {
         "btn_back": "🔙 Back to Main Menu",
         "btn_back_group": "🔙 Back to Panel",
         "btn_pay_stars": "⭐ Pay with Stars",
-        
+
         "inv_pro_t": "PRO Subscription (300 XTR)",
         "inv_pro_d": "Unlimited bot commands, automated purge center, custom captcha pro, and master sentinel shielding.",
         "inv_ultra_t": "ULTRA PRO License (600 XTR)",
@@ -315,7 +471,7 @@ TEXTS = {
         "inv_speaker_d": "Priority placement in the voice room speaker queue with uninterrupted mic privilege.",
         "inv_tip_t": "Community Stars Tip (XTR)",
         "inv_tip_d": "Voluntary Telegram Stars donation directly supporting the community and creators.",
-        
+
         "pmt_ok_pro": (
             "🎉 <b>Payment Confirmed! PRO Plan Active</b>\n\n"
             "• Environment: <code>{chat_id}</code> upgraded to <b>PRO ⭐</b>\n"
@@ -455,7 +611,7 @@ TEXTS = {
 async def show_tip_selection(message: Message, group_id: int, lang: str = "es"):
     """Despliega presets rápidos de Stars y el botón interactivo para monto personalizado."""
     btn_custom_text = "✍️ Donar otro monto / Custom amount" if lang == "es" else "✍️ Custom amount / Other amount"
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="⭐ 15", callback_data=f"paytip_{group_id}_15"),
@@ -520,6 +676,9 @@ async def send_stars_tip_invoice(bot: Bot, user_id: int, group_id: int, amount: 
 # ==========================================
 @router.message(Command("pro", "ultra"))
 async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
+    if not message.from_user or (message.sender_chat and message.chat.type != "private"):
+        # Administrador anónimo o publicación como canal: la factura necesita un DM real.
+        return
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
 
@@ -536,14 +695,14 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
     if not await is_user_creator(bot, chat_id, user_id):
         try:
             warn = await message.reply(t["owner_only"], parse_mode="HTML")
-            asyncio.create_task(auto_delete_pair(message, warn, delay=8))
+            _spawn(auto_delete_pair(message, warn, delay=8))
         except Exception:
             pass
         return
 
-    try: 
+    try:
         await message.delete()
-    except Exception: 
+    except Exception:
         pass
 
     current_tier = await get_group_tier(chat_id)
@@ -578,7 +737,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
     except Exception:
         bot_info = await bot.get_me()
         temp_msg = await message.answer(t["private_only"].format(bot_username=bot_info.username), parse_mode="HTML")
-        asyncio.create_task(auto_delete_pair(message, temp_msg, delay=12))
+        _spawn(auto_delete_pair(message, temp_msg, delay=12))
 
 
 # ==========================================
@@ -640,12 +799,12 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             _, back_cb = await resolve_chat_context(bot, chat_id_target)
             prices = [LabeledPrice(label=title, amount=price)]
             back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")
-            
+
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
                 [back_btn]
             ])
-            
+
             await bot.send_invoice(
                 chat_id=message.chat.id,
                 title=title,
@@ -708,7 +867,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
 
             prices = [LabeledPrice(label=title, amount=stars_price)]
-            
+
             kb_rows = [
                 [InlineKeyboardButton(text=f"⭐ Pagar {stars_price} XTR", pay=True)]
             ]
@@ -750,13 +909,13 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             title = f"MicVIP: {tag}"[:32]
             desc = custom_desc[:255] if custom_desc else t["inv_vip_d"]
             payload = f"vip_mic_{chat_id}"
-            
+
             prices = [LabeledPrice(label=title, amount=final_price)]
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({final_price} XTR)", pay=True)],
                 [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
             ])
-            
+
             await bot.send_invoice(
                 chat_id=message.chat.id,
                 title=title,
@@ -823,6 +982,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 return
 
             # Si ya trae monto fijo definido, genera la factura directa
+            if tip_amount > MAX_TIP_STARS:
+                await show_tip_selection(message, chat_id, lang)
+                return
             await send_stars_tip_invoice(bot, message.chat.id, chat_id, tip_amount, lang)
         except Exception as e:
             logger.error(f"Error generando factura de propina: {e}")
@@ -841,7 +1003,7 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
 
     if len(parts) >= 3:
-        plan = parts[1] 
+        plan = parts[1]
         chat_id = int(parts[2])
 
         if chat_id >= 0:
@@ -881,14 +1043,14 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
             [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({price} XTR)", pay=True)],
             [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
         ])
-        
+
         try:
             await bot.send_invoice(
                 chat_id=callback.message.chat.id,
                 title=title,
                 description=desc,
                 payload=payload,
-                provider_token="", 
+                provider_token="",
                 currency="XTR",
                 prices=prices,
                 reply_markup=markup
@@ -905,12 +1067,16 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
 async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
     lang = get_lang(callback.from_user.language_code)
-    
+
     # Caso 1: El usuario pulsa "Donar otro monto"
     if len(parts) >= 3 and parts[1] == "custom":
-        group_id = int(parts[2])
-        CUSTOM_TIP_STATES[(bot.id, callback.from_user.id)] = group_id
-        
+        try:
+            group_id = int(parts[2])
+        except ValueError:
+            await callback.answer()
+            return
+        _open_custom_tip(bot.id, callback.from_user.id, group_id)
+
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ Cancelar / Cancel", callback_data="cancel_custom_tip")]
         ])
@@ -929,16 +1095,29 @@ async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
 
     # Caso 2: El usuario selecciona un preset (ej. 15, 50, 100, 250, 500)
     if len(parts) >= 3:
-        group_id = int(parts[1])
-        amount = int(parts[2])
+        try:
+            group_id = int(parts[1])
+            amount = int(parts[2])
+        except ValueError:
+            await callback.answer()
+            return
         await callback.answer()
-        await send_stars_tip_invoice(bot, callback.from_user.id, group_id, amount, lang)
+        if group_id >= 0 or not (1 <= amount <= MAX_TIP_STARS):
+            return
+        try:
+            await send_stars_tip_invoice(bot, callback.from_user.id, group_id, amount, lang)
+        except Exception as ex:
+            logger.error(f"Error emitiendo factura de propina preset: {ex}")
+            try:
+                await callback.message.answer(TEXTS[lang]["err_inv"], parse_mode="HTML")
+            except Exception:
+                pass
 
 
 @router.callback_query(F.data == "cancel_custom_tip")
 async def cancel_custom_tip_callback(callback: CallbackQuery, bot: Bot):
     """Cancela la solicitud de monto manual y libera el estado en memoria."""
-    CUSTOM_TIP_STATES.pop((bot.id, callback.from_user.id), None)
+    _close_custom_tip(bot.id, callback.from_user.id)
     lang = get_lang(callback.from_user.language_code)
     await callback.answer("Donación cancelada." if lang == "es" else "Donation cancelled.")
     try:
@@ -947,29 +1126,31 @@ async def cancel_custom_tip_callback(callback: CallbackQuery, bot: Bot):
         pass
 
 
-@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
+@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"), _awaiting_custom_tip)
 async def process_custom_tip_input(message: Message, bot: Bot):
     """Captura el número de Stars ingresado por el usuario y genera la factura."""
-    user_key = (bot.id, message.from_user.id)
-    if user_key not in CUSTOM_TIP_STATES:
+    group_id = _close_custom_tip(bot.id, message.from_user.id)
+    if group_id is None:
         return
-
-    group_id = CUSTOM_TIP_STATES.pop(user_key)
     lang = get_lang(message.from_user.language_code)
-    text_val = (message.text or "").strip()
+    text_val = (message.text or "").strip().replace(".", "").replace(",", "")
 
-    if not text_val.isdigit() or int(text_val) < 1:
-        CUSTOM_TIP_STATES[user_key] = group_id  # Mantiene la espera activa si se equivoca
+    if not text_val.isdigit() or not (1 <= int(text_val) <= MAX_TIP_STARS):
+        _open_custom_tip(bot.id, message.from_user.id, group_id)  # Mantiene la espera activa si se equivoca
         err_msg = (
-            "⚠️ Ingresa un número entero positivo (mínimo 1 ⭐)."
+            f"⚠️ Ingresa un número entero entre 1 y {MAX_TIP_STARS} ⭐."
             if lang == "es" else
-            "⚠️ Please enter a positive integer of Stars (minimum 1 ⭐)."
+            f"⚠️ Please enter a whole number of Stars between 1 and {MAX_TIP_STARS} ⭐."
         )
         await message.answer(err_msg)
         return
 
     amount = int(text_val)
-    await send_stars_tip_invoice(bot, message.chat.id, group_id, amount, lang)
+    try:
+        await send_stars_tip_invoice(bot, message.chat.id, group_id, amount, lang)
+    except Exception as ex:
+        logger.error(f"Error emitiendo factura de propina personalizada: {ex}")
+        await message.answer(TEXTS[lang]["err_inv"], parse_mode="HTML")
 
 
 # ==========================================
@@ -977,7 +1158,46 @@ async def process_custom_tip_input(message: Message, bot: Bot):
 # ==========================================
 @router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_)"))
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
-    await pre_checkout_query.answer(ok=True)
+    """
+    Telegram exige responder en menos de 10 s. Se valida que la factura siga siendo coherente
+    (moneda, comunidad válida, precio vigente del plan) antes de cobrar; así no hace falta
+    reembolsar después por un plan pausado o un precio modificado.
+    """
+    payload = pre_checkout_query.invoice_payload or ""
+    amount = int(pre_checkout_query.total_amount or 0)
+    ok = False
+    try:
+        if pre_checkout_query.currency != "XTR" or amount < 1:
+            ok = False
+        elif payload.startswith("sub_"):
+            parts = payload.split("_")
+            expected = {"pro": PRICE_PRO_STARS, "ultra": PRICE_ULTRAPRO_STARS}.get(parts[1])
+            ok = expected is not None and int(parts[2]) < 0 and amount == expected
+        elif payload.startswith("chan_sub_"):
+            parts = payload.split("_")
+            channel_id, plan_id = int(parts[2]), int(parts[3])
+            plan = await asyncio.wait_for(get_channel_plan(plan_id), timeout=5)
+            ok = bool(
+                plan and plan.get("channel_id") == channel_id and plan.get("status") == "active"
+                and amount == int(plan.get("stars_price") or 0)
+            )
+        elif payload.startswith("vip_mic_"):
+            ok = int(payload.split("_")[2]) < 0
+        elif payload.startswith("speaker_"):
+            ok = int(payload.split("_")[1]) < 0
+        elif payload.startswith("tip_"):
+            ok = int(payload.split("_")[1]) < 0 and amount <= MAX_TIP_STARS
+    except Exception as ex:
+        logger.warning(f"⚠️ [Pre-Checkout] Payload no válido {payload!r}: {ex}")
+        ok = False
+
+    if ok:
+        await pre_checkout_query.answer(ok=True)
+    else:
+        await pre_checkout_query.answer(
+            ok=False,
+            error_message="La oferta cambió o ya no está disponible. Solicita una nueva factura. / This offer changed; please request a new invoice."
+        )
 
 
 # ==========================================
@@ -1002,10 +1222,14 @@ async def process_successful_payment(message: Message, bot: Bot):
             parts = payload.split("_")
             plan_type = parts[1]
             chat_id = int(parts[2])
-            
+
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
-            await approve_group(group_id=chat_id, tier=tier_db, duration_days=30)
-            
+            granted_tier, granted_days = await compute_license_grant(chat_id, tier_db, base_days=30)
+            await approve_group(group_id=chat_id, tier=granted_tier, duration_days=granted_days)
+            logger.info(f"⭐ [Licencia] {chat_id} → {granted_tier} por {granted_days} días (compra: {tier_db}).")
+            if granted_tier != tier_db:
+                plan_type = "ultra"
+
             chat_kind, back_cb = await resolve_chat_context(bot, chat_id)
 
             if plan_type == "pro":
@@ -1072,7 +1296,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
             ]
-            
+
             if target_link:
                 target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
                 kb_rows.append([InlineKeyboardButton(text=t["btn_view_target"], url=target_url)])
@@ -1109,37 +1333,51 @@ async def process_successful_payment(message: Message, bot: Bot):
     elif payload.startswith("vip_mic_"):
         try:
             chat_id = int(payload.split("_")[2])
-            
+
             await grant_vip_mic(user_id=user_id, group_id=chat_id)
-            
+
             try:
                 await set_participant_mic(
-                    chat_id=chat_id, 
-                    user_id=user_id, 
-                    muted=False, 
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    muted=False,
                     volume=10000
                 )
             except Exception as radar_err:
                 logger.warning(f"Aviso Centinela al restaurar volumen de pase VIP: {radar_err}")
-            
+
             try:
                 custom_cfg = await get_mic_vip_custom_config(chat_id)
                 badge_title = custom_cfg.get("tag") or await get_vip_badge_title(chat_id)
 
-                await bot.promote_chat_member(
-                    chat_id=chat_id, user_id=user_id,
-                    can_manage_chat=True, can_change_info=False, can_delete_messages=False,
-                    can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
-                    can_promote_members=False, can_manage_video_chats=False
-                )
-                await bot.set_chat_administrator_custom_title(
-                    chat_id=chat_id, user_id=user_id, custom_title=badge_title[:16]
-                )
+                # Un administrador real NO se re-promueve: promote_chat_member con todos los
+                # permisos en False le quitaría sus facultades reales de moderación.
+                current_status = None
+                try:
+                    current_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+                    current_status = current_member.status
+                except Exception:
+                    pass
+
+                if current_status not in ("creator", "administrator"):
+                    await bot.promote_chat_member(
+                        chat_id=chat_id, user_id=user_id,
+                        can_manage_chat=True, can_change_info=False, can_delete_messages=False,
+                        can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
+                        can_promote_members=False, can_manage_video_chats=False
+                    )
+                    await bot.set_chat_administrator_custom_title(
+                        chat_id=chat_id, user_id=user_id, custom_title=badge_title[:16]
+                    )
+                    try:
+                        await asyncio.to_thread(_sync_record_vip_badge, chat_id, user_id)
+                    except Exception as rec_err:
+                        logger.warning(f"Aviso registrando insignia VIP temporal ({chat_id}/{user_id}): {rec_err}")
             except TelegramBadRequest as admin_err:
                 logger.warning(f"Aviso al asignar título VIP: {admin_err}")
             except Exception as admin_err:
                 logger.warning(f"Error general al asignar título VIP de micrófono: {admin_err}")
-            
+
             kb_rows = []
             try:
                 chat_info = await bot.get_chat(chat_id)
@@ -1235,11 +1473,11 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             confirm_text = t["pmt_tip_ok"].format(stars=stars_paid)
             await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
-            
+
             # Anuncio opcional en la comunidad
             if chat_id:
                 try:
-                    buyer_name = html.escape(message.from_user.full_name)
+                    buyer_name = html.escape(message.from_user.full_name or "Usuario")
                     public_notice = (
                         f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> acaba de enviar una propina "
                         f"de <b>{stars_paid} Stars (XTR)</b>. ¡Gracias por respaldar el proyecto!\n\n"
@@ -1250,7 +1488,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                         f"🛡️ <i>Cloud Media Management</i>"
                     )
                     pub_msg = await bot.send_message(chat_id=chat_id, text=public_notice, parse_mode="HTML")
-                    asyncio.create_task(auto_delete_pair(pub_msg, pub_msg, delay=45))
+                    _spawn(auto_delete_pair(pub_msg, pub_msg, delay=45))
                 except Exception:
                     pass
 

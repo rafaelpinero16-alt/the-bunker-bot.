@@ -12,13 +12,13 @@ import html
 import logging
 from aiogram import Router, F, Bot
 from aiogram.types import (
-    Message, ChatPermissions, InlineKeyboardMarkup, 
+    Message, ChatPermissions, InlineKeyboardMarkup,
     InlineKeyboardButton, CallbackQuery
 )
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
-    check_command_limit, get_group_tier, 
+    check_command_limit, get_group_tier,
     add_to_whitelist, remove_from_whitelist,
     ban_user, add_to_blacklist, get_blacklist,
     is_whitelisted, add_user_strike, get_user_strikes,
@@ -36,6 +36,10 @@ RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
+# Cuentas de servicio de Telegram: 777000 (canal vinculado), 1087968824 (admin anónimo),
+# 136817688 (publicación como canal). Jamás pueden ser objetivo de una sanción.
+SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
+
 _BG_TASKS: set = set()
 
 
@@ -47,7 +51,49 @@ def _spawn(coro) -> asyncio.Task:
 
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    try:
+        return int(user_id) in SUPER_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+def _msg_lang(message: Message) -> str:
+    """Idioma del autor tolerando mensajes sin from_user."""
+    user = getattr(message, "from_user", None)
+    return get_lang(getattr(user, "language_code", None) or "es")
+
+
+def _is_anonymous_admin(message: Message) -> bool:
+    return bool(message.sender_chat and message.sender_chat.id == message.chat.id)
+
+
+_FULL_CHAT_PERMISSIONS = dict(
+    can_send_messages=True,
+    can_send_audios=True,
+    can_send_documents=True,
+    can_send_photos=True,
+    can_send_videos=True,
+    can_send_video_notes=True,
+    can_send_voice_notes=True,
+    can_send_polls=True,
+    can_send_other_messages=True,
+    can_add_web_page_previews=True
+)
+
+
+async def _chat_default_permissions(bot: Bot, chat_id: int) -> ChatPermissions:
+    """
+    Permisos por defecto del grupo (coherente con la aduana de groups.py): levantar una
+    sanción devuelve al usuario al nivel general del grupo, no a permisos totales que
+    saltarían las restricciones generales o un Raid Lockdown activo.
+    """
+    try:
+        chat = await bot.get_chat(chat_id)
+        if chat.permissions is not None:
+            return chat.permissions
+    except Exception:
+        pass
+    return ChatPermissions(**_FULL_CHAT_PERMISSIONS)
 
 
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -63,7 +109,7 @@ async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 async def is_target_protected(bot: Bot, chat_id: int, target_id: int) -> bool:
     """Verifica si el objetivo posee inmunidad absoluta contra sanciones."""
-    if is_super_admin(target_id) or target_id == 1087968824:
+    if is_super_admin(target_id) or target_id in SERVICE_ACCOUNT_IDS:
         return True
     try:
         if await is_whitelisted(target_id):
@@ -208,7 +254,12 @@ TEXTS = {
 async def extract_target_user(message: Message, command: CommandObject):
     """Extrae la entidad de usuario objetivo mediante respuesta, mención @ o ID numérico."""
     if message.reply_to_message and message.reply_to_message.from_user:
-        return message.reply_to_message.from_user
+        replied_user = message.reply_to_message.from_user
+        # Respuesta a una publicación hecha como canal / admin anónimo: el from_user es una
+        # cuenta de servicio de Telegram, no la persona real (sancionarla no tiene efecto).
+        if replied_user.id in SERVICE_ACCOUNT_IDS:
+            return None
+        return replied_user
     if command and command.args:
         arg = command.args.split()[0].strip()
         if arg.isdigit():
@@ -256,13 +307,22 @@ async def enforce_limits(group_id: int, user_id: int, command_name: str, lang: s
 
 async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKeyboardMarkup | None):
     """Despacha la consola remota de sanción al chat privado del administrador ejecutor."""
+    if _is_anonymous_admin(message) or not message.from_user:
+        # Un administrador anónimo no tiene DM: la consola se muestra en el grupo de forma
+        # temporal (cada botón vuelve a verificar que quien pulsa sea administrador).
+        try:
+            sent = await message.answer(text, reply_markup=kb, parse_mode="HTML")
+            _spawn(auto_delete_pair(message, sent, delay=60))
+        except Exception as ex:
+            logger.debug(f"Aviso mostrando consola remota en grupo: {ex}")
+        return
     try:
         await message.bot.send_message(chat_id=message.from_user.id, text=text, reply_markup=kb, parse_mode="HTML")
         tier = await get_group_tier(message.chat.id)
         if tier in ["pro", "ultra_pro"] or is_super_admin(message.from_user.id):
-            try: 
+            try:
                 await message.delete()
-            except Exception: 
+            except Exception:
                 pass
     except Exception:
         bot_info = await message.bot.get_me()
@@ -275,12 +335,12 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
     if message.chat.type == "private":
         return None, None, None
 
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     # Reconocimiento de administradores anónimos en supergrupos
-    is_anon = bool(message.sender_chat and message.sender_chat.id == message.chat.id)
-    if not is_anon and not await is_operator_admin(bot, message.chat.id, message.from_user.id):
+    is_anon = _is_anonymous_admin(message)
+    if not is_anon and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
         try:
             await message.delete()
         except Exception:
@@ -352,7 +412,7 @@ async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
             InlineKeyboardButton(text=t["btn_perm"], callback_data=f"exec_ban_{message.chat.id}_{target.id}_0")
         ]
     ])
-    
+
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["ban_title"].format(group_name=html.escape(chat_title), name=target_name)
     await send_remote_menu(message, lang, text, kb)
@@ -389,7 +449,7 @@ async def cmd_kick(message: Message, command: CommandObject, bot: Bot):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_confirm_kick"], callback_data=f"exec_kick_{message.chat.id}_{target.id}_0")]
     ])
-    
+
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["kick_title"].format(group_name=html.escape(chat_title), name=target_name)
     await send_remote_menu(message, lang, text, kb)
@@ -419,7 +479,7 @@ async def cmd_mute(message: Message, command: CommandObject, bot: Bot):
             InlineKeyboardButton(text=t["btn_perm"], callback_data=f"exec_mute_{message.chat.id}_{target.id}_0")
         ]
     ])
-    
+
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["mute_title"].format(group_name=html.escape(chat_title), name=target_name)
     await send_remote_menu(message, lang, text, kb)
@@ -448,9 +508,11 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
         if len(args_parts) > 1:
             reason = args_parts[1].strip()
 
-    raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
+    raw_name = getattr(target, "full_name", None) or getattr(target, "first_name", None) or f"ID {target.id}"
     clean_username = getattr(target, "username", "") or ""
     target_mention = f'<a href="tg://user?id={target.id}">{html.escape(raw_name)}</a>'
+    # El motivo es texto libre del operador y se inserta en mensajes HTML.
+    reason = html.escape(reason[:200])
 
     try:
         from handlers.groups import enforce_warn_ladder
@@ -485,10 +547,10 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
                 await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
             elif action == "kick":
                 await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id, until_date=int(time.time() + 35))
-                await bot.unban_chat_member(chat_id=message.chat.id, user_id=target.id)
+                await bot.unban_chat_member(chat_id=message.chat.id, user_id=target.id, only_if_banned=True)
             elif action == "mute":
                 await bot.restrict_chat_member(
-                    chat_id=message.chat.id, 
+                    chat_id=message.chat.id,
                     user_id=target.id,
                     permissions=ChatPermissions(can_send_messages=False)
                 )
@@ -498,7 +560,7 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
                 pass
             msg = await message.reply(t["warn_max_hit"].format(name=target_mention, limit=limit, action=action.upper()), parse_mode="HTML")
         except Exception as ex:
-            msg = await message.reply(f"❌ Error: {ex}", parse_mode="HTML")
+            msg = await message.reply(f"❌ Error: {html.escape(str(ex))}", parse_mode="HTML")
     else:
         try:
             vol = int(10000 * max(0, limit - current_strikes) / max(1, limit))
@@ -515,10 +577,10 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
     """Restablece a cero las advertencias acumuladas por un usuario y restaura facultades de texto y voz."""
     if message.chat.type == "private":
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
+    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
         try:
             await message.delete()
         except Exception:
@@ -532,32 +594,21 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
         return
 
     await reset_user_strikes(message.chat.id, target.id)
-    
+
     # 1. Restaurar volumen acústico en la llamada
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=False, volume=10000)
     except Exception:
         pass
 
-    # 2. Restaurar permisos completos de texto y multimedia en el chat general
-    permissions = ChatPermissions(
-        can_send_messages=True,
-        can_send_audios=True,
-        can_send_documents=True,
-        can_send_photos=True,
-        can_send_videos=True,
-        can_send_video_notes=True,
-        can_send_voice_notes=True,
-        can_send_polls=True,
-        can_send_other_messages=True,
-        can_add_web_page_previews=True
-    )
+    # 2. Restaurar los permisos por defecto del grupo en el chat general
+    permissions = await _chat_default_permissions(bot, message.chat.id)
     try:
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target.id, permissions=permissions)
     except Exception as e:
         logger.debug(f"Aviso restaurando permisos de chat en unwarn ({target.id}): {e}")
 
-    raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
+    raw_name = getattr(target, "full_name", None) or getattr(target, "first_name", None) or f"ID {target.id}"
     text = t["warn_cleared"].format(name=html.escape(raw_name))
     msg = await message.reply(text, parse_mode="HTML")
     _spawn(auto_delete_pair(message, msg, delay=12))
@@ -570,14 +621,19 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
 async def cb_mod_execution(callback: CallbackQuery):
     """Ejecuta la sanción seleccionada sincronizándola en tiempo real con el Centinela de voz."""
     await callback.answer()
-    parts = callback.data.split("_")
+    parts = (callback.data or "").split("_")
     if len(parts) < 5:
         return
 
     action = parts[1]
-    group_id = int(parts[2])
-    target_id = int(parts[3])
-    minutes = int(parts[4])
+    try:
+        group_id = int(parts[2])
+        target_id = int(parts[3])
+        minutes = int(parts[4])
+    except ValueError:
+        return
+    if action not in ("ban", "kick", "mute") or minutes < 0 or minutes > 525600:
+        return
 
     lang = get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
@@ -592,7 +648,7 @@ async def cb_mod_execution(callback: CallbackQuery):
 
     try:
         target_member = await callback.bot.get_chat_member(chat_id=group_id, user_id=target_id)
-        raw_name = target_member.user.full_name
+        raw_name = target_member.user.full_name or f"ID: {target_id}"
     except Exception:
         raw_name = f"ID: {target_id}"
 
@@ -615,25 +671,25 @@ async def cb_mod_execution(callback: CallbackQuery):
                 await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=until_timestamp)
                 dur = format_duration(minutes, lang)
                 await callback.message.edit_text(t["ban_timed_success"].format(name=target_name, duration=dur), parse_mode="HTML")
-            
+
             # Sincronización del padrón local
             try:
                 from handlers.groups import registry_forget
                 await registry_forget(group_id, target_id)
             except Exception:
                 pass
-        
+
         elif action == "kick":
             await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
-            await callback.bot.unban_chat_member(chat_id=group_id, user_id=target_id)
+            await callback.bot.unban_chat_member(chat_id=group_id, user_id=target_id, only_if_banned=True)
             await callback.message.edit_text(t["kick_success"].format(name=target_name), parse_mode="HTML")
-            
+
             try:
                 from handlers.groups import registry_forget
                 await registry_forget(group_id, target_id)
             except Exception:
                 pass
-        
+
         elif action == "mute":
             perms = ChatPermissions(
                 can_send_messages=False,
@@ -658,8 +714,8 @@ async def cb_mod_execution(callback: CallbackQuery):
 
     except Exception as e:
         try:
-            await callback.message.edit_text(t["error"].format(error=e), parse_mode="HTML")
-        except TelegramBadRequest: 
+            await callback.message.edit_text(t["error"].format(error=html.escape(str(e))), parse_mode="HTML")
+        except TelegramBadRequest:
             pass
 
 
@@ -669,15 +725,15 @@ async def cb_mod_execution(callback: CallbackQuery):
 @router.message(Command("unmute"))
 async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
     """Restaura todos los permisos de envío en el chat y el micrófono al 100% en el videochat."""
-    if message.chat.type == "private": 
+    if message.chat.type == "private":
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
+    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+        try:
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
         return
 
@@ -699,18 +755,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
             pass
         return
 
-    permissions = ChatPermissions(
-        can_send_messages=True,
-        can_send_audios=True,
-        can_send_documents=True,
-        can_send_photos=True,
-        can_send_videos=True,
-        can_send_video_notes=True,
-        can_send_voice_notes=True,
-        can_send_polls=True,
-        can_send_other_messages=True,
-        can_add_web_page_previews=True
-    )
+    permissions = await _chat_default_permissions(bot, message.chat.id)
 
     try:
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target.id, permissions=permissions)
@@ -724,7 +769,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
         text = t["unmute_success"].format(name=target_name)
         await send_remote_menu(message, lang, text, None)
     except Exception as e:
-        msg = await message.reply(t["error"].format(error=e), parse_mode="HTML")
+        msg = await message.reply(t["error"].format(error=html.escape(str(e))), parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, delay=10))
 
 
@@ -734,20 +779,20 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
 @router.message(Command("whitelist"))
 async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
     """Concede inmunidad absoluta ante filtros antispam, cerraduras y captcha."""
-    if message.chat.type == "private": 
+    if message.chat.type == "private":
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
+    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+        try:
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
         return
 
     target = await extract_target_user(message, command)
-    
+
     limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "whitelist", lang, bot)
     if limit_text:
         try:
@@ -760,6 +805,8 @@ async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
             pass
         return
 
+    if target and target.id in SERVICE_ACCOUNT_IDS:
+        target = None
     if target:
         await add_to_whitelist(target.id)
         raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
@@ -778,20 +825,20 @@ async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
 @router.message(Command("unwhitelist"))
 async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
     """Revoca la inmunidad táctica de un usuario previamente autorizado."""
-    if message.chat.type == "private": 
+    if message.chat.type == "private":
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
+    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+        try:
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
         return
 
     target = await extract_target_user(message, command)
-    
+
     if target:
         await remove_from_whitelist(target.id)
         raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
@@ -813,15 +860,15 @@ async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
 @router.message(Command("blacklist"))
 async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
     """Registra términos prohibidos con purga automática y advertencias tácticas."""
-    if message.chat.type == "private": 
+    if message.chat.type == "private":
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(bot, message.chat.id, message.from_user.id):
-        try: 
+    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+        try:
             await message.delete()
-        except Exception: 
+        except Exception:
             pass
         return
 
@@ -838,7 +885,7 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
         return
 
     if command and command.args:
-        word = command.args.strip().lower()
+        word = command.args.strip().lower()[:64]
         await add_to_blacklist(word)
         text = t["bl_added"].format(word=html.escape(word))
         await send_remote_menu(message, lang, text, None)
@@ -850,7 +897,7 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
             word = replied_text.strip().lower()
             if len(word) > 50:
                 msg = await message.reply(
-                    "⚠️ El texto es demasiado largo para ser una palabra prohibida. Usa <code>/blacklist [palabra]</code>.\n\n🛡️ <i>Cloud Media Management</i>", 
+                    "⚠️ El texto es demasiado largo para ser una palabra prohibida. Usa <code>/blacklist [palabra]</code>.\n\n🛡️ <i>Cloud Media Management</i>",
                     parse_mode="HTML"
                 )
                 _spawn(auto_delete_pair(message, msg, delay=10))
@@ -861,16 +908,26 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
             return
         else:
             target = message.reply_to_message.from_user
-            if target:
+            if target and target.id not in SERVICE_ACCOUNT_IDS:
                 if await is_target_protected(bot, message.chat.id, target.id):
                     msg = await message.reply(t["target_protected"], parse_mode="HTML")
                     _spawn(auto_delete_pair(message, msg, delay=8))
                     return
 
                 await ban_user(target.id)
-                await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
+                try:
+                    await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
+                except Exception as ban_err:
+                    msg = await message.reply(t["error"].format(error=html.escape(str(ban_err))), parse_mode="HTML")
+                    _spawn(auto_delete_pair(message, msg, delay=10))
+                    return
                 try:
                     await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=True, volume=0)
+                except Exception:
+                    pass
+                try:
+                    from handlers.groups import registry_forget
+                    await registry_forget(message.chat.id, target.id)
                 except Exception:
                     pass
                 raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))

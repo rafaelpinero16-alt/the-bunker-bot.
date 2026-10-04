@@ -12,13 +12,13 @@ import time
 import html
 from aiogram import Router, F, Bot
 from aiogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, 
+    Message, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, WebAppInfo
 )
 from aiogram.filters import Command, CommandObject
 from aiogram.exceptions import TelegramBadRequest
 from database.database import (
-    add_to_whitelist, remove_from_whitelist, is_group_approved, 
+    add_to_whitelist, remove_from_whitelist, is_group_approved,
     get_mic_vip_price, get_mic_vip_custom_config, get_session_by_group,
     get_night_mode_config,
     get_community_live_telemetry,
@@ -26,9 +26,9 @@ from database.database import (
     is_whitelisted, get_sentinel_service_messages_config
 )
 from assistant import (
-    set_participant_mic, 
-    build_vc_moderation_keyboard, 
-    VC_START_TEXTS, 
+    set_participant_mic,
+    build_vc_moderation_keyboard,
+    VC_START_TEXTS,
     VC_MEMBER_JOIN_TEXTS
 )
 
@@ -55,12 +55,32 @@ def _spawn(coro) -> asyncio.Task:
 
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    try:
+        return int(user_id) in SUPER_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def get_lang(lang_code: str) -> str:
     """Detecta el idioma del operador para renderizar la respuesta correspondiente."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
+
+
+def _msg_lang(message: Message) -> str:
+    """Idioma del autor tolerando mensajes publicados como canal (sin from_user)."""
+    user = getattr(message, "from_user", None)
+    return get_lang(getattr(user, "language_code", None) or "es")
+
+
+def _sync_registered_owners(chat_ids: tuple) -> dict:
+    """Propietarios registrados en user_groups para cada chat (consulta en hilo, no bloquea el loop)."""
+    from database.database import get_db_connection
+    owners: dict = {}
+    with get_db_connection() as conn:
+        for cid in chat_ids:
+            rows = conn.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (cid,)).fetchall()
+            owners[cid] = {r[0] for r in rows}
+    return owners
 
 
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -335,16 +355,17 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
     # 1. Caso: El comando proviene de un Canal como remitente (sender_chat)
     if message.sender_chat and message.sender_chat.id != chat_id:
         channel_id = message.sender_chat.id
-        # Verificar en base de datos si el canal y el grupo pertenecen al mismo dueño
-        from database.database import get_db_connection
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (chat_id,))
-            grp_owner = cursor.fetchone()
-            cursor.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (channel_id,))
-            chn_owner = cursor.fetchone()
+        # Verificar en base de datos si el canal y el grupo comparten propietario registrado.
+        # (Antes: consulta SQLite síncrona dentro del event loop y comparación solo de la
+        #  primera fila, que fallaba cuando el grupo tenía varios registros.)
+        try:
+            owners = await asyncio.to_thread(_sync_registered_owners, (chat_id, channel_id))
+        except Exception as db_err:
+            logger.warning(f"Aviso verificando propietario de canal remitente en {chat_id}: {db_err}")
+            owners = {}
+        shared_owner = owners.get(chat_id, set()) & owners.get(channel_id, set())
 
-        if grp_owner and chn_owner and grp_owner[0] == chn_owner[0]:
+        if shared_owner:
             try:
                 await message.delete()
             except Exception:
@@ -355,7 +376,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
                 await message.delete()
             except Exception:
                 pass
-            lang = get_lang(message.from_user.language_code if message.from_user else "es")
+            lang = _msg_lang(message)
             warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
             _spawn(auto_delete_msg(warn, 8))
             return False
@@ -407,7 +428,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
                 await message.delete()
             except Exception:
                 pass
-            lang = get_lang(message.from_user.language_code)
+            lang = _msg_lang(message)
             warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
             _spawn(auto_delete_msg(warn, 8))
             return False
@@ -471,11 +492,11 @@ async def cb_vcinfo_micvip(callback: CallbackQuery):
     chat_id = int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 0
     lang = parts[3] if len(parts) > 3 and parts[3] in ["es", "en"] else "es"
     t = TEXTS.get(lang, TEXTS["es"])
-    
+
     custom_cfg = await get_mic_vip_custom_config(chat_id) if chat_id else {"price": 50, "text": ""}
     price = custom_cfg.get("price") or 50
     custom_desc = custom_cfg.get("text")
-    
+
     alert_text = custom_desc if custom_desc else t["micvip_info_alert"].format(price=price)
     await callback.answer(alert_text, show_alert=True)
 
@@ -509,16 +530,17 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
     if "UN NUEVO MIEMBRO" in current_text.upper() or "A NEW MEMBER" in current_text.upper() or "VOLUMEN" in current_text.upper():
         lines = current_text.split("\n")
         user_line = next((l for l in lines if "@" in l or "volumen" in l or "volume" in l), "")
-        user_ref = user_line.split(",")[0].replace("🔇", "").strip() or "Miembro"
+        # El texto se reconstruye como HTML: el nombre recuperado del mensaje plano se escapa.
+        user_ref = html.escape(user_line.split(",")[0].replace("🔇", "").strip() or "Miembro")
         text_template = VC_MEMBER_JOIN_TEXTS.get(new_lang, VC_MEMBER_JOIN_TEXTS["es"])
         new_text = text_template.format(user_name=user_ref)
     else:
         new_text = VC_START_TEXTS.get(new_lang, VC_START_TEXTS["es"])
 
     new_kb = build_vc_moderation_keyboard(
-        chat_id=chat_id, 
-        bot_username=bot_username, 
-        lang=new_lang, 
+        chat_id=chat_id,
+        bot_username=bot_username,
+        lang=new_lang,
         price=price,
         custom_btn_text=custom_btn,
         custom_btn_url=custom_url
@@ -540,11 +562,11 @@ async def cmd_start_group(message: Message, bot: Bot):
         await message.delete()
     except Exception:
         pass
-        
+
     try:
         member = await bot.get_chat_member(message.chat.id, message.from_user.id)
         if member.status not in ["creator", "administrator"] and not is_super_admin(message.from_user.id):
-            lang = get_lang(message.from_user.language_code)
+            lang = _msg_lang(message)
             name = message.from_user.username or message.from_user.first_name
             temp_msg = await bot.send_message(
                 chat_id=message.chat.id,
@@ -565,7 +587,7 @@ async def cmd_enable_vc(message: Message, bot: Bot):
         return
     chat_id = message.chat.id
     await set_vc_monitor_status(chat_id, 1)
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     await send_private_response(message, TEXTS[lang]["vc_enabled"])
 
 
@@ -575,7 +597,7 @@ async def cmd_disable_vc(message: Message, bot: Bot):
         return
     chat_id = message.chat.id
     await set_vc_monitor_status(chat_id, 0)
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     await send_private_response(message, TEXTS[lang]["vc_disabled"])
 
 
@@ -584,7 +606,7 @@ async def cmd_cams(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
     chat_id = message.chat.id
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     ctx = await get_telemetry_context(chat_id, lang)
@@ -604,7 +626,7 @@ async def cmd_cams(message: Message, bot: Bot):
 async def cmd_kickoff_cam(message: Message, command: CommandObject, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     target_id, target_mention = await extract_vc_target(message, command, bot)
@@ -635,7 +657,7 @@ async def cmd_vc_whitelist(message: Message, command: CommandObject, bot: Bot):
     """Permite autorizar identidades para no ser atenuadas por el Centinela."""
     if not await verify_creator_and_approved(message, bot):
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     target_id, target_mention = await extract_vc_target(message, command, bot)
@@ -656,7 +678,7 @@ async def cmd_vc_unwhitelist(message: Message, command: CommandObject, bot: Bot)
     """Retira una identidad de la whitelist de voz."""
     if not await verify_creator_and_approved(message, bot):
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     target_id, target_mention = await extract_vc_target(message, command, bot)
@@ -678,7 +700,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
         return
     chat_id = message.chat.id
     is_active = (await get_vc_monitor_status(chat_id)) == 1
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     ctx = await get_telemetry_context(chat_id, lang)
@@ -693,12 +715,12 @@ async def cmd_status_vc(message: Message, bot: Bot):
     keyboard = _build_status_keyboard(chat_id, lang, t, is_private=True)
 
     await send_private_response(
-        message, 
+        message,
         t["status_text"].format(
             status=status_text,
             mic_price=mic_price,
             **ctx
-        ), 
+        ),
         reply_markup=keyboard
     )
 
@@ -706,7 +728,7 @@ async def cmd_status_vc(message: Message, bot: Bot):
 @router.callback_query(F.data.startswith("vc_"))
 async def process_vc_callback(callback: CallbackQuery, bot: Bot):
     await callback.answer()
-    
+
     if callback.data == "vc_close_panel":
         try:
             await callback.message.delete()
@@ -735,7 +757,7 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
         return
 
     is_private = bool(callback.message and callback.message.chat.type == "private")
-    
+
     try:
         if action == "vc_status":
             is_active = (await get_vc_monitor_status(chat_id)) == 1
@@ -775,6 +797,21 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
             await callback.message.edit_text(report, reply_markup=back_kb, parse_mode="HTML")
 
         elif action == "vc_reset":
+            # Sincronización real: se invalidan las cachés del Radar MTProto (permisos de
+            # videochat y administradores) para que el próximo ciclo las relea en vivo.
+            try:
+                import assistant as _assistant_mod
+                invalidate = getattr(_assistant_mod, "_invalidate_call_rights", None)
+                if callable(invalidate):
+                    invalidate(chat_id)
+                admin_cache = getattr(_assistant_mod, "admin_caches", None)
+                if isinstance(admin_cache, dict):
+                    admin_cache.pop(chat_id, None)
+                join_attempts = getattr(_assistant_mod, "_last_join_attempt", None)
+                if isinstance(join_attempts, dict):
+                    join_attempts.pop(chat_id, None)
+            except Exception as sync_err:
+                logger.debug(f"Aviso sincronizando radar en {chat_id}: {sync_err}")
             synced = (
                 "🔄 <b>Sincronización Completada:</b> Refresco de sala de voz ejecutado con éxito.\n\n"
                 "🛡️ <i>Cloud Media Management</i>"
@@ -794,10 +831,10 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
 async def cmd_get_id(message: Message, bot: Bot):
     if not await verify_creator_and_approved(message, bot):
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
     await send_private_response(
-        message, 
+        message,
         t["getid_text"].format(
             type=message.chat.type,
             chat_id=message.chat.id,
@@ -811,8 +848,12 @@ async def cmd_get_id(message: Message, bot: Bot):
 # ==========================================
 @router.message(Command("micvip", "mic_vip"))
 async def trigger_mic_vip_offer(message: Message, bot: Bot):
-    lang = get_lang(message.from_user.language_code)
+    lang = _msg_lang(message)
     t = TEXTS[lang]
+
+    if not message.from_user or message.sender_chat:
+        # Publicación como canal o admin anónimo: el pase VIP es personal, no aplica.
+        return
 
     if message.chat.type == "private":
         await message.answer(
@@ -859,15 +900,30 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
         custom_btn_url=custom_url
     )
 
+    if svc_cfg.get("micvip_enabled", 1) == 0:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     sent_msg = await message.answer(
         text,
         reply_markup=keyboard,
         parse_mode="HTML"
     )
-    
+
     try:
-        await message.delete()  
+        await message.delete()
     except Exception:
         pass
+
+    # Auto-borrado coherente con Sentinel Settings (micvip_autodel, 0 = permanente).
+    try:
+        autodel = int(svc_cfg.get("micvip_autodel", 30) or 0)
+    except (TypeError, ValueError):
+        autodel = 30
+    if sent_msg and autodel > 0:
+        _spawn(auto_delete_msg(sent_msg, autodel))
 
     _spawn(auto_delete_msg(sent_msg, 45))
