@@ -26,6 +26,7 @@ import sqlite3
 import threading
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from database.vault import encrypt_secret, decrypt_secret
 
 logger = logging.getLogger("database")
 
@@ -1847,11 +1848,14 @@ def revoke_vip_mic(user_id: int, group_id: int):
 
 @db_async
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
+    # Ciframos el token con AES-256 antes de guardarlo en la base de datos
+    encrypted_token = encrypt_secret(bot_token)
     with _write_transaction() as conn:
         cursor = conn.cursor()
+        # Opcional: si deseas revocar ocurrencias previas de este token en otros registros
         cursor.execute(
-            "UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE bot_token = ? AND (user_id != ? OR group_id != ?)",
-            (bot_token, user_id, group_id)
+            "UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE user_id != ? OR group_id != ?",
+            (user_id, group_id)
         )
         cursor.execute("""
             INSERT INTO bot_clones (user_id, group_id, bot_token, bot_username, status)
@@ -1860,7 +1864,7 @@ def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username
                 bot_token = excluded.bot_token,
                 bot_username = excluded.bot_username,
                 status = 'active'
-        """, (user_id, group_id, bot_token, bot_username))
+        """, (user_id, group_id, encrypted_token, bot_username))
         conn.commit()
 
 
@@ -1869,7 +1873,12 @@ def get_bot_clone(user_id: int, group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT bot_token, bot_username, status FROM bot_clones WHERE user_id = ? AND group_id = ?", (user_id, group_id))
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        if row:
+            # Desciframos el token en memoria RAM antes de retornarlo
+            decrypted_token = decrypt_secret(row[0])
+            return (decrypted_token, row[1], row[2])
+        return None
 
 
 @db_async
@@ -1898,6 +1907,8 @@ def get_all_active_clone_tokens() -> list:
 
 @db_async
 def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: str = None, api_id: int = None, api_hash: str = None):
+    # Ciframos la cadena de sesión con AES-256 antes de guardarla en la base de datos
+    encrypted_session = encrypt_secret(session_string)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1911,7 +1922,7 @@ def save_owner_session(user_id: int, group_id: int, session_string: str, phone_n
                 status = 'active',
                 last_error = NULL,
                 updated_at = CURRENT_TIMESTAMP
-        """, (user_id, group_id, session_string, phone_number, api_id, api_hash))
+        """, (user_id, group_id, encrypted_session, phone_number, api_id, api_hash))
         conn.commit()
 
 
@@ -1930,7 +1941,12 @@ def get_owner_session(user_id: int, group_id: int = None):
                 "ORDER BY updated_at DESC LIMIT 1",
                 (user_id,)
             )
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        if row:
+            # Desciframos la sesión en memoria RAM antes de retornarla
+            decrypted_session = decrypt_secret(row[0])
+            return (decrypted_session, row[1], row[2])
+        return None
 
 
 @db_async
@@ -1942,7 +1958,12 @@ def get_session_by_group(group_id: int):
             "WHERE group_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
             (group_id,)
         )
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        if row:
+            # Desciframos la sesión (índice 1)
+            decrypted_session = decrypt_secret(row[1])
+            return (row[0], decrypted_session, row[2], row[3])
+        return None
 
 
 @db_async
@@ -1950,7 +1971,13 @@ def get_all_active_sessions():
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, group_id, session_string, api_id, api_hash FROM owner_sessions WHERE status = 'active'")
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+        results = []
+        for row in rows:
+            # Desciframos la sesión de cada fila (índice 2)
+            decrypted_session = decrypt_secret(row[2])
+            results.append((row[0], row[1], decrypted_session, row[3], row[4]))
+        return results
 
 
 @db_async
