@@ -2512,3 +2512,228 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
         "group_id": group_id, "matrix": matrix,
         "days": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
     }
+# ==========================================
+# 📊 ANALÍTICA, DASHBOARDS Y TELEMETRÍA (FASTAPI)
+# ==========================================
+@db_async
+def get_chat_dashboard_data(chat_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT tier FROM approved_groups WHERE group_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        tier = row[0] if row and row[0] else "free"
+
+        cursor.execute("""
+            SELECT log_channel_id, spam_detection_mode, timezone, chat_language, 
+                   active_modules_count, captcha_status, autolower, screen_shield_status, lock_links
+            FROM group_settings WHERE group_id = ?
+        """, (chat_id,))
+        row = cursor.fetchone()
+        
+        log_id = row[0] if row and row[0] else None
+        spam_mode = row[1] if row and row[1] else "smart"
+        tz = row[2] if row and row[2] else "Bogota (UTC-05)"
+        lang = row[3] if row and row[3] else "ES"
+        active_mods = row[4] if row and row[4] is not None else 11
+        
+        captcha_active = bool(row[5]) if row and row[5] is not None else True
+        autolower_active = bool(row[6]) if row and row[6] is not None else True
+        shield_active = bool(row[7]) if row and row[7] is not None else True
+        linklock_active = bool(row[8]) if row and row[8] is not None else False
+
+        return {
+            "chat_id": str(chat_id),
+            "plan": {"name": tier.capitalize(), "status": "active" if tier != "free" else "empty"},
+            "log_channel": {"enabled": log_id is not None, "channel_id": log_id},
+            "modules": {"active": active_mods, "total": 91},
+            "protection": {"enabled": True, "spam_mode": spam_mode, "timezone": tz, "language": lang},
+            "switches": {"captcha": captcha_active, "autolower": autolower_active, "shield": shield_active, "linklock": linklock_active},
+            "modules_errors": [],
+            "footer_metrics": {}
+        }
+
+
+@db_async
+def get_chat_timeseries_stats(chat_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT month_key, total_messages, total_users
+            FROM chat_monthly_metrics WHERE group_id = ?
+            ORDER BY rowid DESC LIMIT 12
+        """, (chat_id,))
+        rows = cursor.fetchall()
+        
+        if not rows:
+            months = ["May '26", "Jun '26", "Jul '26", "Aug '26", "Sep '26"]
+            return {"months": months, "mau": [0, 0, 0, 0, 0], "messages": [0, 0, 0, 0, 0], "messages_per_user": [0, 0, 0, 0, 0]}
+
+        months = [r[0] for r in reversed(rows)]
+        messages = [r[1] for r in reversed(rows)]
+        mau = [r[2] for r in reversed(rows)]
+        msgs_per_user = [round(m / max(1, u), 1) for m, u in zip(messages, mau)]
+
+        return {"months": months, "mau": mau, "messages": messages, "messages_per_user": msgs_per_user}
+
+
+@db_async
+def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, full_name, username, message_count
+            FROM chat_user_activity WHERE group_id = ?
+            ORDER BY message_count DESC LIMIT ?
+        """, (chat_id, limit))
+        rows = cursor.fetchall()
+        
+        res = []
+        for idx, r in enumerate(rows, start=1):
+            act_level = 4 if r[3] > 300 else (3 if r[3] > 150 else (2 if r[3] > 50 else 1))
+            res.append({
+                "rank": idx,
+                "name": r[1] or f"User {r[0]}",
+                "badge": f"@{r[2]}" if r[2] else "",
+                "activity_level": act_level,
+                "messages": r[3]
+            })
+        return res
+
+
+@db_async
+def get_chat_admin_stats(chat_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT full_name, username, message_count, reply_count
+                FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
+                ORDER BY message_count DESC
+            """, (chat_id,))
+            rows = cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+        
+        return [
+            {
+                "name": r[0] or f"Admin {r[1]}",
+                "role": "Administrator",
+                "messages": r[2],
+                "replies": r[3],
+                "actions": 0
+            }
+            for r in rows
+        ]
+
+
+@db_async
+def update_chat_operational_settings(chat_id: int, settings: dict):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        updates = []
+        params = []
+        
+        if "spam_mode" in settings:
+            updates.append("spam_detection_mode = ?")
+            params.append(settings["spam_mode"])
+        if "timezone" in settings:
+            updates.append("timezone = ?")
+            params.append(settings["timezone"])
+        if "language" in settings:
+            updates.append("chat_language = ?")
+            params.append(settings["language"])
+        if "log_channel_id" in settings:
+            updates.append("log_channel_id = ?")
+            params.append(settings["log_channel_id"])
+            
+        if "captcha" in settings:
+            updates.append("captcha_status = ?")
+            params.append(1 if settings["captcha"] else 0)
+        if "autolower" in settings:
+            updates.append("autolower = ?")
+            params.append(1 if settings["autolower"] else 0)
+        if "shield" in settings:
+            updates.append("screen_shield_status = ?")
+            params.append(1 if settings["shield"] else 0)
+        if "linklock" in settings:
+            updates.append("lock_links = ?")
+            params.append(1 if settings["linklock"] else 0)
+            
+        cursor.execute("""
+            INSERT INTO group_settings (group_id) VALUES (?)
+            ON CONFLICT(group_id) DO NOTHING
+        """, (chat_id,))
+        
+        if updates:
+            params.append(chat_id)
+            query = f"UPDATE group_settings SET {', '.join(updates)} WHERE group_id = ?"
+            cursor.execute(query, tuple(params))
+        conn.commit()
+
+
+@db_async
+def get_user_global_stats(user_id: int) -> dict:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM user_groups WHERE user_id = ?", (user_id,))
+        total_chats = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT COUNT(s.id) FROM channel_subscriptions s
+            JOIN user_groups ug ON s.channel_id = ug.group_id
+            WHERE ug.user_id = ? AND s.status = 'active' AND s.expires_at > datetime('now')
+        """, (user_id,))
+        vip_subs = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT SUM(s.stars_paid) FROM channel_subscriptions s
+            JOIN user_groups ug ON s.channel_id = ug.group_id
+            WHERE ug.user_id = ?
+        """, (user_id,))
+        rev_stars = cursor.fetchone()[0] or 0
+
+        return {
+            "subscribers": vip_subs,
+            "revenue_stars": rev_stars,
+            "verified": total_chats,
+            "expelled": 0,
+            "purges": 0,
+            "perimeter": {
+                "captcha": "Activo 🟢",
+                "autolower": "2% Activo 🟢",
+                "shield": "Blindado 🟢",
+                "broadcast": "Worker Activo 🟢",
+                "captcha_active": True,
+                "autolower_active": True,
+                "shield_active": True,
+                "linklock_active": False
+            }
+        }
+
+
+@db_async
+def get_user_subscribers_audit(user_id: int) -> list:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT s.user_id, p.plan_name, s.stars_paid, 
+                   CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left,
+                   u.username
+            FROM channel_subscriptions s
+            JOIN channel_plans p ON s.plan_id = p.plan_id
+            JOIN user_groups ug ON s.channel_id = ug.group_id
+            LEFT JOIN users u ON s.user_id = u.user_id
+            WHERE ug.user_id = ? AND s.status = 'active'
+            ORDER BY s.expires_at ASC
+        """, (user_id,))
+        rows = cursor.fetchall()
+        return [
+            {
+                "user_id": r[0],
+                "username": r[4] if r[4] else str(r[0]),
+                "plan_name": r[1],
+                "price": r[2],
+                "days_left": max(0, r[3]) if r[3] is not None else 0
+            }
+            for r in rows
+        ]
