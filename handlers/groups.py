@@ -5,6 +5,8 @@ Núcleo de seguridad perimetral para grupos y supergrupos.
 Motor Híbrido: Detección MTProto + Padrón Local Bot API + Protección Total por Niveles (Free / PRO / ULTRA PRO).
 Fase 4: Gamificación Tokenizada (XP / Niveles / /rank / /top) + Analítica Heatmap 24x7.
 Fase 5: Ascensos de nivel emitidos en caliente al radar WebSocket de la Mini App.
+Fase 6: Aduana sin DMs fríos — el captcha privado solo se envía en ChatJoinRequest (ventana legal
+        de 5 min vía user_chat_id); los ingresos directos se verifican únicamente en el grupo.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import time
@@ -218,6 +220,15 @@ FLOOD_CACHE = {}
 CAPTCHA_SESSIONS = {}
 RECENTLY_VERIFIED = {}
 
+# Telegram autoriza escribir por privado a quien envía una solicitud de unión usando
+# ChatJoinRequest.user_chat_id durante 5 minutos y SOLO hasta que la solicitud se aprueba o
+# rechaza. Se deja un margen para que el aviso de expiración aún llegue dentro de la ventana.
+JOIN_REQUEST_DM_WINDOW_SECONDS = 300
+JOIN_REQUEST_DM_SAFETY_MARGIN = 20
+JOIN_REQUEST_MAX_CAPTCHA_SECONDS = JOIN_REQUEST_DM_WINDOW_SECONDS - JOIN_REQUEST_DM_SAFETY_MARGIN
+CAPTCHA_GROUP_NOTICE_TTL = 20
+SUPPORT_URL = "https://t.me/m/RGx4ohGTMTk5"
+
 
 async def auto_delete_msg(message: Optional[Message], delay: int = 15):
     if not message:
@@ -353,6 +364,73 @@ def generate_simple_keyboard(group_id: int, user_id: int) -> InlineKeyboardMarku
     ])
 
 
+def _support_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Soporte Técnico / Support", url=SUPPORT_URL)]
+    ])
+
+
+def _join_request_dm_open(session_data: dict) -> bool:
+    """True si la ventana legal de DM de la solicitud de unión sigue abierta."""
+    if not session_data.get("is_join_req") or not session_data.get("dm_chat_id"):
+        return False
+    return time.monotonic() < float(session_data.get("dm_deadline", 0.0))
+
+
+async def _send_join_request_dm(bot: Bot, session_data: dict, text: str,
+                                reply_markup: Optional[InlineKeyboardMarkup] = None) -> bool:
+    """
+    Único punto autorizado para escribir por privado durante la aduana: exige solicitud de
+    unión pendiente y ventana de 5 minutos abierta. Debe llamarse ANTES de aprobar o rechazar.
+    """
+    if not _join_request_dm_open(session_data):
+        return False
+    try:
+        await bot.send_message(
+            chat_id=session_data["dm_chat_id"], text=text,
+            reply_markup=reply_markup, parse_mode="HTML"
+        )
+        return True
+    except Exception as e:
+        logger.debug(f"Aviso DM de solicitud de unión ({session_data.get('dm_chat_id')}): {e}")
+        return False
+
+
+async def _post_group_notice(bot: Bot, group_id: int, text: str,
+                             reply_markup: Optional[InlineKeyboardMarkup] = None,
+                             ttl: int = CAPTCHA_GROUP_NOTICE_TTL) -> None:
+    try:
+        notice = await bot.send_message(chat_id=group_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+        _spawn(auto_delete_msg(notice, ttl))
+    except Exception as e:
+        logger.debug(f"Aviso publicando nota de aduana en {group_id}: {e}")
+
+
+async def _apply_captcha_sanction(bot: Bot, group_id: int, user_id: int, cfg: dict, is_join_req: bool) -> None:
+    """Rechaza la solicitud (ingreso por solicitud) o sanciona al miembro (ingreso directo)."""
+    if is_join_req:
+        # El usuario aún no es miembro: basta con rechazar; restringir o banear fallaría o
+        # le impediría volver a solicitar acceso legítimamente.
+        try:
+            await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
+        except Exception as e:
+            logger.debug(f"Aviso rechazando solicitud de {user_id} en {group_id}: {e}")
+        return
+    try:
+        if cfg["action"] == "mute":
+            await bot.restrict_chat_member(
+                chat_id=group_id,
+                user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False)
+            )
+        else:
+            await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+            await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
+            await registry_forget(group_id, user_id)
+    except Exception as e:
+        logger.error(f"Error aplicando sanción de aduana a {user_id} en {group_id}: {e}")
+
+
 async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: int):
     try:
         await asyncio.sleep(timeout)
@@ -360,84 +438,90 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
         return
 
     session_key = (group_id, user_id)
-    if session_key in CAPTCHA_SESSIONS:
-        session_data = CAPTCHA_SESSIONS.pop(session_key, {})
-        cfg = await get_captcha_config(group_id)
-        
-        msg_id = session_data.get("msg_id")
-        chat_msg_id = session_data.get("group_msg_id")
-        
-        if msg_id:
-            try: 
-                await bot.delete_message(chat_id=user_id, message_id=msg_id)
-            except Exception: 
-                pass
+    if session_key not in CAPTCHA_SESSIONS:
+        return
+    session_data = CAPTCHA_SESSIONS.pop(session_key, {})
+    cfg = await get_captcha_config(group_id)
+    is_join_req = bool(session_data.get("is_join_req"))
 
-        if chat_msg_id:
-            try:
-                await bot.delete_message(chat_id=group_id, message_id=chat_msg_id)
-            except Exception: 
-                pass
-
-        support_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Soporte Técnico / Support", url="https://t.me/m/RGx4ohGTMTk5")]
-        ])
-        
-        custom_msg = cfg["text"] if cfg["text"] else "⏱️ El tiempo límite para verificar tu identidad ha expirado."
-        text = (
-            f"❌ <b>Acceso Denegado / Access Denied</b>\n\n"
-            f"{custom_msg}\n\n"
-            f"🇺🇸 <i>Verification time expired. Automated perimeter protocol applied.</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        )
-
+    msg_id = session_data.get("msg_id")
+    if msg_id and session_data.get("dm_chat_id"):
         try:
-            await bot.send_message(chat_id=user_id, text=text, reply_markup=support_kb, parse_mode="HTML")
-        except Exception:
-            try:
-                fail_msg = await bot.send_message(
-                    chat_id=group_id, 
-                    text=f"❌ <a href='tg://user?id={user_id}'>Usuario / User</a> no completó la verificación a tiempo.", 
-                    reply_markup=support_kb, 
-                    parse_mode="HTML"
-                )
-                asyncio.create_task(auto_delete_msg(fail_msg, 20))
-            except Exception: 
-                pass
-
-        try:
-            await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
+            await bot.delete_message(chat_id=session_data["dm_chat_id"], message_id=msg_id)
         except Exception:
             pass
 
+    chat_msg_id = session_data.get("group_msg_id")
+    if chat_msg_id:
         try:
-            if cfg["action"] == "mute":
-                await bot.restrict_chat_member(
-                    chat_id=group_id,
-                    user_id=user_id,
-                    permissions=ChatPermissions(can_send_messages=False)
-                )
-            else:
-                await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
-                await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
-        except Exception as e:
-            logger.error(f"Error aplicando sanción por timeout a {user_id}: {e}")
+            await bot.delete_message(chat_id=group_id, message_id=chat_msg_id)
+        except Exception:
+            pass
+
+    custom_msg = cfg["text"] if cfg["text"] else "⏱️ El tiempo límite para verificar tu identidad ha expirado."
+
+    if is_join_req:
+        # Aviso privado dentro de la ventana legal y ANTES de rechazar (el rechazo la cierra).
+        await _send_join_request_dm(
+            bot, session_data,
+            (
+                f"❌ <b>Acceso Denegado / Access Denied</b>\n\n"
+                f"{custom_msg}\n\n"
+                f"🇺🇸 <i>Verification time expired. Automated perimeter protocol applied.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ),
+            reply_markup=_support_keyboard()
+        )
+    else:
+        # Ingreso directo: jamás se escribe por privado. Aviso efímero en el grupo.
+        await _post_group_notice(
+            bot, group_id,
+            (
+                f"❌ <a href='tg://user?id={user_id}'>Usuario / User</a> no completó la verificación a tiempo.\n"
+                f"🇺🇸 <i>Verification time expired.</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ),
+            reply_markup=_support_keyboard()
+        )
+
+    await _apply_captcha_sanction(bot, group_id, user_id, cfg, is_join_req)
 
 
-async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name: str, username: str, is_join_req: bool = False):
+async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name: str, username: str,
+                               is_join_req: bool = False, user_chat_id: Optional[int] = None):
+    """
+    Aduana de seguridad con dos rutas estrictamente separadas:
+
+    • Solicitud de unión (is_join_req=True): Telegram autoriza el diálogo privado con
+      `user_chat_id` durante 5 minutos → el desafío se envía por privado. Si no se puede
+      entregar, la solicitud queda pendiente para revisión manual (nunca se aprueba sola).
+    • Ingreso directo (new_chat_members): CERO mensajes privados. Se restringe al miembro y el
+      desafío se publica solo en el grupo, con auto-eliminación programada.
+    """
     cfg = await get_captcha_config(group_id)
     if cfg["status"] != 1:
         return
 
     if is_super_admin(user_id) or await is_sentinel_account(group_id, user_id, username) or await is_whitelisted(user_id):
+        if is_join_req:
+            try:
+                await bot.approve_chat_join_request(chat_id=group_id, user_id=user_id)
+            except Exception:
+                pass
         return
 
-    try:
-        member_check = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
-        if member_check.status in ["creator", "administrator"]:
-            return
-    except Exception:
-        pass
+    if not is_join_req:
+        try:
+            member_check = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
+            if member_check.status in ["creator", "administrator"]:
+                return
+        except Exception:
+            pass
+
+    session_key = (group_id, user_id)
+    previous = CAPTCHA_SESSIONS.pop(session_key, None)
+    if previous and previous.get("task"):
+        previous["task"].cancel()
 
     clean_name = html.escape(full_name or "Usuario")
     mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
@@ -452,58 +536,77 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
         except Exception as e:
             logger.warning(f"Aviso restricción preventiva a {user_id} en {group_id}: {e}")
 
+    # En solicitudes de unión el tiempo se acota para que el desenlace llegue dentro de la ventana.
+    time_limit = int(cfg["time"] or 60)
+    if is_join_req:
+        time_limit = max(15, min(time_limit, JOIN_REQUEST_MAX_CAPTCHA_SECONDS))
+
     custom_intro = cfg["text"] if cfg["text"] else f"¡Hola, {mention}! Para proteger la comunidad, requerimos una breve verificación."
+
+    session_data = {"is_join_req": is_join_req}
+    if is_join_req:
+        session_data["dm_chat_id"] = int(user_chat_id or user_id)
+        session_data["dm_deadline"] = time.monotonic() + JOIN_REQUEST_DM_WINDOW_SECONDS - JOIN_REQUEST_DM_SAFETY_MARGIN
 
     if cfg["mode"] == 1:
         correct_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
-        CAPTCHA_SESSIONS[(group_id, user_id)] = {"code": correct_code, "is_join_req": is_join_req}
+        session_data["code"] = correct_code
         kb = generate_captcha_keyboard(group_id, user_id, correct_code)
-        text = (
-            f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
-            f"{custom_intro}\n\n"
+        challenge_line = (
             f"Selecciona el botón que contiene exactamente este código:\n"
             f"👉 <code>{correct_code}</code>\n\n"
-            f"⏱️ <b>Tiempo límite:</b> {cfg['time']}s\n\n"
-            f"🇺🇸 <i>Tap the button matching the code above to clear entry!</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
         )
+        footer_en = "🇺🇸 <i>Tap the button matching the code above to clear entry!</i>"
     else:
-        CAPTCHA_SESSIONS[(group_id, user_id)] = {"code": "simple", "is_join_req": is_join_req}
+        session_data["code"] = "simple"
         kb = generate_simple_keyboard(group_id, user_id)
+        challenge_line = "Pulsa el botón inferior para confirmar tu identidad:\n\n"
+        footer_en = "🇺🇸 <i>Hit the button below to verify your account and join the chat!</i>"
+
+    CAPTCHA_SESSIONS[session_key] = session_data
+
+    if is_join_req:
+        # Ruta 1 — Solicitud de unión: diálogo privado autorizado por Telegram.
         text = (
             f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
             f"{custom_intro}\n\n"
-            f"Pulsa el botón inferior para confirmar tu identidad:\n\n"
-            f"🇺🇸 <i>Hit the button below to verify your account and join the chat!</i>\n\n"
+            f"{challenge_line}"
+            f"⏱️ <b>Tiempo límite:</b> {time_limit}s\n\n"
+            f"{footer_en}\n\n"
             f"🛡️ <i>Cloud Media Management</i>"
         )
-
-    dm_sent = False
-    try:
-        sent_msg = await bot.send_message(chat_id=user_id, text=text, reply_markup=kb, parse_mode="HTML")
-        CAPTCHA_SESSIONS[(group_id, user_id)]["msg_id"] = sent_msg.message_id
-        dm_sent = True
-    except Exception:
-        pass
-
-    if not dm_sent and not is_join_req:
+        try:
+            sent_msg = await bot.send_message(chat_id=session_data["dm_chat_id"], text=text, reply_markup=kb, parse_mode="HTML")
+            session_data["msg_id"] = sent_msg.message_id
+        except Exception as e:
+            # Sin entrega no hay verificación posible: se deja la solicitud pendiente para revisión
+            # humana en lugar de aprobarla o rechazarla a ciegas.
+            CAPTCHA_SESSIONS.pop(session_key, None)
+            logger.warning(f"Aduana: no se pudo entregar el desafío de la solicitud de {user_id} en {group_id} ({e}); queda pendiente para revisión manual.")
+            return
+    else:
+        # Ruta 2 — Ingreso directo: desafío exclusivamente en el grupo, sin DMs.
         try:
             group_msg = await bot.send_message(
                 chat_id=group_id,
                 text=(
-                    f"🛑 <b>ADUANA DE SEGURIDAD / CHECKPOINT</b>\n\n"
-                    f"{mention}, completa tu verificación en este botón para desbloquear tu acceso al chat:\n"
-                    f"⏱️ <i>Tiempo restante: {cfg['time']}s</i>"
+                    f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
+                    f"{custom_intro}\n\n"
+                    f"{mention}, {challenge_line}"
+                    f"⏱️ <i>Tiempo restante / Time left: {time_limit}s</i>\n\n"
+                    f"{footer_en}\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
                 ),
                 reply_markup=kb,
                 parse_mode="HTML"
             )
-            CAPTCHA_SESSIONS[(group_id, user_id)]["group_msg_id"] = group_msg.message_id
-        except Exception:
-            pass
+            session_data["group_msg_id"] = group_msg.message_id
+            # Auto-eliminación programada de respaldo (el desenlace normal también lo borra).
+            _spawn(auto_delete_msg(group_msg, time_limit + 5))
+        except Exception as e:
+            logger.warning(f"Aduana: no se pudo publicar el desafío de {user_id} en {group_id}: {e}")
 
-    task = asyncio.create_task(captcha_timeout_task(bot, group_id, user_id, cfg["time"]))
-    CAPTCHA_SESSIONS[(group_id, user_id)]["task"] = task
+    session_data["task"] = _spawn(captcha_timeout_task(bot, group_id, user_id, time_limit))
 
 
 # ==========================================
@@ -538,7 +641,11 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
             pass
         return
 
-    await process_user_captcha(bot, group_id, user_id, event.from_user.full_name, event.from_user.username or "", is_join_req=True)
+    await process_user_captcha(
+        bot, group_id, user_id, event.from_user.full_name, event.from_user.username or "",
+        is_join_req=True,
+        user_chat_id=getattr(event, "user_chat_id", None) or user_id
+    )
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}), F.new_chat_members)
@@ -633,11 +740,26 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
     if clicker_id != target_user_id:
         await callback.answer("⚠️ Este desafío no pertenece a tu perfil / Not your checkpoint.", show_alert=True)
         return
-        
+
     session_key = (group_id, target_user_id)
     session_data = CAPTCHA_SESSIONS.pop(session_key, {})
     if "task" in session_data:
         session_data["task"].cancel()
+
+    # Ruta de ingreso: por la sesión o, si se perdió (reinicio), por dónde se pulsó el botón:
+    # un desafío pulsado en privado solo pudo originarse en una solicitud de unión.
+    message_chat_type = getattr(getattr(callback.message, "chat", None), "type", None)
+    if session_data:
+        is_join_req = bool(session_data.get("is_join_req"))
+    else:
+        is_join_req = message_chat_type == "private"
+        if is_join_req and callback.message is not None:
+            session_data = {
+                "is_join_req": True,
+                "dm_chat_id": callback.message.chat.id,
+                # Ventana desconocida tras un reinicio: se asume cerrada (sin DMs adicionales).
+                "dm_deadline": 0.0,
+            }
 
     cfg = await get_captcha_config(group_id)
 
@@ -653,6 +775,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
         except Exception:
             pass
 
+    chat_info = None
     try:
         chat_info = await bot.get_chat(group_id)
         group_title = chat_info.title or "la comunidad"
@@ -663,86 +786,80 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
         await callback.answer("✅ ¡Identidad verificada con éxito!", show_alert=False)
         RECENTLY_VERIFIED[(group_id, target_user_id)] = time.time()
 
-        try:
-            await bot.approve_chat_join_request(chat_id=group_id, user_id=target_user_id)
-        except Exception:
-            pass
-
-        try:
-            await bot.restrict_chat_member(
-                chat_id=group_id,
-                user_id=target_user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_audios=True,
-                    can_send_documents=True,
-                    can_send_photos=True,
-                    can_send_videos=True,
-                    can_send_video_notes=True,
-                    can_send_voice_notes=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True
-                )
+        if is_join_req:
+            try:
+                await bot.approve_chat_join_request(chat_id=group_id, user_id=target_user_id)
+            except Exception as e:
+                logger.warning(f"Aviso aprobando solicitud de {target_user_id} en {group_id}: {e}")
+        else:
+            # Se restauran los permisos por defecto del grupo (no se conceden más de los que el
+            # grupo permite a cualquier miembro).
+            default_permissions = getattr(chat_info, "permissions", None) or ChatPermissions(
+                can_send_messages=True,
+                can_send_audios=True,
+                can_send_documents=True,
+                can_send_photos=True,
+                can_send_videos=True,
+                can_send_video_notes=True,
+                can_send_voice_notes=True,
+                can_send_polls=True,
+                can_send_other_messages=True,
+                can_add_web_page_previews=True
             )
-        except Exception as e:
-            logger.warning(f"Aviso otorgando permisos en {group_id}: {e}")
-            
-        user_full_name = html.escape(callback.from_user.full_name or "Usuario")
-        user_mention = f"<a href='tg://user?id={target_user_id}'>{user_full_name}</a>"
-
-        try:
-            welcome_msg = await bot.send_message(
-                chat_id=group_id,
-                text=(
-                    f"🎉 <b>¡Acceso Concedido! / Access Granted!</b>\n\n"
-                    f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
-                    f"🔓 Tu acceso ha sido liberado para participar en <b>{html.escape(group_title)}</b>.\n\n"
-                    f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
-                parse_mode="HTML"
-            )
-            asyncio.create_task(auto_delete_msg(welcome_msg, 20))
-        except Exception:
-            pass
-
-    else:
-        await callback.answer("❌ Código incorrecto / Wrong code.", show_alert=True)
-        try:
-            support_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Soporte Técnico / Support", url="https://t.me/m/RGx4ohGTMTk5")]
-            ])
-            
-            custom_fail = cfg["text"] if cfg["text"] else "❌ Código incorrecto ingresado en la aduana de seguridad."
-            fail_text = (
-                f"❌ <b>Verificación Fallida / Checkpoint Failed</b>\n\n"
-                f"{custom_fail}\n\n"
-                f"🇺🇸 <i>Incorrect code selected. Access protocol denied.</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            )
-
-            try: 
-                await bot.send_message(chat_id=target_user_id, text=fail_text, reply_markup=support_kb, parse_mode="HTML")
-            except Exception: 
-                pass
-
-            try: 
-                await bot.decline_chat_join_request(chat_id=group_id, user_id=target_user_id)
-            except Exception: 
-                pass
-
-            if cfg["action"] == "mute":
+            try:
                 await bot.restrict_chat_member(
                     chat_id=group_id,
                     user_id=target_user_id,
-                    permissions=ChatPermissions(can_send_messages=False)
+                    permissions=default_permissions
                 )
-            else:
-                await bot.ban_chat_member(chat_id=group_id, user_id=target_user_id)
-                await bot.unban_chat_member(chat_id=group_id, user_id=target_user_id)
-        except Exception as ex:
-            logger.error(f"Error aplicando sanción por fallo de captcha: {ex}")
+            except Exception as e:
+                logger.warning(f"Aviso otorgando permisos en {group_id}: {e}")
+
+        user_full_name = html.escape(callback.from_user.full_name or "Usuario")
+        user_mention = f"<a href='tg://user?id={target_user_id}'>{user_full_name}</a>"
+
+        await _post_group_notice(
+            bot, group_id,
+            (
+                f"🎉 <b>¡Acceso Concedido! / Access Granted!</b>\n\n"
+                f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
+                f"🔓 Tu acceso ha sido liberado para participar en <b>{html.escape(group_title)}</b>.\n\n"
+                f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
+                f"🛡️ <i>Cloud Media Management</i>"
+            ),
+            ttl=20
+        )
+
+    else:
+        await callback.answer("❌ Código incorrecto / Wrong code.", show_alert=True)
+        custom_fail = cfg["text"] if cfg["text"] else "❌ Código incorrecto ingresado en la aduana de seguridad."
+
+        if is_join_req:
+            # Aviso privado dentro de la ventana legal, ANTES de rechazar la solicitud.
+            await _send_join_request_dm(
+                bot, session_data,
+                (
+                    f"❌ <b>Verificación Fallida / Checkpoint Failed</b>\n\n"
+                    f"{custom_fail}\n\n"
+                    f"🇺🇸 <i>Incorrect code selected. Access protocol denied.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                ),
+                reply_markup=_support_keyboard()
+            )
+        else:
+            # Ingreso directo: el aviso se publica solo en el grupo y se autoelimina.
+            await _post_group_notice(
+                bot, group_id,
+                (
+                    f"❌ <b>Verificación Fallida / Checkpoint Failed</b>\n\n"
+                    f"<a href='tg://user?id={target_user_id}'>Usuario / User</a>: {custom_fail}\n\n"
+                    f"🇺🇸 <i>Incorrect code selected. Access protocol denied.</i>\n\n"
+                    f"🛡️ <i>Cloud Media Management</i>"
+                ),
+                reply_markup=_support_keyboard()
+            )
+
+        await _apply_captcha_sanction(bot, group_id, target_user_id, cfg, is_join_req)
 
 
 # ==========================================
@@ -1362,17 +1479,24 @@ async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
             prices=[LabeledPrice(label="Turno prioritario", amount=price)],
         )
     except Exception as e:
+        # Si la factura no se entregó, el usuario no ha iniciado el bot: un segundo DM fallaría
+        # igual. Se le invita a abrir el privado él mismo desde un aviso efímero en el grupo.
         logger.warning(f"Error enviando invoice de /speakers a {callback.from_user.id}: {e}")
         try:
-            await bot.send_message(
-                chat_id=callback.from_user.id,
-                text="⚠️ No pude generarte la factura. Abre un chat privado conmigo primero e inténtalo de nuevo."
+            bot_info = await bot.me()
+            open_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💬 Abrir privado / Open chat", url=f"https://t.me/{bot_info.username}?start=speakers")]
+            ])
+            notice = await callback.message.answer(
+                "⚠️ Abre un privado con el bot primero para poder pagar con Stars.\n"
+                "🇺🇸 <i>Open a private chat with the bot first to pay with Stars.</i>\n\n"
+                "🛡️ <i>Cloud Media Management</i>",
+                reply_markup=open_kb,
+                parse_mode="HTML"
             )
+            _spawn(auto_delete_msg(notice, 30))
         except Exception:
-            try:
-                await callback.message.answer("⚠️ Abre un privado con el bot primero para poder pagar con Stars.")
-            except Exception:
-                pass
+            pass
 
 
 @router.pre_checkout_query(F.invoice_payload.startswith("speak_"))
