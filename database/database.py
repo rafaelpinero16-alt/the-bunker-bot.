@@ -2737,3 +2737,85 @@ def get_user_subscribers_audit(user_id: int) -> list:
             }
             for r in rows
         ]
+    # ==========================================
+# 💳 PAGOS Y BÓVEDA CRIPTOGRÁFICA (.BUNKER)
+# ==========================================
+@db_async
+def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO processed_payments (charge_id, user_id, payload) VALUES (?, ?, ?)",
+                (charge_id, user_id, payload)
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+
+BACKUP_SECRET_SALT = os.getenv("BACKUP_SECRET_SALT", "bunker-secret-vault-2026")
+
+
+@db_async
+def export_group_configuration(group_id: int) -> str:
+    with get_db_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM group_settings WHERE group_id = ?", (group_id,))
+        settings_row = cursor.fetchone()
+        settings_dict = dict(settings_row) if settings_row else {}
+        settings_dict.pop("group_id", None)
+        cursor.execute("SELECT days, start_time, end_time, status FROM vc_schedules WHERE group_id = ?", (group_id,))
+        sched_row = cursor.fetchone()
+        sched_dict = dict(sched_row) if sched_row else {}
+        cursor.execute("SELECT target_value FROM group_tip_targets WHERE group_id = ?", (group_id,))
+        targets = [r[0] for r in cursor.fetchall()]
+
+    payload = {
+        "version": "6.0", "exported_at": datetime.now().isoformat(),
+        "source_group_id": group_id, "settings": settings_dict,
+        "vc_schedule": sched_dict, "tip_targets": targets,
+        "reputation_enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
+        "reputation_xp_multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0),
+    }
+    raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    signature = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
+    return json.dumps({"payload": payload, "signature": signature}, indent=2, ensure_ascii=False)
+
+
+@db_async
+def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[bool, str]:
+    try:
+        package = json.loads(backup_json)
+        payload = package.get("payload")
+        received_sig = package.get("signature")
+        if not payload or not received_sig:
+            return False, "Estructura de paquete inválida."
+        raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        expected_sig = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected_sig, received_sig):
+            return False, "Firma digital no válida."
+        settings = payload.get("settings", {})
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            if settings:
+                clean_cols = [c for c in settings.keys() if _IDENT_RE.match(c)]
+                if clean_cols:
+                    placeholders = ", ".join([f"{col} = ?" for col in clean_cols])
+                    values = [settings[col] for col in clean_cols]
+                    values.append(target_group_id)
+                    cursor.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (target_group_id,))
+                    cursor.execute(f"UPDATE group_settings SET {placeholders} WHERE group_id = ?", tuple(values))
+            conn.commit()
+        return True, "Configuración importada con éxito."
+    except Exception as ex:
+        return False, f"Error durante la restauración: {ex}"
+
+
+try:
+    init_db()
+except Exception:
+    logger.exception("❌ [DB] Falló init_db()")
+    raise
