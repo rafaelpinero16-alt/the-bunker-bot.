@@ -17,7 +17,7 @@ from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
-from pyrogram.enums import ChatMembersFilter, ChatType, ChatAction
+from pyrogram.enums import ChatMembersFilter, ChatType, ChatAction, ParseMode
 from pyrogram.errors import (
     FloodWait, RPCError, Unauthorized,
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneCodeExpired,
@@ -46,7 +46,7 @@ from database.database import (
     get_radar_config, revoke_owner_session, save_owner_session,
     get_screen_shield_status, set_screen_shield_status,
     get_podcast_config, set_podcast_mode, set_podcast_duck_volume,
-    get_night_mode_config, is_night_mode_time,
+    get_night_mode_config, is_night_mode_time, set_night_mode_config,
     get_lock_status, get_db_connection,
     activate_universal_night_mode,
     deactivate_universal_night_mode,
@@ -73,6 +73,25 @@ except ImportError:
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 mistral_client = Mistral(api_key=MISTRAL_API_KEY) if (Mistral and MISTRAL_API_KEY) else None
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest").strip() or "mistral-small-latest"
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "").strip() or default)
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
+# ⏱️ Time-outs asíncronos globales (evitan congelamientos en Railway)
+MISTRAL_TIMEOUT_SECONDS = _env_float("MISTRAL_TIMEOUT_SECONDS", 25.0)
+MTPROTO_CONNECT_TIMEOUT = _env_float("MTPROTO_CONNECT_TIMEOUT", 30.0)
+MTPROTO_RPC_TIMEOUT = _env_float("MTPROTO_RPC_TIMEOUT", 25.0)
+MTPROTO_STOP_TIMEOUT = _env_float("MTPROTO_STOP_TIMEOUT", 10.0)
+AUTH_SEND_CODE_TIMEOUT = _env_float("AUTH_SEND_CODE_TIMEOUT", 25.0)
+AUTH_SIGN_IN_TIMEOUT = _env_float("AUTH_SIGN_IN_TIMEOUT", 20.0)
+AUTH_DISCONNECT_TIMEOUT = _env_float("AUTH_DISCONNECT_TIMEOUT", 5.0)
 
 try:
     from database.database import get_sentinel_payload_config
@@ -174,15 +193,57 @@ SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
 _BG_TASKS: set = set()
 
 
-def _spawn(coro) -> asyncio.Task:
-    task = asyncio.create_task(coro)
+def _log_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"❌ [Tarea Radar] {task.get_name()} terminó con error: {exc!r}", exc_info=exc)
+
+
+def _spawn(coro, name: str = None) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
+    task.add_done_callback(_log_task_exception)
     return task
 
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    try:
+        return int(user_id) in SUPER_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+async def _invoke(client: Client, query, timeout: float = None):
+    """client.invoke con time-out asíncrono: una RPC colgada no congela el radar."""
+    return await asyncio.wait_for(client.invoke(query), timeout=timeout or MTPROTO_RPC_TIMEOUT)
+
+
+async def _safe_stop_client(client: Client, label: str = "") -> None:
+    """Detiene un cliente Pyrogram propio con time-out; nunca detiene al maestro."""
+    if client is None or client is assistant_app:
+        return
+    try:
+        if getattr(client, "is_initialized", False):
+            await asyncio.wait_for(client.stop(), timeout=MTPROTO_STOP_TIMEOUT)
+        elif client.is_connected:
+            await asyncio.wait_for(client.disconnect(), timeout=MTPROTO_STOP_TIMEOUT)
+    except Exception as e:
+        logger.debug(f"Aviso deteniendo cliente MTProto {label}: {e}")
+
+
+def _normalize_hm(value: str, default: str) -> str:
+    """Normaliza 'H:MM' / 'HH:MM' a 'HH:MM' para comparaciones léxicas seguras."""
+    try:
+        hours, minutes = str(value).strip().split(":", 1)
+        h, m = int(hours), int(minutes[:2])
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return f"{h:02d}:{m:02d}"
+    except Exception:
+        pass
+    return default
 
 
 def _get_env_api_id() -> int:
@@ -220,6 +281,21 @@ else:
 
 _global_bot = None
 _default_my_id = None
+_bot_username_cache: str = ""
+
+
+async def _get_bot_username() -> str:
+    """Username del bot maestro cacheado (evita un getMe por cada aviso)."""
+    global _bot_username_cache
+    if _bot_username_cache:
+        return _bot_username_cache
+    if _global_bot:
+        try:
+            info = await _global_bot.get_me()
+            _bot_username_cache = info.username or ""
+        except Exception as e:
+            logger.debug(f"Aviso obteniendo username del bot: {e}")
+    return _bot_username_cache or "thebunkerapp_bot"
 
 
 def get_assistant_bot_id() -> int:
@@ -233,13 +309,13 @@ def get_assistant_bot_id() -> int:
 
 
 active_sentinels = {}
-admin_caches = {}  
+admin_caches = {}
 ADMIN_CACHE_TTL = 300
 pending_auth_sessions = {}
 _forbidden_strikes = {}
 _autolower_cooldowns = {}
 FORBIDDEN_STRIKE_LIMIT = 3
-FORBIDDEN_COOLDOWN_SECONDS = 900  
+FORBIDDEN_COOLDOWN_SECONDS = 900
 _screen_shield_flagged = {}
 _noise_unmute_history = {}
 NOISE_SPIKE_WINDOW_SECONDS = 12
@@ -252,6 +328,15 @@ _sentinel_launch_semaphore = asyncio.Semaphore(4)
 _pinned_vc_messages = {}
 _last_vc_notice = {}
 _vc_notice_locks = {}
+_auth_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_auth_lock(user_id: int) -> asyncio.Lock:
+    lock = _auth_locks.get(user_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _auth_locks[user_id] = lock
+    return lock
 
 _call_rights_cache: dict[int, tuple[bool, float]] = {}
 _last_join_attempt: dict[int, float] = {}
@@ -266,7 +351,7 @@ async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
         return cached[0]
     try:
         user_target = client.me.id if getattr(client, "me", None) else "me"
-        me = await client.get_chat_member(chat_id, user_target)
+        me = await asyncio.wait_for(client.get_chat_member(chat_id, user_target), timeout=MTPROTO_RPC_TIMEOUT)
         status_val = str(getattr(me.status, "value", me.status)).lower()
         if status_val in ("owner", "creator"):
             allowed = True
@@ -291,9 +376,7 @@ async def _fetch_all_participants(client: Client, call, max_pages: int = 20):
     users_map: dict = {}
     offset = ""
     for _ in range(max_pages):
-        res = await client.invoke(
-            GetGroupParticipants(call=call, ids=[], sources=[], offset=offset, limit=100)
-        )
+        res = await _invoke(client, GetGroupParticipants(call=call, ids=[], sources=[], offset=offset, limit=100))
         participants.extend(getattr(res, "participants", []) or [])
         for u in getattr(res, "users", []) or []:
             users_map[u.id] = u
@@ -320,15 +403,18 @@ def _get_group_now(tz_name: str = None) -> datetime:
         return datetime.now()
 
 
-async def _ensure_connected(client: Client, retries: int = 2, delay: float = 1.0) -> bool:
+async def _ensure_connected(client: Client, retries: int = 2, delay: float = 1.0, timeout: float = None) -> bool:
+    connect_timeout = timeout or min(MTPROTO_CONNECT_TIMEOUT, 15.0)
     for attempt in range(retries):
         if client.is_connected:
             return True
         try:
-            await asyncio.wait_for(client.connect(), timeout=8.0)
+            await asyncio.wait_for(client.connect(), timeout=connect_timeout)
             return True
         except Exception as e:
             logger.debug(f"Reintento de conexión ({attempt + 1}/{retries}) falló: {e}")
+            if client.is_connected:
+                return True
             await asyncio.sleep(delay)
     return client.is_connected
 
@@ -339,14 +425,14 @@ def _register_forbidden_strike(chat_id: int, action_label: str) -> int:
     logger.warning(f"⚠️ [Strike prohibido] Grupo {chat_id}: {action_label} (intento {current}/{FORBIDDEN_STRIKE_LIMIT})")
 
     if current >= FORBIDDEN_STRIKE_LIMIT:
-        _autolower_cooldowns[chat_id] = asyncio.get_event_loop().time() + FORBIDDEN_COOLDOWN_SECONDS
+        _autolower_cooldowns[chat_id] = time.monotonic() + FORBIDDEN_COOLDOWN_SECONDS
         logger.warning(f"⏳ [Cooldown activado] Grupo {chat_id} bloqueado por {FORBIDDEN_COOLDOWN_SECONDS}s.")
     return current
 
 
 def _register_noise_strike(chat_id: int, user_id: int) -> bool:
     key = (chat_id, user_id)
-    now_ts = asyncio.get_event_loop().time()
+    now_ts = time.monotonic()
     history = _noise_unmute_history.setdefault(key, [])
     history = [ts for ts in history if now_ts - ts <= NOISE_SPIKE_WINDOW_SECONDS]
     history.append(now_ts)
@@ -359,6 +445,20 @@ def _register_noise_strike(chat_id: int, user_id: int) -> bool:
     return False
 
 
+def _night_window_now(start_str: str, end_str: str) -> bool:
+    """
+    Evalúa la ventana nocturna con la zona horaria de la comunidad (BOT_TIMEZONE,
+    por defecto America/Bogota). is_night_mode_time() usa la hora del contenedor,
+    que en Railway es UTC y desplazaba el modo nocturno 5 horas.
+    """
+    start_hm = _normalize_hm(start_str, "22:00")
+    end_hm = _normalize_hm(end_str, "06:00")
+    if start_hm == end_hm:
+        return False
+    current_hm = _get_group_now().strftime("%H:%M")
+    return _is_time_in_window(current_hm, start_hm, end_hm)
+
+
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
     try:
         cfg = await get_night_mode_config(chat_id)
@@ -366,7 +466,7 @@ async def _is_night_active(chat_id: int) -> tuple[bool, str]:
             return False, "disabled"
         start_str = cfg.get("start", "22:00")
         end_str = cfg.get("end", "06:00")
-        in_night = is_night_mode_time(start_str, end_str)
+        in_night = _night_window_now(start_str, end_str)
         return in_night, "night" if in_night else "day"
     except Exception:
         return False, "error"
@@ -471,8 +571,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
             except Exception:
                 pass
 
-        bot_info = await _global_bot.get_me()
-        bot_username = bot_info.username or "thebunkerapp_bot"
+        bot_username = await _get_bot_username()
         price = await get_mic_vip_price(chat_id) or 50
 
         custom_text = svc_cfg.get("vc_text")
@@ -513,14 +612,13 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         if svc_cfg.get("vc_welcome_enabled", 1) == 0:
             return
 
-        bot_info = await _global_bot.get_me()
-        bot_username = bot_info.username or "thebunkerapp_bot"
+        bot_username = await _get_bot_username()
         tier = (await get_group_tier(chat_id) or "free").lower()
 
         custom_text = svc_cfg.get("vc_welcome_text")
         custom_btn = svc_cfg.get("vc_welcome_btn")
         custom_url = svc_cfg.get("vc_welcome_btn_url")
-        autodel = svc_cfg.get("vc_welcome_autodel", 0) or 0
+        autodel = int(svc_cfg.get("vc_welcome_autodel", 0) or 0)
 
         markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, custom_btn_text=custom_btn, custom_btn_url=custom_url)
         text = custom_text if (tier in ("pro", "ultra_pro") and custom_text) else VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
@@ -558,8 +656,9 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     if not text:
         return None
 
-    now = asyncio.get_event_loop().time()
-    if now - _sentinel_payload_last_sent.get(chat_id, 0) < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
+    now = time.monotonic()
+    last_sent = _sentinel_payload_last_sent.get(chat_id)
+    if last_sent is not None and now - last_sent < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
         return None
 
     cleaned_text, markup = _extract_urls_to_markup(text, payload_cfg.get("button_text"), payload_cfg.get("button_url"))
@@ -573,35 +672,43 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     return sent
 
 
-async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
+async def _get_raw_group_call(client: Client, chat_id: int, peer=None, raise_errors: bool = False):
+    """
+    Devuelve el InputGroupCall activo o None si no hay llamada.
+    Con raise_errors=True los fallos de red/time-out se propagan en lugar de
+    confundirse con "no hay llamada" (el monitor reenviaba la bienvenida fijada
+    y reiniciaba el contador de 3.5 h tras cualquier error transitorio).
+    """
     try:
         if peer is None:
             peer = await client.resolve_peer(chat_id)
 
         raw_call = None
         if isinstance(peer, (InputPeerChannel, InputChannel)):
-            full_chat_res = await client.invoke(
+            full_chat_res = await _invoke(client,
                 GetFullChannel(channel=InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash))
             )
             raw_call = getattr(full_chat_res.full_chat, "call", None)
         elif isinstance(peer, InputPeerChat):
-            full_chat_res = await client.invoke(GetFullChat(chat_id=peer.chat_id))
+            full_chat_res = await _invoke(client, GetFullChat(chat_id=peer.chat_id))
             raw_call = getattr(full_chat_res.full_chat, "call", None)
         else:
             resolved = await client.resolve_peer(chat_id)
             if isinstance(resolved, (InputPeerChannel, InputChannel)):
-                full_chat_res = await client.invoke(
+                full_chat_res = await _invoke(client,
                     GetFullChannel(channel=InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash))
                 )
                 raw_call = getattr(full_chat_res.full_chat, "call", None)
             elif isinstance(resolved, InputPeerChat):
-                full_chat_res = await client.invoke(GetFullChat(chat_id=resolved.chat_id))
+                full_chat_res = await _invoke(client, GetFullChat(chat_id=resolved.chat_id))
                 raw_call = getattr(full_chat_res.full_chat, "call", None)
 
         if raw_call:
             return InputGroupCall(id=raw_call.id, access_hash=raw_call.access_hash)
         return None
     except Exception as e:
+        if raise_errors:
+            raise
         logger.debug(f"Aviso obteniendo llamada en {chat_id}: {e}")
         return None
 
@@ -609,26 +716,45 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None):
 async def semantic_scan_content(text: str, custom_prompt: str = "") -> dict:
     if not text or not mistral_client or len(text.strip()) < 8:
         return {"flagged": False, "reason": ""}
+    system_prompt = (
+        "Determina si el texto contiene amenazas extremas o material ilicito. "
+        "Responde estrictamente JSON con 'flagged' y 'reason'."
+    )
+    if custom_prompt:
+        system_prompt += f"\nDirectivas adicionales del administrador: {custom_prompt}"
     try:
-        response = await asyncio.to_thread(
-            mistral_client.chat.complete,
-            model="mistral-small-latest",
-            messages=[
-                {"role": "system", "content": "Determina si el texto contiene amenazas extremas o material ilicito. Responde estrictamente JSON con 'flagged' y 'reason'."},
-                {"role": "user", "content": text}
-            ],
-            response_format={"type": "json_object"}
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                mistral_client.chat.complete,
+                model=MISTRAL_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text[:4000]}
+                ],
+                response_format={"type": "json_object"}
+            ),
+            timeout=MISTRAL_TIMEOUT_SECONDS
         )
-        data = json.loads(response.choices[0].message.content)
-        return {"flagged": bool(data.get("flagged")), "reason": data.get("reason", "Infracción semántica")}
-    except Exception:
+        raw_content = response.choices[0].message.content or "{}"
+        data = json.loads(raw_content)
+        if not isinstance(data, dict):
+            return {"flagged": False, "reason": ""}
+        flagged = data.get("flagged")
+        if isinstance(flagged, str):
+            flagged = flagged.strip().lower() in ("true", "1", "yes", "si", "sí")
+        return {"flagged": bool(flagged), "reason": str(data.get("reason") or "Infracción semántica")}
+    except asyncio.TimeoutError:
+        logger.warning("⏱️ [Guardián IA] Mistral excedió el tiempo de espera en el escaneo semántico.")
+        return {"flagged": False, "reason": ""}
+    except Exception as e:
+        logger.debug(f"Aviso en escaneo semántico Mistral: {e}")
         return {"flagged": False, "reason": ""}
 
 
 async def generate_sentinel_ai_response(
-    chat_id: int, 
-    user_id: int, 
-    user_name: str, 
+    chat_id: int,
+    user_id: int,
+    user_name: str,
     message_text: str,
     personality_tone: str = "guardian",
     custom_prompt: str = ""
@@ -671,28 +797,46 @@ async def generate_sentinel_ai_response(
         context_history = await get_ai_chat_context(chat_id, limit=6)
         messages = [{"role": "system", "content": system_instruction}]
         for item in context_history:
-            messages.append({"role": item["role"], "content": item["content"]})
-        messages.append({"role": "user", "content": f"{user_name}: {message_text}"})
+            role = item.get("role")
+            content = item.get("content")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": f"{user_name}: {message_text}"[:4000]})
 
-        response = await asyncio.to_thread(
-            mistral_client.chat.complete,
-            model="mistral-small-latest",
-            messages=messages,
-            max_tokens=220,
-            temperature=0.7
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                mistral_client.chat.complete,
+                model=MISTRAL_MODEL,
+                messages=messages,
+                max_tokens=220,
+                temperature=0.7
+            ),
+            timeout=MISTRAL_TIMEOUT_SECONDS
         )
-        reply_text = response.choices[0].message.content.strip()
+        reply_text = (response.choices[0].message.content or "").strip()
+        if not reply_text:
+            return f"Perímetro asegurado, {user_name}. Directiva de supervisión en línea. 🛡️"
 
         await save_ai_chat_context(chat_id, user_id, "user", message_text)
         await save_ai_chat_context(chat_id, 0, "assistant", reply_text)
 
         return reply_text
+    except asyncio.TimeoutError:
+        logger.warning(f"⏱️ [IA Centinela] Mistral excedió {MISTRAL_TIMEOUT_SECONDS:.0f}s en chat {chat_id}.")
+        return f"Perímetro asegurado, {user_name}. Directiva de supervisión en línea. 🛡️"
     except Exception as ex:
         logger.error(f"❌ [Error Generando Respuesta IA Centinela]: {ex}")
         return f"Perímetro asegurado, {user_name}. Directiva de supervisión en línea. 🛡️"
 
 
 async def sentinel_incoming_message_dispatcher(client: Client, message):
+    try:
+        await _sentinel_incoming_message_dispatcher(client, message)
+    except Exception as e:
+        logger.debug(f"Aviso en dispatcher de mensajes del Centinela: {e}")
+
+
+async def _sentinel_incoming_message_dispatcher(client: Client, message):
     if not message.chat or message.chat.type == ChatType.PRIVATE or (message.from_user and message.from_user.is_self):
         return
     chat_id = message.chat.id
@@ -728,7 +872,7 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
                 alert_text = (
                     f"🛡️️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
                     f"Mensaje de <b>{html.escape(user_tag)}</b> purgado preventivamente.\n"
-                    f"• <b>Detección:</b> <code>{html.escape(threat.get('reason'))}</code>\n\n"
+                    f"• <b>Detección:</b> <code>{html.escape(str(threat.get('reason') or 'Infracción semántica'))}</code>\n\n"
                     f"🛡️ <i>Cloud Media Management</i>"
                 )
                 _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20))
@@ -739,8 +883,8 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
         text_lower = text_content.lower()
 
         is_replied_to_me = bool(
-            message.reply_to_message 
-            and message.reply_to_message.from_user 
+            message.reply_to_message
+            and message.reply_to_message.from_user
             and message.reply_to_message.from_user.is_self
         )
         is_mentioned = (f"@{me_username}" in text_lower) if me_username else False
@@ -779,37 +923,73 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
             )
 
             if ai_reply:
+                # Texto generado por IA: sin parseo Markdown/HTML para que caracteres
+                # sueltos (*, _, <) no rompan el envío.
                 try:
-                    await message.reply_text(ai_reply, quote=True)
+                    await message.reply_text(ai_reply, quote=True, parse_mode=ParseMode.DISABLED)
                 except Exception:
                     try:
-                        await client.send_message(chat_id, ai_reply)
+                        await client.send_message(chat_id, ai_reply, parse_mode=ParseMode.DISABLED)
                     except Exception as send_err:
                         logger.warning(f"Aviso enviando réplica IA en {chat_id}: {send_err}")
 
 
 async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
-    try:
-        new_admins = set()
+    async def _collect() -> set:
+        collected = set()
         async for member in client.get_chat_members(chat_id, filter=ChatMembersFilter.ADMINISTRATORS):
             status_val = str(getattr(member.status, "value", member.status)).lower()
             if status_val in ["creator", "owner", "administrator"] and member.user and not member.user.is_bot:
-                new_admins.add(member.user.id)
+                collected.add(member.user.id)
+        return collected
+
+    try:
+        new_admins = await asyncio.wait_for(_collect(), timeout=MTPROTO_RPC_TIMEOUT * 2)
         if bot_client_id:
             new_admins.add(bot_client_id)
-        admin_caches[chat_id] = {'admins': new_admins, 'ts': asyncio.get_event_loop().time()}
+        admin_caches[chat_id] = {'admins': new_admins, 'ts': time.monotonic()}
+    except FATAL_SESSION_ERRORS:
+        raise
     except Exception as e:
         logger.debug(f"Aviso actualizando admin cache en chat {chat_id}: {e}")
+        # Se marca el intento para no reintentar en cada ciclo de 3 segundos.
+        previous = admin_caches.get(chat_id, {'admins': set(), 'ts': 0})
+        admin_caches[chat_id] = {'admins': previous.get('admins', set()), 'ts': time.monotonic() - ADMIN_CACHE_TTL + 60}
 
 
 async def _verify_active_membership(client: Client, chat_id: int) -> bool:
     try:
         user_target = client.me.id if getattr(client, "me", None) else "me"
-        member = await client.get_chat_member(chat_id, user_target)
+        member = await asyncio.wait_for(client.get_chat_member(chat_id, user_target), timeout=MTPROTO_RPC_TIMEOUT)
         status_val = str(getattr(member.status, "value", member.status)).lower()
         return status_val not in ("left", "kicked", "banned")
-    except Exception:
+    except FATAL_SESSION_ERRORS:
+        raise
+    except Exception as e:
+        err_up = str(e).upper()
+        if any(k in err_up for k in ("USER_NOT_PARTICIPANT", "CHANNEL_PRIVATE", "CHAT_FORBIDDEN")):
+            return False
         return True
+
+
+async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reason: str = None, revoke: bool = False) -> None:
+    """
+    Retira el Centinela de un grupo cuando su monitor termina: limpia el registro
+    (solo si sigue apuntando a ESTE cliente, para no borrar uno más nuevo), revoca
+    la sesión si es inválida y detiene el cliente propio para no dejar sockets vivos.
+    """
+    current = active_sentinels.get(chat_id)
+    if current and current.get("client") is client:
+        active_sentinels.pop(chat_id, None)
+    if revoke and user_id:
+        try:
+            await revoke_owner_session(user_id, chat_id, reason=reason)
+        except Exception:
+            pass
+    if client is not assistant_app:
+        still_used = any(info.get("client") is client for info in active_sentinels.values())
+        if not still_used:
+            await _safe_stop_client(client, label=f"grupo {chat_id}")
 
 
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
@@ -819,46 +999,51 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
     is_joined_audio = False
     call_start_time = 0
 
+    reconnect_backoff = 5.0
+    seen_users: set = set()
+
     while True:
         if not client.is_connected:
             try:
-                await asyncio.wait_for(client.connect(), timeout=10.0)
+                await asyncio.wait_for(client.connect(), timeout=MTPROTO_CONNECT_TIMEOUT)
+                reconnect_backoff = 5.0
+                logger.info(f"🔌 [Centinela Reconectado] Grupo {chat_id}.")
+            except asyncio.CancelledError:
+                raise
             except FATAL_SESSION_ERRORS as auth_err:
                 logger.error(f"🔒 [Sesión Inválida] Centinela del grupo {chat_id} desautorizado: {auth_err}")
-                if user_id:
-                    try:
-                        await revoke_owner_session(user_id, chat_id, reason=str(auth_err))
-                    except Exception:
-                        pass
-                active_sentinels.pop(chat_id, None)
+                await _retire_sentinel(chat_id, client, user_id, reason=str(auth_err), revoke=True)
                 return
             except Exception as e:
                 err_up = str(e).upper()
                 if any(x in err_up for x in ("AUTH_KEY", "UNAUTHORIZED", "SESSION_REVOKED", "USER_DEACTIVATED", "406")):
                     logger.error(f"🔒 [Sesión Inválida MTProto] {e}")
-                    active_sentinels.pop(chat_id, None)
+                    await _retire_sentinel(chat_id, client, user_id, reason=str(e), revoke=True)
                     return
-                await asyncio.sleep(5)
+                logger.debug(f"Reconexión MTProto fallida en {chat_id} ({e}); reintento en {reconnect_backoff:.0f}s.")
+                await asyncio.sleep(reconnect_backoff)
+                reconnect_backoff = min(reconnect_backoff * 2, 120.0)
                 continue
 
         try:
-            current_time = asyncio.get_event_loop().time()
+            current_time = time.monotonic()
             cache_info = admin_caches.get(chat_id, {'admins': set(), 'ts': 0})
-            
+
             if current_time - cache_info['ts'] > ADMIN_CACHE_TTL:
                 await _refresh_admin_cache(client, chat_id, bot_client_id)
                 cache_info = admin_caches.get(chat_id, {'admins': set(), 'ts': current_time})
 
                 if not await _verify_active_membership(client, chat_id):
                     logger.warning(f"🚪 [Membresía Perdida] El Centinela ya no pertenece al grupo {chat_id}. Deteniendo monitor.")
-                    active_sentinels.pop(chat_id, None)
+                    await _retire_sentinel(chat_id, client, user_id)
                     return
 
             if not current_call or (current_time - last_channel_check > 15):
-                raw_call_obj = await _get_raw_group_call(client, chat_id, peer)
+                raw_call_obj = await _get_raw_group_call(client, chat_id, peer, raise_errors=True)
                 if raw_call_obj:
                     if not current_call or current_call.id != raw_call_obj.id:
-                        call_start_time = asyncio.get_event_loop().time()
+                        call_start_time = time.monotonic()
+                        is_joined_audio = False
                         _spawn(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
                     current_call = raw_call_obj
                 else:
@@ -869,7 +1054,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
             # Protocolo de reinicio preventivo audiovisual cada 3.5 horas de transmisión continua
             if current_call and call_start_time > 0:
-                if (asyncio.get_event_loop().time() - call_start_time) >= 12600:
+                if (time.monotonic() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
                     if _global_bot:
                         try:
@@ -878,10 +1063,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 text, media_id, media_type, btn_text, btn_url, autodel = await _resolve_reset_text(chat_id)
                                 reset_markup = None
                                 if btn_text or btn_url:
-                                    bot_info = await _global_bot.get_me()
                                     reset_markup = build_vc_moderation_keyboard(
                                         chat_id=chat_id,
-                                        bot_username=bot_info.username or "thebunkerapp_bot",
+                                        bot_username=await _get_bot_username(),
                                         lang="es",
                                         custom_btn_text=btn_text,
                                         custom_btn_url=btn_url
@@ -894,7 +1078,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     text=cleaned_text,
                                     media_id=media_id,
                                     media_type=media_type,
-                                    auto_delete_after=autodel,
+                                    auto_delete_after=int(autodel) if autodel else None,
                                     reply_markup=final_reset_markup
                                 )
                         except Exception as reset_notice_err:
@@ -906,17 +1090,19 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             logger.debug(f"Aviso despachando payload Ultra Pro en {chat_id}: {payload_err}")
 
                     try:
-                        await client.invoke(DiscardGroupCall(call=current_call))
+                        await _invoke(client, DiscardGroupCall(call=current_call))
                     except Exception as disc_err:
                         logger.warning(f"Aviso al cerrar llamada previa: {disc_err}")
 
                     await asyncio.sleep(3.0)
 
                     try:
-                        await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
-                        _spawn(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
+                        await _invoke(client, CreateGroupCall(peer=peer, random_id=random.randint(100000, 2147483647)))
                     except Exception as create_err:
                         logger.warning(f"Aviso al reiniciar llamada: {create_err}")
+                    # La bienvenida fijada se envía una sola vez cuando el monitor detecta la
+                    # llamada nueva (antes se enviaba aquí Y en la detección: mensaje duplicado).
+                    last_channel_check = 0
 
                     current_call = None
                     is_joined_audio = False
@@ -942,7 +1128,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     _last_join_attempt[chat_id] = current_time
                     try:
                         my_peer = await client.resolve_peer("me")
-                        await client.invoke(
+                        await _invoke(client,
                             JoinGroupCall(
                                 call=current_call, join_as=my_peer,
                                 muted=True, video_stopped=True, params=DataJSON(data="{}")
@@ -982,15 +1168,21 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     active_users.add(u_id)
 
                     if await is_userbot_flagged(u_id, chat_id):
+                        if getattr(p, "muted", True) and (getattr(p, "volume", None) or 0) == 0:
+                            continue
                         try:
-                            await client.invoke(
-                                EditGroupCallParticipant(
-                                    call=current_call, 
-                                    participant=await client.resolve_peer(u_id), 
-                                    muted=True, 
-                                    volume=0
-                                )
+                            flagged_obj = users_map.get(u_id)
+                            flagged_peer = (
+                                InputPeerUser(user_id=u_id, access_hash=flagged_obj.access_hash)
+                                if (flagged_obj and getattr(flagged_obj, "access_hash", None))
+                                else await client.resolve_peer(u_id)
                             )
+                            await _invoke(client, EditGroupCallParticipant(
+                                call=current_call,
+                                participant=flagged_peer,
+                                muted=True,
+                                volume=0
+                            ))
                         except Exception:
                             pass
                         continue
@@ -998,7 +1190,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     is_admin_or_owner = (
                         is_super_admin(u_id)
                         or u_id in SERVICE_ACCOUNT_IDS
-                        or u_id == bot_client_id 
+                        or u_id == bot_client_id
                         or u_id in cache_info['admins']
                     )
                     is_vip = await is_vip_mic_active(u_id, chat_id) or await is_whitelisted(u_id)
@@ -1034,7 +1226,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         if abs(vol - target_vip_vol) > 50:
                             try:
                                 p_peer = await client.resolve_peer(u_id)
-                                await client.invoke(
+                                await _invoke(client,
                                     EditGroupCallParticipant(call=current_call, participant=p_peer, muted=False, volume=target_vip_vol)
                                 )
                             except Exception:
@@ -1070,7 +1262,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         user_obj = users_map.get(u_id)
                         try:
                             p_peer = InputPeerUser(user_id=u_id, access_hash=user_obj.access_hash) if (user_obj and getattr(user_obj, "access_hash", None)) else await client.resolve_peer(u_id)
-                            await client.invoke(EditGroupCallParticipant(call=current_call, participant=p_peer, muted=desired_muted, volume=desired_volume))
+                            await _invoke(client, EditGroupCallParticipant(call=current_call, participant=p_peer, muted=desired_muted, volume=desired_volume))
                             _forbidden_strikes[chat_id] = 0
                         except Exception as e:
                             err_msg = str(e).upper()
@@ -1104,11 +1296,37 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
                 alerted_users.intersection_update(active_users)
 
+                # Poda de estados por usuario que ya salió de la llamada (evita crecimiento sin límite 24/7)
+                for gone_id in seen_users - active_users:
+                    _last_mute_state.pop((chat_id, gone_id), None)
+                    _screen_shield_flagged.pop((chat_id, gone_id), None)
+                    _noise_unmute_history.pop((chat_id, gone_id), None)
+                seen_users = active_users
+            elif seen_users:
+                for gone_id in seen_users:
+                    _last_mute_state.pop((chat_id, gone_id), None)
+                    _screen_shield_flagged.pop((chat_id, gone_id), None)
+                    _noise_unmute_history.pop((chat_id, gone_id), None)
+                seen_users = set()
+                alerted_users.clear()
+
+        except asyncio.CancelledError:
+            raise
+        except FATAL_SESSION_ERRORS as auth_err:
+            logger.error(f"🔒 [Sesión Inválida en operación] Grupo {chat_id}: {auth_err}")
+            await _retire_sentinel(chat_id, client, user_id, reason=str(auth_err), revoke=True)
+            return
         except FloodWait as fw:
-            await asyncio.sleep(fw.value + 2)
+            wait_s = int(getattr(fw, "value", 5) or 5)
+            logger.warning(f"⏳ [FloodWait Radar] Grupo {chat_id}: pausa de {wait_s}s.")
+            await asyncio.sleep(wait_s + 2)
         except PeerIdInvalid:
             await asyncio.sleep(60)
-        except Exception:
+        except asyncio.TimeoutError:
+            logger.debug(f"⏱️ [Radar] RPC excedió el time-out en grupo {chat_id}; se reintenta.")
+            await asyncio.sleep(5)
+        except Exception as loop_err:
+            logger.debug(f"Aviso en ciclo de radar del grupo {chat_id}: {loop_err}")
             await asyncio.sleep(3)
         await asyncio.sleep(3)
 
@@ -1124,11 +1342,17 @@ async def vc_scheduler_loop():
             schedules = await get_all_active_vc_schedules()
             for row in schedules:
                 group_id, days_allowed, start_time, end_time, status, call_active = row[0], row[1], row[2], row[3], row[4], row[5]
-                
+
                 if not days_allowed:
                     continue
-                allowed_days_list = [d.strip() for d in days_allowed.split(",")]
-                if current_day_str not in allowed_days_list:
+                allowed_days_list = [d.strip() for d in str(days_allowed).split(",")]
+                start_hm = _normalize_hm(start_time, "20:00")
+                end_hm = _normalize_hm(end_time, "23:00")
+                is_in_window = _is_time_in_window(current_time_str, start_hm, end_hm)
+
+                # El día solo condiciona la APERTURA; el cierre debe ejecutarse aunque la
+                # ventana cruce la medianoche hacia un día no habilitado.
+                if current_day_str not in allowed_days_list and not (call_active == 1 and not is_in_window):
                     continue
 
                 sentinel_data = active_sentinels.get(group_id)
@@ -1137,15 +1361,16 @@ async def vc_scheduler_loop():
                     continue
 
                 try:
-                    peer = await client.resolve_peer(group_id)
+                    peer = await asyncio.wait_for(client.resolve_peer(group_id), timeout=MTPROTO_RPC_TIMEOUT)
                 except Exception:
                     continue
 
-                is_in_window = _is_time_in_window(current_time_str, start_time, end_time)
+                if current_day_str not in allowed_days_list:
+                    is_in_window = False
 
                 if is_in_window and call_active == 0:
                     try:
-                        await client.invoke(CreateGroupCall(peer=peer, random_id=random.randint(100000, 999999)))
+                        await _invoke(client, CreateGroupCall(peer=peer, random_id=random.randint(100000, 2147483647)))
                         await update_vc_call_status(group_id, 1)
                         if _global_bot:
                             svc_cfg = await get_sentinel_service_messages_config(group_id)
@@ -1153,8 +1378,10 @@ async def vc_scheduler_loop():
                                 sched_text = svc_cfg.get("sched_start_text") or VC_SCHED_MESSAGES["start"]
                                 sched_media_id = svc_cfg.get("sched_start_media_id")
                                 sched_media_type = svc_cfg.get("sched_start_media_type")
-                                sched_autodel = svc_cfg.get("sched_start_autodel", 0) or 0
-                                cleaned_sched_text, sched_markup = _extract_urls_to_markup(sched_text)
+                                sched_autodel = int(svc_cfg.get("sched_start_autodel", 0) or 0)
+                                cleaned_sched_text, sched_markup = _extract_urls_to_markup(
+                                    sched_text, svc_cfg.get("sched_start_btn"), svc_cfg.get("sched_start_btn_url")
+                                )
 
                                 await _dispatch_radar_notice(
                                     chat_id=group_id,
@@ -1164,7 +1391,10 @@ async def vc_scheduler_loop():
                                     auto_delete_after=sched_autodel if sched_autodel > 0 else None,
                                     reply_markup=sched_markup
                                 )
-                            _spawn(_dispatch_pinned_vc_welcome(group_id, lang="es"))
+                            # La bienvenida fijada la emite el monitor del grupo al detectar la llamada;
+                            # solo se envía aquí si no hay monitor activo (evita duplicados).
+                            if group_id not in active_sentinels:
+                                _spawn(_dispatch_pinned_vc_welcome(group_id, lang="es"))
                             try:
                                 await _dispatch_sentinel_payload(group_id, origin="apertura_programada")
                             except Exception as payload_err:
@@ -1181,7 +1411,7 @@ async def vc_scheduler_loop():
                     try:
                         raw_call_obj = await _get_raw_group_call(client, group_id, peer)
                         if raw_call_obj:
-                            await client.invoke(DiscardGroupCall(call=raw_call_obj))
+                            await _invoke(client, DiscardGroupCall(call=raw_call_obj))
                         await update_vc_call_status(group_id, 0)
                         if _global_bot:
                             await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["end"], parse_mode="HTML")
@@ -1211,6 +1441,17 @@ async def _get_all_night_groups() -> list[int]:
         return list(active_sentinels.keys())
 
 
+async def _has_night_snapshot(group_id: int) -> bool:
+    def _sync():
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT 1 FROM night_snapshots WHERE group_id = ?", (group_id,)).fetchone()
+            return row is not None
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception:
+        return False
+
+
 async def night_mode_autonomous_loop():
     logger.info("🌙 [Modo Nocturno Autónomo] Bucle de automatización perimetral iniciado.")
     while True:
@@ -1225,10 +1466,13 @@ async def night_mode_autonomous_loop():
                         continue
                     start_str = cfg.get("start", "22:00")
                     end_str = cfg.get("end", "06:00")
-                    in_night_time = is_night_mode_time(start_str, end_str)
+                    in_night_time = _night_window_now(start_str, end_str)
+                    # Estado real del modo noche = existencia del snapshot (no el lock de media,
+                    # que un admin puede activar manualmente durante el día).
+                    night_engaged = await _has_night_snapshot(group_id)
                     current_media_lock = await get_lock_status(group_id, "lock_media")
 
-                    if in_night_time and current_media_lock == 0:
+                    if in_night_time and not night_engaged:
                         await activate_universal_night_mode(group_id)
                         if _global_bot:
                             try:
@@ -1241,10 +1485,13 @@ async def night_mode_autonomous_loop():
                                 pass
                         logger.info(f"🌙 [Modo Nocturno Activado] Perímetro asegurado automáticamente en comunidad {group_id}.")
 
-                    elif not in_night_time and current_media_lock == 1:
+                    elif not in_night_time and night_engaged:
                         night_cfg = await get_night_mode_config(group_id)
-                        if night_cfg.get("status") == 1:
+                        if night_cfg.get("status") == 1 or current_media_lock == 1:
                             await deactivate_universal_night_mode(group_id)
+                            # deactivate_universal_night_mode pone night_mode_status=0, que también
+                            # es el interruptor de la programación: se reactiva para la próxima noche.
+                            await set_night_mode_config(group_id, "night_mode_status", 1)
                             if _global_bot:
                                 try:
                                     await _global_bot.send_message(
@@ -1271,7 +1518,10 @@ async def radar_master_loop():
         try:
             if not assistant_app.is_connected:
                 try:
-                    await asyncio.wait_for(assistant_app.start(), timeout=10.0)
+                    if getattr(assistant_app, "is_initialized", False):
+                        await asyncio.wait_for(assistant_app.connect(), timeout=MTPROTO_CONNECT_TIMEOUT)
+                    else:
+                        await asyncio.wait_for(assistant_app.start(), timeout=MTPROTO_CONNECT_TIMEOUT)
                     logger.info("🤖 [Centinela Maestro Reconectado con Éxito]")
                 except FATAL_SESSION_ERRORS as auth_err:
                     logger.error(
@@ -1288,38 +1538,75 @@ async def radar_master_loop():
                     err_str = str(e).upper()
                     if any(k in err_str for k in ("AUTH_KEY", "UNAUTHORIZED", "406", "DUPLICATED")):
                         logger.error(f"🔒 [MASTER_SESSION Inválida]: {e}. Deteniendo Centinela Maestro.")
+                        dead_client = assistant_app
                         assistant_app = None
+                        try:
+                            await asyncio.wait_for(dead_client.stop(), timeout=MTPROTO_STOP_TIMEOUT)
+                        except Exception:
+                            pass
                         break
+                    logger.warning(f"⚠️ [Centinela Maestro] Reconexión fallida: {e}")
 
             if assistant_app and assistant_app.is_connected:
-                async for dialog in assistant_app.get_dialogs(limit=100):
-                    chat = dialog.chat
-                    if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-                        chat_id = chat.id
-                        lock = _get_launch_lock(chat_id)
-                        async with lock:
-                            if chat_id in active_sentinels:
-                                continue
-                            try:
-                                peer = await assistant_app.resolve_peer(chat_id)
-                                bot_id = get_assistant_bot_id()
-                                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, bot_id))
-                                active_sentinels[chat_id] = {
-                                    "client": assistant_app,
-                                    "task": task,
-                                    "user_id": 0
-                                }
-                            except Exception:
-                                pass
+                master_client = assistant_app
+
+                async def _collect_groups() -> list:
+                    found = []
+                    async for dialog in master_client.get_dialogs(limit=100):
+                        chat = dialog.chat
+                        if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+                            found.append(chat.id)
+                    return found
+
+                group_ids = await asyncio.wait_for(_collect_groups(), timeout=MTPROTO_RPC_TIMEOUT * 2)
+                for chat_id in group_ids:
+                    lock = _get_launch_lock(chat_id)
+                    async with lock:
+                        existing = active_sentinels.get(chat_id)
+                        if existing and existing.get("task") is not None and not existing["task"].done():
+                            continue
+                        try:
+                            peer = await asyncio.wait_for(master_client.resolve_peer(chat_id), timeout=MTPROTO_RPC_TIMEOUT)
+                            bot_id = get_assistant_bot_id()
+                            task = asyncio.create_task(
+                                monitor_single_group(chat_id, peer, master_client, bot_id),
+                                name=f"radar_master:{chat_id}"
+                            )
+                            active_sentinels[chat_id] = {
+                                "client": master_client,
+                                "task": task,
+                                "user_id": 0
+                            }
+                            task.add_done_callback(_make_sentinel_cleanup(chat_id))
+                        except Exception as launch_err:
+                            logger.debug(f"Aviso lanzando monitor maestro en {chat_id}: {launch_err}")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.debug(f"Aviso en radar master loop: {e}")
         await asyncio.sleep(25)
 
 
+def _make_sentinel_cleanup(group_id: int):
+    """Callback que borra el registro si la tarea terminó y sigue siendo la registrada."""
+    def _cleanup(task: asyncio.Task) -> None:
+        current = active_sentinels.get(group_id)
+        if current and current.get("task") is task:
+            active_sentinels.pop(group_id, None)
+    return _cleanup
+
+
 async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
+    if not session_string:
+        logger.warning(f"⚠️ [Centinela Propio] Sesión vacía para grupo {group_id}.")
+        return False
+
     client_api_id = api_id if api_id else DEFAULT_API_ID
     client_api_hash = api_hash if api_hash else DEFAULT_API_HASH
-    
+    if not client_api_id or not client_api_hash:
+        logger.error("❌ [Centinela Propio] Faltan TELEGRAM_API_ID / TELEGRAM_API_HASH.")
+        return False
+
     session_client = Client(
         f"sentinel_{user_id}_{group_id}",
         session_string=session_string,
@@ -1327,27 +1614,33 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         api_hash=client_api_hash,
         in_memory=True
     )
-    
+
     try:
         session_client.add_handler(
             MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
         )
 
-        await asyncio.wait_for(session_client.start(), timeout=12.0)
-        me = await session_client.get_me()
+        await asyncio.wait_for(session_client.start(), timeout=MTPROTO_CONNECT_TIMEOUT)
+        me = await asyncio.wait_for(session_client.get_me(), timeout=MTPROTO_RPC_TIMEOUT)
 
         try:
-            chat_obj = await session_client.get_chat(group_id)
-            peer = await session_client.resolve_peer(chat_obj.id)
+            chat_obj = await asyncio.wait_for(session_client.get_chat(group_id), timeout=MTPROTO_RPC_TIMEOUT)
+            peer = await asyncio.wait_for(session_client.resolve_peer(chat_obj.id), timeout=MTPROTO_RPC_TIMEOUT)
+        except FATAL_SESSION_ERRORS:
+            raise
         except Exception:
-            peer = await session_client.resolve_peer(group_id)
+            peer = await asyncio.wait_for(session_client.resolve_peer(group_id), timeout=MTPROTO_RPC_TIMEOUT)
 
-        task = asyncio.create_task(monitor_single_group(group_id, peer, session_client, me.id, user_id))
+        task = asyncio.create_task(
+            monitor_single_group(group_id, peer, session_client, me.id, user_id),
+            name=f"radar_sentinel:{group_id}"
+        )
         active_sentinels[group_id] = {
             "client": session_client,
             "task": task,
             "user_id": user_id
         }
+        task.add_done_callback(_make_sentinel_cleanup(group_id))
         logger.info(f"💎 [Centinela Propio Conectado] Comunidad {group_id} protegida por @{me.username or me.id}")
         return True
     except FATAL_SESSION_ERRORS as auth_err:
@@ -1356,9 +1649,15 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             await revoke_owner_session(user_id, group_id, reason=str(auth_err))
         except Exception:
             pass
+        await _safe_stop_client(session_client, label=f"grupo {group_id}")
+        return False
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ [Centinela Propio] Time-out conectando la sesión del grupo {group_id}.")
+        await _safe_stop_client(session_client, label=f"grupo {group_id}")
         return False
     except Exception as e:
         logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
+        await _safe_stop_client(session_client, label=f"grupo {group_id}")
         return False
 
 
@@ -1379,16 +1678,18 @@ async def disconnect_sentinel(group_id: int):
 async def _disconnect_sentinel_unlocked(group_id: int):
     if group_id in active_sentinels:
         sentinel_info = active_sentinels.pop(group_id)
-        try:
-            sentinel_info["task"].cancel()
-        except Exception:
-            pass
-        try:
-            client = sentinel_info["client"]
-            if client and client != assistant_app and client.is_connected:
-                await client.stop()
-        except Exception:
-            pass
+        task = sentinel_info.get("task")
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=MTPROTO_STOP_TIMEOUT)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+        client = sentinel_info.get("client")
+        if client is not None and client is not assistant_app:
+            still_used = any(info.get("client") is client for info in active_sentinels.values())
+            if not still_used:
+                await _safe_stop_client(client, label=f"grupo {group_id}")
         logger.info(f"🛑 [Centinela Desconectado] Grupo {group_id} liberado.")
 
     admin_caches.pop(group_id, None)
@@ -1401,25 +1702,42 @@ async def _disconnect_sentinel_unlocked(group_id: int):
         _noise_unmute_history.pop(key, None)
     for key in [k for k in _last_mute_state if k[0] == group_id]:
         _last_mute_state.pop(key, None)
+    _call_rights_cache.pop(group_id, None)
+    _last_join_attempt.pop(group_id, None)
 
 
 async def load_all_sentinels():
-    sessions = await get_all_active_sessions()
+    try:
+        sessions = await get_all_active_sessions() or []
+    except Exception as e:
+        logger.error(f"❌ [Centinelas] No se pudieron leer las sesiones activas: {e}")
+        return
 
     async def _load_one(u_id, g_id, s_str, a_id, a_hash):
         lock = _get_launch_lock(g_id)
         async with lock:
-            if g_id in active_sentinels:
+            existing = active_sentinels.get(g_id)
+            if existing and existing.get("task") is not None and not existing["task"].done():
                 return
             async with _sentinel_launch_semaphore:
                 try:
                     await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Aviso cargando Centinela del grupo {g_id}: {e}")
 
-    await asyncio.gather(*[
+    results = await asyncio.gather(*[
         _load_one(row[0], row[1], row[2], row[3], row[4]) for row in sessions
-    ])
+    ], return_exceptions=True)
+    failures = sum(1 for r in results if isinstance(r, Exception))
+    logger.info(f"🛰️ [Centinelas] {len(sessions)} sesión(es) procesadas, {failures} con error inesperado.")
+
+
+async def _disconnect_auth_client(client: Client) -> None:
+    if client and client.is_connected:
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=AUTH_DISCONNECT_TIMEOUT)
+        except Exception:
+            pass
 
 
 async def cancel_phone_auth(uid: int):
@@ -1428,11 +1746,7 @@ async def cancel_phone_auth(uid: int):
         session_data = pending_auth_sessions.pop(uid, None)
         if session_data:
             client = session_data.get("client")
-            if client and client.is_connected:
-                try:
-                    await asyncio.wait_for(client.disconnect(), timeout=3.0)
-                except Exception:
-                    pass
+            await _disconnect_auth_client(client)
             logger.info(f"🧹 [Auth Pendiente] Cancelada y desconectada sesión de UID {uid}.")
             return True
         return False
@@ -1446,16 +1760,23 @@ async def cancel_phone_auth(uid: int):
 # ==========================================
 async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> dict:
     """Inicia el proceso de autenticación telefónica con timeout estricto para evitar cuelgues."""
+    async with _get_auth_lock(user_id):
+        return await _start_phone_auth_locked(user_id, group_id, phone_number)
+
+
+async def _start_phone_auth_locked(user_id: int, group_id: int, phone_number: str) -> dict:
     await cancel_phone_auth(user_id)
-    clean_phone = phone_number.replace(" ", "").replace("-", "").strip()
+    clean_phone = re.sub(r"[\s\-().]", "", phone_number or "").strip()
     if not clean_phone.startswith("+"):
         clean_phone = f"+{clean_phone}"
+    if not re.fullmatch(r"\+\d{7,15}", clean_phone):
+        return {"status": "error", "message": "invalid_phone"}
 
     api_id = DEFAULT_API_ID
     api_hash = DEFAULT_API_HASH
     if not api_id or not api_hash:
         return {
-            "status": "error", 
+            "status": "error",
             "message": "Faltan TELEGRAM_API_ID o TELEGRAM_API_HASH en las variables de entorno."
         }
 
@@ -1466,12 +1787,16 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
         in_memory=True
     )
 
+    # NOTA: antes existía un primer bloque `except Exception` que capturaba TODO,
+    # dejando inalcanzables los manejadores específicos (número inválido, baneado,
+    # flood...). Ahora cada error devuelve su código correcto al handler.
     try:
-        connected = await _ensure_connected(client)
+        connected = await _ensure_connected(client, retries=2, delay=1.0)
         if not connected:
+            await _disconnect_auth_client(client)
             return {"status": "error", "message": "No se pudo conectar a los servidores de Telegram."}
 
-        sent_code = await asyncio.wait_for(client.send_code(clean_phone), timeout=25.0)
+        sent_code = await asyncio.wait_for(client.send_code(clean_phone), timeout=AUTH_SEND_CODE_TIMEOUT)
 
         pending_auth_sessions[user_id] = {
             "client": client,
@@ -1480,81 +1805,53 @@ async def start_phone_auth(user_id: int, group_id: int, phone_number: str) -> di
             "group_id": group_id,
             "ts": time.time()
         }
+        logger.info(f"📨 [Auth Teléfono] Código enviado a {clean_phone[:4]}*** para UID {user_id}.")
         return {"status": "ok", "phone": clean_phone}
 
     except asyncio.TimeoutError:
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
-        return {"status": "error", "message": "Tiempo de espera agotado (Timeout). Verifica el formato del número."}
-    except Exception as e:
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
-        return {"status": "error", "message": str(e)}
-
-    except asyncio.TimeoutError:
-        logger.error(f"⏱️ [Auth Teléfono] Tiempo de espera agotado al conectar con Telegram para {clean_phone}.")
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
+        logger.error(f"⏱️ [Auth Teléfono] Tiempo de espera agotado al conectar con Telegram para {clean_phone[:4]}***.")
+        await _disconnect_auth_client(client)
         return {"status": "error", "message": "Tiempo de espera agotado (Timeout). Verifica tu conexión o formato del número (+código)."}
     except PhoneNumberInvalid:
-        logger.warning(f"⚠️ [Auth Teléfono] Número inválido: {clean_phone}")
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
+        logger.warning(f"⚠️ [Auth Teléfono] Número inválido: {clean_phone[:4]}***")
+        await _disconnect_auth_client(client)
         return {"status": "error", "message": "invalid_phone"}
     except PhoneNumberBanned:
-        logger.warning(f"⚠️ [Auth Teléfono] Número suspendido: {clean_phone}")
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
+        logger.warning(f"⚠️ [Auth Teléfono] Número suspendido: {clean_phone[:4]}***")
+        await _disconnect_auth_client(client)
         return {"status": "error", "message": "Este número de teléfono está suspendido en Telegram."}
     except PhoneNumberFlood:
-        logger.warning(f"⚠️ [Auth Teléfono] Límite de intentos superado para: {clean_phone}")
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
+        logger.warning(f"⚠️ [Auth Teléfono] Límite de intentos superado para: {clean_phone[:4]}***")
+        await _disconnect_auth_client(client)
         return {"status": "error", "message": "Demasiados intentos para este número. Espera unas horas antes de reintentar."}
     except FloodWait as fw:
-        logger.warning(f"⏳ [Auth Teléfono] FloodWait {fw.value}s para {clean_phone}")
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
+        logger.warning(f"⏳ [Auth Teléfono] FloodWait {fw.value}s para {clean_phone[:4]}***")
+        await _disconnect_auth_client(client)
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except asyncio.CancelledError:
+        await _disconnect_auth_client(client)
+        raise
     except Exception as e:
         logger.error(f"❌ [Auth Teléfono] Error inesperado en start_phone_auth: {e}", exc_info=True)
-        if client.is_connected:
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3.0)
-            except Exception:
-                pass
+        await _disconnect_auth_client(client)
         return {"status": "error", "message": str(e)}
 
 
 async def verify_phone_code(user_id: int, code: str) -> dict:
     """Verifica el código numérico enviado por Telegram con timeout."""
+    async with _get_auth_lock(user_id):
+        return await _verify_phone_code_locked(user_id, code)
+
+
+async def _verify_phone_code_locked(user_id: int, code: str) -> dict:
     auth_data = pending_auth_sessions.get(user_id)
     if not auth_data:
         return {"status": "error", "message": "session_expired"}
 
     client: Client = auth_data["client"]
-    clean_code = code.strip().replace(" ", "").replace("-", "")
+    clean_code = re.sub(r"\D", "", code or "")
+    if not clean_code:
+        return {"status": "error", "message": "invalid_code"}
 
     logger.info(f"🔑 [Auth Código] Validando código para UID {user_id}...")
 
@@ -1563,29 +1860,45 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
         if not connected:
             return {"status": "error", "message": "connection_lost"}
 
-        await asyncio.wait_for(
+        signed = await asyncio.wait_for(
             client.sign_in(
                 phone_number=auth_data["phone"],
                 phone_code_hash=auth_data["phone_code_hash"],
                 phone_code=clean_code
             ),
-            timeout=20.0
+            timeout=AUTH_SIGN_IN_TIMEOUT
         )
-        session_str = await client.export_session_string()
+        # Pyrogram devuelve False / TermsOfService si el número no tiene cuenta registrada.
+        if not signed or not hasattr(signed, "id"):
+            await cancel_phone_auth(user_id)
+            logger.warning(f"⚠️ [Auth Código] El número de UID {user_id} no tiene cuenta de Telegram registrada.")
+            return {"status": "error", "message": "phone_not_registered"}
+
+        session_str = await asyncio.wait_for(client.export_session_string(), timeout=AUTH_SIGN_IN_TIMEOUT)
         group_id = auth_data["group_id"]
-        
+
         await cancel_phone_auth(user_id)
         logger.info(f"✅ [Auth Código] Sesión exportada con éxito para UID {user_id}.")
         return {"status": "success", "session_string": session_str, "group_id": group_id}
 
     except SessionPasswordNeeded:
+        auth_data["ts"] = time.time()
         logger.info(f"🔐 [Auth Código] Verificación 2FA requerida para UID {user_id}.")
         return {"status": "2fa_required"}
-    except (PhoneCodeInvalid, PhoneCodeExpired):
-        logger.warning(f"⚠️ [Auth Código] Código inválido o expirado para UID {user_id}.")
+    except PhoneCodeExpired:
+        logger.warning(f"⚠️ [Auth Código] Código expirado para UID {user_id}.")
+        await cancel_phone_auth(user_id)
         return {"status": "error", "message": "invalid_code"}
+    except PhoneCodeInvalid:
+        logger.warning(f"⚠️ [Auth Código] Código inválido para UID {user_id}.")
+        return {"status": "error", "message": "invalid_code"}
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ [Auth Código] Time-out validando el código de UID {user_id}.")
+        return {"status": "error", "message": "Tiempo de espera agotado (Timeout). Intenta enviar el código de nuevo."}
     except FloodWait as fw:
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"❌ [Auth Código] Error en verify_phone_code: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
@@ -1593,9 +1906,16 @@ async def verify_phone_code(user_id: int, code: str) -> dict:
 
 async def verify_2fa_password(user_id: int, password: str) -> dict:
     """Valida la contraseña de Verificación en Dos Pasos (2FA) con timeout."""
+    async with _get_auth_lock(user_id):
+        return await _verify_2fa_password_locked(user_id, password)
+
+
+async def _verify_2fa_password_locked(user_id: int, password: str) -> dict:
     auth_data = pending_auth_sessions.get(user_id)
     if not auth_data:
         return {"status": "error", "message": "session_expired"}
+    if not password or not password.strip():
+        return {"status": "error", "message": "invalid_password"}
 
     client: Client = auth_data["client"]
 
@@ -1606,8 +1926,8 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
         if not connected:
             return {"status": "error", "message": "connection_lost"}
 
-        await asyncio.wait_for(client.check_password(password=password.strip()), timeout=20.0)
-        session_str = await client.export_session_string()
+        await asyncio.wait_for(client.check_password(password=password.strip()), timeout=AUTH_SIGN_IN_TIMEOUT)
+        session_str = await asyncio.wait_for(client.export_session_string(), timeout=AUTH_SIGN_IN_TIMEOUT)
         group_id = auth_data["group_id"]
 
         await cancel_phone_auth(user_id)
@@ -1617,8 +1937,13 @@ async def verify_2fa_password(user_id: int, password: str) -> dict:
     except PasswordHashInvalid:
         logger.warning(f"⚠️ [Auth 2FA] Contraseña incorrecta para UID {user_id}.")
         return {"status": "error", "message": "invalid_password"}
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ [Auth 2FA] Time-out validando la contraseña de UID {user_id}.")
+        return {"status": "error", "message": "Tiempo de espera agotado (Timeout). Intenta de nuevo."}
     except FloodWait as fw:
         return {"status": "error", "message": f"flood_wait_{fw.value}"}
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.error(f"❌ [Auth 2FA] Error en verify_2fa_password: {e}", exc_info=True)
         return {"status": "error", "message": str(e)}
@@ -1629,9 +1954,14 @@ async def pending_auth_cleanup_loop():
     while True:
         try:
             now = time.time()
-            expired = [uid for uid, data in pending_auth_sessions.items() if now - data.get("ts", now) > TTL_SECONDS]
+            expired = [uid for uid, data in list(pending_auth_sessions.items()) if now - data.get("ts", now) > TTL_SECONDS]
             for uid in expired:
+                lock = _get_auth_lock(uid)
+                if lock.locked():
+                    continue
                 await cancel_phone_auth(uid)
+            for uid in [u for u, lk in list(_auth_locks.items()) if u not in pending_auth_sessions and not lk.locked()]:
+                _auth_locks.pop(uid, None)
         except Exception as e:
             logger.debug(f"Aviso en limpieza de sesiones pendientes: {e}")
         await asyncio.sleep(120)
@@ -1644,17 +1974,19 @@ async def init_assistant_master():
     else:
         try:
             if not assistant_app.is_connected:
-                assistant_app.add_handler(
-                    MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
-                )
-                await asyncio.wait_for(assistant_app.start(), timeout=12.0)
-            me = await assistant_app.get_me()
+                if not getattr(assistant_app, "_bunker_handler_added", False):
+                    assistant_app.add_handler(
+                        MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
+                    )
+                    assistant_app._bunker_handler_added = True
+                await asyncio.wait_for(assistant_app.start(), timeout=MTPROTO_CONNECT_TIMEOUT)
+            me = await asyncio.wait_for(assistant_app.get_me(), timeout=MTPROTO_RPC_TIMEOUT)
             _default_my_id = me.id
             logger.info(f"🤖 [Centinela Maestro Activo] Online como ID {_default_my_id} (@{me.username or me.first_name})")
         except FATAL_SESSION_ERRORS as auth_err:
             logger.error(f"🔒 [MASTER_SESSION Inválida/Duplicada] {auth_err}. Desactivando Centinela Maestro para evitar bucles.")
             try:
-                await assistant_app.stop()
+                await asyncio.wait_for(assistant_app.stop(), timeout=MTPROTO_STOP_TIMEOUT)
             except Exception:
                 pass
             assistant_app = None
@@ -1663,33 +1995,53 @@ async def init_assistant_master():
             if any(k in err_up for k in ("AUTH_KEY", "UNAUTHORIZED", "406", "DUPLICATED")):
                 logger.error(f"🔒 [MASTER_SESSION Duplicada/Inválida]: {e}. Desactivando Centinela Maestro permanentemente.")
                 try:
-                    await assistant_app.stop()
+                    await asyncio.wait_for(assistant_app.stop(), timeout=MTPROTO_STOP_TIMEOUT)
                 except Exception:
                     pass
                 assistant_app = None
             else:
                 logger.warning(f"⚠️ [Centinela Maestro]: Error de conexión inicial ({e})")
 
-    await load_all_sentinels()
+    # Los bucles autónomos arrancan ANTES de cargar los Centinelas: si la carga
+    # tarda (muchas sesiones / red lenta) el programador y el modo noche no se retrasan.
     if assistant_app:
-        _spawn(radar_master_loop())
-    _spawn(vc_scheduler_loop())
-    _spawn(pending_auth_cleanup_loop())
-    _spawn(night_mode_autonomous_loop())
+        _spawn(radar_master_loop(), name="radar_master_loop")
+    _spawn(vc_scheduler_loop(), name="vc_scheduler_loop")
+    _spawn(pending_auth_cleanup_loop(), name="pending_auth_cleanup_loop")
+    _spawn(night_mode_autonomous_loop(), name="night_mode_autonomous_loop")
+    await load_all_sentinels()
 
 
 def start_voice_radar(bot):
-    global _global_bot
+    global _global_bot, _bot_username_cache
     _global_bot = bot
-    _spawn(init_assistant_master())
+    _bot_username_cache = ""
+    _spawn(init_assistant_master(), name="init_assistant_master")
 
 
 async def close_all_sentinels():
+    # 1. Detener bucles autónomos e inicialización en curso
+    pending_loops = [t for t in list(_BG_TASKS) if not t.done()]
+    for t in pending_loops:
+        t.cancel()
+    if pending_loops:
+        await asyncio.wait(pending_loops, timeout=MTPROTO_STOP_TIMEOUT)
+
+    # 2. Desconectar Centinelas propios y monitores del maestro
     for group_id in list(active_sentinels.keys()):
-        await disconnect_sentinel(group_id)
-    if assistant_app and assistant_app.is_connected:
         try:
-            await assistant_app.stop()
+            await disconnect_sentinel(group_id)
+        except Exception as e:
+            logger.debug(f"Aviso desconectando Centinela {group_id}: {e}")
+
+    # 3. Cerrar autenticaciones telefónicas pendientes
+    for uid in list(pending_auth_sessions.keys()):
+        await cancel_phone_auth(uid)
+
+    # 4. Detener el Centinela Maestro
+    if assistant_app and (assistant_app.is_connected or getattr(assistant_app, "is_initialized", False)):
+        try:
+            await asyncio.wait_for(assistant_app.stop(), timeout=MTPROTO_STOP_TIMEOUT)
         except Exception:
             pass
 
@@ -1706,10 +2058,9 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
         if not raw_call:
             return False
 
-        participant_peer = await client.resolve_peer(user_id)
-        await client.invoke(
-            EditGroupCallParticipant(call=raw_call, participant=participant_peer, muted=muted, volume=volume)
-        )
+        participant_peer = await asyncio.wait_for(client.resolve_peer(user_id), timeout=MTPROTO_RPC_TIMEOUT)
+        safe_volume = max(1, min(20000, int(volume)))
+        await _invoke(client, EditGroupCallParticipant(call=raw_call, participant=participant_peer, muted=muted, volume=safe_volume))
         return True
     except Exception as e:
         logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
@@ -1721,7 +2072,7 @@ async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id
         return False
 
     try:
-        await client.invoke(
+        await _invoke(client,
             EditGroupCallParticipant(
                 call=current_call, participant=p_peer,
                 video_stopped=True, presentation_paused=True, muted=True, volume=200
@@ -1733,7 +2084,7 @@ async def _cut_video_and_remove(client: Client, current_call, chat_id: int, u_id
     if _global_bot:
         try:
             await _global_bot.ban_chat_member(chat_id=chat_id, user_id=u_id, until_date=int(time.time() + 35))
-            await _global_bot.unban_chat_member(chat_id=chat_id, user_id=u_id)
+            await _global_bot.unban_chat_member(chat_id=chat_id, user_id=u_id, only_if_banned=True)
             return True
         except Exception as e:
             logger.warning(f"Aviso: no se pudo expulsar a {u_id} de {chat_id} tras Escudo Antinota: {e}")
@@ -1751,6 +2102,7 @@ async def disengage_screen_shield(group_id: int):
 
 
 async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
+    duck_level = max(1, min(100, int(duck_level)))
     await set_podcast_mode(group_id, 1)
     await set_podcast_duck_volume(group_id, duck_level * 100)
     logger.info(f"🎙️ [Modo Podcast] Ducking activado al {duck_level}% y persistido en el grupo {group_id}")
@@ -1774,15 +2126,19 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
                 user = member.user
                 if user and getattr(user, "is_deleted", False):
                     found += 1
-                    try:
-                        if action == "ban":
-                            await client.ban_chat_member(chat_id, user.id)
-                        else:
-                            await client.ban_chat_member(chat_id, user.id)
-                            await client.unban_chat_member(chat_id, user.id)
-                        purged += 1
-                    except Exception as p_err:
-                        logger.warning(f"Aviso purgando usuario {user.id} en {chat_id}: {p_err}")
+                    for _attempt in range(2):
+                        try:
+                            await asyncio.wait_for(client.ban_chat_member(chat_id, user.id), timeout=MTPROTO_RPC_TIMEOUT)
+                            if action != "ban":
+                                await asyncio.wait_for(client.unban_chat_member(chat_id, user.id), timeout=MTPROTO_RPC_TIMEOUT)
+                            purged += 1
+                            break
+                        except FloodWait as fw:
+                            await asyncio.sleep(int(getattr(fw, "value", 5) or 5) + 1)
+                        except Exception as p_err:
+                            logger.warning(f"Aviso purgando usuario {user.id} en {chat_id}: {p_err}")
+                            break
+                    await asyncio.sleep(0.2)
 
             await update_ghost_purge_scan_time(chat_id)
             if _global_bot and purged > 0:
@@ -1800,10 +2156,15 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
     if _global_bot:
         try:
             await update_ghost_purge_scan_time(chat_id)
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,))
-                tracked = cursor.fetchall()
+
+            def _load_tracked():
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,))
+                    return cursor.fetchall()
+
+            # Lectura SQLite en hilo: no bloquea el event loop compartido con Aiogram/FastAPI.
+            tracked = await asyncio.to_thread(_load_tracked)
 
             for (uid,) in tracked:
                 try:
@@ -1820,8 +2181,17 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
                 except Exception:
                     continue
 
+            if purged > 0:
+                alert_text = GHOST_PURGE_ALERT_TEXT.format(
+                    found=found,
+                    purged=purged,
+                    action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
+                )
+                _spawn(_dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60))
             return {"status": "success", "found": found, "purged": purged, "action": action, "fallback": True}
         except Exception as fb_err:
             logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
+
+    return {"status": "error", "found": found, "purged": purged, "action": action, "message": "Sin cliente MTProto ni bot disponible."}
 
     return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}

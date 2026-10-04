@@ -2,21 +2,34 @@
 database.py — The Bunker OS (Sqlite3 Async-Wrapper Pattern)
 Núcleo relacional de persistencia, canales, telemetría y seguridad perimetral.
 The Bunker Command OS © 2026 — Cloud Media Management
+
+Notas de despliegue (Railway / Python 3.12):
+  * El módulo no usa print(); todo pasa por `logging`, que escribe en stderr y
+    es compatible con PYTHONUNBUFFERED=1.
+  * La ruta de la base se puede sobrescribir con DB_PATH o DATABASE_PATH
+    (por ejemplo, apuntando a un volumen persistente de Railway).
+  * Cada hilo reutiliza su propia conexión SQLite en modo WAL. Las funciones
+    públicas decoradas con @db_async se ejecutan vía asyncio.to_thread y su
+    versión síncrona queda disponible en `fn.sync`.
 """
 import asyncio
-import functools
-import sqlite3
-import os
 import contextlib
-import threading
-import logging
-import re
-import json
-import hmac
+import functools
 import hashlib
-from datetime import datetime
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import sqlite3
+import threading
+from datetime import datetime, timedelta, timezone
 
-DB_PATH = "database/bot_data.db"
+logger = logging.getLogger("database")
+
+DB_PATH = os.getenv("DB_PATH") or os.getenv("DATABASE_PATH") or "database/bot_data.db"
+_DB_TIMEOUT_SECONDS = 30.0
 
 # Thread-local storage para reutilización de conexiones por hilo bajo alta concurrencia
 _thread_local = threading.local()
@@ -28,28 +41,111 @@ RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
-def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+
+def is_super_admin(user_id) -> bool:
+    try:
+        return int(user_id) in SUPER_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+# ==========================================
+# 🔌 CAPA DE CONEXIÓN (WAL + THREAD-LOCAL)
+# ==========================================
+def _open_connection() -> sqlite3.Connection:
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_SECONDS)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute(f"PRAGMA busy_timeout = {int(_DB_TIMEOUT_SECONDS * 1000)};")
+    return conn
+
+
+def _get_thread_connection() -> sqlite3.Connection:
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        conn = _open_connection()
+        _thread_local.conn = conn
+        _thread_local.depth = 0
+    return conn
 
 
 @contextlib.contextmanager
 def get_db_connection():
-    """Genera y reutiliza conexiones SQLite por hilo optimizadas con WAL y modo concurrente."""
-    conn = getattr(_thread_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(DB_PATH, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout = 30000;")
-        _thread_local.conn = conn
+    """
+    Genera y reutiliza conexiones SQLite por hilo optimizadas con WAL.
+
+    Garantías:
+      * Si ocurre una excepción, la transacción abierta se revierte.
+      * Al salir del bloque más externo, cualquier transacción que haya quedado
+        abierta (por ejemplo, un `return` anticipado tras un DELETE/INSERT sin
+        commit) se confirma, de modo que el hilo nunca retiene el lock de
+        escritura y no bloquea al resto de procesos/hilos.
+      * Las llamadas anidadas dentro del mismo hilo comparten la conexión y solo
+        el nivel más externo cierra la transacción.
+    """
+    conn = _get_thread_connection()
+    depth = getattr(_thread_local, "depth", 0)
+    if depth == 0 and conn.row_factory is not None:
+        conn.row_factory = None
+    _thread_local.depth = depth + 1
     try:
         yield conn
-    except Exception:
-        conn.rollback()
+    except BaseException:
+        if conn.in_transaction:
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                logger.exception("❌ [DB] Falló el rollback de la transacción")
         raise
+    else:
+        if depth == 0 and conn.in_transaction:
+            try:
+                conn.commit()
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.rollback()
+                raise
+    finally:
+        _thread_local.depth = depth
 
 
-logger = logging.getLogger("database")
+@contextlib.contextmanager
+def _write_transaction():
+    """
+    Transacción de escritura con BEGIN IMMEDIATE: toma el lock de escritura antes
+    de leer, evitando condiciones de carrera del tipo leer-luego-escribir entre
+    hilos o procesos (bot, FastAPI y workers Pyrogram compartiendo el archivo).
+    """
+    with get_db_connection() as conn:
+        if conn.in_transaction:
+            yield conn
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        if conn.in_transaction:
+            conn.commit()
+
+
+def close_thread_connection() -> None:
+    """Cierra la conexión del hilo actual (útil en hooks de apagado)."""
+    conn = getattr(_thread_local, "conn", None)
+    if conn is None:
+        return
+    with contextlib.suppress(sqlite3.Error):
+        if conn.in_transaction:
+            conn.rollback()
+        conn.close()
+    _thread_local.conn = None
+    _thread_local.depth = 0
+
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -64,16 +160,29 @@ def db_async(fn):
 
 
 def _ident(name: str) -> str:
-    if not _IDENT_RE.match(name):
+    if not isinstance(name, str) or not _IDENT_RE.match(name):
         raise ValueError(f"Identificador SQL no permitido: {name!r}")
     return name
 
 
+def _sql_modifier(amount, unit: str) -> str:
+    """Construye un modificador de fecha SQLite seguro, p. ej. '+5 days'."""
+    return f"{int(amount):+d} {_ident(unit)}"
+
+
+def _table_columns(cursor, table: str) -> set:
+    return {row[1] for row in cursor.execute(f"PRAGMA table_info({_ident(table)})")}
+
+
 def _ensure_columns(cursor, table: str, columns) -> None:
-    existing = {row[1] for row in cursor.execute(f"PRAGMA table_info({_ident(table)})")}
+    existing = _table_columns(cursor, table)
     for col_name, col_def in columns:
         if col_name not in existing:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {_ident(col_name)} {col_def}")
+            try:
+                cursor.execute(f"ALTER TABLE {_ident(table)} ADD COLUMN {_ident(col_name)} {col_def}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
 
 def _upsert_setting(group_id: int, column: str, value) -> None:
@@ -97,14 +206,36 @@ def _get_setting(group_id: int, column: str, default=0):
     return row[0] if row and row[0] is not None else default
 
 
+def _as_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_positive_float(value, default: float) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result > 0 else default
+
+
+def _read_reputation_settings(group_id: int) -> dict:
+    return {
+        "enabled": _as_int(_get_setting(group_id, "reputation_enabled", 1), 1),
+        "multiplier": _as_positive_float(_get_setting(group_id, "reputation_xp_multiplier", 1.0), 1.0),
+    }
+
+
 def init_db():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
 
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -115,7 +246,7 @@ def init_db():
                 is_banned INTEGER DEFAULT 0
             )
         """)
-        
+
         cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (word TEXT UNIQUE)")
         cursor.execute("CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY)")
 
@@ -134,7 +265,7 @@ def init_db():
                 autolower INTEGER DEFAULT 1
             )
         """)
-        
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS web_sessions (
                 token TEXT PRIMARY KEY,
@@ -153,7 +284,7 @@ def init_db():
                 processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
+
         settings_columns = [
             ("antispam", "INTEGER DEFAULT 0"),
             ("captcha_status", "INTEGER DEFAULT 0"),
@@ -275,7 +406,7 @@ def init_db():
         ]
 
         _ensure_columns(cursor, "group_settings", settings_columns)
-        
+
         cursor.execute("CREATE TABLE IF NOT EXISTS command_usage (group_id INTEGER, command TEXT, usage_date TEXT, count INTEGER DEFAULT 0, PRIMARY KEY (group_id, command, usage_date))")
         cursor.execute("CREATE TABLE IF NOT EXISTS vip_mic_passes (user_id INTEGER, group_id INTEGER, expires_at TIMESTAMP, PRIMARY KEY (user_id, group_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vip_mic_passes ON vip_mic_passes (user_id, group_id, expires_at)")
@@ -346,13 +477,16 @@ def get_or_create_user(user_id: int, username: str, full_name: str):
         row = cursor.fetchone()
         if row:
             return row[0], row[1], row[2]
-        else:
-            cursor.execute(
-                "INSERT INTO users (user_id, username, full_name, topic_id, warnings, is_banned) VALUES (?, ?, ?, NULL, 0, 0)", 
-                (user_id, username, full_name)
-            )
-            conn.commit()
-            return None, 0, 0
+        cursor.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, full_name, topic_id, warnings, is_banned) VALUES (?, ?, ?, NULL, 0, 0)",
+            (user_id, username, full_name)
+        )
+        conn.commit()
+        cursor.execute("SELECT topic_id, warnings, is_banned FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row:
+            return row[0], row[1] or 0, row[2] or 0
+        return None, 0, 0
 
 
 @db_async
@@ -376,10 +510,11 @@ def get_user_by_topic(topic_id: int):
 def add_warning(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET warnings = warnings + 1 WHERE user_id = ?", (user_id,))
+        cursor.execute("UPDATE users SET warnings = COALESCE(warnings, 0) + 1 WHERE user_id = ?", (user_id,))
         conn.commit()
         cursor.execute("SELECT warnings FROM users WHERE user_id = ?", (user_id,))
-        return cursor.fetchone()[0]
+        row = cursor.fetchone()
+        return row[0] if row and row[0] is not None else 0
 
 
 @db_async
@@ -410,7 +545,10 @@ def get_blacklist():
 def add_to_blacklist(word: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", (word.lower().strip(),))
+        clean = (word or "").lower().strip()
+        if not clean:
+            return
+        cursor.execute("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", (clean,))
         conn.commit()
 
 
@@ -418,7 +556,7 @@ def add_to_blacklist(word: str):
 def remove_from_blacklist(word: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM blacklist WHERE word = ?", (word.lower().strip(),))
+        cursor.execute("DELETE FROM blacklist WHERE word = ?", ((word or "").lower().strip(),))
         conn.commit()
 
 
@@ -427,9 +565,9 @@ def register_user_group(user_id: int, group_id: int, group_name: str, chat_type:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO user_groups (user_id, group_id, group_name, chat_type) 
-            VALUES (?, ?, ?, ?) 
-            ON CONFLICT(user_id, group_id) DO UPDATE SET 
+            INSERT INTO user_groups (user_id, group_id, group_name, chat_type)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, group_id) DO UPDATE SET
                 group_name = excluded.group_name,
                 chat_type = excluded.chat_type
         """, (user_id, group_id, group_name, chat_type))
@@ -441,7 +579,7 @@ def get_user_groups(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT group_id, group_name FROM user_groups 
+            SELECT group_id, group_name FROM user_groups
             WHERE user_id = ? AND (chat_type = 'supergroup' OR chat_type = 'group' OR chat_type IS NULL)
         """, (user_id,))
         return cursor.fetchall()
@@ -452,7 +590,7 @@ def get_user_channels(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT group_id, group_name FROM user_groups 
+            SELECT group_id, group_name FROM user_groups
             WHERE user_id = ? AND chat_type = 'channel'
         """, (user_id,))
         return cursor.fetchall()
@@ -494,7 +632,7 @@ def get_captcha_config(group_id: int) -> dict:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT captcha_status, captcha_mode, captcha_time, captcha_action, captcha_text, captcha_service_del 
+                SELECT captcha_status, captcha_mode, captcha_time, captcha_action, captcha_text, captcha_service_del
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
@@ -519,7 +657,7 @@ def set_captcha_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
@@ -531,7 +669,7 @@ def get_warns_config(group_id: int) -> dict:
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT warns_limit, warns_action, warn_links, warn_blacklist, warn_flood 
+                SELECT warns_limit, warns_action, warn_links, warn_blacklist, warn_flood
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
@@ -555,7 +693,7 @@ def set_warns_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
@@ -563,7 +701,7 @@ def set_warns_config(group_id: int, field: str, value):
 
 @db_async
 def add_user_strike(group_id: int, user_id: int, reason: str = "Infracción de reglas") -> int:
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO user_strikes (group_id, user_id, strikes, last_strike_at, last_reason)
@@ -617,7 +755,7 @@ def set_lock_status(group_id: int, lock_name: str, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {lock_name}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {lock_name}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {lock_name} = excluded.{lock_name}
         """, (group_id, status))
         conn.commit()
@@ -633,8 +771,8 @@ def set_mic_vip_price(group_id: int, price: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO group_settings (group_id, mic_vip_price, mic_vip_custom_price) VALUES (?, ?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET 
+            INSERT INTO group_settings (group_id, mic_vip_price, mic_vip_custom_price) VALUES (?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
                 mic_vip_price = excluded.mic_vip_price,
                 mic_vip_custom_price = excluded.mic_vip_custom_price
         """, (group_id, price, price))
@@ -660,7 +798,7 @@ def get_mic_vip_custom_config(group_id: int) -> dict:
                 }
         except sqlite3.OperationalError:
             pass
-        return {"price": 50, "tag": "⚜️MIC🎙️️VIP⚜️", "text": ""}
+        return {"price": 50, "tag": "⚜️MIC🎙️VIP⚜️", "text": ""}
 
 
 @db_async
@@ -671,9 +809,9 @@ def set_mic_vip_custom_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if field in ("mic_vip_price", "mic_vip_custom_price"):
-            cursor.execute(f"""
+            cursor.execute("""
                 INSERT INTO group_settings (group_id, mic_vip_price, mic_vip_custom_price) VALUES (?, ?, ?)
-                ON CONFLICT(group_id) DO UPDATE SET 
+                ON CONFLICT(group_id) DO UPDATE SET
                     mic_vip_price = excluded.mic_vip_price,
                     mic_vip_custom_price = excluded.mic_vip_custom_price
             """, (group_id, value, value))
@@ -704,12 +842,12 @@ def get_free_badge_config(group_id: int) -> dict:
 
 @db_async
 def set_free_badge_config(group_id: int, field: str, value):
-    if field not in ["free_badge_status", "free_badge_title"]: 
+    if field not in ["free_badge_status", "free_badge_title"]:
         return
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
@@ -741,8 +879,8 @@ def set_vip_badge_title(group_id: int, title: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO group_settings (group_id, vip_mic_badge_title, mic_vip_custom_tag) VALUES (?, ?, ?) 
-            ON CONFLICT(group_id) DO UPDATE SET 
+            INSERT INTO group_settings (group_id, vip_mic_badge_title, mic_vip_custom_tag) VALUES (?, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
                 vip_mic_badge_title = excluded.vip_mic_badge_title,
                 mic_vip_custom_tag = excluded.mic_vip_custom_tag
         """, (group_id, clean_title, clean_title))
@@ -801,7 +939,7 @@ def get_user_speaker_position(group_id: int, user_id: int) -> int:
 
 @db_async
 def pop_next_speaker(group_id: int):
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, user_id, full_name, username, stars_paid FROM speaker_queue
@@ -847,10 +985,10 @@ def set_vc_monitor_status(group_id: int, status: int):
 
 @db_async
 def create_web_session(user_id: int) -> str:
-    import secrets
     token = secrets.token_urlsafe(32)
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        cursor.execute("DELETE FROM web_sessions WHERE expires_at <= datetime('now')")
         cursor.execute("""
             INSERT INTO web_sessions (token, user_id, expires_at)
             VALUES (?, ?, datetime('now', '+5 minutes'))
@@ -861,10 +999,12 @@ def create_web_session(user_id: int) -> str:
 
 @db_async
 def get_user_by_web_session(token: str) -> int:
+    if not token:
+        return None
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT user_id FROM web_sessions 
+            SELECT user_id FROM web_sessions
             WHERE token = ? AND expires_at > datetime('now')
         """, (token,))
         row = cursor.fetchone()
@@ -905,7 +1045,7 @@ def set_radar_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {col_name}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {col_name}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {col_name} = excluded.{col_name}
         """, (group_id, value))
         conn.commit()
@@ -950,9 +1090,12 @@ def set_sentinel_service_message(group_id: int, field: str, value):
         "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type", "vc_join_btn_text", "vc_join_btn_url", "vc_join_autodel_seconds", "vc_join_enabled",
         "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type", "mic_vip_btn_text", "mic_vip_btn_url", "mic_vip_autodel_seconds", "mic_vip_enabled",
         "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_btn_url", "reset_notice_autodel_seconds", "reset_notice_enabled",
-        "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_btn_text", "vc_sched_start_btn_url", "vc_sched_start_autodel_seconds", "vc_sched_enabled",
+        "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_btn_text", "vc_sched_start_btn_url", "vc_sched_start_autodel_seconds", "vc_sched_start_enabled",
         "vc_welcome_custom_text", "vc_welcome_custom_media_id", "vc_welcome_custom_media_type", "vc_welcome_btn_text", "vc_welcome_btn_url", "vc_welcome_autodel_seconds", "vc_welcome_enabled"
     ]
+    # Alias heredado: la clave pública del getter es "sched_enabled", la columna real es vc_sched_start_enabled.
+    if field in ("vc_sched_enabled", "sched_enabled"):
+        field = "vc_sched_start_enabled"
     if field not in valid:
         return
     with get_db_connection() as conn:
@@ -1013,22 +1156,51 @@ def get_ai_sentinel_config(group_id: int) -> dict:
     }
 
 
+_AI_SENTINEL_FIELDS = {
+    "ai_guardian_status": "ai_guardian_status",
+    "ai_copilot_status": "ai_copilot_status",
+    "ai_custom_prompt": "ai_custom_prompt",
+    "ai_response_mode": "ai_response_mode",
+    "ai_response_chance": "ai_response_chance",
+    "ai_personality_tone": "ai_personality_tone",
+    "guardian_status": "ai_guardian_status",
+    "copilot_status": "ai_copilot_status",
+    "custom_prompt": "ai_custom_prompt",
+    "response_mode": "ai_response_mode",
+    "response_chance": "ai_response_chance",
+    "personality_tone": "ai_personality_tone",
+}
+
+
 @db_async
 def set_ai_sentinel_config(group_id: int, field: str, value):
-    _upsert_setting(group_id, field, value)
+    column = _AI_SENTINEL_FIELDS.get(field)
+    if not column:
+        logger.warning("⚠️ [DB] Campo de IA no permitido: %r", field)
+        return
+    _upsert_setting(group_id, column, value)
+
+
+_REPUTATION_FIELDS = {
+    "reputation_enabled": "reputation_enabled",
+    "reputation_xp_multiplier": "reputation_xp_multiplier",
+    "enabled": "reputation_enabled",
+    "multiplier": "reputation_xp_multiplier",
+}
 
 
 @db_async
 def get_reputation_settings(group_id: int) -> dict:
-    return {
-        "enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
-        "multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0)
-    }
+    return _read_reputation_settings(group_id)
 
 
 @db_async
 def set_reputation_setting(group_id: int, field: str, value):
-    _upsert_setting(group_id, field, value)
+    column = _REPUTATION_FIELDS.get(field)
+    if not column:
+        logger.warning("⚠️ [DB] Campo de reputación no permitido: %r", field)
+        return
+    _upsert_setting(group_id, column, value)
 
 
 @db_async
@@ -1038,12 +1210,12 @@ def save_ai_chat_context(chat_id: int, user_id: int, role: str, content: str, ma
         cursor.execute("""
             INSERT INTO ai_chat_context (chat_id, user_id, role, content)
             VALUES (?, ?, ?, ?)
-        """, (chat_id, user_id, role, content.strip()))
+        """, (chat_id, user_id, role, (content or "").strip()))
         cursor.execute("""
-            DELETE FROM ai_chat_context 
+            DELETE FROM ai_chat_context
             WHERE chat_id = ? AND id NOT IN (
-                SELECT id FROM ai_chat_context 
-                WHERE chat_id = ? 
+                SELECT id FROM ai_chat_context
+                WHERE chat_id = ?
                 ORDER BY created_at DESC, id DESC LIMIT ?
             )
         """, (chat_id, chat_id, max_history))
@@ -1054,10 +1226,13 @@ def save_ai_chat_context(chat_id: int, user_id: int, role: str, content: str, ma
 def get_ai_chat_context(chat_id: int, limit: int = 8) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Toma los N mensajes MÁS RECIENTES y los devuelve en orden cronológico.
         cursor.execute("""
-            SELECT role, content FROM ai_chat_context 
-            WHERE chat_id = ? 
-            ORDER BY created_at ASC, id ASC LIMIT ?
+            SELECT role, content FROM (
+                SELECT id, role, content, created_at FROM ai_chat_context
+                WHERE chat_id = ?
+                ORDER BY created_at DESC, id DESC LIMIT ?
+            ) ORDER BY created_at ASC, id ASC
         """, (chat_id, limit))
         return [{"role": r[0], "content": r[1]} for r in cursor.fetchall()]
 
@@ -1083,23 +1258,24 @@ def get_ghost_purge_config(group_id: int) -> dict:
             row = cursor.fetchone()
             if row:
                 return {
-                    "action": row[0] if row[0] is not None else "delete",
-                    "purge_action": row[0] if row[0] is not None else "delete",
+                    "action": row[0] if row[0] is not None else "ban",
+                    "purge_action": row[0] if row[0] is not None else "ban",
                     "last_free_scan": row[1] if row[1] is not None else None,
                     "purge_last_free_scan": row[1] if row[1] is not None else None,
                     "schedule_status": row[2] if row[2] is not None else 0,
                     "purge_schedule_status": row[2] if row[2] is not None else 0,
-                    "schedule_time": row[3] if row[3] is not None else "00:00",
-                    "purge_schedule_time": row[3] if row[3] is not None else "00:00",
-                    "schedule_days": row[4] if row[4] is not None else [],
-                    "purge_schedule_days": row[4] if row[4] is not None else []
+                    "schedule_time": row[3] if row[3] is not None else "03:00",
+                    "purge_schedule_time": row[3] if row[3] is not None else "03:00",
+                    "schedule_days": row[4] if row[4] is not None else "1,2,3,4,5,6,7",
+                    "purge_schedule_days": row[4] if row[4] is not None else "1,2,3,4,5,6,7"
                 }
         except sqlite3.OperationalError:
             pass
     return {
-        "action": "delete", "purge_action": "delete", "last_free_scan": None,
+        "action": "ban", "purge_action": "ban", "last_free_scan": None,
         "purge_last_free_scan": None, "schedule_status": 0, "purge_schedule_status": 0,
-        "schedule_time": "00:00", "purge_schedule_time": "00:00", "schedule_days": [], "purge_schedule_days": []
+        "schedule_time": "03:00", "purge_schedule_time": "03:00",
+        "schedule_days": "1,2,3,4,5,6,7", "purge_schedule_days": "1,2,3,4,5,6,7"
     }
 
 
@@ -1193,20 +1369,20 @@ def set_night_mode_config(group_id: int, field: str, value):
 
 @db_async
 def activate_universal_night_mode(group_id: int) -> bool:
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT lock_media, lock_links, lock_stickers, lock_commands 
+            SELECT COALESCE(lock_media, 0), COALESCE(lock_links, 0),
+                   COALESCE(lock_stickers, 0), COALESCE(lock_commands, 0)
             FROM group_settings WHERE group_id = ?
         """, (group_id,))
         prev = cursor.fetchone() or (0, 0, 0, 0)
+        # Si ya existe un snapshot (modo noche ya activo), NO se sobrescribe:
+        # de lo contrario se guardarían los locks nocturnos como "estado previo".
         cursor.execute("""
             INSERT INTO night_snapshots (group_id, lock_media, lock_links, lock_stickers, lock_commands, activated_at)
             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(group_id) DO UPDATE SET
-                lock_media = excluded.lock_media, lock_links = excluded.lock_links,
-                lock_stickers = excluded.lock_stickers, lock_commands = excluded.lock_commands,
-                activated_at = CURRENT_TIMESTAMP
+            ON CONFLICT(group_id) DO NOTHING
         """, (group_id, *prev))
         cursor.execute("""
             INSERT INTO group_settings (group_id, night_mode_status, lock_media, lock_links, lock_stickers, lock_commands)
@@ -1220,13 +1396,26 @@ def activate_universal_night_mode(group_id: int) -> bool:
 
 @db_async
 def deactivate_universal_night_mode(group_id: int) -> bool:
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT lock_media, lock_links, lock_stickers, lock_commands 
+            SELECT COALESCE(lock_media, 0), COALESCE(lock_links, 0),
+                   COALESCE(lock_stickers, 0), COALESCE(lock_commands, 0)
             FROM night_snapshots WHERE group_id = ?
         """, (group_id,))
-        snap = cursor.fetchone() or (0, 0, 0, 0)
+        snap = cursor.fetchone()
+        if snap is None:
+            cursor.execute("SELECT night_mode_status FROM group_settings WHERE group_id = ?", (group_id,))
+            status_row = cursor.fetchone()
+            if not status_row or not status_row[0]:
+                # Modo noche no estaba activo: no se tocan los locks configurados manualmente.
+                cursor.execute("""
+                    INSERT INTO group_settings (group_id, night_mode_status) VALUES (?, 0)
+                    ON CONFLICT(group_id) DO UPDATE SET night_mode_status = 0
+                """, (group_id,))
+                conn.commit()
+                return True
+            snap = (0, 0, 0, 0)
         cursor.execute("""
             INSERT INTO group_settings (group_id, night_mode_status, lock_media, lock_links, lock_stickers, lock_commands)
             VALUES (?, 0, ?, ?, ?, ?)
@@ -1239,9 +1428,32 @@ def deactivate_universal_night_mode(group_id: int) -> bool:
         return True
 
 
-def is_night_mode_time(start_str: str, end_str: str) -> bool:
+_UTC_OFFSET_RE = re.compile(r"UTC\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?", re.IGNORECASE)
+
+
+def _parse_utc_offset(tz_label):
+    if not tz_label:
+        return None
+    match = _UTC_OFFSET_RE.search(str(tz_label))
+    if not match:
+        return None
+    sign = 1 if match.group(1) == "+" else -1
+    hours = int(match.group(2))
+    minutes = int(match.group(3) or 0)
+    if hours > 14 or minutes > 59:
+        return None
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+def is_night_mode_time(start_str: str, end_str: str, tz_label: str = None) -> bool:
+    """
+    Indica si la hora actual cae dentro de la ventana [start, end].
+    `tz_label` es opcional (p. ej. "Bogota (UTC-05)", el formato de la columna
+    `timezone`). Sin él se usa la hora local del contenedor (UTC en Railway).
+    """
     try:
-        now = datetime.now().time()
+        tzinfo = _parse_utc_offset(tz_label)
+        now = datetime.now(tzinfo).time() if tzinfo else datetime.now().time()
         start_t = datetime.strptime(start_str.strip(), "%H:%M").time()
         end_t = datetime.strptime(end_str.strip(), "%H:%M").time()
         if start_t <= end_t:
@@ -1253,7 +1465,7 @@ def is_night_mode_time(start_str: str, end_str: str) -> bool:
 
 
 VALID_FILTERS = {
-    "tg_links", "forwards", "quotes", "web_links", 
+    "tg_links", "forwards", "quotes", "web_links",
     "fwd_channels", "fwd_users", "fwd_groups", "fwd_bots"
 }
 
@@ -1281,7 +1493,7 @@ def set_antispam_filter(group_id: int, filter_name: str, status: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {col_name}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {col_name}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {col_name} = excluded.{col_name}
         """, (group_id, status))
         conn.commit()
@@ -1323,7 +1535,7 @@ def set_antiflood_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
@@ -1378,7 +1590,7 @@ def set_tips_config(group_id: int, field: str, value):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(f"""
-            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?) 
+            INSERT INTO group_settings (group_id, {field}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
@@ -1468,18 +1680,18 @@ def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if tier in ["pro", "ultra_pro"]:
-            cursor.execute(f"""
-                INSERT INTO approved_groups (group_id, tier, expires_at) 
-                VALUES (?, ?, datetime('now', '+{duration_days} days')) 
-                ON CONFLICT(group_id) DO UPDATE SET 
+            cursor.execute("""
+                INSERT INTO approved_groups (group_id, tier, expires_at)
+                VALUES (?, ?, datetime('now', ?))
+                ON CONFLICT(group_id) DO UPDATE SET
                     tier = excluded.tier,
-                    expires_at = datetime('now', '+{duration_days} days')
-            """, (group_id, tier))
+                    expires_at = excluded.expires_at
+            """, (group_id, tier, _sql_modifier(duration_days, "days")))
         else:
             cursor.execute("""
-                INSERT INTO approved_groups (group_id, tier, expires_at) 
-                VALUES (?, 'free', NULL) 
-                ON CONFLICT(group_id) DO UPDATE SET 
+                INSERT INTO approved_groups (group_id, tier, expires_at)
+                VALUES (?, 'free', NULL)
+                ON CONFLICT(group_id) DO UPDATE SET
                     tier = 'free',
                     expires_at = NULL
             """, (group_id,))
@@ -1548,11 +1760,11 @@ def get_user_global_tier(user_id: int) -> str:
 @db_async
 def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
     tier = get_group_tier.sync(group_id)
-    if tier in ["pro", "ultra_pro"]: 
+    if tier in ["pro", "ultra_pro"]:
         return True
-        
-    today = datetime.now().strftime("%Y-%m-%d")
-    with get_db_connection() as conn:
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM command_usage WHERE usage_date < date('now', '-7 days')")
         cursor.execute("SELECT count FROM command_usage WHERE group_id = ? AND command = ? AND usage_date = ?", (group_id, command, today))
@@ -1572,15 +1784,16 @@ def check_command_limit(group_id: int, command: str, max_uses: int = 3) -> bool:
 def grant_vip_mic(user_id: int, group_id: int, hours: int = 24):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"""
-            INSERT INTO vip_mic_passes (user_id, group_id, expires_at) 
-            VALUES (?, ?, datetime('now', '+{hours} hours'))
-            ON CONFLICT(user_id, group_id) DO UPDATE SET 
+        modifier = _sql_modifier(hours, "hours")
+        cursor.execute("""
+            INSERT INTO vip_mic_passes (user_id, group_id, expires_at)
+            VALUES (?, ?, datetime('now', ?))
+            ON CONFLICT(user_id, group_id) DO UPDATE SET
                 expires_at = datetime(
                     CASE WHEN expires_at > datetime('now') THEN expires_at ELSE datetime('now') END,
-                    '+{hours} hours'
+                    ?
                 )
-        """, (user_id, group_id))
+        """, (user_id, group_id, modifier, modifier))
         conn.commit()
 
 
@@ -1589,7 +1802,7 @@ def is_vip_mic_active(user_id: int, group_id: int) -> bool:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT 1 FROM vip_mic_passes 
+            SELECT 1 FROM vip_mic_passes
             WHERE user_id = ? AND group_id = ? AND expires_at > datetime('now')
         """, (user_id, group_id))
         return cursor.fetchone() is not None
@@ -1605,16 +1818,16 @@ def revoke_vip_mic(user_id: int, group_id: int):
 
 @db_async
 def register_bot_clone(user_id: int, group_id: int, bot_token: str, bot_username: str = ""):
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE bot_token = ? AND (user_id != ? OR group_id != ?)", 
+            "UPDATE bot_clones SET status = 'revoked', bot_token = NULL WHERE bot_token = ? AND (user_id != ? OR group_id != ?)",
             (bot_token, user_id, group_id)
         )
         cursor.execute("""
             INSERT INTO bot_clones (user_id, group_id, bot_token, bot_username, status)
             VALUES (?, ?, ?, ?, 'active')
-            ON CONFLICT(user_id, group_id) DO UPDATE SET 
+            ON CONFLICT(user_id, group_id) DO UPDATE SET
                 bot_token = excluded.bot_token,
                 bot_username = excluded.bot_username,
                 status = 'active'
@@ -1661,7 +1874,7 @@ def save_owner_session(user_id: int, group_id: int, session_string: str, phone_n
         cursor.execute("""
             INSERT INTO owner_sessions (user_id, group_id, session_string, phone_number, api_id, api_hash, status, last_error, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, 'active', NULL, CURRENT_TIMESTAMP)
-            ON CONFLICT(user_id, group_id) DO UPDATE SET 
+            ON CONFLICT(user_id, group_id) DO UPDATE SET
                 session_string = excluded.session_string,
                 phone_number = COALESCE(excluded.phone_number, owner_sessions.phone_number),
                 api_id = COALESCE(excluded.api_id, owner_sessions.api_id),
@@ -1679,12 +1892,13 @@ def get_owner_session(user_id: int, group_id: int = None):
         cursor = conn.cursor()
         if group_id is not None:
             cursor.execute(
-                "SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND group_id = ? AND status = 'active'", 
+                "SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND group_id = ? AND status = 'active'",
                 (user_id, group_id)
             )
         else:
             cursor.execute(
-                "SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND status = 'active'", 
+                "SELECT session_string, api_id, api_hash FROM owner_sessions WHERE user_id = ? AND status = 'active' "
+                "ORDER BY updated_at DESC LIMIT 1",
                 (user_id,)
             )
         return cursor.fetchone()
@@ -1694,7 +1908,11 @@ def get_owner_session(user_id: int, group_id: int = None):
 def get_session_by_group(group_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id, session_string, api_id, api_hash FROM owner_sessions WHERE group_id = ? AND status = 'active'", (group_id,))
+        cursor.execute(
+            "SELECT user_id, session_string, api_id, api_hash FROM owner_sessions "
+            "WHERE group_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+            (group_id,)
+        )
         return cursor.fetchone()
 
 
@@ -1746,7 +1964,7 @@ def set_vc_schedule(group_id: int, days: str, start_time: str, end_time: str, st
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO vc_schedules (group_id, days, start_time, end_time, status) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(group_id) DO UPDATE SET 
+            ON CONFLICT(group_id) DO UPDATE SET
                 days = excluded.days,
                 start_time = excluded.start_time,
                 end_time = excluded.end_time,
@@ -1813,7 +2031,7 @@ def set_podcast_status(group_id: int, status: int):
 
 @db_async
 def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
         row = cursor.fetchone()
@@ -1821,8 +2039,10 @@ def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str 
             return False
 
         cursor.execute("""
-            SELECT lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
-                   antispam, antispam_delete, antiflood_msgs, antiflood_time, antiflood_action
+            SELECT COALESCE(lock_media, 0), COALESCE(lock_links, 0), COALESCE(lock_stickers, 0),
+                   COALESCE(captcha_status, 0), COALESCE(captcha_mode, 1), COALESCE(captcha_time, 60),
+                   COALESCE(antispam, 0), COALESCE(antispam_delete, 0), COALESCE(antiflood_msgs, 10),
+                   COALESCE(antiflood_time, 15), COALESCE(antiflood_action, 'kick')
             FROM group_settings WHERE group_id = ?
         """, (group_id,))
         prev = cursor.fetchone()
@@ -1863,7 +2083,7 @@ def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str 
 
 @db_async
 def deactivate_panic(group_id: int) -> dict:
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
@@ -1872,6 +2092,15 @@ def deactivate_panic(group_id: int) -> dict:
             FROM panic_snapshots WHERE group_id = ?
         """, (group_id,))
         snap = cursor.fetchone()
+
+        if snap is None:
+            cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
+            status_row = cursor.fetchone()
+            if not status_row or status_row[0] != 1:
+                # Pánico no activo y sin snapshot: no se pisa la configuración actual.
+                cursor.execute("UPDATE group_settings SET panic_active = 0 WHERE group_id = ?", (group_id,))
+                conn.commit()
+                return {"chat_permissions_json": None}
 
         if snap:
             (lock_media, lock_links, lock_stickers, captcha_status, captcha_mode, captcha_time,
@@ -1925,7 +2154,7 @@ def set_podcast_mode(group_id: int, status: int):
 
 @db_async
 def set_podcast_duck_volume(group_id: int, volume: int):
-    volume = max(0, min(10000, volume))
+    volume = max(0, min(10000, _as_int(volume, 500)))
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -1981,7 +2210,7 @@ def get_community_live_telemetry(group_id: int) -> dict:
         speakers_in_queue = cursor.fetchone()[0]
 
         cursor.execute("""
-            SELECT panic_active, screen_shield_status, podcast_mode_status, autolower, night_mode_status 
+            SELECT panic_active, screen_shield_status, podcast_mode_status, autolower, night_mode_status
             FROM group_settings WHERE group_id = ?
         """, (group_id,))
         row = cursor.fetchone() or (0, 1, 0, 1, 0)
@@ -2010,7 +2239,7 @@ def get_channel_live_telemetry(channel_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT COUNT(*) FROM channel_subscriptions 
+            SELECT COUNT(*) FROM channel_subscriptions
             WHERE channel_id = ? AND status = 'active' AND expires_at > datetime('now')
         """, (channel_id,))
         active_subs = cursor.fetchone()[0]
@@ -2070,15 +2299,15 @@ def set_channel_settings(channel_id: int, field: str, value):
 def _sanitize_target_link(target_link: str = None) -> str:
     if target_link is None:
         return None
-    clean = target_link.strip()
+    clean = str(target_link).strip()
     return clean if clean else None
 
 
 @db_async
 def create_channel_plan(
-    channel_id: int, 
-    plan_name: str, 
-    duration_days: int, 
+    channel_id: int,
+    plan_name: str,
+    duration_days: int,
     stars_price: int,
     promo_text: str = None,
     media_id: str = None,
@@ -2094,7 +2323,7 @@ def create_channel_plan(
             )
             VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
         """, (
-            channel_id, plan_name.strip(), duration_days, stars_price,
+            channel_id, (plan_name or "").strip(), duration_days, stars_price,
             promo_text, media_id, media_type, _sanitize_target_link(target_link)
         ))
         conn.commit()
@@ -2168,7 +2397,7 @@ def set_channel_plan_status(plan_id: int, status: str):
 
 @db_async
 def toggle_channel_plan_status(plan_id: int) -> str:
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status FROM channel_plans WHERE plan_id = ?", (plan_id,))
         row = cursor.fetchone()
@@ -2194,14 +2423,14 @@ def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours
         return False
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"""
+        cursor.execute("""
             UPDATE channel_plans
             SET broadcast_chat_id = ?,
                 broadcast_interval_hours = ?,
                 broadcast_enabled = 1,
-                next_broadcast_at = datetime('now', '+{interval_hours} hours')
+                next_broadcast_at = datetime('now', ?)
             WHERE plan_id = ?
-        """, (chat_id, interval_hours, plan_id))
+        """, (chat_id, interval_hours, _sql_modifier(interval_hours, "hours"), plan_id))
         conn.commit()
         return cursor.rowcount > 0
 
@@ -2225,12 +2454,16 @@ def mark_channel_plan_broadcasted(plan_id: int):
             conn.commit()
             return
 
-        interval_hours = row[0]
-        cursor.execute(f"""
+        interval_hours = _as_int(row[0], 0)
+        if interval_hours <= 0:
+            cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (plan_id,))
+            conn.commit()
+            return
+        cursor.execute("""
             UPDATE channel_plans
-            SET next_broadcast_at = datetime('now', '+{interval_hours} hours')
+            SET next_broadcast_at = datetime('now', ?)
             WHERE plan_id = ?
-        """, (plan_id,))
+        """, (_sql_modifier(interval_hours, "hours"), plan_id))
         conn.commit()
 
 
@@ -2263,24 +2496,26 @@ def get_due_channel_plan_broadcasts() -> list:
 
 @db_async
 def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, stars_paid: int, duration_days: int, invite_link: str = None):
+    modifier = _sql_modifier(duration_days, "days")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"""
+        cursor.execute("""
             INSERT INTO channel_subscriptions (
                 channel_id, user_id, plan_id, stars_paid, invite_link,
                 subscribed_at, expires_at, status
-            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, datetime('now', '+{duration_days} days'), 'active')
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, datetime('now', ?), 'active')
             ON CONFLICT(channel_id, user_id) DO UPDATE SET
                 plan_id = excluded.plan_id,
-                stars_paid = stars_paid + excluded.stars_paid,
-                invite_link = excluded.invite_link,
+                stars_paid = COALESCE(channel_subscriptions.stars_paid, 0) + excluded.stars_paid,
+                invite_link = COALESCE(excluded.invite_link, channel_subscriptions.invite_link),
                 expires_at = datetime(
-                    CASE WHEN expires_at > datetime('now') THEN expires_at ELSE datetime('now') END,
-                    '+{duration_days} days'
+                    CASE WHEN channel_subscriptions.expires_at > datetime('now')
+                         THEN channel_subscriptions.expires_at ELSE datetime('now') END,
+                    ?
                 ),
                 status = 'active',
                 last_warned_at = NULL
-        """, (channel_id, user_id, plan_id, stars_paid, invite_link))
+        """, (channel_id, user_id, plan_id, stars_paid, invite_link, modifier, modifier))
         conn.commit()
 
 
@@ -2307,15 +2542,16 @@ def get_channel_subscription(channel_id: int, user_id: int) -> dict:
 def get_expiring_channel_subscriptions(hours_ahead: int = 48) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"""
-            SELECT s.channel_id, s.user_id, s.expires_at, s.stars_paid, c.grace_days
+        # LEFT JOIN: los canales sin fila en channel_settings también se auditan con los defaults.
+        cursor.execute("""
+            SELECT s.channel_id, s.user_id, s.expires_at, s.stars_paid, COALESCE(c.grace_days, 1)
             FROM channel_subscriptions s
-            JOIN channel_settings c ON s.channel_id = c.channel_id
+            LEFT JOIN channel_settings c ON s.channel_id = c.channel_id
             WHERE s.status = 'active'
               AND s.expires_at > datetime('now')
-              AND s.expires_at <= datetime('now', '+{hours_ahead} hours')
+              AND s.expires_at <= datetime('now', ?)
               AND (s.last_warned_at IS NULL OR s.last_warned_at < datetime('now', '-20 hours'))
-        """)
+        """, (_sql_modifier(hours_ahead, "hours"),))
         return cursor.fetchall()
 
 
@@ -2324,11 +2560,11 @@ def get_expired_channel_subscriptions() -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT s.channel_id, s.user_id, s.expires_at, c.grace_days, c.auto_kick
+            SELECT s.channel_id, s.user_id, s.expires_at, COALESCE(c.grace_days, 1), COALESCE(c.auto_kick, 1)
             FROM channel_subscriptions s
-            JOIN channel_settings c ON s.channel_id = c.channel_id
+            LEFT JOIN channel_settings c ON s.channel_id = c.channel_id
             WHERE s.status IN ('active', 'grace')
-              AND datetime('now') > datetime(s.expires_at, '+' || c.grace_days || ' days')
+              AND datetime('now') > datetime(s.expires_at, '+' || COALESCE(c.grace_days, 1) || ' days')
         """)
         return cursor.fetchall()
 
@@ -2363,7 +2599,7 @@ def get_active_subscribers_count(channel_id: int) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT COUNT(*) FROM channel_subscriptions 
+            SELECT COUNT(*) FROM channel_subscriptions
             WHERE channel_id = ? AND status = 'active' AND expires_at > datetime('now')
         """, (channel_id,))
         row = cursor.fetchone()
@@ -2372,58 +2608,57 @@ def get_active_subscribers_count(channel_id: int) -> int:
 
 @db_async
 def record_chat_activity(group_id: int, user_id: int, full_name: str, username: str, is_reply: bool = False, is_admin: bool = False):
-    month_key = datetime.now().strftime("%b '%y")
-    with get_db_connection() as conn:
+    month_key = datetime.now(timezone.utc).strftime("%b '%y")
+    reply_inc = 1 if is_reply else 0
+    admin_flag = 1 if is_admin else 0
+    with _write_transaction() as conn:
         cursor = conn.cursor()
+        # ¿Es la primera actividad del usuario en el mes en curso? (para MAU real)
         cursor.execute("""
-            SELECT 1 FROM chat_user_activity WHERE group_id = ? AND user_id = ?
+            SELECT strftime('%Y-%m', last_active) = strftime('%Y-%m', 'now')
+            FROM chat_user_activity WHERE group_id = ? AND user_id = ?
         """, (group_id, user_id))
-        exists = cursor.fetchone() is not None
+        prev = cursor.fetchone()
+        new_monthly_user = 1 if (prev is None or not prev[0]) else 0
 
-        if exists:
-            cursor.execute("""
-                UPDATE chat_user_activity SET
-                    full_name = ?, username = ?,
-                    message_count = message_count + 1,
-                    reply_count = reply_count + ?,
-                    is_admin = ?,
-                    last_active = CURRENT_TIMESTAMP
-                WHERE group_id = ? AND user_id = ?
-            """, (full_name, username or "", 1 if is_reply else 0, 1 if is_admin else 0, group_id, user_id))
-        else:
-            cursor.execute("""
-                INSERT INTO chat_user_activity (group_id, user_id, full_name, username, message_count, reply_count, is_admin, last_active)
-                VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
-            """, (group_id, user_id, full_name, username or "", 1 if is_reply else 0, 1 if is_admin else 0))
+        cursor.execute("""
+            INSERT INTO chat_user_activity (group_id, user_id, full_name, username, message_count, reply_count, is_admin, last_active)
+            VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                full_name = excluded.full_name,
+                username = excluded.username,
+                message_count = COALESCE(chat_user_activity.message_count, 0) + 1,
+                reply_count = COALESCE(chat_user_activity.reply_count, 0) + excluded.reply_count,
+                is_admin = excluded.is_admin,
+                last_active = CURRENT_TIMESTAMP
+        """, (group_id, user_id, full_name, username or "", reply_inc, admin_flag))
 
         cursor.execute("""
             INSERT INTO chat_monthly_metrics (group_id, month_key, total_messages, total_users)
-            VALUES (?, ?, 1, 1)
+            VALUES (?, ?, 1, ?)
             ON CONFLICT(group_id, month_key) DO UPDATE SET
-                total_messages = total_messages + 1
-        """, (group_id, month_key))
+                total_messages = COALESCE(chat_monthly_metrics.total_messages, 0) + 1,
+                total_users = COALESCE(chat_monthly_metrics.total_users, 0) + ?
+        """, (group_id, month_key, max(1, new_monthly_user), new_monthly_user))
         conn.commit()
 
 
 @db_async
 def add_user_reputation_xp(
-    group_id: int, 
-    user_id: int, 
-    full_name: str, 
-    username: str, 
-    base_xp: int = 10, 
+    group_id: int,
+    user_id: int,
+    full_name: str,
+    username: str,
+    base_xp: int = 10,
     cooldown_seconds: int = 45
 ) -> dict:
-    rep_cfg = {
-        "enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
-        "multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0)
-    }
+    rep_cfg = _read_reputation_settings(group_id)
     if rep_cfg["enabled"] != 1:
         return {"awarded": False, "xp": 0, "level": 1, "leveled_up": False, "reason": "disabled"}
 
     effective_xp = max(1, int(base_xp * rep_cfg["multiplier"]))
 
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT xp, level, CAST((julianday('now') - julianday(last_xp_at)) * 86400 AS INTEGER)
@@ -2433,6 +2668,8 @@ def add_user_reputation_xp(
 
         if row:
             current_xp, current_level, elapsed_sec = row
+            current_xp = current_xp or 0
+            current_level = current_level or 1
             if elapsed_sec is not None and elapsed_sec < cooldown_seconds:
                 return {"awarded": False, "xp": current_xp, "level": current_level, "leveled_up": False, "reason": "cooldown"}
         else:
@@ -2441,11 +2678,7 @@ def add_user_reputation_xp(
         new_xp = current_xp + effective_xp
         new_level = int((new_xp / 100) ** 0.5) + 1
         leveled_up = new_level > current_level
-
-        cursor.execute("""
-            SELECT 1 FROM chat_user_reputation WHERE group_id = ? AND user_id = ?
-        """, (group_id, user_id))
-        exists = cursor.fetchone() is not None
+        exists = row is not None
 
         if exists:
             cursor.execute("""
@@ -2472,7 +2705,7 @@ def get_user_reputation(group_id: int, user_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT xp, level FROM chat_user_reputation 
+            SELECT xp, level FROM chat_user_reputation
             WHERE group_id = ? AND user_id = ?
         """, (group_id, user_id))
         row = cursor.fetchone()
@@ -2480,7 +2713,7 @@ def get_user_reputation(group_id: int, user_id: int) -> dict:
             return {"xp": 0, "level": 1, "rank": 0}
 
         cursor.execute("""
-            SELECT COUNT(*) + 1 FROM chat_user_reputation 
+            SELECT COUNT(*) + 1 FROM chat_user_reputation
             WHERE group_id = ? AND xp > ?
         """, (group_id, row[0]))
         rank = cursor.fetchone()[0]
@@ -2493,9 +2726,9 @@ def get_top_reputation(group_id: int, limit: int = 10) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT user_id, full_name, username, xp, level 
-            FROM chat_user_reputation 
-            WHERE group_id = ? 
+            SELECT user_id, full_name, username, xp, level
+            FROM chat_user_reputation
+            WHERE group_id = ?
             ORDER BY xp DESC LIMIT ?
         """, (group_id, limit))
         rows = cursor.fetchall()
@@ -2516,20 +2749,11 @@ def record_hourly_chat_activity(group_id: int, dt: datetime = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT 1 FROM chat_hourly_activity WHERE group_id = ? AND day_of_week = ? AND hour_of_day = ?
+            INSERT INTO chat_hourly_activity (group_id, day_of_week, hour_of_day, message_count)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(group_id, day_of_week, hour_of_day) DO UPDATE SET
+                message_count = COALESCE(chat_hourly_activity.message_count, 0) + 1
         """, (group_id, day_of_week, hour_of_day))
-        exists = cursor.fetchone() is not None
-
-        if exists:
-            cursor.execute("""
-                UPDATE chat_hourly_activity SET message_count = message_count + 1
-                WHERE group_id = ? AND day_of_week = ? AND hour_of_day = ?
-            """, (group_id, day_of_week, hour_of_day))
-        else:
-            cursor.execute("""
-                INSERT INTO chat_hourly_activity (group_id, day_of_week, hour_of_day, message_count)
-                VALUES (?, ?, ?, 1)
-            """, (group_id, day_of_week, hour_of_day))
         conn.commit()
 
 
@@ -2539,8 +2763,8 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT day_of_week, hour_of_day, message_count 
-            FROM chat_hourly_activity 
+            SELECT day_of_week, hour_of_day, message_count
+            FROM chat_hourly_activity
             WHERE group_id = ?
         """, (group_id,))
         for day, hour, count in cursor.fetchall():
@@ -2564,19 +2788,19 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         tier = row[0] if row and row[0] else "free"
 
         cursor.execute("""
-            SELECT log_channel_id, spam_detection_mode, timezone, chat_language, 
+            SELECT log_channel_id, spam_detection_mode, timezone, chat_language,
                    active_modules_count, captcha_status, autolower, screen_shield_status, lock_links
             FROM group_settings WHERE group_id = ?
         """, (chat_id,))
         row = cursor.fetchone()
-        
+
         log_id = row[0] if row and row[0] else None
         spam_mode = row[1] if row and row[1] else "smart"
         tz = row[2] if row and row[2] else "Bogota (UTC-05)"
         lang = row[3] if row and row[3] else "ES"
         active_mods = row[4] if row and row[4] is not None else 11
-        
-        captcha_active = bool(row[5]) if row and row[5] is not None else True
+
+        captcha_active = bool(row[5]) if row and row[5] is not None else False
         autolower_active = bool(row[6]) if row and row[6] is not None else True
         shield_active = bool(row[7]) if row and row[7] is not None else True
         linklock_active = bool(row[8]) if row and row[8] is not None else False
@@ -2603,14 +2827,22 @@ def get_chat_timeseries_stats(chat_id: int) -> dict:
             ORDER BY rowid DESC LIMIT 12
         """, (chat_id,))
         rows = cursor.fetchall()
-        
+
         if not rows:
-            months = ["May '26", "Jun '26", "Jul '26", "Aug '26", "Sep '26"]
+            now = datetime.now(timezone.utc)
+            months = []
+            year, month = now.year, now.month
+            for _ in range(5):
+                months.append(datetime(year, month, 1).strftime("%b '%y"))
+                month -= 1
+                if month == 0:
+                    month, year = 12, year - 1
+            months.reverse()
             return {"months": months, "mau": [0, 0, 0, 0, 0], "messages": [0, 0, 0, 0, 0], "messages_per_user": [0, 0, 0, 0, 0]}
 
         months = [r[0] for r in reversed(rows)]
-        messages = [r[1] for r in reversed(rows)]
-        mau = [r[2] for r in reversed(rows)]
+        messages = [r[1] or 0 for r in reversed(rows)]
+        mau = [r[2] or 0 for r in reversed(rows)]
         msgs_per_user = [round(m / max(1, u), 1) for m, u in zip(messages, mau)]
 
         return {"months": months, "mau": mau, "messages": messages, "messages_per_user": msgs_per_user}
@@ -2626,16 +2858,17 @@ def get_chat_top_users(chat_id: int, limit: int = 10) -> list:
             ORDER BY message_count DESC LIMIT ?
         """, (chat_id, limit))
         rows = cursor.fetchall()
-        
+
         res = []
         for idx, r in enumerate(rows, start=1):
-            act_level = 4 if r[3] > 300 else (3 if r[3] > 150 else (2 if r[3] > 50 else 1))
+            msg_count = r[3] or 0
+            act_level = 4 if msg_count > 300 else (3 if msg_count > 150 else (2 if msg_count > 50 else 1))
             res.append({
                 "rank": idx,
                 "name": r[1] or f"User {r[0]}",
                 "badge": f"@{r[2]}" if r[2] else "",
                 "activity_level": act_level,
-                "messages": r[3]
+                "messages": msg_count
             })
         return res
 
@@ -2653,7 +2886,7 @@ def get_chat_admin_stats(chat_id: int) -> list:
             rows = cursor.fetchall()
         except sqlite3.OperationalError:
             return []
-        
+
         return [
             {
                 "name": r[0] or f"Admin {r[1]}",
@@ -2672,7 +2905,7 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
         cursor = conn.cursor()
         updates = []
         params = []
-        
+
         if "spam_mode" in settings:
             updates.append("spam_detection_mode = ?")
             params.append(settings["spam_mode"])
@@ -2685,7 +2918,7 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
         if "log_channel_id" in settings:
             updates.append("log_channel_id = ?")
             params.append(settings["log_channel_id"])
-            
+
         if "captcha" in settings:
             updates.append("captcha_status = ?")
             params.append(1 if settings["captcha"] else 0)
@@ -2698,12 +2931,12 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
         if "linklock" in settings:
             updates.append("lock_links = ?")
             params.append(1 if settings["linklock"] else 0)
-            
+
         cursor.execute("""
             INSERT INTO group_settings (group_id) VALUES (?)
             ON CONFLICT(group_id) DO NOTHING
         """, (chat_id,))
-        
+
         if updates:
             params.append(chat_id)
             query = f"UPDATE group_settings SET {', '.join(updates)} WHERE group_id = ?"
@@ -2756,11 +2989,11 @@ def get_user_subscribers_audit(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT s.user_id, p.plan_name, s.stars_paid, 
+            SELECT s.user_id, COALESCE(p.plan_name, 'Plan eliminado'), s.stars_paid,
                    CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left,
                    u.username
             FROM channel_subscriptions s
-            JOIN channel_plans p ON s.plan_id = p.plan_id
+            LEFT JOIN channel_plans p ON s.plan_id = p.plan_id
             JOIN user_groups ug ON s.channel_id = ug.group_id
             LEFT JOIN users u ON s.user_id = u.user_id
             WHERE ug.user_id = ? AND s.status = 'active'
@@ -2794,17 +3027,27 @@ def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> bool:
             conn.commit()
             return True
         except sqlite3.IntegrityError:
+            if conn.in_transaction:
+                conn.rollback()
             return False
 
 
 BACKUP_SECRET_SALT = os.getenv("BACKUP_SECRET_SALT", "bunker-secret-vault-2026")
+if "BACKUP_SECRET_SALT" not in os.environ:
+    logger.warning("⚠️ [DB] BACKUP_SECRET_SALT no definido; se usa la sal por defecto (configúrala en Railway).")
+
+# Columnas de estado en tiempo de ejecución que NO deben viajar entre grupos en un backup.
+_IMPORT_EXCLUDED_COLUMNS = {"group_id", "panic_active", "night_mode_status", "purge_last_free_scan"}
+_IMPORT_ALLOWED_TYPES = (int, float, str, type(None))
 
 
 @db_async
 def export_group_configuration(group_id: int) -> str:
     with get_db_connection() as conn:
-        conn.row_factory = sqlite3.Row
+        # row_factory a nivel de CURSOR: asignarlo a la conexión compartida del hilo
+        # contaminaría todas las consultas posteriores de ese hilo.
         cursor = conn.cursor()
+        cursor.row_factory = sqlite3.Row
         cursor.execute("SELECT * FROM group_settings WHERE group_id = ?", (group_id,))
         settings_row = cursor.fetchone()
         settings_dict = dict(settings_row) if settings_row else {}
@@ -2819,8 +3062,8 @@ def export_group_configuration(group_id: int) -> str:
         "version": "6.0", "exported_at": datetime.now().isoformat(),
         "source_group_id": group_id, "settings": settings_dict,
         "vc_schedule": sched_dict, "tip_targets": targets,
-        "reputation_enabled": int(_get_setting(group_id, "reputation_enabled", 1) or 1),
-        "reputation_xp_multiplier": float(_get_setting(group_id, "reputation_xp_multiplier", 1.0) or 1.0),
+        "reputation_enabled": _read_reputation_settings(group_id)["enabled"],
+        "reputation_xp_multiplier": _read_reputation_settings(group_id)["multiplier"],
     }
     raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     signature = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -2831,28 +3074,66 @@ def export_group_configuration(group_id: int) -> str:
 def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[bool, str]:
     try:
         package = json.loads(backup_json)
+        if not isinstance(package, dict):
+            return False, "Estructura de paquete inválida."
         payload = package.get("payload")
         received_sig = package.get("signature")
-        if not payload or not received_sig:
+        if not isinstance(payload, dict) or not isinstance(received_sig, str) or not received_sig:
             return False, "Estructura de paquete inválida."
         raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         expected_sig = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected_sig, received_sig):
             return False, "Firma digital no válida."
-        settings = payload.get("settings", {})
-        with get_db_connection() as conn:
+
+        settings = payload.get("settings") or {}
+        if not isinstance(settings, dict):
+            return False, "Bloque de ajustes inválido."
+        vc_schedule = payload.get("vc_schedule") or {}
+        tip_targets = payload.get("tip_targets") or []
+
+        with _write_transaction() as conn:
             cursor = conn.cursor()
-            if settings:
-                clean_cols = [c for c in settings.keys() if _IDENT_RE.match(c)]
-                if clean_cols:
-                    placeholders = ", ".join([f"{col} = ?" for col in clean_cols])
-                    values = [settings[col] for col in clean_cols]
-                    values.append(target_group_id)
-                    cursor.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (target_group_id,))
-                    cursor.execute(f"UPDATE group_settings SET {placeholders} WHERE group_id = ?", tuple(values))
+            existing_cols = _table_columns(cursor, "group_settings")
+            clean_cols = [
+                c for c in settings.keys()
+                if isinstance(c, str)
+                and _IDENT_RE.match(c)
+                and c in existing_cols
+                and c not in _IMPORT_EXCLUDED_COLUMNS
+                and isinstance(settings[c], _IMPORT_ALLOWED_TYPES)
+            ]
+            cursor.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (target_group_id,))
+            if clean_cols:
+                placeholders = ", ".join([f"{col} = ?" for col in clean_cols])
+                values = [settings[col] for col in clean_cols]
+                values.append(target_group_id)
+                cursor.execute(f"UPDATE group_settings SET {placeholders} WHERE group_id = ?", tuple(values))
+
+            if isinstance(vc_schedule, dict) and vc_schedule:
+                cursor.execute("""
+                    INSERT INTO vc_schedules (group_id, days, start_time, end_time, status) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(group_id) DO UPDATE SET
+                        days = excluded.days,
+                        start_time = excluded.start_time,
+                        end_time = excluded.end_time,
+                        status = excluded.status
+                """, (
+                    target_group_id,
+                    str(vc_schedule.get("days") or "1,2,3,4,5,6,7"),
+                    str(vc_schedule.get("start_time") or "20:00"),
+                    str(vc_schedule.get("end_time") or "23:00"),
+                    _as_int(vc_schedule.get("status"), 0),
+                ))
+
+            if isinstance(tip_targets, list):
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO group_tip_targets (group_id, target_value, is_active) VALUES (?, ?, 1)",
+                    [(target_group_id, str(t).strip()) for t in tip_targets if isinstance(t, (str, int)) and str(t).strip()],
+                )
             conn.commit()
         return True, "Configuración importada con éxito."
     except Exception as ex:
+        logger.exception("❌ [DB] Falló import_group_configuration")
         return False, f"Error durante la restauración: {ex}"
 
 

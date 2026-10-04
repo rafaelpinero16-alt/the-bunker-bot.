@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 from contextlib import asynccontextmanager
 import hashlib
 import hmac
@@ -24,17 +25,35 @@ import urllib.parse
 from dotenv import load_dotenv
 
 if __name__ == "__main__":
+    # Evita la doble importación cuando los handlers hacen `import main`.
     sys.modules.setdefault("main", sys.modules[__name__])
 
 load_dotenv()
+
+# ==========================================
+# 🧾 LOGGING Y SALIDA SIN BUFFER (RAILWAY / PYTHONUNBUFFERED=1)
+# ==========================================
+# Aunque PYTHONUNBUFFERED=1 no esté definido, se fuerza el vaciado por línea
+# para que los logs aparezcan en tiempo real en la consola de Railway.
+for _stream in (sys.stdout, sys.stderr):
+    with contextlib.suppress(AttributeError, ValueError):
+        _stream.reconfigure(line_buffering=True)
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("bunker.main")
 
 # ==========================================
 # 🌐 IMPORTACIONES Y COMPATIBILIDAD CON FASTAPI & WEBSOCKETS
 # ==========================================
 try:
     from fastapi import (  # type: ignore[import-not-found]
-        Body, FastAPI, Header, HTTPException, APIRouter, 
-        WebSocket, WebSocketDisconnect, Query, status
+        Body, FastAPI, Header, HTTPException, APIRouter,
+        WebSocket, WebSocketDisconnect, Query
     )
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
 except ImportError:
@@ -85,6 +104,26 @@ try:
 except ImportError:
     uvicorn = None
 
+if uvicorn is not None:
+    class _EmbeddedUvicornServer(uvicorn.Server):  # type: ignore[misc, name-defined]
+        """
+        Servidor uvicorn embebido en el mismo event loop que Aiogram.
+
+        Se desactiva la captura de señales de uvicorn porque Aiogram ya gestiona
+        SIGINT/SIGTERM (Railway envía SIGTERM al redeploy). Si ambos instalan
+        manejadores, uno pisa al otro y el apagado queda a medias. El cierre del
+        servidor se hace explícitamente con `should_exit = True` desde main().
+        """
+
+        def install_signal_handlers(self) -> None:  # uvicorn < 0.29
+            return None
+
+        @contextlib.contextmanager
+        def capture_signals(self):  # uvicorn >= 0.29
+            yield
+else:
+    _EmbeddedUvicornServer = None  # type: ignore[assignment, misc]
+
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.event.bases import UNHANDLED
@@ -118,6 +157,7 @@ from database.database import (
     record_chat_activity,
     register_bot_clone,
     register_user_group,
+    revoke_owner_session,
     save_owner_session,
     update_chat_operational_settings,
     update_ghost_purge_scan_time,
@@ -166,6 +206,12 @@ CREATOR_FALLBACK_ID = 8269470905
 active_clone_tasks: dict[str, dict] = {}
 dp = Dispatcher()
 master_bot_instance: Optional[Bot] = None
+_uvicorn_server = None
+
+# ⚠️ Solo para desarrollo local: si se activa, las peticiones sin firma válida se
+# atribuyen al creador (comportamiento heredado). En producción DEBE quedar en 0,
+# porque cualquiera podría operar la API con privilegios de super-admin.
+ALLOW_INSECURE_AUTH_FALLBACK = os.getenv("ALLOW_INSECURE_AUTH_FALLBACK", "0").strip().lower() in ("1", "true", "yes", "on")
 
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
@@ -173,17 +219,29 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    try:
+        return int(user_id) in SUPER_ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 _BG_TASKS: Set[asyncio.Task] = set()
 
 
-def _spawn(coro) -> asyncio.Task:
+def _log_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("❌ [Tarea en segundo plano] %s falló: %r", task.get_name(), exc, exc_info=exc)
+
+
+def _spawn(coro, name: Optional[str] = None) -> asyncio.Task:
     """Ejecuta corrutinas en segundo plano reteniendo referencia fuerte para evitar recolección por GC."""
-    task = asyncio.create_task(coro)
+    task = asyncio.create_task(coro, name=name)
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
+    task.add_done_callback(_log_task_exception)
     return task
 
 
@@ -192,9 +250,17 @@ def _spawn(coro) -> asyncio.Task:
 # ==========================================
 class ConnectionManager:
     """Administra conexiones reactivas WebSocket por chat_id para telemetría en tiempo real."""
+    SEND_TIMEOUT_SECONDS = 5.0
+
     def __init__(self):
         self.active_connections: dict[int, set[WebSocket]] = {}
         self._lock = asyncio.Lock()
+
+    async def _safe_send(self, chat_id: int, ws: WebSocket, message: dict) -> None:
+        try:
+            await asyncio.wait_for(ws.send_json(message), timeout=self.SEND_TIMEOUT_SECONDS)
+        except Exception:
+            await self.disconnect(chat_id, ws)
 
     async def connect(self, chat_id: int, websocket: WebSocket):
         await websocket.accept()
@@ -213,24 +279,21 @@ class ConnectionManager:
     async def broadcast(self, chat_id: int, message: dict):
         async with self._lock:
             connections = list(self.active_connections.get(chat_id, []))
-        for ws in connections:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                await self.disconnect(chat_id, ws)
+        if connections:
+            await asyncio.gather(*(self._safe_send(chat_id, ws, message) for ws in connections))
 
     async def broadcast_global(self, message: dict):
         async with self._lock:
             all_connections = [
-                (cid, ws) 
-                for cid, conns in self.active_connections.items() 
+                (cid, ws)
+                for cid, conns in self.active_connections.items()
                 for ws in list(conns)
             ]
-        for cid, ws in all_connections:
-            try:
-                await ws.send_json(message)
-            except Exception:
-                await self.disconnect(cid, ws)
+        if all_connections:
+            await asyncio.gather(*(self._safe_send(cid, ws, message) for cid, ws in all_connections))
+
+    def total_connections(self) -> int:
+        return sum(len(conns) for conns in self.active_connections.values())
 
 
 ws_manager = ConnectionManager()
@@ -244,7 +307,10 @@ async def emit_radar_event(chat_id: int, event_type: str, data: dict = None):
         "timestamp": int(time.time()),
         "data": data or {}
     }
-    await ws_manager.broadcast(chat_id, payload)
+    try:
+        await ws_manager.broadcast(int(chat_id), payload)
+    except Exception as ex:
+        logger.debug("Aviso emitiendo evento WS (%s): %s", chat_id, ex)
 
 
 # ==========================================
@@ -270,7 +336,9 @@ async def health_check():
     return {
         "status": "online",
         "service": "The Bunker Command OS API",
-        "bot_connected": master_bot_instance is not None
+        "bot_connected": master_bot_instance is not None,
+        "active_clones": len(active_clone_tasks),
+        "websocket_clients": ws_manager.total_connections()
     }
 
 
@@ -289,17 +357,17 @@ def parse_telegram_user_id(init_data: str) -> int:
         computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if not hmac.compare_digest(computed_hash, received_hash):
-            logging.warning("⚠️ [initData] Firma inválida rechazada.")
+            logger.warning("⚠️ [initData] Firma inválida rechazada.")
             return 0
 
         auth_date = int(parsed.get("auth_date", 0))
         if time.time() - auth_date > 86400:
             return 0
 
-        user_json = json.loads(parsed.get("user", "{}"))
+        user_json = json.loads(parsed.get("user", "{}") or "{}")
         return int(user_json.get("id", 0))
     except Exception as e:
-        logging.debug(f"Error parseando initData: {e}")
+        logger.debug(f"Error parseando initData: {e}")
         return 0
 
 
@@ -365,33 +433,51 @@ def verify_telegram_widget_login(data: dict) -> bool:
 
 
 def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
+    """
+    Resuelve el user_id SOLO a partir de credenciales firmadas (initData HMAC o
+    token de sesión firmado). Devuelve 0 si no hay credenciales válidas.
+    Con ALLOW_INSECURE_AUTH_FALLBACK=1 se restaura el comportamiento heredado
+    (id sin firmar / creador por defecto) para desarrollo local.
+    """
     if x_telegram_init_data:
         uid = parse_telegram_user_id(x_telegram_init_data)
         if uid:
             return uid
-        try:
-            if "id=" in x_telegram_init_data:
-                raw_id = x_telegram_init_data.split("id=")[1].split("&")[0].strip()
-                if raw_id.isdigit():
-                    return int(raw_id)
-        except Exception:
-            pass
 
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization.split(" ", 1)[1].strip()
         payload = verify_session_token(token)
         if payload and payload.get("uid"):
-            return int(payload["uid"])
+            try:
+                return int(payload["uid"])
+            except (TypeError, ValueError):
+                pass
 
-    return CREATOR_FALLBACK_ID
+    if ALLOW_INSECURE_AUTH_FALLBACK:
+        if x_telegram_init_data:
+            try:
+                parsed = dict(urllib.parse.parse_qsl(x_telegram_init_data, keep_blank_values=True))
+                user_json = json.loads(parsed.get("user", "{}") or "{}")
+                raw_id = int(user_json.get("id", 0))
+                if raw_id:
+                    return raw_id
+            except Exception:
+                pass
+        return CREATOR_FALLBACK_ID
+
+    return 0
 
 
 def require_authenticated_user(x_telegram_init_data: str = None, authorization: str = None) -> int:
     uid = resolve_user_id(x_telegram_init_data, authorization)
-    return uid if uid else CREATOR_FALLBACK_ID
+    if not uid:
+        raise HTTPException(status_code=401, detail="Autenticación requerida: initData o sesión inválida.")
+    return uid
 
 
 async def assert_chat_ownership(user_id: int, chat_id: int):
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Autenticación requerida.")
     if is_super_admin(user_id) or user_id == CREATOR_FALLBACK_ID:
         return
     owned_channels = await get_user_channels(user_id)
@@ -445,7 +531,7 @@ async def api_auth_telegram_widget(payload: dict = Body(...)):
     try:
         await get_or_create_user(user_id, username or "Sin username", first_name or "Operador")
     except Exception as e:
-        logging.warning(f"⚠️️ [Auth Widget] Aviso BD: {e}")
+        logger.warning(f"⚠️ [Auth Widget] Aviso BD: {e}")
 
     token = issue_session_token(user_id, first_name, username, photo_url)
     return {
@@ -460,11 +546,11 @@ async def api_exchange_web_token(payload: dict = Body(...)):
     temp_token = payload.get("token")
     if not temp_token:
         raise HTTPException(status_code=400, detail="Token no proporcionado.")
-    
+
     user_id = await get_user_by_web_session(temp_token)
     if not user_id:
         raise HTTPException(status_code=401, detail="Token temporal inválido o expirado.")
-    
+
     session_token = issue_session_token(user_id, first_name="Operador", username="", photo_url="")
     return {
         "status": "success",
@@ -492,15 +578,15 @@ async def api_auth_session_check(authorization: str = Header(None)):
 
 @api_router.get("/stats")
 async def api_stats(
-    context: str = "global", 
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    context: str = "global",
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         return await get_user_global_stats(user_id)
     except Exception as e:
-        logging.error(f"❌ [API Stats Error]: {e}")
+        logger.error(f"❌ [API Stats Error]: {e}")
         return {
             "subscribers": 0, "revenue_stars": 0, "verified": 0, "expelled": 0, "purges": 0,
             "perimeter": {
@@ -512,7 +598,7 @@ async def api_stats(
 
 @api_router.get("/channels")
 async def api_channels(
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -526,7 +612,8 @@ async def api_channels(
         else:
             channels = await get_user_channels(user_id)
 
-        if not channels:
+        # La vista global solo se expone a super-admins (antes se filtraba a cualquiera).
+        if not channels and is_super_admin(user_id):
             channels = await asyncio.to_thread(_get_global_channels_sync)
 
         res = []
@@ -560,13 +647,13 @@ async def api_channels(
             })
         return {"channels": res}
     except Exception as e:
-        logging.error(f"❌ [API Channels Error]: {e}")
+        logger.error(f"❌ [API Channels Error]: {e}")
         return {"channels": []}
 
 
 @api_router.get("/groups")
 async def api_groups(
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -579,8 +666,8 @@ async def api_groups(
                 groups_list = await get_user_groups(user_id)
         else:
             groups_list = await get_user_groups(user_id)
-        
-        if not groups_list:
+
+        if not groups_list and is_super_admin(user_id):
             groups_list = await asyncio.to_thread(_get_global_groups_sync)
 
         res = []
@@ -614,29 +701,31 @@ async def api_groups(
             })
         return {"groups": res}
     except Exception as e:
-        logging.error(f"❌ [API Groups Error]: {e}")
+        logger.error(f"❌ [API Groups Error]: {e}")
         return {"groups": []}
 
 
 @api_router.post("/sync-chats")
 async def api_sync_chats(
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
-    try:
-        await register_user_group(
-            user_id=user_id,
-            group_id=ADMIN_GROUP_ID,
-            group_name="The Bunker Admin Matrix",
-            chat_type="supergroup"
-        )
-    except Exception:
-        pass
+    # Solo los super-admins quedan vinculados al grupo de administración maestro.
+    if is_super_admin(user_id):
+        try:
+            await register_user_group(
+                user_id=user_id,
+                group_id=ADMIN_GROUP_ID,
+                group_name="The Bunker Admin Matrix",
+                chat_type="supergroup"
+            )
+        except Exception:
+            pass
 
     synced_channels = 0
     synced_groups = 0
-    
+
     if master_bot_instance:
         try:
             channels = await get_active_user_channels(master_bot_instance, user_id)
@@ -654,7 +743,7 @@ async def api_sync_chats(
         synced_channels = len(channels)
         synced_groups = len(groups_list)
 
-    if synced_groups == 0:
+    if synced_groups == 0 and is_super_admin(user_id):
         synced_groups = await asyncio.to_thread(_get_groups_count_sync)
 
     return {
@@ -666,7 +755,7 @@ async def api_sync_chats(
 
 @api_router.get("/subscribers")
 async def api_subscribers(
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -674,14 +763,14 @@ async def api_subscribers(
         subs = await get_user_subscribers_audit(user_id)
         return {"subscribers": subs if subs is not None else []}
     except Exception as e:
-        logging.error(f"❌ [API Subscribers Error]: {e}")
+        logger.error(f"❌ [API Subscribers Error]: {e}")
         return {"subscribers": []}
 
 
 @api_router.get("/chat/{chat_id}/dashboard")
 async def api_chat_dashboard(
-    chat_id: str, 
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -689,7 +778,7 @@ async def api_chat_dashboard(
         numeric_id = int(chat_id)
         await assert_chat_ownership(user_id, numeric_id)
         data = await get_chat_dashboard_data(numeric_id)
-        
+
         if not isinstance(data, dict):
             data = {
                 "chat_id": str(chat_id),
@@ -738,8 +827,8 @@ async def api_chat_dashboard(
 
 @api_router.get("/chat/{chat_id}/stats")
 async def api_chat_stats(
-    chat_id: str, 
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -758,8 +847,8 @@ async def api_chat_stats(
 
 @api_router.get("/chat/{chat_id}/admin-stats")
 async def api_chat_admin_stats(
-    chat_id: str, 
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -778,8 +867,8 @@ async def api_chat_admin_stats(
 
 @api_router.get("/chat/{chat_id}/top-users")
 async def api_chat_top_users(
-    chat_id: str, 
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -829,7 +918,8 @@ async def api_chat_top_reputation(
     try:
         numeric_id = int(chat_id)
         await assert_chat_ownership(user_id, numeric_id)
-        return {"top": await get_top_reputation(numeric_id, limit=limit)}
+        safe_limit = max(1, min(100, int(limit or 10)))
+        return {"top": await get_top_reputation(numeric_id, limit=safe_limit)}
     except HTTPException:
         raise
     except ValueError:
@@ -907,9 +997,9 @@ async def api_import_backup(
 
 @api_router.post("/chat/{chat_id}/settings")
 async def api_update_chat_settings(
-    chat_id: str, 
-    payload: dict = Body(...), 
-    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"), 
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
@@ -917,19 +1007,25 @@ async def api_update_chat_settings(
         numeric_id = int(chat_id)
         await assert_chat_ownership(user_id, numeric_id)
         action = payload.get("action")
-        
+
         # 1. Despliegue de Bot Clon
         if action == "deploy_clone":
             bot_token = (payload.get("bot_token") or "").strip()
             if not bot_token:
                 raise HTTPException(status_code=400, detail="Token de bot no proporcionado.")
+            if bot_token == BOT_TOKEN:
+                raise HTTPException(status_code=400, detail="No puedes usar el token del bot maestro como clon.")
+            test_bot = None
             try:
                 test_bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
                 bot_info = await test_bot.get_me()
-                await test_bot.session.close()
             except Exception as ex:
                 raise HTTPException(status_code=400, detail=f"Token inválido o bot inaccesible: {ex}")
-            
+            finally:
+                if test_bot is not None:
+                    with contextlib.suppress(Exception):
+                        await test_bot.session.close()
+
             await register_bot_clone(user_id, numeric_id, bot_token, bot_info.username or "")
             await start_clone_polling_task(bot_token)
             return {
@@ -944,10 +1040,13 @@ async def api_update_chat_settings(
             session_str = (payload.get("session_string") or "").strip()
             if not session_str:
                 raise HTTPException(status_code=400, detail="String Session no proporcionada.")
-            
+
             await save_owner_session(user_id, numeric_id, session_str)
             connected = await register_or_update_sentinel(user_id, numeric_id, session_str)
             if not connected:
+                # Evita que una sesión rota quede marcada como activa y se reintente en cada arranque.
+                with contextlib.suppress(Exception):
+                    await revoke_owner_session(user_id, numeric_id, reason="Conexión MTProto fallida al registrar")
                 raise HTTPException(status_code=400, detail="No se pudo conectar la sesión MTProto. Verifica que la sesión sea válida.")
             return {
                 "status": "success",
@@ -957,7 +1056,7 @@ async def api_update_chat_settings(
 
         # 3. Ghost Purge
         elif action == "run_ghost_purge":
-            _spawn(execute_ghost_purge(numeric_id, action="ban"))
+            _spawn(execute_ghost_purge(numeric_id, action="ban"), name=f"ghost_purge:{numeric_id}")
             return {
                 "status": "success",
                 "action": "run_ghost_purge",
@@ -967,17 +1066,17 @@ async def api_update_chat_settings(
 
         # 4. Actualización general
         await update_chat_operational_settings(numeric_id, payload or {})
-        
+
         # Notificar en vivo a los WebSockets de la sala
         _spawn(emit_radar_event(numeric_id, "settings_updated", payload or {}))
-        
+
         return {"status": "success", "chat_id": chat_id, "updated": payload}
     except HTTPException:
         raise
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id inválido.")
     except Exception as e:
-        logging.error(f"❌ [Settings API Error]: {e}", exc_info=True)
+        logger.error(f"❌ [Settings API Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -995,7 +1094,12 @@ async def api_affiliates(
 # ==========================================
 @app.websocket("/ws/live-radar/{chat_id}")
 @app.websocket("/api/ws/live-radar/{chat_id}")
-async def websocket_live_radar(websocket: WebSocket, chat_id: str, token: str = Query(None)):
+async def websocket_live_radar(
+    websocket: WebSocket,
+    chat_id: str,
+    token: str = Query(None),
+    init_data: str = Query(None)
+):
     """Canal bidireccional reactivo en tiempo real para Mini App y Dashboard."""
     try:
         numeric_id = int(chat_id)
@@ -1003,9 +1107,23 @@ async def websocket_live_radar(websocket: WebSocket, chat_id: str, token: str = 
         await websocket.close(code=1003)
         return
 
-    # 1. Autenticación de la sesión WebSocket
+    # 1. Autenticación de la sesión WebSocket (token de sesión firmado o initData firmado)
+    user_id = 0
     user_payload = verify_session_token(token) if token else None
-    user_id = user_payload.get("uid") if user_payload else resolve_user_id(authorization=f"Bearer {token}" if token else None)
+    if user_payload and user_payload.get("uid"):
+        try:
+            user_id = int(user_payload["uid"])
+        except (TypeError, ValueError):
+            user_id = 0
+    if not user_id:
+        user_id = resolve_user_id(
+            x_telegram_init_data=init_data or (token if token and "hash=" in token else None),
+            authorization=f"Bearer {token}" if token else None
+        )
+
+    if not user_id:
+        await websocket.close(code=1008)
+        return
 
     if not is_super_admin(user_id) and user_id != CREATOR_FALLBACK_ID:
         try:
@@ -1026,7 +1144,7 @@ async def websocket_live_radar(websocket: WebSocket, chat_id: str, token: str = 
             "data": snapshot
         })
     except Exception as e:
-        logging.debug(f"Aviso enviando snapshot inicial WS ({numeric_id}): {e}")
+        logger.debug(f"Aviso enviando snapshot inicial WS ({numeric_id}): {e}")
 
     # 3. Bucle de escucha reactivo con soporte de heartbeat (ping / pong)
     try:
@@ -1048,9 +1166,10 @@ async def websocket_live_radar(websocket: WebSocket, chat_id: str, token: str = 
                 except Exception:
                     pass
     except WebSocketDisconnect:
-        await ws_manager.disconnect(numeric_id, websocket)
+        pass
     except Exception as ws_err:
-        logging.debug(f"Aviso en conexión WebSocket ({numeric_id}): {ws_err}")
+        logger.debug(f"Aviso en conexión WebSocket ({numeric_id}): {ws_err}")
+    finally:
         await ws_manager.disconnect(numeric_id, websocket)
 
 
@@ -1058,21 +1177,79 @@ app.include_router(api_router, prefix="/api")
 app.include_router(api_router)
 
 
+def _resolve_port() -> int:
+    raw_port = os.getenv("PORT", "8080").strip()
+    try:
+        port = int(raw_port)
+        if 0 < port < 65536:
+            return port
+    except ValueError:
+        pass
+    logger.warning(f"⚠️ [FastAPI] PORT inválido ({raw_port!r}); se usa 8080.")
+    return 8080
+
+
+def _websocket_backend_available() -> bool:
+    for module_name in ("websockets", "wsproto"):
+        try:
+            __import__(module_name)
+            return True
+        except ImportError:
+            continue
+    return False
+
+
 async def run_fastapi_server():
-    if uvicorn is None:
-        logging.warning("uvicorn no está instalado; el servidor FastAPI no iniciará.")
+    global _uvicorn_server
+    if uvicorn is None or _EmbeddedUvicornServer is None:
+        logger.warning("uvicorn no está instalado; el servidor FastAPI no iniciará.")
         return
-    port = int(os.getenv("PORT", 8080))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
-    server = uvicorn.Server(config)
+    if not _websocket_backend_available():
+        logger.warning(
+            "⚠️ [FastAPI] No hay librería WebSocket instalada (websockets/wsproto). "
+            "Instala 'uvicorn[standard]' o 'websockets' para activar /ws/live-radar."
+        )
+    port = _resolve_port()
+    config = uvicorn.Config(
+        app,
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=port,
+        log_level=os.getenv("UVICORN_LOG_LEVEL", "info").lower(),
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+        ws_ping_interval=20.0,
+        ws_ping_timeout=20.0,
+        timeout_keep_alive=30,
+    )
+    server = _EmbeddedUvicornServer(config)
+    _uvicorn_server = server
+    logger.info(f"🌐 [API Backend & WebSockets]: Iniciando servidor en 0.0.0.0:{port}.")
     try:
         await server.serve()
     except asyncio.CancelledError:
-        pass
+        raise
+    except SystemExit as ex:
+        # uvicorn llama a sys.exit(1) si no puede enlazar el puerto; sin este bloque
+        # el SystemExit escaparía del event loop y tumbaría también al bot.
+        logger.critical(f"❌ [FastAPI] El servidor no pudo arrancar (código {ex.code}). Revisa el puerto {port}.")
     except Exception as ex:
-        logging.error(f"⚠️ [FastAPI Server Error]: {ex}")
+        logger.error(f"⚠️ [FastAPI Server Error]: {ex}", exc_info=True)
 
-    # ==========================================
+
+async def stop_fastapi_server(timeout: float = 10.0):
+    server = _uvicorn_server
+    if server is None:
+        return
+    server.should_exit = True
+    deadline = time.monotonic() + timeout
+    while getattr(server, "started", False) and not getattr(server, "force_exit", False):
+        if time.monotonic() >= deadline:
+            server.force_exit = True
+            break
+        await asyncio.sleep(0.1)
+
+
+# ==========================================
 # ⚙️ GESTIÓN DE CALLBACKS Y CLONES DE AIOGRAM
 # ==========================================
 fallback_router = Router(name="callback_fallback")
@@ -1084,15 +1261,15 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
         try:
             return await user_private.cb_channel_plans_dispatch(callback, bot)
         except Exception as ex:
-            logging.error(f"❌ [Fallback Rescue] Error: {ex}", exc_info=True)
+            logger.error(f"❌ [Fallback Rescue] Error: {ex}", exc_info=True)
 
     user_id = callback.from_user.id if callback.from_user else 0
-    logging.warning(f"🧭 [Callback sin handler] usuario={user_id} callback_data={callback.data!r}")
-    
+    logger.warning(f"🧭 [Callback sin handler] usuario={user_id} callback_data={callback.data!r}")
+
     lang_code = callback.from_user.language_code if callback.from_user else ""
     is_es = bool(lang_code and lang_code.startswith("es"))
     text = "⚠️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
-    
+
     try:
         await callback.answer(text, show_alert=True)
     except Exception:
@@ -1101,7 +1278,7 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
 
 @dp.errors()
 async def on_dispatcher_error(event: ErrorEvent) -> bool:
-    logging.error(f"❌ [Error Dispatcher]: {event.exception!r}", exc_info=event.exception)
+    logger.error(f"❌ [Error Dispatcher]: {event.exception!r}", exc_info=event.exception)
     if event.update and event.update.callback_query:
         try:
             await event.update.callback_query.answer("⚠️ Error temporal", show_alert=False)
@@ -1110,8 +1287,7 @@ async def on_dispatcher_error(event: ErrorEvent) -> bool:
     return True
 
 
-@dp.my_chat_member()
-async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
+async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot = None):
     try:
         new_status = event.new_chat_member.status
         if new_status in ("administrator", "member"):
@@ -1125,28 +1301,31 @@ async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot):
                 group_name=chat_title,
                 chat_type=chat_type
             )
-            logging.info(f"🎯 [Auto-Detección]: '{chat_title}' ({event.chat.id}) vinculado.")
+            logger.info(f"🎯 [Auto-Detección]: '{chat_title}' ({event.chat.id}) vinculado.")
     except Exception as e:
-        logging.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
+        logger.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
+
+
+class ChatAutoDetectMiddleware(BaseMiddleware):
+    """
+    Registra el chat cuando el bot es añadido/promovido y DESPUÉS deja pasar el
+    evento a los routers. Como handler directo del Dispatcher se ejecutaba antes
+    que cualquier router y consumía el evento, de modo que los handlers
+    my_chat_member de groups/user_private nunca se disparaban.
+    """
+
+    async def __call__(self, handler, event: ChatMemberUpdated, data: dict):
+        await on_bot_promoted_or_added(event, data.get("bot"))
+        return await handler(event, data)
 
 
 async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Update):
     try:
         is_private_start = False
         if update.message:
-            if update.message.chat.type in ("group", "supergroup") and update.message.from_user:
-                try:
-                    await record_chat_activity(
-                        group_id=update.message.chat.id,
-                        user_id=update.message.from_user.id,
-                        full_name=update.message.from_user.full_name or "Usuario",
-                        username=update.message.from_user.username or "",
-                        is_reply=bool(update.message.reply_to_message),
-                        is_admin=False
-                    )
-                except Exception:
-                    pass
-
+            # La actividad de grupo la registra ActivityTrackerMiddleware (outer middleware
+            # del Dispatcher), que también se ejecuta en dp.feed_update; registrarla aquí
+            # duplicaba los contadores de los clones.
             if update.message.chat.type == "private":
                 text = (update.message.text or "").strip()
                 is_private_start = text.startswith("/start")
@@ -1162,87 +1341,170 @@ async def _dispatch_clone_update(clone_bot: Bot, bot_username: str, update: Upda
                 pass
             await send_official_welcome(clone_bot, update.message.chat.id, user, bot_username)
     except Exception as feed_err:
-        logging.error(f"❌ [Error clon @{bot_username}]: {feed_err}", exc_info=True)
+        logger.error(f"❌ [Error clon @{bot_username}]: {feed_err}", exc_info=True)
+
+
+CLONE_MAX_CONCURRENT_UPDATES = 16
+
+
+async def _dispatch_clone_update_limited(semaphore: asyncio.Semaphore, clone_bot: Bot, bot_username: str, update: Update):
+    async with semaphore:
+        await _dispatch_clone_update(clone_bot, bot_username, update)
 
 
 async def _clone_worker(clone_bot: Bot, token: str):
     allowed_updates = ["message", "callback_query", "pre_checkout_query", "chat_join_request", "chat_member", "my_chat_member"]
+    token_tag = token.split(":", 1)[0]
     try:
-        await clone_bot.delete_webhook(drop_pending_updates=True)
-        bot_info = await clone_bot.get_me()
-        bot_username = bot_info.username or "BotClon"
-    except TelegramUnauthorizedError:
-        active_clone_tasks.pop(token, None)
-        return
-    except Exception:
-        return
+        # 1. Arranque con reintentos (fallos de red transitorios no deben matar el clon)
+        backoff = 2.0
+        while True:
+            try:
+                await clone_bot.delete_webhook(drop_pending_updates=True)
+                bot_info = await clone_bot.get_me()
+                bot_username = bot_info.username or "BotClon"
+                break
+            except TelegramUnauthorizedError:
+                logger.warning(f"🔒 [Clon {token_tag}] Token revocado o inválido; se detiene el clon.")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                logger.warning(f"⚠️ [Clon {token_tag}] Error al iniciar ({ex}); reintento en {backoff:.0f}s.")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
 
-    offset = None
-    while token in active_clone_tasks:
-        try:
-            updates = await clone_bot.get_updates(offset=offset, timeout=15, allowed_updates=allowed_updates)
-            for update in updates:
-                offset = update.update_id + 1
-                await _dispatch_clone_update(clone_bot, bot_username, update)
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            await asyncio.sleep(2)
+        logger.info(f"🤖 [Clon @{bot_username}] Polling activo.")
+
+        # 2. Bucle de long-polling; cada update se procesa como tarea (igual que Aiogram)
+        semaphore = asyncio.Semaphore(CLONE_MAX_CONCURRENT_UPDATES)
+        offset = None
+        error_backoff = 2.0
+        while token in active_clone_tasks:
+            try:
+                updates = await clone_bot.get_updates(offset=offset, timeout=15, allowed_updates=allowed_updates)
+                error_backoff = 2.0
+                for update in updates:
+                    offset = update.update_id + 1
+                    _spawn(
+                        _dispatch_clone_update_limited(semaphore, clone_bot, bot_username, update),
+                        name=f"clone_update:{token_tag}:{update.update_id}"
+                    )
+            except asyncio.CancelledError:
+                raise
+            except TelegramUnauthorizedError:
+                logger.warning(f"🔒 [Clon @{bot_username}] Token revocado durante el polling; se detiene.")
+                return
+            except Exception as ex:
+                logger.debug(f"Aviso polling clon @{bot_username}: {ex}")
+                await asyncio.sleep(error_backoff)
+                error_backoff = min(error_backoff * 2, 30.0)
+    finally:
+        current = active_clone_tasks.get(token)
+        if current is not None and current.get("task") is asyncio.current_task():
+            active_clone_tasks.pop(token, None)
+        with contextlib.suppress(Exception):
+            await clone_bot.session.close()
 
 
 async def start_clone_polling_task(token: str):
+    token = (token or "").strip()
     if not token or token in active_clone_tasks:
+        return
+    if token == BOT_TOKEN:
+        logger.warning("⚠️ [Clones] Se ignoró un clon con el token del bot maestro (provocaría conflicto de polling).")
         return
     try:
         clone_bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-        task = asyncio.create_task(_clone_worker(clone_bot, token))
-        active_clone_tasks[token] = {"bot": clone_bot, "task": task}
+        entry: dict = {"bot": clone_bot, "task": None}
+        active_clone_tasks[token] = entry
+        entry["task"] = asyncio.create_task(_clone_worker(clone_bot, token), name=f"clone_worker:{token.split(':', 1)[0]}")
     except Exception as e:
-        logging.error(f"⚠️️ [Error Clon {token[:10]}]: {e}")
+        active_clone_tasks.pop(token, None)
+        logger.error(f"⚠️ [Error Clon {token[:10]}]: {e}")
 
 
 async def stop_clone_polling_task(token: str):
     task_data = active_clone_tasks.pop(token, None)
-    if task_data:
-        task_data["task"].cancel()
-        try:
-            await task_data["bot"].session.close()
-        except Exception:
-            pass
+    if not task_data:
+        return
+    task = task_data.get("task")
+    if task is not None and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await asyncio.wait_for(task, timeout=10)
+    with contextlib.suppress(Exception):
+        await task_data["bot"].session.close()
 
 
 def trigger_dynamic_clone(token: str):
-    _spawn(start_clone_polling_task(token))
+    _spawn(start_clone_polling_task(token), name="clone_start")
 
 
 def trigger_disconnect_clone(token: str):
-    _spawn(stop_clone_polling_task(token))
+    _spawn(stop_clone_polling_task(token), name="clone_stop")
 
 
 # ==========================================
 # 📊 MIDDLEWARE ROBUSTO DE ACTIVIDAD DE CHAT
 # ==========================================
 class ActivityTrackerMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event: Message, data: dict):
-        if event.chat and event.chat.type in ("group", "supergroup") and event.from_user:
-            try:
-                is_admin = False
-                try:
-                    member = await event.chat.get_member(event.from_user.id)
-                    is_admin = member.status in ("creator", "administrator")
-                except Exception:
-                    pass
+    """
+    Registra la actividad de chat sin bloquear el pipeline de handlers.
+    El estado de administrador se cachea (antes se hacía una llamada
+    getChatMember a Telegram por CADA mensaje, con riesgo de flood-wait).
+    """
+    ADMIN_CACHE_TTL_SECONDS = 300.0
+    ADMIN_CACHE_MAX_ENTRIES = 20000
 
-                await record_chat_activity(
-                    group_id=event.chat.id,
-                    user_id=event.from_user.id,
-                    full_name=event.from_user.full_name or "Usuario",
-                    username=event.from_user.username or "",
-                    is_reply=bool(event.reply_to_message),
-                    is_admin=is_admin
-                )
-            except Exception:
-                pass
+    def __init__(self):
+        super().__init__()
+        self._admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
+
+    async def _is_admin(self, event: Message) -> bool:
+        key = (event.chat.id, event.from_user.id)
+        now = time.monotonic()
+        cached = self._admin_cache.get(key)
+        if cached and cached[1] > now:
+            return cached[0]
+        is_admin = False
+        try:
+            member = await event.chat.get_member(event.from_user.id)
+            is_admin = member.status in ("creator", "administrator")
+        except Exception:
+            pass
+        if len(self._admin_cache) >= self.ADMIN_CACHE_MAX_ENTRIES:
+            expired = [k for k, (_, exp) in self._admin_cache.items() if exp <= now]
+            for k in expired:
+                self._admin_cache.pop(k, None)
+            if len(self._admin_cache) >= self.ADMIN_CACHE_MAX_ENTRIES:
+                self._admin_cache.clear()
+        self._admin_cache[key] = (is_admin, now + self.ADMIN_CACHE_TTL_SECONDS)
+        return is_admin
+
+    async def _track(self, event: Message) -> None:
+        try:
+            is_admin = await self._is_admin(event)
+            await record_chat_activity(
+                group_id=event.chat.id,
+                user_id=event.from_user.id,
+                full_name=event.from_user.full_name or "Usuario",
+                username=event.from_user.username or "",
+                is_reply=bool(event.reply_to_message),
+                is_admin=is_admin
+            )
+        except Exception as ex:
+            logger.debug(f"Aviso registrando actividad ({event.chat.id}): {ex}")
+
+    async def __call__(self, handler, event: Message, data: dict):
+        if (
+            isinstance(event, Message)
+            and event.chat
+            and event.chat.type in ("group", "supergroup")
+            and event.from_user
+            and not event.from_user.is_bot
+        ):
+            _spawn(self._track(event), name="activity_tracker")
         return await handler(event, data)
 
 
@@ -1251,20 +1513,19 @@ class ActivityTrackerMiddleware(BaseMiddleware):
 # ==========================================
 async def main():
     global master_bot_instance
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - [%(levelname)s] - %(name)s - %(message)s",
-        stream=sys.stdout
-    )
 
+    # 0. Base de datos primero: todo lo demás depende del esquema.
     init_db()
-    print("🛡️ [Base de Datos]: Inicializada correctamente.")
+    logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
 
-    _spawn(run_fastapi_server())
-    print(f"🌐 [API Backend & WebSockets]: Servidor activo en puerto {os.getenv('PORT', 8080)}.")
+    if ALLOW_INSECURE_AUTH_FALLBACK:
+        logger.warning("🚨 [Seguridad] ALLOW_INSECURE_AUTH_FALLBACK=1: la API acepta peticiones sin firma. NO usar en producción.")
+
+    # 1. API + WebSockets en el mismo event loop (Railway enruta el tráfico a $PORT)
+    fastapi_task = _spawn(run_fastapi_server(), name="fastapi_server")
 
     master_bot = Bot(
-        token=BOT_TOKEN, 
+        token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     master_bot_instance = master_bot
@@ -1272,13 +1533,20 @@ async def main():
     try:
         master_info = await master_bot.get_me()
         set_master_bot_username(master_info.username or "")
-        print(f"🤖 [Identidad Maestro]: Online como @{master_info.username} (ID: {master_info.id})")
+        logger.info(f"🤖 [Identidad Maestro]: Online como @{master_info.username} (ID: {master_info.id})")
+    except TelegramUnauthorizedError:
+        logger.critical("❌ [Identidad Maestro]: BOT_TOKEN rechazado por Telegram. Revisa la variable en Railway.")
+        await stop_fastapi_server()
+        with contextlib.suppress(Exception):
+            await master_bot.session.close()
+        raise
     except Exception as e:
-        print(f"⚠️ [Identidad Maestro]: {e}")
+        logger.warning(f"⚠️ [Identidad Maestro]: {e}")
 
     # Registro formal de middlewares
     dp.message.middleware(AntiSpamMiddleware())
     dp.message.outer_middleware.register(ActivityTrackerMiddleware())
+    dp.my_chat_member.outer_middleware.register(ChatAutoDetectMiddleware())
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
     # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
@@ -1298,21 +1566,27 @@ async def main():
 
     # Inicialización del Radar Acústico MTProto y Centinelas dedicados
     try:
-        start_voice_radar(master_bot)
+        radar_result = start_voice_radar(master_bot)
+        if asyncio.iscoroutine(radar_result):
+            _spawn(radar_result, name="voice_radar")
     except Exception as e:
-        print(f"⚠️ [Radar MTProto]: {e}")
+        logger.warning(f"⚠️ [Radar MTProto]: {e}")
 
     # Inicialización del worker de difusión recurrente de planes en canales
     if hasattr(ecosystem, "start_channel_broadcast_worker"):
-        _spawn(ecosystem.start_channel_broadcast_worker(master_bot))
+        try:
+            _spawn(ecosystem.start_channel_broadcast_worker(master_bot), name="channel_broadcast_worker")
+        except Exception as e:
+            logger.warning(f"⚠️ [Broadcast Worker]: {e}")
 
     # Carga concurrente de bots clones persistidos en SQLite
     try:
         stored_clones = await get_all_active_clone_tokens()
         for clone_token in stored_clones:
-            _spawn(start_clone_polling_task(clone_token))
+            _spawn(start_clone_polling_task(clone_token), name="clone_boot")
+        logger.info(f"🧬 [Clones BD]: {len(stored_clones)} clon(es) en cola de arranque.")
     except Exception as e:
-        print(f"⚠️ [Clones BD]: {e}")
+        logger.warning(f"⚠️ [Clones BD]: {e}")
 
     try:
         for _att in range(3):
@@ -1320,20 +1594,38 @@ async def main():
                 await master_bot.delete_webhook(drop_pending_updates=True)
                 break
             except Exception as w_err:
-                logging.warning(f"Reintento de delete_webhook ({_att + 1}/3): {w_err}")
+                logger.warning(f"Reintento de delete_webhook ({_att + 1}/3): {w_err}")
                 await asyncio.sleep(2)
 
         allowed_updates = dp.resolve_used_update_types()
         required_updates = [
-            "message", "callback_query", "pre_checkout_query", 
+            "message", "callback_query", "pre_checkout_query",
             "chat_join_request", "chat_member", "my_chat_member"
         ]
         for update_type in required_updates:
             if update_type not in allowed_updates:
                 allowed_updates.append(update_type)
 
+        logger.info("🚀 [Polling Maestro]: Iniciando recepción de updates.")
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
+        logger.info("🛑 [Apagado]: Liberando recursos...")
+        # 1. Cerrar la API para no aceptar más tráfico
+        try:
+            await stop_fastapi_server()
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                await asyncio.wait_for(fastapi_task, timeout=10)
+        except Exception:
+            pass
+        # 2. Cancelar tareas en segundo plano (incluidas las de arranque de clones,
+        #    para que ninguna cree un clon nuevo después de este punto)
+        pending = [t for t in list(_BG_TASKS) if not t.done()]
+        for t in pending:
+            t.cancel()
+        if pending:
+            with contextlib.suppress(Exception):
+                await asyncio.wait(pending, timeout=5)
+        # 3. Detener clones y Centinelas MTProto
         for token in list(active_clone_tasks.keys()):
             try:
                 await stop_clone_polling_task(token)
@@ -1343,7 +1635,20 @@ async def main():
             await close_all_sentinels()
         except Exception:
             pass
+        # 4. Cerrar la sesión HTTP del bot maestro
         try:
             await master_bot.session.close()
         except Exception:
             pass
+        master_bot_instance = None
+        logger.info("✅ [Apagado]: Completado.")
+
+
+# ==========================================
+# ▶️ PUNTO DE ENTRADA (python main.py)
+# ==========================================
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("👋 [The Bunker OS]: Proceso detenido.")
