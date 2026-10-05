@@ -129,6 +129,14 @@ export const session = {
 
 const STALE_RESULT = Object.freeze({ __error: 'stale_session', __status: 0, __stale: true });
 
+/** Id numérico seguro para construir rutas: evita que un valor manipulado inyecte segmentos ("../"). */
+function numericId(value) {
+    const text = String(value ?? '').trim();
+    return /^-?\d+$/.test(text) ? text : null;
+}
+
+const INVALID_ID_RESULT = Object.freeze({ __error: 'invalid_id', __status: 400 });
+
 /** Mensaje legible de un cuerpo de error de FastAPI (detail puede ser string, lista u objeto). */
 function errorDetail(errData, status) {
     const detail = errData && errData.detail;
@@ -271,6 +279,62 @@ export const api = {
             `/community/${encodeURIComponent(chatId)}/analytics?fresh=${flag}`,
             { timeoutMs: CONFIG.ANALYTICS?.REST_TIMEOUT_MS || 12000 }
         );
+    },
+
+    // --- Planes de Membresía del Canal (Fase 8) ---
+
+    /**
+     * ¿La respuesta indica que el SERVIDOR no expone el endpoint (backend sin actualizar)?
+     * FastAPI responde 404 {"detail":"Not Found"} (o 405) para rutas inexistentes, mientras que un plan
+     * que no existe devuelve su propio mensaje ("Plan no encontrado en este canal.").
+     */
+    isEndpointMissing(res) {
+        if (!res || !res.__error) return false;
+        return res.__status === 405 || (res.__status === 404 && /^not found$/i.test(String(res.__error).trim()));
+    },
+
+    /** GET /api/channel/{channel_id}/plans → { plans: [...], total, active_count, subscribers } */
+    async fetchChannelPlans(channelId) {
+        const channel = numericId(channelId);
+        if (!channel) return INVALID_ID_RESULT;
+        return await this.get(`/channel/${channel}/plans`, { timeoutMs: CONFIG.PLANS?.LIST_TIMEOUT_MS || 12000 });
+    },
+
+    /** POST /api/channel/{channel_id}/plan/{plan_id}/toggle → { new_status, is_active } */
+    async toggleChannelPlanStatus(channelId, planId) {
+        const channel = numericId(channelId), plan = numericId(planId);
+        if (!channel || !plan) return INVALID_ID_RESULT;
+        return await this.post(`/channel/${channel}/plan/${plan}/toggle`, {});
+    },
+
+    /** DELETE /api/channel/{channel_id}/plan/{plan_id} → { deleted: true } */
+    async deleteChannelPlan(channelId, planId) {
+        const channel = numericId(channelId), plan = numericId(planId);
+        if (!channel || !plan) return INVALID_ID_RESULT;
+        return await this.request('DELETE', `/channel/${channel}/plan/${plan}`);
+    },
+
+    /**
+     * POST /api/channel/{channel_id}/plan/{plan_id}/broadcast → { sent: true, message_id }
+     * Publica el anuncio comercial del plan en el propio canal. `options.lang` ('es' | 'en') fija el idioma
+     * del anuncio; el servidor aplica un enfriamiento por plan (429) y exige el plan activo (409).
+     */
+    async broadcastChannelPlan(channelId, planId, options = {}) {
+        const channel = numericId(channelId), plan = numericId(planId);
+        if (!channel || !plan) return INVALID_ID_RESULT;
+        const body = options && options.lang ? { lang: options.lang } : {};
+        return await this.post(`/channel/${channel}/plan/${plan}/broadcast`, body);
+    },
+
+    /**
+     * POST /api/channel/{channel_id}/plan/{plan_id}/invite-link → { link, kind: 'purchase' }
+     * Devuelve el ENLACE DE COMPRA del plan (t.me/<bot>?start=chanplan_<plan>_<canal>): quien paga con
+     * Stars recibe automáticamente su enlace de acceso VIP de un solo uso. Exige el plan activo (409).
+     */
+    async generatePlanInviteLink(channelId, planId) {
+        const channel = numericId(channelId), plan = numericId(planId);
+        if (!channel || !plan) return INVALID_ID_RESULT;
+        return await this.post(`/channel/${channel}/plan/${plan}/invite-link`, {});
     },
 
     // --- Acciones Tácticas Ultra Pro ---

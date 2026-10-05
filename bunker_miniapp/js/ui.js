@@ -1,6 +1,6 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
-   ui.js — Renderizado del DOM, Componentes Visuales, Analítica en Vivo, Estudio de Canales y Toasts
+   ui.js — Renderizado del DOM, Analítica en Vivo, Estudio de Canales, Planes de Membresía y Toasts
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -27,6 +27,15 @@ const WS_STATUS_STYLE = {
     paused:       'text-neutral-400',
     denied:       'text-rose-400',
     idle:         'text-neutral-500'
+};
+
+// Tonos de los botones de acción de cada plan de membresía
+const PLAN_TONES = {
+    cyan:    'text-[#00f3ff] border-[#00f3ff]/40 bg-[#00f3ff]/10 hover:bg-[#00f3ff]/20',
+    amber:   'text-amber-300 border-amber-400/40 bg-amber-400/10 hover:bg-amber-400/20',
+    magenta: 'text-[#ff00ff] border-[#ff00ff]/40 bg-[#ff00ff]/10 hover:bg-[#ff00ff]/20',
+    emerald: 'text-emerald-400 border-emerald-400/40 bg-emerald-400/10 hover:bg-emerald-400/20',
+    rose:    'text-rose-400 border-rose-500/40 bg-rose-500/10 hover:bg-rose-500/20'
 };
 
 // Estados del indicador de guardado del Estudio de Canales
@@ -687,6 +696,233 @@ export const ui = {
     },
 
     // ======================================================================
+    // 💎 PLANES DE MEMBRESÍA DEL CANAL
+    // ======================================================================
+
+    /**
+     * HTML de Telegram → HTML seguro para la vista previa. Se escapa TODO y solo se restauran las etiquetas
+     * simples sin atributos (b, i, u, s, code y sus alias). Las etiquetas se balancean: un <b> sin cerrar no
+     * debe "sangrar" a los bloques siguientes de la tarjeta, y un cierre huérfano se descarta.
+     */
+    safeTelegramHtml(text) {
+        const parts = this.escapeHtml(text).split(/(&lt;\/?(?:b|strong|i|em|u|ins|s|strike|del|code)&gt;)/gi);
+        const stack = [];
+        const out = parts.map(part => {
+            const tag = part.match(/^&lt;(\/?)(b|strong|i|em|u|ins|s|strike|del|code)&gt;$/i);
+            if (!tag) return part.replace(/\r?\n/g, '<br>');
+            const name = tag[2].toLowerCase();
+            if (!tag[1]) {
+                stack.push(name);
+                return `<${name}>`;
+            }
+            if (stack.length && stack[stack.length - 1] === name) {
+                stack.pop();
+                return `</${name}>`;
+            }
+            return '';
+        });
+        while (stack.length) out.push(`</${stack.pop()}>`);
+        return out.join('');
+    },
+
+    /** Botón de acción rápida de un plan: glifo + etiqueta diminuta (5 caben en una fila de 360 px). */
+    planActionButton({ action, glyph, label, tip, tone, onclick, disabled = false, spinning = false }) {
+        const icon = spinning
+            ? '<i class="fa-solid fa-spinner fa-spin text-sm leading-none"></i>'
+            : `<span class="text-base leading-none">${glyph}</span>`;
+        return `
+        <button type="button" data-action="${action}" onclick="${onclick}" title="${this.escapeHtml(tip)}" aria-label="${this.escapeHtml(tip)}"${disabled ? ' disabled' : ''}
+            class="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl border transition active:scale-95 disabled:opacity-40 disabled:cursor-wait disabled:active:scale-100 ${PLAN_TONES[tone] || PLAN_TONES.cyan}">
+            ${icon}
+            <span class="text-[8px] font-bold uppercase leading-none truncate max-w-full">${this.escapeHtml(label)}</span>
+        </button>`;
+    },
+
+    /** Barra de confirmación inline (eliminar / difundir): sustituye a la botonera hasta confirmar o cancelar. */
+    planConfirmBar(plan, action) {
+        const isDelete = action === 'delete';
+        const tone = isDelete ? 'rose' : 'magenta';
+        const border = isDelete ? 'border-rose-500/40 bg-rose-500/10' : 'border-[#ff00ff]/40 bg-[#ff00ff]/10';
+        const text = this.tf(isDelete ? 'plans_confirm_delete' : 'plans_confirm_broadcast', { name: plan.name });
+        const yes = this.t(isDelete ? 'plans_confirm_delete_yes' : 'plans_confirm_broadcast_yes');
+        const call = isDelete ? `app.deletePlan(${plan.plan_id}, true)` : `app.broadcastPlan(${plan.plan_id}, true)`;
+        const solid = isDelete ? 'bg-rose-500/90 text-white' : 'bg-[#ff00ff] text-black';
+        return `
+        <div role="alertdialog" data-confirm="${action}" class="rounded-xl border ${border} p-2.5 space-y-2.5">
+            <p class="text-[11px] text-theme-main leading-snug break-words">${this.escapeHtml(text)}</p>
+            <div class="grid grid-cols-2 gap-2">
+                <button type="button" data-action="cancel" onclick="app.cancelPlanConfirm()" class="py-2 rounded-xl border border-neutral-600 text-neutral-300 text-[10px] font-bold uppercase transition active:scale-95 hover:bg-white/5">${this.escapeHtml(this.t('plans_confirm_no'))}</button>
+                <button type="button" data-action="confirm" onclick="${call}" class="py-2 rounded-xl ${solid} text-[10px] font-extrabold uppercase transition active:scale-95" data-tone="${tone}">${this.escapeHtml(yes)}</button>
+            </div>
+        </div>`;
+    },
+
+    /** Fila con el enlace de compra generado y su botón Copiar. */
+    planLinkRow(plan, link) {
+        return `
+        <div data-role="plan-link" class="rounded-xl bg-black/50 border border-emerald-400/30 p-2.5 space-y-1.5">
+            <p class="text-[9px] uppercase font-bold text-emerald-400 tracking-wide">🔗 ${this.escapeHtml(this.t('plans_link_label'))}</p>
+            <div class="flex items-center gap-2">
+                <span class="flex-1 min-w-0 truncate font-mono text-[10px] text-neutral-200 select-all">${this.escapeHtml(link)}</span>
+                <button type="button" data-action="copy" onclick="app.copyPlanLink(${plan.plan_id})" class="shrink-0 px-2.5 py-1.5 rounded-lg bg-emerald-400/15 border border-emerald-400/40 text-emerald-400 text-[9px] font-extrabold uppercase transition active:scale-95 hover:bg-emerald-400/25">${this.escapeHtml(this.t('plans_btn_copy'))}</button>
+            </div>
+            <p class="text-[9px] text-neutral-500 leading-snug">${this.escapeHtml(this.t('plans_link_hint'))}</p>
+        </div>`;
+    },
+
+    /** Tarjeta completa de un plan. ctx: { busyAction, confirm, link }. */
+    buildPlanCard(plan, ctx = {}) {
+        const id = plan.plan_id;
+        const active = Boolean(plan.is_active);
+        const busyAction = ctx.busyAction || null;
+        const busy = Boolean(busyAction);
+
+        const badge = active
+            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+            : 'bg-rose-500/15 text-rose-400 border-rose-500/40';
+        const bar = active ? 'border-l-emerald-400' : 'border-l-rose-500';
+        const mediaChip = plan.has_media
+            ? `<span class="px-2 py-0.5 rounded-lg bg-black/50 border border-neutral-700 text-neutral-300">🖼️ ${this.escapeHtml(this.t('plans_media_' + plan.media_type))}</span>`
+            : '';
+
+        const actions = ctx.confirm
+            ? this.planConfirmBar(plan, ctx.confirm)
+            : `<div class="grid grid-cols-5 gap-1.5">
+                ${this.planActionButton({ action: 'preview', glyph: '👁️', label: this.t('plans_btn_preview'), tip: this.t('plans_tip_preview'), tone: 'cyan', onclick: `app.previewPlan(${id})` })}
+                ${this.planActionButton({ action: 'toggle', glyph: '🔄', label: this.t(active ? 'plans_btn_pause' : 'plans_btn_activate'), tip: this.t(active ? 'plans_tip_pause' : 'plans_tip_activate'), tone: 'amber', onclick: `app.togglePlanStatus(${id})`, disabled: busy, spinning: busyAction === 'toggle' })}
+                ${this.planActionButton({ action: 'broadcast', glyph: '📢', label: this.t('plans_btn_broadcast'), tip: this.t('plans_tip_broadcast'), tone: 'magenta', onclick: `app.broadcastPlan(${id})`, disabled: busy, spinning: busyAction === 'broadcast' })}
+                ${this.planActionButton({ action: 'link', glyph: '🔗', label: this.t(ctx.link ? 'plans_btn_copy' : 'plans_btn_link'), tip: this.t(ctx.link ? 'plans_tip_copy' : 'plans_tip_link'), tone: 'emerald', onclick: `app.generateInviteLink(${id})`, disabled: busy, spinning: busyAction === 'link' })}
+                ${this.planActionButton({ action: 'delete', glyph: '🗑️', label: this.t('plans_btn_delete'), tip: this.t('plans_tip_delete'), tone: 'rose', onclick: `app.deletePlan(${id})`, disabled: busy, spinning: busyAction === 'delete' })}
+            </div>`;
+
+        return `
+        <article id="plan-card-${id}" data-plan-id="${id}" data-status="${active ? 'active' : 'paused'}"${busy ? ' aria-busy="true"' : ''} class="glass-panel p-3.5 space-y-3 border-l-2 ${bar}">
+            <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                    <h4 class="text-sm font-extrabold text-theme-main truncate">💎 ${this.escapeHtml(plan.name)}</h4>
+                    <div class="flex flex-wrap items-center gap-1.5 mt-1.5 font-mono text-[10px]">
+                        <span class="px-2 py-0.5 rounded-lg bg-black/50 border border-neutral-700 text-neutral-300">⏳ ${this.escapeHtml(this.tf('plans_days', { n: this.fmtNum(plan.duration_days) }))}</span>
+                        <span class="px-2 py-0.5 rounded-lg bg-black/50 border border-amber-400/30 text-amber-300 font-bold">⭐ ${this.escapeHtml(this.fmtNum(plan.stars_price))} XTR</span>
+                        ${mediaChip}
+                    </div>
+                </div>
+                <span data-role="plan-status" class="shrink-0 px-2 py-1 rounded-lg border text-[10px] font-bold ${badge}">${this.escapeHtml(this.t(active ? 'plans_status_active' : 'plans_status_paused'))}</span>
+            </div>
+            ${ctx.link ? this.planLinkRow(plan, ctx.link) : ''}
+            ${actions}
+        </article>`;
+    },
+
+    /** Resumen bajo el título: "N activos · M en total · K suscriptores activos". */
+    renderChannelPlansSummary(list, summary) {
+        const el = byId('channel-plans-count');
+        if (!el) return;
+        if (!Array.isArray(list)) {
+            el.textContent = '';
+            return;
+        }
+        const active = summary && Number.isFinite(Number(summary.active_count)) ? Number(summary.active_count) : list.filter(p => p.is_active).length;
+        const total = summary && Number.isFinite(Number(summary.total)) ? Number(summary.total) : list.length;
+        let text = this.tf('plans_count', { active: this.fmtNum(active), total: this.fmtNum(total) });
+        if (summary && summary.subscribers !== null && summary.subscribers !== undefined && Number.isFinite(Number(summary.subscribers))) {
+            text += ` · ${this.tf('plans_subscribers', { n: this.fmtNum(summary.subscribers) })}`;
+        }
+        el.textContent = text;
+    },
+
+    /**
+     * Dibuja el listado de planes del canal en #channel-plans-list.
+     * @param {Array} plansList  Planes del servidor: { plan_id, name, duration_days, stars_price, status, is_active, ... }
+     * @param {object} [opts]    { busy: {planId: acción}, confirm: {planId, action}, links: {planId: url}, summary }
+     */
+    renderChannelPlans(plansList, opts = {}) {
+        const host = byId('channel-plans-list');
+        if (!host) return;
+        const busy = opts.busy || {};
+        const links = opts.links || {};
+        const confirm = opts.confirm || null;
+        const list = (Array.isArray(plansList) ? plansList : []).filter(p => p && Number.isInteger(Number(p.plan_id)));
+
+        this.renderChannelPlansSummary(list, opts.summary);
+
+        if (list.length === 0) {
+            host.innerHTML = `
+            <div class="rounded-2xl border border-dashed border-neutral-700 p-5 text-center space-y-2">
+                <div class="text-2xl">💎</div>
+                <p class="text-[11px] text-neutral-400 leading-relaxed">${this.escapeHtml(this.t('plans_empty'))}</p>
+            </div>`;
+            return;
+        }
+
+        host.innerHTML = list.map(plan => {
+            const normalized = { ...plan, plan_id: Number(plan.plan_id) };
+            return this.buildPlanCard(normalized, {
+                busyAction: busy[normalized.plan_id] || null,
+                confirm: confirm && Number(confirm.planId) === normalized.plan_id ? confirm.action : null,
+                link: links[normalized.plan_id] || null
+            });
+        }).join('');
+    },
+
+    /** Estados sin lista: idle (sin canal), loading y error (con reintento). */
+    renderChannelPlansState(kind, message = '') {
+        const host = byId('channel-plans-list');
+        if (!host) return;
+        this.renderChannelPlansSummary(null);
+
+        if (kind === 'loading') {
+            host.innerHTML = `<div class="rounded-2xl bg-black/30 border border-neutral-800 p-5 text-center text-[11px] text-[#00f3ff] font-mono animate-pulse"><i class="fa-solid fa-spinner fa-spin mr-1.5"></i>${this.escapeHtml(this.t('plans_loading'))}</div>`;
+        } else if (kind === 'error') {
+            host.innerHTML = `
+            <div class="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-5 text-center space-y-3">
+                <p class="text-[11px] text-rose-300 leading-relaxed">⚠️ ${this.escapeHtml(message || this.t('plans_load_error'))}</p>
+                <button type="button" data-action="retry" onclick="app.refreshChannelPlans()" class="bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 px-4 py-2 rounded-xl text-[11px] font-bold transition active:scale-95 inline-flex items-center gap-2"><i class="fa-solid fa-rotate"></i> ${this.escapeHtml(this.t('btn_retry'))}</button>
+            </div>`;
+        } else {
+            host.innerHTML = `<div class="rounded-2xl border border-dashed border-neutral-800 p-5 text-center text-[11px] text-neutral-500 font-mono">${this.escapeHtml(this.t('plans_select_channel'))}</div>`;
+        }
+    },
+
+    /** Vista previa de la tarjeta comercial tal como la verán los suscriptores en Telegram (solo lectura). */
+    renderPlanPreview(plan) {
+        const body = byId('plan-preview-body');
+        if (!body || !plan) return;
+        const stars = Number(plan.stars_price) || 0;
+        const media = plan.has_media
+            ? `<div class="h-28 bg-gradient-to-br from-[#00f3ff]/20 via-[#1f2a37] to-[#ff00ff]/20 flex items-center justify-center text-neutral-300 text-xs font-mono">🖼️ ${this.escapeHtml(this.tf('plans_preview_media', { type: this.t('plans_media_' + plan.media_type) }))}</div>`
+            : '';
+        const promo = plan.promo_text
+            ? `<div class="text-[12px] text-neutral-200 leading-relaxed break-words">${this.safeTelegramHtml(plan.promo_text)}</div>`
+            : '';
+        const resource = plan.target_link
+            ? `<div class="py-2 rounded-lg bg-white/10 text-center text-[11px] font-semibold text-[#8ab4f8]">${this.escapeHtml(this.t('plans_preview_resource'))}</div>`
+            : '';
+
+        body.innerHTML = `
+        <div data-role="plan-preview" class="rounded-2xl bg-[#17212b] border border-white/10 overflow-hidden text-left">
+            ${media}
+            <div class="p-3.5 space-y-2.5">
+                <p class="text-[13px] font-extrabold text-white break-words">💎 ${this.escapeHtml(plan.name)}</p>
+                <p class="text-[12px] text-neutral-200">⏳ <b>${this.escapeHtml(this.t('plans_preview_duration'))}:</b> ${this.escapeHtml(this.tf('plans_days', { n: this.fmtNum(plan.duration_days) }))}</p>
+                <p class="text-[12px] text-neutral-200">⭐ <b>${this.escapeHtml(this.t('plans_preview_price'))}:</b> ${this.escapeHtml(this.fmtNum(stars))} XTR</p>
+                ${promo}
+                <p class="text-[10px] text-neutral-400 italic">🛡️ Cloud Media Management</p>
+            </div>
+            <div class="px-3.5 pb-3.5 space-y-1.5">
+                <div class="py-2 rounded-lg bg-white/10 text-center text-[11px] font-semibold text-[#8ab4f8]">${this.escapeHtml(this.tf('plans_preview_subscribe', { n: this.fmtNum(stars) }))}</div>
+                ${resource}
+            </div>
+        </div>`;
+        this.setVisible('modal-plan-preview', true);
+    },
+
+    closePlanPreview() {
+        this.setVisible('modal-plan-preview', false);
+        const body = byId('plan-preview-body');
+        if (body) body.innerHTML = '';
+    },
+
+    // ======================================================================
     // 🎬 ESTUDIO DE CANALES — formulario reactivo
     // ======================================================================
     STUDIO_FIELDS: {
@@ -807,6 +1043,8 @@ export const ui = {
         this.clearStudioErrors();
         this.setStudioStatus('idle');
         this.setText('channel-id-display', 'ID: —');
+        this.renderChannelPlansState('idle');
+        this.closePlanPreview();
         this.setRadarTarget('');
         this.resetAnalyticsView();
         this.renderVoiceCard();
@@ -932,7 +1170,7 @@ export const ui = {
         const box = document.createElement('div');
         box.className = 'min-w-0 flex-1';
         const titleEl = document.createElement('p');
-        titleEl.className = 'text-xs font-extrabold text-white truncate';
+        titleEl.className = 'text-xs font-extrabold text-white break-words';
         titleEl.textContent = title;
         box.appendChild(titleEl);
         if (body) {

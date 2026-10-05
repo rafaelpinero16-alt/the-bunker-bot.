@@ -1,8 +1,8 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
    config.js — Constantes de Entorno, Tarifas e Internacionalización (i18n)
-   Fase 5/6/7: Radar en vivo (WebSocket), analítica de comunidad, checkout exclusivo
-   con Telegram Stars (XTR), Estudio de Canales reactivo y sesión estricta por initData.
+   Fase 5/6/7/8: Radar en vivo, analítica, checkout Stars (XTR), Estudio de Canales reactivo,
+   sesión estricta por initData y gestión interactiva de Planes de Membresía del canal.
    ========================================================================== */
 
 export const CONFIG = {
@@ -44,6 +44,13 @@ export const CONFIG = {
         LINK_MAX: 256,
         DEFAULT_PRICE: 150,
         DEFAULT_DAYS: 30
+    },
+
+    // 💎 Planes de Membresía del canal
+    PLANS: {
+        LIST_TIMEOUT_MS: 12000,
+        CONFIRM_TIMEOUT_MS: 6000,   // la confirmación inline (eliminar / difundir) se cancela sola
+        TOAST_MS: 3200
     },
 
     // 📈 Analítica de comunidad
@@ -283,7 +290,64 @@ export const translations = {
         session_expired_btn: "Cerrar",
 
         // 🎙️ Centinela
-        sentinel_phone_hint: "El acceso por teléfono se completa desde el bot en privado. Aquí pega la String Session."
+        sentinel_phone_hint: "El acceso por teléfono se completa desde el bot en privado. Aquí pega la String Session.",
+
+        // 💎 Planes de Membresía del canal
+        plans_badge: "MEMBRESÍAS",
+        plans_title: "Planes Activos del Canal",
+        plans_refresh: "Actualizar",
+        plans_select_channel: "Selecciona un canal para ver sus planes de membresía.",
+        plans_loading: "Cargando planes...",
+        plans_empty: "Este canal aún no tiene planes de membresía. Créalos desde el panel del canal en el bot (💎 Planes de Membresía).",
+        plans_load_error: "No se pudieron cargar los planes",
+        plans_count: "{active} activos · {total} en total",
+        plans_subscribers: "{n} suscriptores activos",
+        plans_status_active: "Activo 🟢",
+        plans_status_paused: "Pausado 🔴",
+        plans_days: "{n} días",
+        plans_media_photo: "Foto",
+        plans_media_video: "Vídeo",
+        plans_media_animation: "GIF",
+        plans_btn_preview: "Vista",
+        plans_btn_pause: "Pausar",
+        plans_btn_activate: "Activar",
+        plans_btn_broadcast: "Difundir",
+        plans_btn_link: "Enlace",
+        plans_btn_copy: "Copiar",
+        plans_btn_delete: "Borrar",
+        plans_tip_preview: "Previsualizar tarjeta",
+        plans_tip_pause: "Pausar plan",
+        plans_tip_activate: "Activar plan",
+        plans_tip_broadcast: "Difundir en el canal",
+        plans_tip_link: "Generar enlace de compra",
+        plans_tip_copy: "Copiar enlace de compra",
+        plans_tip_delete: "Eliminar plan",
+        plans_confirm_delete: "¿Eliminar «{name}»? Esta acción no se puede deshacer.",
+        plans_confirm_delete_yes: "Sí, eliminar",
+        plans_confirm_broadcast: "¿Publicar «{name}» en el canal ahora?",
+        plans_confirm_broadcast_yes: "Sí, publicar",
+        plans_confirm_no: "Cancelar",
+        plans_link_label: "Enlace de compra con entrega automática",
+        plans_link_hint: "Quien pague con Stars recibe automáticamente su enlace de acceso VIP de un solo uso.",
+        plans_toast_activated: "Plan activado 🟢",
+        plans_toast_paused: "Plan pausado 🔴",
+        plans_toast_deleted: "Plan eliminado 🗑️",
+        plans_toast_broadcast: "Anuncio publicado en el canal 📢",
+        plans_toast_link_copied: "Enlace de compra copiado 🔗",
+        plans_toast_link_ready: "Enlace generado: pulsa Copiar 🔗",
+        plans_toast_link_local: "Enlace generado localmente (tu servidor no expone esta función)",
+        plans_toast_error: "No se pudo completar: {error}",
+        plans_err_missing: "Tu servidor aún no expone esta función. Actualiza el backend (channel_plans_api).",
+        plans_err_forbidden: "No tienes permisos sobre este canal.",
+        plans_err_inactive: "Activa el plan primero: un plan pausado no se puede comprar ni difundir.",
+        plans_toast_copy_failed: "No se pudo copiar: mantén pulsado el enlace y cópialo.",
+        plans_preview_title: "Vista previa del anuncio",
+        plans_preview_hint: "Así verán tu plan en Telegram.",
+        plans_preview_duration: "Duración",
+        plans_preview_price: "Precio",
+        plans_preview_subscribe: "⭐ Suscribirme ({n} Stars)",
+        plans_preview_resource: "🔗 Acceder al Recurso VIP",
+        plans_preview_media: "Incluye: {type}"
     },
     en: {
         plans_title: "Community Memberships",
@@ -511,6 +575,63 @@ export const translations = {
         session_expired_btn: "Close",
 
         // 🎙️ Sentinel
-        sentinel_phone_hint: "Phone sign-in is completed from the bot in private. Paste the String Session here."
+        sentinel_phone_hint: "Phone sign-in is completed from the bot in private. Paste the String Session here.",
+
+        // 💎 Channel membership plans
+        plans_badge: "MEMBERSHIPS",
+        plans_title: "Channel Active Plans",
+        plans_refresh: "Refresh",
+        plans_select_channel: "Select a channel to see its membership plans.",
+        plans_loading: "Loading plans...",
+        plans_empty: "This channel has no membership plans yet. Create them from the channel panel in the bot (💎 Membership Plans).",
+        plans_load_error: "Could not load the plans",
+        plans_count: "{active} active · {total} total",
+        plans_subscribers: "{n} active subscribers",
+        plans_status_active: "Active 🟢",
+        plans_status_paused: "Paused 🔴",
+        plans_days: "{n} days",
+        plans_media_photo: "Photo",
+        plans_media_video: "Video",
+        plans_media_animation: "GIF",
+        plans_btn_preview: "Preview",
+        plans_btn_pause: "Pause",
+        plans_btn_activate: "Activate",
+        plans_btn_broadcast: "Broadcast",
+        plans_btn_link: "Link",
+        plans_btn_copy: "Copy",
+        plans_btn_delete: "Delete",
+        plans_tip_preview: "Preview card",
+        plans_tip_pause: "Pause plan",
+        plans_tip_activate: "Activate plan",
+        plans_tip_broadcast: "Broadcast to the channel",
+        plans_tip_link: "Generate purchase link",
+        plans_tip_copy: "Copy purchase link",
+        plans_tip_delete: "Delete plan",
+        plans_confirm_delete: "Delete «{name}»? This cannot be undone.",
+        plans_confirm_delete_yes: "Yes, delete",
+        plans_confirm_broadcast: "Publish «{name}» to the channel now?",
+        plans_confirm_broadcast_yes: "Yes, publish",
+        plans_confirm_no: "Cancel",
+        plans_link_label: "Purchase link with automatic delivery",
+        plans_link_hint: "Whoever pays with Stars automatically receives their single-use VIP access link.",
+        plans_toast_activated: "Plan activated 🟢",
+        plans_toast_paused: "Plan paused 🔴",
+        plans_toast_deleted: "Plan deleted 🗑️",
+        plans_toast_broadcast: "Announcement published to the channel 📢",
+        plans_toast_link_copied: "Purchase link copied 🔗",
+        plans_toast_link_ready: "Link generated: tap Copy 🔗",
+        plans_toast_link_local: "Link generated locally (your server does not expose this feature)",
+        plans_toast_error: "Could not complete: {error}",
+        plans_err_missing: "Your server does not expose this feature yet. Update the backend (channel_plans_api).",
+        plans_err_forbidden: "You do not have permissions over this channel.",
+        plans_err_inactive: "Activate the plan first: a paused plan cannot be purchased or broadcast.",
+        plans_toast_copy_failed: "Could not copy: press and hold the link to copy it.",
+        plans_preview_title: "Announcement preview",
+        plans_preview_hint: "This is how your plan will look in Telegram.",
+        plans_preview_duration: "Duration",
+        plans_preview_price: "Price",
+        plans_preview_subscribe: "⭐ Subscribe ({n} Stars)",
+        plans_preview_resource: "🔗 Access VIP Resource",
+        plans_preview_media: "Includes: {type}"
     }
 };

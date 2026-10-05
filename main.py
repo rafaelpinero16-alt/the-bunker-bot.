@@ -1484,6 +1484,23 @@ async def websocket_radar(
             snapshot_task.cancel()
         await radar_hub.disconnect(numeric_id, websocket)
 
+# 1. Importa la función constructora del router de planes de canal
+# Si el módulo no existe en este despliegue, se omite de forma segura.
+try:
+    from channel_plans_api import build_channel_plans_router  # type: ignore[import-not-found]
+except ImportError:
+    build_channel_plans_router = None
+
+# 2. Inclúyelo en tu api_router existente
+if build_channel_plans_router is not None:
+    api_router.include_router(build_channel_plans_router(
+        require_user=require_authenticated_user,
+        assert_owner=assert_chat_ownership,
+        get_bot=lambda: master_bot_instance,
+    ))
+else:
+    logger.warning("[FastAPI] No se encontró 'channel_plans_api'; se omite el router de planes de canal.")
+
 
 app.include_router(api_router, prefix="/api")
 app.include_router(api_router)

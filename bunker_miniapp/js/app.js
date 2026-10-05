@@ -1,7 +1,8 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
    app.js — Orquestador Central Modular, Enrutador de Eventos y Ciclo de Vida
-   Fase 5/6/7: Analítica en vivo, checkout Stars, Estudio de Canales reactivo y sesión estricta.
+   Fase 5/6/7/8: Analítica en vivo, checkout Stars, Estudio de Canales reactivo, sesión estricta
+   y gestión interactiva de Planes de Membresía del canal.
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -73,6 +74,9 @@ export const app = {
     // Estado interno del Estudio de Canales (guardado reactivo)
     _studio: { channelId: null, timer: null, saving: false, dirty: false, last: null },
     validateStudioForm,
+
+    // Estado interno de los Planes de Membresía del canal seleccionado (la UI se dibuja desde aquí)
+    _plans: { channelId: null, list: [], summary: null, busy: {}, confirm: null, confirmTimer: null, links: {}, previewId: null, requestSeq: 0 },
 
     // Exponer accesos directos reactivos
     get currentLang() { return state.currentLang; },
@@ -354,6 +358,11 @@ export const app = {
         ui.renderVoiceCard();
         if (state.liveAnalytics) ui.renderAnalytics(state.liveAnalytics);
 
+        // Planes de membresía: tarjetas, estados y vista previa se repintan en el nuevo idioma.
+        this.renderPlans();
+        const previewPlan = this._plans.previewId !== null ? this.planById(this._plans.previewId) : null;
+        if (previewPlan) ui.renderPlanPreview(previewPlan);
+
         if (state.selectedChatId && state.data.currentChatDashboard) {
             this.loadChatDashboard(state.selectedChatId);
         }
@@ -502,6 +511,7 @@ export const app = {
         clearTimeout(studio.timer);
         Object.assign(studio, { channelId: null, timer: null, saving: false, dirty: false, last: null });
         ui.setStudioBusy(false);
+        this.resetPlansState();
 
         state.chatEpoch += 1;
         state.selectedChatId = null;
@@ -744,6 +754,32 @@ export const app = {
         tgApp.openTelegramLink(url);
     },
 
+    studioDefaults() {
+        return {
+            target_link: '',
+            stars_price: CONFIG.STUDIO.DEFAULT_PRICE,
+            duration_days: CONFIG.STUDIO.DEFAULT_DAYS
+        };
+    },
+
+    /** Rellena el formulario del Estudio con lo que guarda el servidor (sin pisar ediciones pendientes). */
+    loadStudioFromServer(channelId) {
+        const studio = this._studio;
+        const defaults = this.studioDefaults();
+        const epoch = session.epoch;
+        return api.fetchChatDashboard(channelId).then(data => {
+            if (!data || data.__error || data.__stale) return;
+            if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
+            const values = {
+                target_link: data.target_link || '',
+                stars_price: data.stars_price || defaults.stars_price,
+                duration_days: data.duration_days || defaults.duration_days
+            };
+            ui.fillStudioForm(values);
+            studio.last = values;
+        });
+    },
+
     onChannelSelectChange(channelId) {
         const studio = this._studio;
         const idLabel = document.getElementById('channel-id-display') || document.getElementById('channel-id-text');
@@ -751,15 +787,11 @@ export const app = {
             idLabel.innerText = channelId ? `ID: ${channelId}` : 'ID: —';
         }
 
-        const defaults = {
-            target_link: '',
-            stars_price: CONFIG.STUDIO.DEFAULT_PRICE,
-            duration_days: CONFIG.STUDIO.DEFAULT_DAYS
-        };
-
+        let sameSelection = false;
         if (channelId === studio.channelId) {
             // Misma selección (p. ej. recarga de listas): solo se refresca si no hay ediciones pendientes.
             if (studio.dirty) return;
+            sameSelection = true;
         } else {
             // Cambio de canal con ediciones pendientes: se guardan en el canal ANTERIOR antes de cargar el nuevo.
             // saveChannelStudio lee y valida el formulario de forma síncrona, antes de cualquier await.
@@ -775,25 +807,16 @@ export const app = {
         }
 
         if (!channelId) {
-            ui.fillStudioForm(defaults);
+            ui.fillStudioForm(this.studioDefaults());
+            this.loadChannelPlans(null);
             return;
         }
 
         state.selectedChatId = channelId;
 
-        // Consultar ajustes del canal para autorrellenar los campos (sin pisar lo que el operador esté escribiendo)
-        const epoch = session.epoch;
-        api.fetchChatDashboard(channelId).then(data => {
-            if (!data || data.__error || data.__stale) return;
-            if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
-            const values = {
-                target_link: data.target_link || '',
-                stars_price: data.stars_price || defaults.stars_price,
-                duration_days: data.duration_days || defaults.duration_days
-            };
-            ui.fillStudioForm(values);
-            studio.last = values;
-        });
+        // Ajustes del canal (autorrelleno) y planes de membresía: ambos se piden de inmediato al elegir canal.
+        this.loadStudioFromServer(channelId);
+        this.loadChannelPlans(channelId, { silent: sameSelection });
     },
 
     bindChannelSelectListener() {
@@ -806,6 +829,349 @@ export const app = {
             this.syncUrlChatId(e.target.value, true);
             tgApp.hapticSelection();
         });
+    },
+
+    // ======================================================================
+    // 💎 PLANES DE MEMBRESÍA DEL CANAL — listado e interacciones
+    // ======================================================================
+    planById(planId) {
+        const id = Number(planId);
+        return this._plans.list.find(p => Number(p.plan_id) === id) || null;
+    },
+
+    /** Repinta el listado desde el estado interno (o el estado "sin canal"). */
+    renderPlans() {
+        const plans = this._plans;
+        if (!plans.channelId) {
+            ui.renderChannelPlansState('idle');
+            return;
+        }
+        ui.renderChannelPlans(plans.list, { busy: plans.busy, confirm: plans.confirm, links: plans.links, summary: plans.summary });
+    },
+
+    resetPlansState() {
+        const plans = this._plans;
+        clearTimeout(plans.confirmTimer);
+        Object.assign(plans, { channelId: null, list: [], summary: null, busy: {}, confirm: null, confirmTimer: null, links: {}, previewId: null });
+        ui.closePlanPreview();
+    },
+
+    planErrorMessage(res) {
+        if (api.isEndpointMissing(res)) return ui.t('plans_err_missing');
+        if (res?.__status === 403) return ui.t('plans_err_forbidden');
+        if (res?.__error === 'timeout' || res?.__error === 'network') return ui.t('load_error');
+        return String(res?.__error || ui.t('an_err_unavailable'));
+    },
+
+    /** Aviso flotante de una acción sobre un plan (siempre visible; un aviso nuevo sustituye al anterior). */
+    planToast(tone, icon, title) {
+        ui.showToast({ key: 'plan-action', force: true, icon, tone, ttl: CONFIG.PLANS.TOAST_MS, title });
+    },
+
+    planFailed(res, channelId = this._plans.channelId) {
+        tgApp.hapticNotification('error');
+        this.planToast('error', '⚠️', ui.tf('plans_toast_error', { error: this.planErrorMessage(res) }));
+        // "Plan no encontrado": ya no existe (borrado desde el bot u otro dispositivo) → se resincroniza la lista.
+        if (res?.__status === 404 && !api.isEndpointMissing(res) && channelId) {
+            this.loadChannelPlans(channelId, { silent: true });
+        }
+        return false;
+    },
+
+    /**
+     * Carga los planes del canal (GET /api/channel/{id}/plans) y los dibuja con ui.renderChannelPlans().
+     * silent=true refresca sin sustituir la lista por el cargador (tras una acción o un guardado).
+     * Cada petición lleva un número de secuencia: solo la más reciente pinta, y una respuesta de un canal
+     * o de una sesión anteriores se descarta.
+     */
+    async loadChannelPlans(channelId, { silent = false } = {}) {
+        const plans = this._plans;
+        if (!channelId) {
+            this.resetPlansState();
+            ui.renderChannelPlansState('idle');
+            return;
+        }
+        if (plans.channelId !== channelId) {
+            this.resetPlansState();
+            plans.channelId = channelId;
+        }
+
+        const epoch = session.epoch;
+        const seq = ++plans.requestSeq;
+        if (!silent || plans.list.length === 0) ui.renderChannelPlansState('loading');
+
+        const res = await api.fetchChannelPlans(channelId);
+        if (res?.__stale || epoch !== session.epoch || plans.channelId !== channelId || seq !== plans.requestSeq) return;
+
+        if (res?.__error) {
+            if (!silent || plans.list.length === 0) {
+                plans.list = [];
+                plans.summary = null;
+                ui.renderChannelPlansState('error', this.planErrorMessage(res));
+            }
+            return;   // un refresco silencioso fallido no tapa una lista que ya se está mostrando
+        }
+
+        plans.list = Array.isArray(res.plans) ? res.plans : [];
+        plans.summary = { total: res.total, active_count: res.active_count, subscribers: res.subscribers };
+
+        // Un plan pausado o borrado ya no se puede comprar: su enlace generado deja de servir.
+        const active = new Set(plans.list.filter(p => p.is_active).map(p => Number(p.plan_id)));
+        Object.keys(plans.links).forEach(key => { if (!active.has(Number(key))) delete plans.links[key]; });
+        if (plans.confirm && !plans.list.some(p => Number(p.plan_id) === Number(plans.confirm.planId))) this.dropPlanConfirm(false);
+
+        this.renderPlans();
+    },
+
+    refreshChannelPlans() {
+        const channelId = this._studio.channelId;
+        if (!channelId) {
+            ui.renderChannelPlansState('idle');
+            return Promise.resolve();
+        }
+        tgApp.hapticImpact('light');
+        return this.loadChannelPlans(channelId);
+    },
+
+    /** Tras una acción que cambia el catálogo: resincroniza lista y formulario del Estudio con el servidor. */
+    afterPlanMutation() {
+        const channelId = this._plans.channelId;
+        if (!channelId) return;
+        this.loadChannelPlans(channelId, { silent: true });
+        if (this._studio.channelId === channelId) this.loadStudioFromServer(channelId);
+    },
+
+    // --- Confirmación inline (eliminar / difundir) ---------------------------
+    askPlanConfirm(planId, action) {
+        const plans = this._plans;
+        clearTimeout(plans.confirmTimer);
+        plans.confirm = { planId: Number(planId), action };
+        tgApp.hapticNotification('warning');
+        this.renderPlans();
+        // Una confirmación olvidada se cancela sola: nunca queda un "¿Eliminar?" abierto indefinidamente.
+        plans.confirmTimer = setTimeout(() => this.dropPlanConfirm(true), CONFIG.PLANS.CONFIRM_TIMEOUT_MS);
+    },
+
+    dropPlanConfirm(render = true) {
+        const plans = this._plans;
+        clearTimeout(plans.confirmTimer);
+        plans.confirmTimer = null;
+        if (!plans.confirm) return;
+        plans.confirm = null;
+        if (render) this.renderPlans();
+    },
+
+    cancelPlanConfirm() {
+        tgApp.hapticSelection();
+        this.dropPlanConfirm(true);
+    },
+
+    /**
+     * Ejecuta una acción de un plan marcándolo "ocupado" (botones deshabilitados + spinner en la acción en curso).
+     * Devuelve { res, channelId, id, valid } o null si no aplica. `valid` es false si mientras tanto se cambió
+     * de canal o de sesión: el llamador no debe tocar la interfaz.
+     */
+    async runPlanAction(planId, action, request) {
+        const plans = this._plans;
+        const channelId = plans.channelId;
+        const id = Number(planId);
+        if (!channelId || plans.busy[id]) return null;
+
+        const epoch = session.epoch;
+        plans.busy[id] = action;
+        this.renderPlans();
+
+        const res = await request(channelId, id);
+
+        const valid = !res?.__stale && epoch === session.epoch && plans.channelId === channelId;
+        if (valid) {
+            delete plans.busy[id];
+            this.renderPlans();
+        }
+        return { res, channelId, id, valid };
+    },
+
+    // --- Acciones ------------------------------------------------------------
+
+    /** 👁️ Previsualiza la tarjeta comercial tal como la verán los suscriptores. */
+    previewPlan(planId) {
+        const plan = this.planById(planId);
+        if (!plan) return;
+        tgApp.hapticImpact('light');
+        this._plans.previewId = Number(plan.plan_id);
+        ui.renderPlanPreview(plan);
+    },
+
+    closePlanPreview() {
+        this._plans.previewId = null;
+        ui.closePlanPreview();
+    },
+
+    /** 🔄 Activa o pausa el plan (POST .../toggle). Un plan pausado deja de poder comprarse al instante. */
+    async togglePlanStatus(planId) {
+        const plan = this.planById(planId);
+        if (!plan) return false;
+        tgApp.hapticImpact('light');
+
+        const out = await this.runPlanAction(planId, 'toggle', (channelId, id) => api.toggleChannelPlanStatus(channelId, id));
+        if (!out || !out.valid) return false;
+        if (out.res?.__error) return this.planFailed(out.res, out.channelId);
+
+        const active = out.res.is_active !== undefined ? Boolean(out.res.is_active) : out.res.new_status === 'active';
+        // El plan se vuelve a resolver POR ID: mientras se esperaba al servidor una recarga pudo sustituir la lista,
+        // y la referencia tomada antes de la petición ya no pertenecería a ella.
+        const live = this.planById(out.id);
+        if (live) {
+            live.status = active ? 'active' : 'paused';
+            live.is_active = active;
+        }
+        if (!active) delete this._plans.links[out.id];   // el enlace de un plan pausado no permite comprar
+        this.renderPlans();
+
+        tgApp.hapticNotification('success');
+        this.planToast('success', active ? '🟢' : '🔴', ui.t(active ? 'plans_toast_activated' : 'plans_toast_paused'));
+        this.afterPlanMutation();
+        return true;
+    },
+
+    /** 📢 Publica el anuncio del plan en el canal. Pide confirmación inline: es una publicación pública. */
+    async broadcastPlan(planId, confirmed = false) {
+        const plan = this.planById(planId);
+        if (!plan) return false;
+        if (!plan.is_active) {
+            tgApp.hapticNotification('warning');
+            this.planToast('warn', '⚠️', ui.t('plans_err_inactive'));
+            return false;
+        }
+        if (!confirmed) {
+            this.askPlanConfirm(planId, 'broadcast');
+            return false;
+        }
+
+        this.dropPlanConfirm(false);
+        tgApp.hapticImpact('medium');
+        const out = await this.runPlanAction(planId, 'broadcast', (channelId, id) => api.broadcastChannelPlan(channelId, id, { lang: state.currentLang }));
+        if (!out || !out.valid) return false;
+        if (out.res?.__error) return this.planFailed(out.res, out.channelId);
+
+        tgApp.hapticNotification('success');
+        this.planToast('success', '📢', ui.t('plans_toast_broadcast'));
+        return true;
+    },
+
+    /** 🗑️ Elimina el plan (DELETE). Pide confirmación inline: la acción no se puede deshacer. */
+    async deletePlan(planId, confirmed = false) {
+        const plan = this.planById(planId);
+        if (!plan) return false;
+        if (!confirmed) {
+            this.askPlanConfirm(planId, 'delete');
+            return false;
+        }
+
+        this.dropPlanConfirm(false);
+        tgApp.hapticImpact('medium');
+        const out = await this.runPlanAction(planId, 'delete', (channelId, id) => api.deleteChannelPlan(channelId, id));
+        if (!out || !out.valid) return false;
+        if (out.res?.__error) return this.planFailed(out.res, out.channelId);
+
+        const plans = this._plans;
+        plans.list = plans.list.filter(p => Number(p.plan_id) !== out.id);
+        delete plans.links[out.id];
+        if (plans.summary) {
+            plans.summary = { ...plans.summary, total: plans.list.length, active_count: plans.list.filter(p => p.is_active).length };
+        }
+        if (plans.previewId === out.id) this.closePlanPreview();
+        this.renderPlans();
+
+        tgApp.hapticNotification('success');
+        this.planToast('success', '🗑️', ui.t('plans_toast_deleted'));
+        this.afterPlanMutation();
+        return true;
+    },
+
+    /** Enlace de compra calculado en el cliente (mismo formato que el servidor). Solo se usa si el backend no expone el endpoint. */
+    localPurchaseLink(planId, channelId) {
+        return `https://t.me/${CONFIG.BOT_USERNAME}?start=chanplan_${planId}_${channelId}`;
+    },
+
+    /**
+     * 🔗 Genera (POST .../invite-link) y copia el enlace de compra del plan. Con el enlace ya generado,
+     * el mismo botón solo lo copia. Quien paga con Stars recibe automáticamente su acceso VIP de un solo uso.
+     */
+    async generateInviteLink(planId) {
+        const plan = this.planById(planId);
+        if (!plan) return false;
+        if (!plan.is_active) {
+            tgApp.hapticNotification('warning');
+            this.planToast('warn', '⚠️', ui.t('plans_err_inactive'));
+            return false;
+        }
+        if (this._plans.links[plan.plan_id]) return await this.copyPlanLink(plan.plan_id);
+
+        tgApp.hapticImpact('light');
+        const out = await this.runPlanAction(planId, 'link', (channelId, id) => api.generatePlanInviteLink(channelId, id));
+        if (!out || !out.valid) return false;
+
+        let link = out.res?.link;
+        let local = false;
+        if (out.res?.__error) {
+            if (!api.isEndpointMissing(out.res)) return this.planFailed(out.res, out.channelId);
+            link = this.localPurchaseLink(plan.plan_id, out.channelId);
+            local = true;
+        }
+        if (typeof link !== 'string' || !/^https:\/\/t\.me\//i.test(link)) {
+            return this.planFailed({ __error: ui.t('an_err_unavailable'), __status: 502 }, out.channelId);
+        }
+
+        this._plans.links[plan.plan_id] = link;
+        this.renderPlans();
+
+        const copied = await this.copyToClipboard(link);
+        tgApp.hapticNotification('success');
+        this.planToast('success', '🔗', ui.t(local ? 'plans_toast_link_local' : (copied ? 'plans_toast_link_copied' : 'plans_toast_link_ready')));
+        return true;
+    },
+
+    /** Copia el enlace ya generado de un plan (botón "Copiar" de la tarjeta). */
+    async copyPlanLink(planId) {
+        const link = this._plans.links[Number(planId)];
+        if (!link) return false;
+        const copied = await this.copyToClipboard(link);
+        if (copied) {
+            tgApp.hapticNotification('success');
+            this.planToast('success', '🔗', ui.t('plans_toast_link_copied'));
+        } else {
+            tgApp.hapticNotification('warning');
+            this.planToast('warn', '🔗', ui.t('plans_toast_copy_failed'));
+        }
+        return copied;
+    },
+
+    /**
+     * Copia sin diálogos. El portapapeles asíncrono puede rechazar la llamada si la activación del usuario
+     * caducó mientras esperaba al servidor (Safari / WebView de iOS): se intenta el método clásico y, si
+     * también falla, el enlace queda visible en la tarjeta para copiarlo con un toque en "Copiar".
+     */
+    async copyToClipboard(text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (err) { /* se prueba el método clásico */ }
+        try {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+            document.body.appendChild(area);
+            if (area.select) area.select();
+            const done = typeof document.execCommand === 'function' ? document.execCommand('copy') : false;
+            area.remove();
+            return Boolean(done);
+        } catch (err) {
+            return false;
+        }
     },
 
     // ======================================================================
@@ -933,6 +1299,7 @@ export const app = {
         if (!auto) tgApp.hapticNotification('success');
 
         await this.verifyStudioSaved(channelId, payload, time);
+        this.loadChannelPlans(channelId, { silent: true });   // la lista de planes refleja lo recién guardado
         return true;
     },
 

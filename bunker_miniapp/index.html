@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- THE BUNKER — COMMAND OS v7.2 — Analítica en Vivo (REST + WebSocket) · Estudio de Canales reactivo · Checkout solo Telegram Stars · Sesión estricta por initData -->
+<!-- THE BUNKER — COMMAND OS v7.3 — Analítica en Vivo · Estudio de Canales reactivo + Planes de Membresía interactivos · Checkout solo Telegram Stars · Sesión estricta por initData -->
 <html lang="es" data-theme="dark">
 <head>
     <meta charset="UTF-8">
@@ -541,6 +541,24 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Listado de Planes Activos del Canal: membresías con entrega automática del acceso VIP.
+                         ui.renderChannelPlans() dibuja aquí una tarjeta por plan (nombre, días, Stars, estado y acciones). -->
+                    <div id="channel-plans-panel" class="glass-panel p-5 space-y-4">
+                        <div class="flex items-start justify-between gap-2 border-b border-neutral-800 pb-3">
+                            <div class="min-w-0">
+                                <span class="text-[10px] text-[#ff00ff] uppercase tracking-wider font-bold" data-i18n="plans_badge">MEMBRESÍAS</span>
+                                <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="plans_title">Planes Activos del Canal</h2>
+                                <p id="channel-plans-count" class="text-[10px] text-theme-muted font-mono mt-1"></p>
+                            </div>
+                            <button type="button" id="channel-plans-refresh" onclick="app.refreshChannelPlans()" class="shrink-0 text-[#00f3ff] text-[10px] font-bold flex items-center gap-1 active:scale-95 transition bg-[#00f3ff]/10 border border-[#00f3ff]/30 px-2.5 py-1.5 rounded-lg">
+                                <i class="fa-solid fa-arrows-rotate"></i> <span data-i18n="plans_refresh">Actualizar</span>
+                            </button>
+                        </div>
+                        <div id="channel-plans-list" class="space-y-2.5" aria-live="polite">
+                            <div class="rounded-2xl border border-dashed border-neutral-800 p-5 text-center text-[11px] text-neutral-500 font-mono" data-i18n="plans_select_channel">Selecciona un canal para ver sus planes de membresía.</div>
+                        </div>
+                    </div>
                 </section>
 
                 <!-- VISTA 3: MATRIZ DE GRUPOS & TELEMETRÍA -->
@@ -915,6 +933,19 @@
                     <button onclick="document.getElementById('regex-pattern').value=''; document.getElementById('regex-string').value='';" class="flex-1 bg-neutral-800 text-neutral-300 py-2.5 rounded-xl font-bold uppercase text-xs" data-i18n="btn_reset">Reset</button>
                     <button onclick="app.testRegex()" class="flex-1 bg-[#ff00ff] text-black py-2.5 rounded-xl font-extrabold uppercase text-xs" data-i18n="btn_test">Test</button>
                 </div>
+            </div>
+        </div>
+
+        <!-- MODAL: VISTA PREVIA DE UN PLAN DE MEMBRESÍA (solo lectura; así lo ven los suscriptores en Telegram) -->
+        <div id="modal-plan-preview" role="dialog" aria-modal="true" aria-labelledby="plan-preview-title" class="hidden fixed inset-0 z-[235] bg-black/90 backdrop-blur-md flex justify-center items-center p-4" onclick="if (event.target === this) app.closePlanPreview()">
+            <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-5 w-full max-w-sm text-white relative space-y-3 max-h-[90vh] overflow-y-auto">
+                <button type="button" onclick="app.closePlanPreview()" aria-label="Cerrar" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <div>
+                    <h2 id="plan-preview-title" class="text-base font-extrabold text-[#00f3ff] uppercase tracking-wider pr-8" data-i18n="plans_preview_title">Vista previa del anuncio</h2>
+                    <p class="text-[10px] text-neutral-400 mt-0.5" data-i18n="plans_preview_hint">Así verán tu plan en Telegram.</p>
+                </div>
+                <div id="plan-preview-body"></div>
+                <button type="button" onclick="app.closePlanPreview()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2.5 rounded-xl font-extrabold text-xs uppercase transition active:scale-95" data-i18n="btn_close">Cerrar</button>
             </div>
         </div>
 
