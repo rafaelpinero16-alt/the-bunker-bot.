@@ -1,8 +1,8 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
    config.js — Constantes de Entorno, Tarifas e Internacionalización (i18n)
-   Fase 5/6: Radar en vivo (WebSocket), analítica de comunidad y checkout
-   exclusivo con Telegram Stars (XTR).
+   Fase 5/6/7: Radar en vivo (WebSocket), analítica de comunidad, checkout exclusivo
+   con Telegram Stars (XTR), Estudio de Canales reactivo y sesión estricta por initData.
    ========================================================================== */
 
 export const CONFIG = {
@@ -32,6 +32,18 @@ export const CONFIG = {
         BACKOFF_FACTOR: 2,
         RATE_LIMITED_MIN_MS: 30000, // cierre 4429 (sala llena / demasiadas sesiones)
         HIDDEN_PAUSE_MS: 60000      // pausa la conexión si la Mini App lleva 60 s en segundo plano
+    },
+
+    // 🎬 Estudio de Canales: guardado reactivo (límites alineados con Telegram Stars)
+    STUDIO: {
+        AUTOSAVE_MS: 900,       // espera tras la última pulsación antes de guardar solo
+        PRICE_MIN: 1,           // una factura XTR admite de 1 a 10 000 Stars
+        PRICE_MAX: 10000,
+        DAYS_MIN: 1,
+        DAYS_MAX: 365,
+        LINK_MAX: 256,
+        DEFAULT_PRICE: 150,
+        DEFAULT_DAYS: 30
     },
 
     // 📈 Analítica de comunidad
@@ -128,7 +140,6 @@ export const translations = {
         theme_dark: "Oscuro",
         menu_my_profile: "Mi Perfil",
         menu_help: "Ayuda & Soporte",
-        menu_company_reg: "Registro de Compañía",
         help_support_chat: "Chat de Soporte Técnico",
         help_instruction: "Instrucciones & Manuales",
         help_test_regex: "Verificador de Patrones Regex",
@@ -145,9 +156,6 @@ export const translations = {
         instruction_step1: "1. Añade el bot como administrador en tu canal o grupo.",
         instruction_step2: "2. Sincroniza el ID desde el Estudio de Canales.",
         instruction_step3: "3. Configura tus tarifas en Stars (XTR).",
-        company_reg_title: "Registro de Compañía",
-        company_reg_body: "Bienvenido a la página de registro de organización del servicio The Bunker OS. El registro consta de varios pasos: especifica los datos de la organización y verifica tus credenciales.",
-        company_reg_start: "Iniciar registro",
         regex_title: "Verificador de Expresión Regular",
         regex_pattern_label: "Expresión regular:",
         regex_string_label: "Texto a evaluar:",
@@ -159,7 +167,6 @@ export const translations = {
         select_your_community: "Selecciona tu comunidad...",
         admin_stats_title: "Rendimiento de Administradores",
         top_users_title: "Top 10 Usuarios Activos (30 días)",
-        active_modules_label: "Módulos Activos",
         btn_connect_channel: "➕ Conectar Canal",
         btn_connect_group: "➕ Conectar Comunidad",
         tariff_empty: "Plan de tarifa vacío 🔴",
@@ -231,12 +238,12 @@ export const translations = {
         kind_stickers_gifs: "sticker/GIF",
         kind_commands: "comando",
         kind_other: "otro",
-        ws_live: "EN VIVO",
-        ws_connecting: "Conectando…",
-        ws_reconnecting: "Reconectando…",
-        ws_offline: "Sin conexión",
-        ws_paused: "En pausa",
-        ws_denied: "Sin acceso",
+        ws_live: "Conectado 🟢",
+        ws_connecting: "Conectando 🟡",
+        ws_reconnecting: "Reconectando 🟡",
+        ws_offline: "Sin conexión 🔴",
+        ws_paused: "En pausa ⚪",
+        ws_denied: "Sin acceso 🔴",
         ws_idle: "Radar inactivo",
         toast_level_up_title: "¡Ascenso de nivel! 🏆",
         toast_level_up_body: "{name} alcanzó el nivel {level}",
@@ -251,7 +258,32 @@ export const translations = {
         feed_level_up: "{name} subió al nivel {level}",
         feed_voice_joined: "{names} entró a la sala",
         feed_voice_left: "{n} salió(eron) de la sala",
-        feed_payment: "{name} pagó {stars} ⭐"
+        feed_payment: "{name} pagó {stars} ⭐",
+
+        // 🎬 Estudio de Canales (guardado reactivo)
+        tariff_plan_label: "Plan Tarifario",
+        studio_pick_channel: "Selecciona primero un canal bajo tu ID de creador.",
+        studio_status_dirty: "Cambios sin guardar…",
+        studio_status_saving: "Guardando…",
+        studio_status_saved: "Guardado y verificado ✓ {time}",
+        studio_status_saved_unverified: "Guardado ✓ {time}",
+        studio_status_mismatch: "⚠️ Guardado, pero el servidor devuelve otros valores ({values}). Revisa el plan del canal.",
+        studio_status_error: "❌ No se pudo guardar: {error}",
+        studio_status_invalid: "Revisa los campos marcados en rojo",
+        studio_status_forbidden: "❌ No tienes permisos sobre este canal",
+        studio_err_link: "Usa un enlace https://, t.me/… o @alias",
+        studio_err_link_long: "Máximo {max} caracteres",
+        studio_err_price: "Un número entero entre {min} y {max} Stars",
+        studio_err_days: "Un número entero entre {min} y {max} días",
+        studio_days_unit: "d",
+
+        // 🔐 Sesión de Telegram
+        session_expired_title: "Sesión caducada",
+        session_expired_body: "Tu sesión de Telegram ya no es válida. Cierra y vuelve a abrir la Mini App desde el bot.",
+        session_expired_btn: "Cerrar",
+
+        // 🎙️ Centinela
+        sentinel_phone_hint: "El acceso por teléfono se completa desde el bot en privado. Aquí pega la String Session."
     },
     en: {
         plans_title: "Community Memberships",
@@ -336,7 +368,6 @@ export const translations = {
         theme_dark: "Dark",
         menu_my_profile: "My profile",
         menu_help: "Help & Support",
-        menu_company_reg: "Company registration",
         help_support_chat: "Technical support chat",
         help_instruction: "Instruction & Manuals",
         help_test_regex: "Test Regex / Pattern Checker",
@@ -353,9 +384,6 @@ export const translations = {
         instruction_step1: "1. Add the bot as admin in your channel or group.",
         instruction_step2: "2. Sync the ID from the Channel Studio.",
         instruction_step3: "3. Configure your rates in Stars (XTR).",
-        company_reg_title: "Company Registration",
-        company_reg_body: "Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.",
-        company_reg_start: "Start registration",
         regex_title: "Regular Expression Check",
         regex_pattern_label: "Regular expression:",
         regex_string_label: "String to test:",
@@ -367,7 +395,6 @@ export const translations = {
         select_your_community: "Select your community...",
         admin_stats_title: "Admin Performance",
         top_users_title: "Top 10 Active Users (30 days)",
-        active_modules_label: "Active Modules",
         btn_connect_channel: "➕ Connect Channel",
         btn_connect_group: "➕ Connect Group",
         tariff_empty: "Tariff plan empty 🔴",
@@ -439,12 +466,12 @@ export const translations = {
         kind_stickers_gifs: "sticker/GIF",
         kind_commands: "command",
         kind_other: "other",
-        ws_live: "LIVE",
-        ws_connecting: "Connecting…",
-        ws_reconnecting: "Reconnecting…",
-        ws_offline: "Offline",
-        ws_paused: "Paused",
-        ws_denied: "No access",
+        ws_live: "Connected 🟢",
+        ws_connecting: "Connecting 🟡",
+        ws_reconnecting: "Reconnecting 🟡",
+        ws_offline: "Offline 🔴",
+        ws_paused: "Paused ⚪",
+        ws_denied: "No access 🔴",
         ws_idle: "Radar idle",
         toast_level_up_title: "Level up! 🏆",
         toast_level_up_body: "{name} reached level {level}",
@@ -459,6 +486,31 @@ export const translations = {
         feed_level_up: "{name} reached level {level}",
         feed_voice_joined: "{names} joined the room",
         feed_voice_left: "{n} left the room",
-        feed_payment: "{name} paid {stars} ⭐"
+        feed_payment: "{name} paid {stars} ⭐",
+
+        // 🎬 Channel Studio (reactive saving)
+        tariff_plan_label: "Tariff Plan",
+        studio_pick_channel: "Select a channel under your Creator ID first.",
+        studio_status_dirty: "Unsaved changes…",
+        studio_status_saving: "Saving…",
+        studio_status_saved: "Saved and verified ✓ {time}",
+        studio_status_saved_unverified: "Saved ✓ {time}",
+        studio_status_mismatch: "⚠️ Saved, but the server returns different values ({values}). Check the channel plan.",
+        studio_status_error: "❌ Could not save: {error}",
+        studio_status_invalid: "Check the fields marked in red",
+        studio_status_forbidden: "❌ You do not have permissions over this channel",
+        studio_err_link: "Use an https:// link, t.me/… or @alias",
+        studio_err_link_long: "Maximum {max} characters",
+        studio_err_price: "A whole number between {min} and {max} Stars",
+        studio_err_days: "A whole number between {min} and {max} days",
+        studio_days_unit: "d",
+
+        // 🔐 Telegram session
+        session_expired_title: "Session expired",
+        session_expired_body: "Your Telegram session is no longer valid. Close and reopen the Mini App from the bot.",
+        session_expired_btn: "Close",
+
+        // 🎙️ Sentinel
+        sentinel_phone_hint: "Phone sign-in is completed from the bot in private. Paste the String Session here."
     }
 };

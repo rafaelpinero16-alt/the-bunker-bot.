@@ -1,6 +1,6 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
-   ui.js — Renderizado del DOM, Componentes Visuales, Sparklines, Analítica en Vivo y Toasts
+   ui.js — Renderizado del DOM, Componentes Visuales, Analítica en Vivo, Estudio de Canales y Toasts
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -17,15 +17,27 @@ const KIND_META = {
     other:         { icon: '📦', color: '#94a3b8' }
 };
 
-// Estilo del indicador de conexión del radar según el estado del cliente WebSocket
+// Color del texto del indicador de conexión del radar según el estado del cliente WebSocket.
+// La propia etiqueta traducida lleva el emoji ("Conectado 🟢", "Reconectando 🟡"): no hay punto aparte.
 const WS_STATUS_STYLE = {
-    live:         { dot: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.9)] animate-pulse', text: 'text-emerald-400' },
-    connecting:   { dot: 'bg-amber-400 animate-pulse', text: 'text-amber-400' },
-    reconnecting: { dot: 'bg-amber-400 animate-pulse', text: 'text-amber-400' },
-    offline:      { dot: 'bg-rose-500', text: 'text-rose-400' },
-    paused:       { dot: 'bg-neutral-500', text: 'text-neutral-400' },
-    denied:       { dot: 'bg-rose-500', text: 'text-rose-400' },
-    idle:         { dot: 'bg-neutral-600', text: 'text-neutral-500' }
+    live:         'text-emerald-400',
+    connecting:   'text-amber-400',
+    reconnecting: 'text-amber-400',
+    offline:      'text-rose-400',
+    paused:       'text-neutral-400',
+    denied:       'text-rose-400',
+    idle:         'text-neutral-500'
+};
+
+// Estados del indicador de guardado del Estudio de Canales
+const STUDIO_STATUS_STYLE = {
+    idle:       'text-neutral-500',
+    dirty:      'text-amber-400',
+    saving:     'text-[#00f3ff] animate-pulse',
+    saved:      'text-emerald-400',
+    mismatch:   'text-amber-400',
+    invalid:    'text-rose-400',
+    error:      'text-rose-400'
 };
 
 const TOAST_TONES = {
@@ -389,9 +401,10 @@ export const ui = {
     },
 
     renderAffiliateLink(userId) {
-        const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
         const el = document.getElementById('affiliate-link-text');
-        if (el) el.innerText = link;
+        if (!el) return;
+        // Sin identidad de sesión no hay enlace: jamás se muestra el de otro operador.
+        el.innerText = userId ? `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}` : '—';
     },
 
     // ======================================================================
@@ -646,18 +659,24 @@ export const ui = {
 
     /** Indicador de conexión del radar (cabecera global + cabecera de la analítica). */
     setWsStatus(status) {
-        state.wsStatus = status;
-        const style = WS_STATUS_STYLE[status] || WS_STATUS_STYLE.idle;
-        const label = this.t(`ws_${WS_STATUS_STYLE[status] ? status : 'idle'}`);
+        const known = Object.prototype.hasOwnProperty.call(WS_STATUS_STYLE, status) ? status : 'idle';
+        state.wsStatus = known;
+        const label = this.t(`ws_${known}`);
         ['ws-status', 'an-ws'].forEach(prefix => {
-            const dot = byId(`${prefix}-dot`);
             const text = byId(`${prefix}-label`);
-            if (dot) dot.className = `w-2 h-2 rounded-full shrink-0 ${style.dot}`;
-            if (text) {
-                text.textContent = label;
-                text.className = `text-[10px] font-bold uppercase tracking-wide ${style.text}`;
-            }
+            if (!text) return;
+            text.textContent = label;
+            text.className = `text-[10px] font-bold uppercase tracking-wide ${WS_STATUS_STYLE[known]}`;
         });
+        byId('ws-status-pill')?.setAttribute('data-status', known);
+    },
+
+    /** Comunidad a la que está conectado el radar (junto al estado), para que cambiar de comunidad sea inequívoco. */
+    setRadarTarget(title) {
+        const el = byId('an-ws-chat');
+        if (!el) return;
+        el.textContent = title ? `· ${title}` : '';
+        el.setAttribute('title', title || '');
     },
 
     renderToastToggle() {
@@ -665,6 +684,132 @@ export const ui = {
         if (icon) icon.className = state.liveToastsEnabled ? 'fa-solid fa-bell' : 'fa-solid fa-bell-slash';
         const btn = byId('an-toast-toggle');
         if (btn) btn.setAttribute('aria-pressed', state.liveToastsEnabled ? 'true' : 'false');
+    },
+
+    // ======================================================================
+    // 🎬 ESTUDIO DE CANALES — formulario reactivo
+    // ======================================================================
+    STUDIO_FIELDS: {
+        target_link:   'studio-target-link',
+        stars_price:   'studio-stars-price',
+        duration_days: 'studio-duration-days'
+    },
+
+    /** Valores crudos (texto) de los tres campos del Estudio. */
+    readStudioForm() {
+        const read = (id) => byId(id)?.value ?? '';
+        return {
+            target_link: read(this.STUDIO_FIELDS.target_link),
+            stars_price: read(this.STUDIO_FIELDS.stars_price),
+            duration_days: read(this.STUDIO_FIELDS.duration_days)
+        };
+    },
+
+    /**
+     * Rellena los campos con valores del servidor. Un campo con el foco no se toca: el operador
+     * puede estar escribiendo mientras llega la respuesta y no se le debe pisar lo tecleado.
+     */
+    fillStudioForm(values) {
+        const fields = this.STUDIO_FIELDS;
+        Object.entries(fields).forEach(([key, id]) => {
+            const el = byId(id);
+            if (!el || document.activeElement === el) return;
+            const value = values?.[key];
+            el.value = (value === null || value === undefined) ? '' : String(value);
+        });
+    },
+
+    /** Marca (o limpia) el error de un campo del Estudio. `message` vacío limpia. */
+    setFieldError(inputId, message) {
+        const input = byId(inputId);
+        const hint = byId(`${inputId}-error`);
+        const invalid = Boolean(message);
+        if (input) {
+            input.classList.toggle('border-rose-500', invalid);
+            input.classList.toggle('border-neutral-700', !invalid);
+            input.setAttribute('aria-invalid', invalid ? 'true' : 'false');
+        }
+        if (hint) {
+            hint.textContent = message || '';
+            hint.classList.toggle('hidden', !invalid);
+        }
+    },
+
+    clearStudioErrors() {
+        Object.values(this.STUDIO_FIELDS).forEach(id => this.setFieldError(id, ''));
+    },
+
+    /** Indicador de guardado: kind ∈ idle | dirty | saving | saved | mismatch | invalid | error. */
+    setStudioStatus(kind, text = '') {
+        const el = byId('studio-save-status');
+        if (!el) return;
+        const known = Object.prototype.hasOwnProperty.call(STUDIO_STATUS_STYLE, kind) ? kind : 'idle';
+        el.textContent = text;
+        el.className = `text-[10px] font-semibold min-h-[14px] leading-tight ${STUDIO_STATUS_STYLE[known]}`;
+        el.setAttribute('data-status', known);
+    },
+
+    /** Deshabilita el botón mientras se guarda (evita dobles envíos). */
+    setStudioBusy(busy) {
+        const btn = byId('studio-save-btn');
+        if (!btn) return;
+        btn.disabled = Boolean(busy);
+        btn.classList.toggle('opacity-60', Boolean(busy));
+        btn.classList.toggle('cursor-wait', Boolean(busy));
+    },
+
+    // ======================================================================
+    // 🔐 SESIÓN
+    // ======================================================================
+    /** Aviso a pantalla completa cuando el initData de Telegram ya no es válido (no hay forma de renovarlo desde dentro). */
+    showSessionExpired(show) {
+        this.setVisible('session-expired', Boolean(show));
+    },
+
+    /**
+     * Vacía todo lo que se pintó con datos de un operador. Se llama al cerrar sesión y al detectar que la
+     * identidad cambió: ningún dato de la sesión anterior puede quedar en el DOM, ni siquiera oculto.
+     */
+    resetSessionView() {
+        ['channels-list', 'groups-list', 'watchdog-list', 'chat-top-users-list', 'chat-admin-stats-list',
+         'an-leaderboard', 'an-heatmap', 'an-breakdown-bar', 'an-breakdown-legend', 'an-live-feed',
+         'an-spark-messages', 'an-spark-active', 'an-spark-growth'].forEach(id => {
+            const el = byId(id);
+            if (el) el.innerHTML = '';
+        });
+
+        ['channel-owner-select', 'group-owner-select', 'analytics-chat-select'].forEach(id => {
+            const el = byId(id);
+            if (el) {
+                el.innerHTML = '<option value=""></option>';
+                el.value = '';
+            }
+        });
+
+        this.renderStats({});
+        this.renderAffiliateLink(null);
+        // Estos dos elementos llevan data-i18n: se restauran a su texto por defecto traducido.
+        const planEl = byId('chat-plan-status');
+        if (planEl) {
+            planEl.textContent = this.t('tariff_empty');
+            planEl.className = 'text-xs font-bold text-rose-400 mt-1';
+        }
+        const logEl = byId('chat-log-channel');
+        if (logEl) {
+            logEl.textContent = this.t('status_disabled');
+            logEl.className = 'text-xs font-bold text-neutral-400 mt-1 truncate';
+        }
+        this.fillStudioForm({
+            target_link: '',
+            stars_price: CONFIG.STUDIO?.DEFAULT_PRICE ?? 150,
+            duration_days: CONFIG.STUDIO?.DEFAULT_DAYS ?? 30
+        });
+        this.clearStudioErrors();
+        this.setStudioStatus('idle');
+        this.setText('channel-id-display', 'ID: —');
+        this.setRadarTarget('');
+        this.resetAnalyticsView();
+        this.renderVoiceCard();
     },
 
     // ======================================================================

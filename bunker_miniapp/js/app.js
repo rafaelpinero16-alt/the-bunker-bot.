@@ -1,17 +1,79 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
    app.js — Orquestador Central Modular, Enrutador de Eventos y Ciclo de Vida
-   Fase 5/6: Analítica en vivo (REST + WebSocket /ws/radar) y checkout con Telegram Stars.
+   Fase 5/6/7: Analítica en vivo, checkout Stars, Estudio de Canales reactivo y sesión estricta.
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
 import { CONFIG, translations } from './config.js';
 import { state } from './state.js';
 import { tgApp } from './telegram.js';
-import { api, BunkerWebSocketClient } from './api.js';
+import { api, session, BunkerWebSocketClient } from './api.js';
 import { ui } from './ui.js';
 
+const STUDIO_ALIAS_RE = /^@[A-Za-z][A-Za-z0-9_]{4,31}$/;
+const STUDIO_TME_RE = /^(?:t\.me|telegram\.me)\/\S+$/i;
+
+function isHttpUrl(value) {
+    if (/\s/.test(value)) return false;
+    try {
+        const url = new URL(value);
+        return (url.protocol === 'https:' || url.protocol === 'http:') && url.hostname.includes('.');
+    } catch (err) {
+        return false;
+    }
+}
+
+/**
+ * Valida y normaliza el formulario del Estudio de Canales (función pura, sin DOM).
+ * Devuelve { valid, values, errors }: `values` listo para enviar a updateChatSettings y `errors`
+ * como { campo: { key, vars } } con claves i18n. El enlace VIP acaba siendo un botón inline de
+ * Telegram: se rechaza cualquier esquema que no sea http(s), t.me o @alias (un javascript: o un
+ * enlace malformado haría fallar la entrega al suscriptor).
+ */
+export function validateStudioForm(raw) {
+    const cfg = CONFIG.STUDIO;
+    const errors = {};
+    const values = {};
+
+    const link = String(raw?.target_link ?? '').trim();
+    if (link.length > cfg.LINK_MAX) {
+        errors.target_link = { key: 'studio_err_link_long', vars: { max: cfg.LINK_MAX } };
+    } else if (link === '') {
+        values.target_link = '';
+    } else if (STUDIO_ALIAS_RE.test(link)) {
+        values.target_link = `https://t.me/${link.slice(1)}`;
+    } else if (STUDIO_TME_RE.test(link)) {
+        values.target_link = `https://${link}`;
+    } else if (isHttpUrl(link)) {
+        values.target_link = link;
+    } else {
+        errors.target_link = { key: 'studio_err_link' };
+    }
+
+    const wholeNumber = (text, min, max) => {
+        const clean = String(text ?? '').trim();
+        if (!/^\d+$/.test(clean)) return null;
+        const n = parseInt(clean, 10);
+        return (n >= min && n <= max) ? n : null;
+    };
+
+    const price = wholeNumber(raw?.stars_price, cfg.PRICE_MIN, cfg.PRICE_MAX);
+    if (price === null) errors.stars_price = { key: 'studio_err_price', vars: { min: cfg.PRICE_MIN, max: cfg.PRICE_MAX } };
+    else values.stars_price = price;
+
+    const days = wholeNumber(raw?.duration_days, cfg.DAYS_MIN, cfg.DAYS_MAX);
+    if (days === null) errors.duration_days = { key: 'studio_err_days', vars: { min: cfg.DAYS_MIN, max: cfg.DAYS_MAX } };
+    else values.duration_days = days;
+
+    return { valid: Object.keys(errors).length === 0, values, errors };
+}
+
 export const app = {
+    // Estado interno del Estudio de Canales (guardado reactivo)
+    _studio: { channelId: null, timer: null, saving: false, dirty: false, last: null },
+    validateStudioForm,
+
     // Exponer accesos directos reactivos
     get currentLang() { return state.currentLang; },
     set currentLang(val) { state.currentLang = val; },
@@ -32,6 +94,7 @@ export const app = {
 
     init() {
         tgApp.initViewport();
+        session.purgeLegacy();   // el initData cacheado por versiones anteriores no se usa nunca más
         this.initTheme();
         ui.ensureLiveStyles();
         ui.updateTranslations();
@@ -41,6 +104,7 @@ export const app = {
         this.initDraggableButton();
         this.initCharCounter();
         this.bindChannelSelectListener();
+        this.bindChannelStudio();
         this.initUrlRouting();
         this.initAuth();
     },
@@ -54,29 +118,73 @@ export const app = {
         ui.setTheme(theme);
     },
 
+    /**
+     * Comunidad con la que se abrió la Mini App, por orden de prioridad:
+     *  1. ?chat_id=           (botón WebApp del bot en privado: WebAppInfo(url=...?chat_id=...))
+     *  2. tgWebAppStartParam  (query o hash; Direct Link  t.me/<bot>/<app>?startapp=<chat_id>)
+     *  3. WebApp.initDataUnsafe.start_param
+     *  4. WebApp.initDataUnsafe.chat.id   (lanzada desde el menú de adjuntos de un grupo)
+     * Solo se admiten ids de comunidad (negativos): un id positivo es un chat privado.
+     * Devuelve { id, source } o null.
+     */
+    resolveLaunchChat() {
+        const toCommunityId = (raw) => {
+            const match = String(raw ?? '').trim().match(/^(?:chat_)?(-\d{3,})$/);
+            return match ? match[1] : '';
+        };
+        const query = new URLSearchParams(window.location.search || '');
+        const hash = new URLSearchParams(String(window.location.hash || '').replace(/^#/, ''));
+        const webApp = tgApp.tg?.initDataUnsafe || {};
+        const candidates = [
+            ['url', query.get('chat_id')],
+            ['startapp', query.get('tgWebAppStartParam')],
+            ['startapp', hash.get('tgWebAppStartParam')],
+            ['webapp', webApp.start_param],
+            ['webapp', webApp.chat?.id]
+        ];
+        for (const [source, raw] of candidates) {
+            const id = toCommunityId(raw);
+            if (id) return { id, source };
+        }
+        return null;
+    },
+
     initUrlRouting() {
-        const urlParams = new URLSearchParams(window.location.search);
-        const isNumericId = (value) => /^-?\d+$/.test(String(value || ''));
+        const launch = this.resolveLaunchChat();
+        const channelId = new URLSearchParams(window.location.search || '').get('channel_id');
 
-        // Comunidad por ?chat_id= (botones de /top, /heatmap y /metrics) o por startapp=<chat_id>
-        // (Direct Link de la Mini App en grupos, donde Telegram no admite botones web_app).
-        const startParam = tgApp.tg?.initDataUnsafe?.start_param || '';
-        const rawChat = urlParams.get('chat_id') || (isNumericId(startParam) ? startParam : '');
-        const channelId = urlParams.get('channel_id');
-
-        if (isNumericId(rawChat)) {
-            state.selectedChatId = String(rawChat);
+        if (launch) {
+            state.selectedChatId = launch.id;
             state.activeContext = 'groups';
             state.deepLinkTab = 'analytics';   // el botón "Abrir Dashboard en Vivo" debe aterrizar en la analítica
-        } else if (channelId) {
+        } else if (/^-\d+$/.test(channelId || '')) {
+            // Solo se recuerda el canal: el selector aún no tiene opciones y no hay sesión confirmada.
+            // bootstrapDashboard lo selecciona cuando llegan las listas del servidor.
             state.selectedChatId = channelId;
             state.activeContext = 'channels';
-            const select = document.getElementById('channel-owner-select');
-            if (select) {
-                select.value = channelId;
-            }
-            this.onChannelSelectChange(channelId);
+            state.deepLinkTab = 'channels';
         }
+    },
+
+    /** Refleja la comunidad activa en la URL (?chat_id= / ?channel_id=) para que recargar la Mini App la conserve. */
+    syncUrlChatId(chatId, isChannel = false) {
+        try {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('chat_id');
+            url.searchParams.delete('channel_id');
+            if (chatId) url.searchParams.set(isChannel ? 'channel_id' : 'chat_id', String(chatId));
+            window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+        } catch (err) { /* entornos sin History API o URL opaca */ }
+    },
+
+    /** Nombre legible de una comunidad para el indicador del radar. */
+    communityTitle(chatId) {
+        const id = String(chatId);
+        const known = [...state.data.groups, ...state.data.channels].find(c => String(c.id) === id);
+        if (known?.title) return known.title;
+        const dash = state.data.currentChatDashboard;
+        if (dash?.title && String(dash.chat_id) === id) return dash.title;
+        return `ID ${id}`;
     },
 
     initDraggableButton() {
@@ -153,6 +261,10 @@ export const app = {
 
         btn.addEventListener('touchstart', onStart, { passive: true });
         btn.addEventListener('mousedown', onStart);
+    },
+
+    closeApp() {
+        tgApp.closeApp();
     },
 
     toggleDrawer(show) {
@@ -253,8 +365,6 @@ export const app = {
     closeInstructionModal() { document.getElementById('modal-instruction')?.classList.add('hidden'); },
     openRegexModal() { this.closeHelpModal(); document.getElementById('modal-regex')?.classList.remove('hidden'); },
     closeRegexModal() { document.getElementById('modal-regex')?.classList.add('hidden'); },
-    openCompanyRegModal() { document.getElementById('modal-company-reg')?.classList.remove('hidden'); },
-    closeCompanyRegModal() { document.getElementById('modal-company-reg')?.classList.add('hidden'); },
 
     switchHelpTab(tab) {
         const tabErr = document.getElementById('help-tab-error');
@@ -344,13 +454,9 @@ export const app = {
         }
     },
 
-    startCompanyReg() {
-        alert(state.currentLang === 'es' ? 'Iniciando proceso corporativo...' : 'Starting corporate process...');
-        this.closeCompanyRegModal();
-    },
-
     loadTelegramUser() {
-        const tgUser = tgApp.tg?.initDataUnsafe?.user;
+        // Dentro de Telegram la identidad es SOLO la del initData; fuera, SOLO la de la sesión web.
+        const tgUser = session.telegramInitData() ? tgApp.tg?.initDataUnsafe?.user : null;
         const webUser = state.webUser;
         const user = tgUser || (webUser ? {
             id: webUser.id,
@@ -364,38 +470,106 @@ export const app = {
     },
 
     loadAffiliateLink() {
-        const user = tgApp.tg?.initDataUnsafe?.user;
-        const userId = user ? user.id : (state.webUser?.id || '8269470905');
-        ui.renderAffiliateLink(userId);
+        ui.renderAffiliateLink(session.userId());
     },
 
     copyAffiliateLink() {
-        const user = tgApp.tg?.initDataUnsafe?.user;
-        const userId = user ? user.id : (state.webUser?.id || '8269470905');
-        const link = `https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`;
-        this.copyText(link);
+        const userId = session.userId();
+        if (!userId) return;   // sin identidad de sesión no existe enlace que copiar (nunca el de otro operador)
+        this.copyText(`https://t.me/${CONFIG.BOT_USERNAME}?start=ref_${userId}`);
+    },
+
+    // ======================================================================
+    // 🔐 SESIÓN ESTRICTA POR USUARIO
+    // ======================================================================
+
+    /** Fija la identidad de la sesión; si cambió respecto a la anterior purga todo lo cargado con ella. */
+    bindSession() {
+        const { changed } = session.bind();
+        if (changed) this.resetSessionState();
+        return changed;
+    },
+
+    /**
+     * Vacía todo dato asociado a un operador (memoria, DOM, socket, temporizadores) e invalida las
+     * respuestas en vuelo. No toca la sesión en sí (token, webUser) ni las preferencias (idioma, tema).
+     */
+    resetSessionState() {
+        session.invalidate();
+        this.disconnectLiveRadar();
+
+        const studio = this._studio;
+        clearTimeout(studio.timer);
+        Object.assign(studio, { channelId: null, timer: null, saving: false, dirty: false, last: null });
+        ui.setStudioBusy(false);
+
+        state.chatEpoch += 1;
+        state.selectedChatId = null;
+        state.deepLinkTab = null;
+        state.activeContext = 'global';
+        state.securitySwitches = { captcha: true, autolower: true, shield: true, linklock: false };
+        state.data = {
+            stats: { subscribers: 0, revenue_stars: 0, verified: 0, expelled: 0, purges: 0 },
+            channels: [],
+            groups: [],
+            subscribers: [],
+            currentChatDashboard: null,
+            currentChatStats: null,
+            currentChatAdmins: [],
+            currentChatTopUsers: []
+        };
+
+        ui.clearToasts();
+        ui.resetSessionView();
+        const context = document.getElementById('target-context-select');
+        if (context) context.value = 'global';
+    },
+
+    /** 401 en Telegram: el initData caducó (>24 h) o fue rechazado y no se puede renovar desde dentro. */
+    onTelegramSessionExpired() {
+        if (this._tgExpiredShown) return;
+        this._tgExpiredShown = true;
+        session.invalidate();
+        this.disconnectLiveRadar();
+        ui.showSessionExpired(true);
+    },
+
+    /** 401 en el navegador: la sesión web caducó. Se purga todo y se vuelve al login. */
+    onWebSessionExpired() {
+        if (!state.isAuthenticated) return;   // ya se gestionó (varias peticiones pueden fallar a la vez)
+        this.resetSessionState();
+        session.purgeStored();
+        session.unbind();
+        state.isAuthenticated = false;
+        state.webUser = null;
+        this.toggleDrawer(false);
+        this.showLoginGate('login_expired');
     },
 
     logout() {
-        if (confirm(state.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) {
-            this.disconnectLiveRadar();
-            localStorage.removeItem('bunker_session_token');
-            localStorage.removeItem('bunker_init_data');
-            if (tgApp.tg) {
-                tgApp.closeApp();
-            } else {
-                state.isAuthenticated = false;
-                state.webUser = null;
-                this.toggleDrawer(false);
-                this.showLoginGate();
-            }
+        if (!confirm(state.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) return;
+
+        // El modo se decide por la credencial real, NO por la existencia de window.Telegram.WebApp:
+        // el SDK la define también en un navegador normal, donde close() no hace nada.
+        const inTelegram = Boolean(session.telegramInitData());
+        this.resetSessionState();
+        session.purgeStored();
+        session.unbind();
+
+        if (inTelegram) {
+            tgApp.closeApp();
+            return;
         }
+        state.isAuthenticated = false;
+        state.webUser = null;
+        this.toggleDrawer(false);
+        this.showLoginGate();
     },
 
     initAuth() {
-        const tgInitData = tgApp.tg?.initData;
-        if (tgInitData && tgInitData.trim() !== '') {
+        if (session.telegramInitData()) {
             state.isAuthenticated = true;
+            this.bindSession();
             this.showAppShell();
             this.bootstrapDashboard();
             return;
@@ -408,7 +582,7 @@ export const app = {
             return;
         }
 
-        const savedToken = localStorage.getItem('bunker_session_token');
+        const savedToken = session.webToken();
         if (savedToken) {
             this.verifyWebSession(savedToken);
         } else {
@@ -455,6 +629,7 @@ export const app = {
             localStorage.setItem('bunker_session_token', data.session_token);
             state.webUser = data.user;
             state.isAuthenticated = true;
+            this.bindSession();
             this.showAppShell();
             this.bootstrapDashboard();
             tgApp.hapticNotification('success');
@@ -469,9 +644,17 @@ export const app = {
         const data = await api.exchangeWebToken(tempToken);
         if (data?.status === 'success' && data.session_token) {
             localStorage.setItem('bunker_session_token', data.session_token);
-            window.history.replaceState({}, document.title, window.location.pathname);
+            try {
+                // Se retira solo el token temporal: ?chat_id= y demás parámetros se conservan.
+                const url = new URL(window.location.href);
+                url.searchParams.delete('token');
+                window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+            } catch (err) {
+                window.history.replaceState({}, document.title, window.location.pathname);
+            }
             state.webUser = data.user;
             state.isAuthenticated = true;
+            this.bindSession();
             this.showAppShell();
             this.bootstrapDashboard();
         } else {
@@ -485,10 +668,11 @@ export const app = {
         if (data?.status === 'success') {
             state.webUser = { id: data.user_id, first_name: data.first_name, username: data.username };
             state.isAuthenticated = true;
+            this.bindSession();
             this.showAppShell();
             this.bootstrapDashboard();
         } else {
-            localStorage.removeItem('bunker_session_token');
+            session.purgeStored();
             this.showLoginGate();
         }
     },
@@ -525,6 +709,10 @@ export const app = {
         tgApp.hapticImpact('medium');
 
         const res = await api.syncChats();
+        if (res?.__stale) {
+            state.isSyncing = false;
+            return;
+        }
         await Promise.all([
             this.loadStats(),
             this.loadChannels(),
@@ -557,36 +745,54 @@ export const app = {
     },
 
     onChannelSelectChange(channelId) {
+        const studio = this._studio;
         const idLabel = document.getElementById('channel-id-display') || document.getElementById('channel-id-text');
         if (idLabel) {
             idLabel.innerText = channelId ? `ID: ${channelId}` : 'ID: —';
         }
 
+        const defaults = {
+            target_link: '',
+            stars_price: CONFIG.STUDIO.DEFAULT_PRICE,
+            duration_days: CONFIG.STUDIO.DEFAULT_DAYS
+        };
+
+        if (channelId === studio.channelId) {
+            // Misma selección (p. ej. recarga de listas): solo se refresca si no hay ediciones pendientes.
+            if (studio.dirty) return;
+        } else {
+            // Cambio de canal con ediciones pendientes: se guardan en el canal ANTERIOR antes de cargar el nuevo.
+            // saveChannelStudio lee y valida el formulario de forma síncrona, antes de cualquier await.
+            if (studio.channelId && studio.dirty) this.saveChannelStudio({ auto: true });
+
+            clearTimeout(studio.timer);
+            studio.timer = null;
+            studio.channelId = channelId || null;
+            studio.dirty = false;
+            studio.last = null;
+            ui.clearStudioErrors();
+            ui.setStudioStatus('idle');
+        }
+
         if (!channelId) {
-            const targetEl = document.getElementById('studio-target-link');
-            const priceEl = document.getElementById('studio-stars-price');
-            const daysEl = document.getElementById('studio-duration-days');
-            if (targetEl) targetEl.value = '';
-            if (priceEl) priceEl.value = '150';
-            if (daysEl) daysEl.value = '30';
+            ui.fillStudioForm(defaults);
             return;
         }
 
         state.selectedChatId = channelId;
 
-        // Consultar ajustes del canal para autorrellenar los campos
+        // Consultar ajustes del canal para autorrellenar los campos (sin pisar lo que el operador esté escribiendo)
+        const epoch = session.epoch;
         api.fetchChatDashboard(channelId).then(data => {
-            if (data && !data.__error) {
-                if (data.target_link !== undefined && document.getElementById('studio-target-link')) {
-                    document.getElementById('studio-target-link').value = data.target_link || '';
-                }
-                if (data.stars_price !== undefined && document.getElementById('studio-stars-price')) {
-                    document.getElementById('studio-stars-price').value = data.stars_price || 150;
-                }
-                if (data.duration_days !== undefined && document.getElementById('studio-duration-days')) {
-                    document.getElementById('studio-duration-days').value = data.duration_days || 30;
-                }
-            }
+            if (!data || data.__error || data.__stale) return;
+            if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
+            const values = {
+                target_link: data.target_link || '',
+                stars_price: data.stars_price || defaults.stars_price,
+                duration_days: data.duration_days || defaults.duration_days
+            };
+            ui.fillStudioForm(values);
+            studio.last = values;
         });
     },
 
@@ -597,12 +803,173 @@ export const app = {
         select.dataset.bound = 'true';
         select.addEventListener('change', (e) => {
             this.onChannelSelectChange(e.target.value);
+            this.syncUrlChatId(e.target.value, true);
             tgApp.hapticSelection();
         });
     },
 
+    // ======================================================================
+    // 🎬 ESTUDIO DE CANALES — guardado reactivo (enlace VIP · tarifa en Stars · días)
+    // ======================================================================
+    bindChannelStudio() {
+        Object.values(ui.STUDIO_FIELDS).forEach(id => {
+            const el = document.getElementById(id);
+            if (!el || el.dataset.studioBound) return;
+            el.dataset.studioBound = 'true';
+            el.addEventListener('input', () => this.onStudioInput());
+            // Al confirmar el valor (salir del campo) se guarda sin esperar al temporizador.
+            el.addEventListener('change', () => this.saveChannelStudio({ auto: true }));
+        });
+    },
+
+    applyStudioValidation(result) {
+        const map = { target_link: 'studio-target-link', stars_price: 'studio-stars-price', duration_days: 'studio-duration-days' };
+        Object.entries(map).forEach(([field, id]) => {
+            const err = result.errors[field];
+            ui.setFieldError(id, err ? ui.tf(err.key, err.vars) : '');
+        });
+    },
+
+    onStudioInput() {
+        const studio = this._studio;
+        if (!studio.channelId) {
+            ui.setStudioStatus('invalid', ui.t('studio_pick_channel'));
+            return;
+        }
+        studio.dirty = true;
+
+        const result = validateStudioForm(ui.readStudioForm());
+        this.applyStudioValidation(result);
+        clearTimeout(studio.timer);
+        studio.timer = null;
+
+        if (!result.valid) {
+            ui.setStudioStatus('invalid', ui.t('studio_status_invalid'));
+            return;
+        }
+        ui.setStudioStatus('dirty', ui.t('studio_status_dirty'));
+        // Con un guardado en curso no se programa otro: al terminar se compara el formulario y se reprograma si cambió.
+        if (studio.saving) return;
+        studio.timer = setTimeout(() => {
+            studio.timer = null;
+            this.saveChannelStudio({ auto: true });
+        }, CONFIG.STUDIO.AUTOSAVE_MS);
+    },
+
+    /**
+     * Guarda enlace VIP, tarifa en Stars y duración con api.updateChatSettings().
+     *  • auto=true: disparado por el guardado reactivo; auto=false: botón "Guardar Ajustes".
+     *  • Valida antes de enviar: nada inválido llega al servidor.
+     *  • Tras guardar lee el dashboard del canal y confirma que el servidor refleja lo enviado.
+     */
+    async saveChannelStudio({ auto = false } = {}) {
+        const studio = this._studio;
+        const channelId = studio.channelId || document.getElementById('channel-owner-select')?.value || null;
+        if (!channelId) {
+            ui.showToast({ key: 'studio-pick', force: true, icon: '⚠️', tone: 'warn', ttl: 3000, title: ui.t('studio_pick_channel') });
+            return false;
+        }
+
+        clearTimeout(studio.timer);
+        studio.timer = null;
+
+        const result = validateStudioForm(ui.readStudioForm());
+        this.applyStudioValidation(result);
+        if (!result.valid) {
+            ui.setStudioStatus('invalid', ui.t('studio_status_invalid'));
+            if (!auto) tgApp.hapticNotification('error');
+            return false;
+        }
+        if (auto && !studio.dirty) return true;   // 'change' sin edición real: nada que guardar
+        if (studio.saving) return false;          // el guardado en curso reprograma al terminar
+
+        const payload = result.values;            // exactamente lo validado y normalizado
+        const epoch = session.epoch;
+        studio.saving = true;
+        ui.setStudioBusy(true);
+        ui.setStudioStatus('saving', ui.t('studio_status_saving'));
+
+        const res = await api.updateChatSettings(channelId, payload);
+
+        studio.saving = false;
+        ui.setStudioBusy(false);
+        if (res?.__stale || epoch !== session.epoch) return false;
+
+        // El operador cambió de canal mientras se guardaba: no se toca la interfaz del canal nuevo.
+        if (studio.channelId !== channelId) return !res?.__error;
+
+        if (res?.__error) {
+            ui.setStudioStatus('error', res.__status === 403
+                ? ui.t('studio_status_forbidden')
+                : ui.tf('studio_status_error', { error: res.__error }));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+
+        studio.last = payload;
+        const current = validateStudioForm(ui.readStudioForm());
+        const sameAsSent = current.valid
+            && current.values.target_link === payload.target_link
+            && current.values.stars_price === payload.stars_price
+            && current.values.duration_days === payload.duration_days;
+
+        if (!sameAsSent) {
+            // El operador siguió escribiendo durante el guardado: sus cambios nuevos se guardan a continuación.
+            studio.dirty = true;
+            if (current.valid) {
+                ui.setStudioStatus('dirty', ui.t('studio_status_dirty'));
+                studio.timer = setTimeout(() => {
+                    studio.timer = null;
+                    this.saveChannelStudio({ auto: true });
+                }, CONFIG.STUDIO.AUTOSAVE_MS);
+            }
+            return true;
+        }
+
+        studio.dirty = false;
+        ui.fillStudioForm(payload);   // muestra el valor normalizado (p. ej. @alias → https://t.me/alias)
+        const time = new Date().toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false });
+        ui.setStudioStatus('saved', ui.tf('studio_status_saved_unverified', { time }));
+        if (!auto) tgApp.hapticNotification('success');
+
+        await this.verifyStudioSaved(channelId, payload, time);
+        return true;
+    },
+
+    /** Relee el dashboard del canal y confirma que el servidor devuelve lo que se acaba de guardar. */
+    async verifyStudioSaved(channelId, payload, time) {
+        const studio = this._studio;
+        const epoch = session.epoch;
+        const data = await api.fetchChatDashboard(channelId);
+        if (!data || data.__error || data.__stale) return;   // sin lectura no hay veredicto: se queda "Guardado ✓"
+        if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
+
+        const trimSlash = (value) => String(value ?? '').trim().replace(/\/+$/, '');
+        const server = {
+            target_link: trimSlash(data.target_link),
+            stars_price: Number(data.stars_price),
+            duration_days: Number(data.duration_days)
+        };
+        const matches = server.target_link === trimSlash(payload.target_link)
+            && server.stars_price === payload.stars_price
+            && server.duration_days === payload.duration_days;
+
+        if (matches) {
+            ui.setStudioStatus('saved', ui.tf('studio_status_saved', { time }));
+        } else {
+            const values = `${server.stars_price} ⭐ · ${server.duration_days} ${ui.t('studio_days_unit')}`;
+            ui.setStudioStatus('mismatch', ui.tf('studio_status_mismatch', { values }));
+        }
+    },
+
+    /** Alias de compatibilidad: versiones anteriores del HTML llamaban a openChannelStudio() (Telegram cachea agresivamente). */
+    async openChannelStudio() {
+        return await this.saveChannelStudio({ auto: false });
+    },
+
     async loadChannels() {
         const data = await api.fetchChannels();
+        if (data?.__stale) return;
         if (data?.__error) {
             ui.renderChatListError('channels-list', ui.t('load_error'), 'loadChannels');
             return;
@@ -630,6 +997,7 @@ export const app = {
 
     async loadGroups() {
         const data = await api.fetchGroups();
+        if (data?.__stale) return;
         if (data?.__error) {
             ui.renderChatListError('groups-list', ui.t('load_error'), 'loadGroups');
             return;
@@ -642,6 +1010,7 @@ export const app = {
 
     async loadSubscribers() {
         const data = await api.fetchSubscribers();
+        if (data?.__stale) return;
         if (data?.__error) {
             const el = document.getElementById('watchdog-list');
             if (el) el.innerHTML = `<div class="glass-panel p-6 text-center text-xs text-rose-400 font-mono">⚠️ ${ui.t('load_error')}</div>`;
@@ -680,6 +1049,8 @@ export const app = {
             state.wsClient && state.wsClient.chatId === chatId && state.wsClient.status !== 'denied'
         );
 
+        this.syncUrlChatId(chatId, isChannel);
+
         if (isChannel) {
             this.disconnectLiveRadar();
         } else if (!hasLiveForChat) {
@@ -715,13 +1086,22 @@ export const app = {
     // 📡 RADAR EN VIVO — WebSocket + analítica unificada
     // ======================================================================
     connectLiveRadar(chatId) {
-        this.disconnectLiveRadar();   // una sola conexión: se cierra la de la comunidad anterior
+        const switching = Boolean(state.wsClient);   // ¿se está pasando de una comunidad a otra?
+        this.disconnectLiveRadar();                  // una sola conexión: se cierra la de la comunidad anterior
 
         const client = new BunkerWebSocketClient(chatId);
         state.wsClient = client;
         const isCurrent = () => state.wsClient === client;
+        let wasLive = false;
 
-        client.on('status', ({ status }) => { if (isCurrent()) ui.setWsStatus(status); });
+        ui.setRadarTarget(this.communityTitle(chatId));
+        client.on('status', ({ status }) => {
+            if (!isCurrent()) return;
+            if (status === 'live') wasLive = true;
+            // Al cambiar de comunidad el radar se re-enlaza: "Reconectando 🟡" hasta el saludo (hello) del
+            // servidor, que ya autenticó la sesión y la comunidad; solo entonces "Conectado 🟢".
+            ui.setWsStatus(status === 'connecting' && switching && !wasLive ? 'reconnecting' : status);
+        });
         client.on('analytics_snapshot', (data) => { if (isCurrent()) this.applyAnalyticsSnapshot(data, 'ws'); });
         client.on('initial_state', (data) => { if (isCurrent()) state.liveTelemetry = data; });
         client.on('state_refresh', (data) => { if (isCurrent()) state.liveTelemetry = data; });
@@ -766,6 +1146,7 @@ export const app = {
         state.liveVoice = { active: false, callId: null, participants: 0, mics: 0 };
         ui.clearToasts();
         ui.setWsStatus('idle');
+        ui.setRadarTarget('');
         ui.resetAnalyticsView();
         ui.renderVoiceCard();
     },
@@ -783,6 +1164,7 @@ export const app = {
         ui.setAnalyticsLoading(true);
 
         const data = await api.fetchCommunityAnalytics(chatId, fresh);
+        if (data?.__stale) return;
         if (epoch !== state.chatEpoch || String(state.selectedChatId) !== String(chatId)) return;   // respuesta obsoleta
 
         if (data?.__error) {
@@ -976,7 +1358,10 @@ export const app = {
         const data = await api.fetchChatDashboard(chatId);
         if (data && !data.__error) {
             state.data.currentChatDashboard = data;
-            
+            if (data.title && state.wsClient && String(state.wsClient.chatId) === String(chatId)) {
+                ui.setRadarTarget(data.title);
+            }
+
             // 1. Canal de Registro (Log Channel)
             const logEl = document.getElementById('chat-log-channel');
             if (logEl) {
@@ -999,13 +1384,7 @@ export const app = {
                 planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
             }
 
-            // 3. Módulos Activos
-            const modsEl = document.getElementById('chat-active-modules');
-            if (modsEl && data.modules) {
-                modsEl.innerHTML = `${ui.escapeHtml(data.modules.active)} <span class="text-sm font-normal text-blue-300">/ ${ui.escapeHtml(data.modules.total)}</span>`;
-            }
-
-            // 4. Sincronizar interruptores de seguridad reales de la base de datos
+            // 3. Sincronizar interruptores de seguridad reales de la base de datos
             if (data.switches) {
                 state.securitySwitches = { ...state.securitySwitches, ...data.switches };
                 ['captcha', 'autolower', 'shield', 'linklock'].forEach(k => {
@@ -1020,7 +1399,7 @@ export const app = {
                 });
             }
 
-            // 5. Modo de Spam
+            // 4. Modo de Spam
             const spamModeEl = document.getElementById('chat-spam-mode');
             if (spamModeEl && data.protection?.spam_mode) {
                 spamModeEl.value = data.protection.spam_mode;
@@ -1049,16 +1428,6 @@ export const app = {
         }
     },
 
-    openModulesManager() {
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
-        if (!selectedGroup) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona una comunidad para gestionar sus 91 módulos.' : '⚠️ Select a community to manage its 91 modules.');
-            return;
-        }
-        this.switchTab('bot-settings');
-        tgApp.hapticImpact('medium');
-    },
-
     async loadChatStats(chatId) {
         const data = await api.fetchChatStats(chatId);
         if (data && !data.__error) {
@@ -1069,7 +1438,7 @@ export const app = {
     async loadChatAdminStats(chatId) {
         const data = await api.fetchChatAdminStats(chatId);
         const listEl = document.getElementById('chat-admin-stats-list');
-        if (!listEl) return;
+        if (!listEl || data?.__stale) return;
 
         if (data && !data.__error && data.admins && data.admins.length > 0) {
             state.data.currentChatAdmins = data.admins;
@@ -1093,7 +1462,7 @@ export const app = {
     async loadChatTopUsers(chatId) {
         const data = await api.fetchChatTopUsers(chatId);
         const listEl = document.getElementById('chat-top-users-list');
-        if (!listEl) return;
+        if (!listEl || data?.__stale) return;
 
         if (data && !data.__error && data.top_users && data.top_users.length > 0) {
             state.data.currentChatTopUsers = data.top_users;
@@ -1113,37 +1482,6 @@ export const app = {
         } else {
             listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">${state.currentLang === 'es' ? 'Sin registros de actividad reciente' : 'No recent activity records'}</div>`;
         }
-    },
-
-    async openChannelStudio() {
-        const channelSelect = document.getElementById('channel-owner-select');
-        const selectedChannel = channelSelect?.value;
-
-        if (!selectedChannel) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero un canal bajo tu ID de creador.' : '⚠️ Select a channel under your Creator ID first.');
-            return;
-        }
-
-        const targetLink = document.getElementById('studio-target-link')?.value || '';
-        const price = parseInt(document.getElementById('studio-stars-price')?.value || '150');
-        const days = parseInt(document.getElementById('studio-duration-days')?.value || '30');
-
-        const res = await api.updateChatSettings(selectedChannel, {
-            target_link: targetLink,
-            stars_price: price,
-            duration_days: days
-        });
-
-        if (res?.__error) {
-            alert(state.currentLang === 'es' ? `⚠️ Error al guardar los ajustes: ${res.__error}` : `⚠️ Error saving settings: ${res.__error}`);
-            return;
-        }
-
-        tgApp.hapticNotification('success');
-
-        alert(state.currentLang === 'es'
-            ? `📡 Sincronización del Estudio Exitosa:\n\n• Tarifa: ${price} Stars (XTR)\n• Duración: ${days} días\n• Destino VIP: ${targetLink || 'Guardado'}`
-            : `📡 Studio Sync Successful:\n\n• Rate: ${price} Stars (XTR)\n• Duration: ${days} days\n• VIP Target: ${targetLink || 'Saved'}`);
     },
 
     async deployClone() {
@@ -1180,6 +1518,12 @@ export const app = {
         const sessionInput = document.getElementById('sentinel-session-string');
         const sessionString = sessionInput?.value?.trim();
         const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
+
+        // El REST solo admite una String Session; el acceso por teléfono (código + 2FA) se hace en el bot.
+        if (sessionString && /^\+?[\d\s()\-]{7,16}$/.test(sessionString)) {
+            alert(ui.t('sentinel_phone_hint'));
+            return;
+        }
 
         if (!sessionString) {
             alert(state.currentLang === 'es' ? '⚠️ Pega la String Session generada para tu Centinela MTProto.' : '⚠️ Paste the String Session for your MTProto Sentinel.');
@@ -1234,10 +1578,10 @@ export const app = {
 
     /**
      * Checkout exclusivo con Telegram Stars (XTR): abre el bot con el deep link de la suscripción y la
-     * factura se paga dentro de Telegram. `method` se conserva solo por compatibilidad con HTML en caché:
-     * cualquier valor distinto de 'stars' se trata como Stars (la plataforma no cobra por otros medios).
+     * factura se paga dentro de Telegram. Un segundo argumento heredado (HTML en caché) se ignora: la
+     * plataforma no cobra por ningún otro medio.
      */
-    pagarPlan(plan, method = 'stars') {
+    pagarPlan(plan) {
         if (!CONFIG.PRICES[plan]) return;
         state.selectedPlan = plan;
 

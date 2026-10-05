@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- THE BUNKER — COMMAND OS v7.1 — ChatKeeper Style + Analítica en Vivo (REST + WebSocket) + Checkout solo Telegram Stars -->
+<!-- THE BUNKER — COMMAND OS v7.2 — Analítica en Vivo (REST + WebSocket) · Estudio de Canales reactivo · Checkout solo Telegram Stars · Sesión estricta por initData -->
 <html lang="es" data-theme="dark">
 <head>
     <meta charset="UTF-8">
@@ -113,9 +113,6 @@
                         <button onclick="app.openHelpModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
                             <i class="fa-regular fa-circle-question text-[#00f3ff] w-5"></i> <span data-i18n="menu_help">Help & Support</span>
                         </button>
-                        <button onclick="app.openCompanyRegModal(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2 rounded-lg flex items-center space-x-3 hover:bg-white/5 transition">
-                            <i class="fa-regular fa-building text-[#00f3ff] w-5"></i> <span data-i18n="menu_company_reg">Company registration</span>
-                        </button>
                     </div>
                 </div>
 
@@ -133,12 +130,12 @@
                     <div class="glass-panel p-2.5 rounded-2xl flex items-center justify-between">
                         <div class="flex items-center space-x-2.5 min-w-0">
                             <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] flex items-center justify-center font-bold text-xs text-black shrink-0 overflow-hidden relative">
-                                <span id="drawer-avatar-initials">TM</span>
+                                <span id="drawer-avatar-initials">•</span>
                                 <img id="drawer-avatar-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
                             </div>
                             <div class="min-w-0">
-                                <p id="drawer-user-name" class="text-xs font-bold text-theme-main truncate">Tom Mastercloud 👑</p>
-                                <p id="drawer-user-handle" class="text-[10px] text-[#00f3ff] truncate">@Heytomhadir2310</p>
+                                <p id="drawer-user-name" class="text-xs font-bold text-theme-main truncate">—</p>
+                                <p id="drawer-user-handle" class="text-[10px] text-[#00f3ff] truncate">—</p>
                             </div>
                         </div>
                         <button onclick="app.switchTab('profile'); app.toggleDrawer(false);" class="w-8 h-8 rounded-xl bg-neutral-800 hover:bg-[#00f3ff]/20 text-[#00f3ff] flex items-center justify-center transition active:scale-95 shrink-0 border border-neutral-700">
@@ -170,17 +167,16 @@
                     </div>
                     <div>
                         <div class="flex items-center gap-1.5">
-                            <h1 id="user-name" class="font-extrabold text-xs tracking-wide text-theme-main uppercase">Tom Mastercloud</h1>
+                            <h1 id="user-name" class="font-extrabold text-xs tracking-wide text-theme-main uppercase">—</h1>
                             <i class="fa-solid fa-circle-check text-[10px] text-[#00f3ff]"></i>
                         </div>
-                        <p id="user-handle" class="text-[11px] text-[#00f3ff]">@Heytomhadir2310</p>
-                        <p id="user-id-display" class="text-[9px] text-theme-muted font-mono">ID: 8269470905</p>
+                        <p id="user-handle" class="text-[11px] text-[#00f3ff]">—</p>
+                        <p id="user-id-display" class="text-[9px] text-theme-muted font-mono">ID: —</p>
                     </div>
                 </div>
 
                 <!-- Indicador del radar en vivo (WebSocket /ws/radar): abre la analítica de la comunidad activa -->
                 <button id="ws-status-pill" onclick="app.switchTab('analytics')" title="Radar WebSocket" class="bg-black/60 border border-neutral-700 px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 hover:bg-[#00f3ff]/10 relative z-10">
-                    <span id="ws-status-dot" class="w-2 h-2 rounded-full shrink-0 bg-neutral-600"></span>
                     <span id="ws-status-label" class="text-[10px] font-bold uppercase tracking-wide text-neutral-500">Radar inactivo</span>
                 </button>
             </header>
@@ -277,9 +273,9 @@
                             <select id="analytics-chat-select" onchange="app.openAnalytics(this.value)" class="flex-1 min-w-0 bg-black/70 border border-neutral-700 text-white text-xs font-medium rounded-xl p-2.5 focus:outline-none focus:border-[#00f3ff]">
                                 <option value="" data-i18n="select_your_community">Selecciona tu comunidad...</option>
                             </select>
-                            <span class="flex items-center gap-1.5 shrink-0">
-                                <span id="an-ws-dot" class="w-2 h-2 rounded-full shrink-0 bg-neutral-600"></span>
-                                <span id="an-ws-label" class="text-[10px] font-bold uppercase tracking-wide text-neutral-500">Radar inactivo</span>
+                            <span class="shrink-0 text-right leading-tight">
+                                <span id="an-ws-label" class="block text-[10px] font-bold uppercase tracking-wide text-neutral-500" aria-live="polite">Radar inactivo</span>
+                                <span id="an-ws-chat" class="block text-[9px] text-neutral-400 font-mono max-w-[130px] truncate"></span>
                             </span>
                         </div>
                         <p id="an-updated" class="text-[9px] text-theme-muted font-mono"></p>
@@ -474,7 +470,7 @@
                                 <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="studio_badge">ESTUDIO DE BROADCAST</span>
                                 <h2 class="font-extrabold text-theme-main text-base uppercase mt-0.5" data-i18n="studio_title">Ajustes del Canal</h2>
                             </div>
-                            <button onclick="app.openChannelStudio()" class="bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/50 px-3 py-1.5 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center gap-1.5">
+                            <button id="studio-save-btn" onclick="app.saveChannelStudio()" class="bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/50 px-3 py-1.5 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center gap-1.5">
                                 <i class="fa-solid fa-satellite"></i> <span data-i18n="btn_open_studio">Guardar Ajustes</span>
                             </button>
                         </div>
@@ -497,18 +493,24 @@
                             <div class="space-y-2.5 text-xs">
                                 <div>
                                     <span class="text-[10px] text-theme-muted" data-i18n="vip_target_label">Destino VIP (Canal Privado / Recurso):</span>
-                                    <input type="text" id="studio-target-link" placeholder="https://t.me/+... (Se incrustará en un Botón Inline)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                    <input type="text" id="studio-target-link" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" placeholder="https://t.me/+... (Se incrustará en un Botón Inline)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                    <p id="studio-target-link-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                 </div>
                                 <div class="grid grid-cols-2 gap-2">
                                     <div>
                                         <span class="text-[10px] text-theme-muted" data-i18n="stars_rate_label">Tarifa en Stars (XTR):</span>
-                                        <input type="number" id="studio-stars-price" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                        <input type="number" id="studio-stars-price" inputmode="numeric" min="1" max="10000" step="1" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                        <p id="studio-stars-price-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                     </div>
                                     <div>
                                         <span class="text-[10px] text-theme-muted" data-i18n="duration_days_label">Duración (Días):</span>
-                                        <input type="number" id="studio-duration-days" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                        <input type="number" id="studio-duration-days" inputmode="numeric" min="1" max="365" step="1" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                        <p id="studio-duration-days-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                     </div>
                                 </div>
+
+                                <!-- Estado del guardado reactivo (se guarda solo al editar; el botón fuerza el guardado) -->
+                                <p id="studio-save-status" role="status" aria-live="polite" data-status="idle" class="text-[10px] font-semibold min-h-[14px] leading-tight text-neutral-500"></p>
 
                                 <!-- Parámetros Tácticos de Difusión (Ecosistema Worker) -->
                                 <div class="pt-2 border-t border-neutral-800/80 space-y-2">
@@ -541,7 +543,7 @@
                     </div>
                 </section>
 
-                <!-- VISTA 3: MATRIZ DE GRUPOS & TELEMETRÍA CHATKEEPER -->
+                <!-- VISTA 3: MATRIZ DE GRUPOS & TELEMETRÍA -->
                 <section id="view-groups" class="space-y-4 tab-view hidden">
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
@@ -553,20 +555,13 @@
                         <div id="groups-list" class="space-y-3"></div>
                     </div>
 
-                    <!-- SUITE GRANULAR CHATKEEPER STYLE -->
-                    <div id="chatkeeper-suite-panel" class="space-y-4">
-                        <!-- Banner de Errores de Módulos (ChatKeeper) -->
-                        <div class="bg-rose-950/20 border border-rose-900/40 rounded-2xl p-4 text-xs space-y-1">
-                            <span class="text-neutral-400 font-bold text-[10px] uppercase tracking-wider">Modules errors</span>
-                            <p class="text-theme-main font-bold flex items-center gap-1.5"><i class="fa-solid fa-triangle-exclamation text-rose-400"></i> Stop word filter</p>
-                            <p class="text-[11px] text-blue-400">Punishment for beginners <span class="text-neutral-400">- Filter settings for beginners does not contain penalties</span></p>
-                        </div>
-
+                    <!-- PANEL DE LA COMUNIDAD SELECCIONADA (datos reales de /chat/{id}/dashboard, /top-users y /admin-stats) -->
+                    <div id="community-panel" class="space-y-4">
                         <!-- Grid: Plan y Log Channel -->
                         <div class="grid grid-cols-2 gap-2.5">
                             <div class="glass-panel p-3.5 space-y-2 flex flex-col justify-between">
                                 <div>
-                                    <span class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="tariff_plan_label">A Plan</span>
+                                    <span class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="tariff_plan_label">Plan Tarifario</span>
                                     <p id="chat-plan-status" class="text-xs font-bold text-rose-400 mt-1" data-i18n="tariff_empty">Tariff empty</p>
                                 </div>
                                 <button onclick="app.switchTab('plans')" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-1.5 rounded-xl text-[10px] font-bold transition" data-i18n="license_renew">Buy</button>
@@ -580,18 +575,7 @@
                             </div>
                         </div>
 
-                        <!-- Módulos Activos (Card Azul ChatKeeper) -->
-                        <div class="bg-gradient-to-br from-blue-900/60 to-blue-950/80 border border-blue-500/30 rounded-2xl p-4 flex items-center justify-between shadow-[0_0_20px_rgba(37,99,235,0.2)]">
-                            <div>
-                                <span class="text-[10px] text-blue-300 uppercase font-bold" data-i18n="active_modules_label">Módulos Activos</span>
-                                <h3 id="chat-active-modules" class="text-2xl font-black text-white tracking-wider mt-0.5">11 <span class="text-sm font-normal text-blue-300">/ 91</span></h3>
-                            </div>
-                            <button onclick="app.openModulesManager()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs px-3.5 py-2 rounded-xl shadow-lg transition active:scale-95 flex items-center gap-1.5">
-                                <i class="fa-solid fa-sliders"></i> <span data-i18n="configure">Ajustar</span>
-                            </button>
-                        </div>
-
-                        <!-- Top 10 Usuarios Activos en 30 Días (ChatKeeper) -->
+                        <!-- Top 10 Usuarios Activos en 30 Días -->
                         <div class="glass-panel p-4 space-y-3">
                             <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
                                 <span><i class="fa-solid fa-trophy text-amber-400 mr-1.5"></i> <span data-i18n="top_users_title">Top 10 Usuarios Activos</span></span>
@@ -602,7 +586,7 @@
                             </div>
                         </div>
 
-                        <!-- Admin Stats (ChatKeeper) -->
+                        <!-- Rendimiento de administradores -->
                         <div class="glass-panel p-4 space-y-3">
                             <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
                                 <span><i class="fa-solid fa-user-shield text-blue-400 mr-1.5"></i> <span data-i18n="admin_stats_title">Rendimiento de Admins</span></span>
@@ -691,10 +675,9 @@
                             <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
                                 <div class="flex items-center justify-between">
                                     <span class="text-[10px] text-theme-muted uppercase font-bold">Centinela Acústico MTProto:</span>
-                                    <span class="text-[9px] text-[#00f3ff]">Sesión / Teléfono</span>
+                                    <span class="text-[9px] text-[#00f3ff]">String Session</span>
                                 </div>
-                                <input type="text" id="sentinel-phone-number" placeholder="Teléfono (+57...) o String Session" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#00f3ff]">
-                                <input type="hidden" id="sentinel-session-string">
+                                <input type="password" id="sentinel-session-string" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="String Session (Pyrogram)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#00f3ff]">
                                 <button onclick="app.connectSentinel()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center justify-center gap-2">
                                     <i class="fa-solid fa-plug"></i> Conectar Centinela
                                 </button>
@@ -756,7 +739,7 @@
                             <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="pro_desc">Automatización total, moderación de voz y comandos ilimitados para tu comunidad.</p>
                         </div>
                         <div class="relative z-10 space-y-2">
-                            <button onclick="app.pagarPlan('pro', 'stars')" class="w-full bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-sm py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <button onclick="app.pagarPlan('pro')" class="w-full bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-sm py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
                                 <i class="fa-solid fa-star text-amber-300"></i> 300 XTR
                             </button>
                             <p class="text-center text-[9px] text-theme-muted leading-tight" data-i18n="plans_stars_only">Pago 100% in-app con Telegram Stars (XTR). Activación inmediata.</p>
@@ -771,7 +754,7 @@
                             <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="ultra_desc">Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.</p>
                         </div>
                         <div class="relative z-10 space-y-2">
-                            <button onclick="app.pagarPlan('ultra', 'stars')" class="w-full bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-sm py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
+                            <button onclick="app.pagarPlan('ultra')" class="w-full bg-blue-600/90 hover:bg-blue-500 text-white font-bold text-sm py-3.5 rounded-xl transition-all shadow-[0_0_15px_rgba(37,99,235,0.3)] active:scale-95 flex items-center justify-center gap-2">
                                 <i class="fa-solid fa-star text-amber-300"></i> 600 XTR
                             </button>
                             <p class="text-center text-[9px] text-theme-muted leading-tight" data-i18n="plans_stars_only">Pago 100% in-app con Telegram Stars (XTR). Activación inmediata.</p>
@@ -789,7 +772,7 @@
                             Comparte tu enlace único de promotor. Cada vez que una comunidad adquiera un plan PRO o ULTRA a través de tu recomendación, recibes comisiones instantáneas en Telegram Stars directo a tu balance.
                         </p>
                         <div class="bg-black/60 p-3 rounded-xl border border-neutral-800 flex items-center justify-between">
-                            <span id="affiliate-link-text" class="text-[11px] font-mono text-[#00f3ff] truncate mr-2">https://t.me/thebunkerapp_bot?start=ref_8269470905</span>
+                            <span id="affiliate-link-text" class="text-[11px] font-mono text-[#00f3ff] truncate mr-2">—</span>
                             <button onclick="app.copyAffiliateLink()" class="bg-[#ff00ff]/20 text-[#ff00ff] hover:bg-[#ff00ff]/30 border border-[#ff00ff]/50 px-3 py-1.5 rounded-lg text-xs font-bold shrink-0 transition active:scale-90">
                                 <i class="fa-regular fa-copy"></i>
                             </button>
@@ -802,14 +785,14 @@
                     <div class="glass-panel p-6 text-center space-y-4 relative overflow-hidden">
                         <div class="w-20 h-20 rounded-full mx-auto bg-gradient-to-tr from-[#00f3ff] to-[#ff00ff] p-1 shadow-[0_0_25px_rgba(0,243,255,0.4)]">
                             <div class="w-full h-full rounded-full bg-black flex items-center justify-center font-extrabold text-2xl text-white uppercase overflow-hidden relative">
-                                <span id="profile-initials">TM</span>
+                                <span id="profile-initials">•</span>
                                 <img id="profile-img" class="absolute inset-0 w-full h-full object-cover hidden" alt="Avatar">
                             </div>
                         </div>
                         <div>
-                            <h2 id="profile-name" class="font-extrabold text-lg text-theme-main">Tom Mastercloud 👑</h2>
-                            <p id="profile-handle" class="text-xs text-[#00f3ff]">@Heytomhadir2310</p>
-                            <p id="profile-id" class="text-[10px] text-theme-muted font-mono mt-0.5">ID: 8269470905</p>
+                            <h2 id="profile-name" class="font-extrabold text-lg text-theme-main">—</h2>
+                            <p id="profile-handle" class="text-xs text-[#00f3ff]">—</p>
+                            <p id="profile-id" class="text-[10px] text-theme-muted font-mono mt-0.5">ID: —</p>
                         </div>
 
                         <!-- Tarjetas de Balance y Descuentos -->
@@ -935,26 +918,22 @@
             </div>
         </div>
 
-        <!-- MODAL 4: REGISTRO DE COMPAÑÍA / ORGANIZACIÓN -->
-        <div id="modal-company-reg" class="hidden fixed inset-0 z-[230] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
-            <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4 text-center">
-                <button onclick="app.closeCompanyRegModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
-                <div class="w-16 h-16 rounded-2xl bg-[#00f3ff]/20 border border-[#00f3ff]/40 mx-auto flex items-center justify-center text-[#00f3ff] text-2xl">
-                    <i class="fa-regular fa-building"></i>
-                </div>
-                <h3 class="font-extrabold text-base text-white" data-i18n="company_reg_title">Company Registration</h3>
-                <p class="text-xs text-neutral-400 leading-relaxed" data-i18n="company_reg_body">Welcome to the organization registration page in The Bunker OS service. Registration consists of several steps: specify organization details and verify credentials.</p>
-                <button onclick="app.startCompanyReg()" class="w-full bg-[#00f3ff] text-black py-3 rounded-xl font-extrabold text-xs uppercase shadow-[0_0_15px_rgba(0,243,255,0.4)] transition active:scale-95" data-i18n="company_reg_start">Start registration</button>
-            </div>
-        </div>
-
-
     <!-- FIN APP SHELL -->
     </div>
 
     <!-- BOTÓN FLOTANTE 100% ARRASTRABLE (DRAGGABLE UX) -->
     <div id="floating-lang-btn" class="w-10 h-10 rounded-full bg-[#05070c] border border-[#00f3ff] shadow-[0_0_20px_rgba(0,243,255,0.6)] flex flex-col items-center justify-center cursor-pointer select-none active:scale-95">
         <span id="lang-indicator" class="text-[10px] font-black text-[#00f3ff] uppercase pointer-events-none">ES</span>
+    </div>
+
+    <!-- Sesión de Telegram caducada: el initData ya no es válido y no puede renovarse desde dentro de la Mini App -->
+    <div id="session-expired" role="alertdialog" aria-modal="true" aria-labelledby="session-expired-title" class="hidden fixed inset-0 z-[400] bg-black/95 backdrop-blur-md flex justify-center items-center p-4">
+        <div class="glass-panel border-t-2 border-t-rose-500 rounded-3xl p-6 w-full max-w-sm text-center space-y-4">
+            <div class="w-14 h-14 rounded-2xl bg-rose-500/15 border border-rose-500/40 mx-auto flex items-center justify-center text-rose-400 text-2xl"><i class="fa-solid fa-lock"></i></div>
+            <h3 id="session-expired-title" class="font-extrabold text-base text-white" data-i18n="session_expired_title">Sesión caducada</h3>
+            <p class="text-xs text-neutral-400 leading-relaxed" data-i18n="session_expired_body">Tu sesión de Telegram ya no es válida. Cierra y vuelve a abrir la Mini App desde el bot.</p>
+            <button onclick="app.closeApp()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 py-3 rounded-xl font-extrabold text-xs uppercase transition active:scale-95" data-i18n="session_expired_btn">Cerrar</button>
+        </div>
     </div>
 
     <!-- Avisos flotantes del radar en vivo (ui.showToast los inyecta aquí) -->

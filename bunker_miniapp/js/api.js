@@ -1,6 +1,6 @@
 /* ==========================================================================
    THE BUNKER — COMMAND OS
-   api.js — Cliente HTTP Centralizado, Radar WebSocket y Comunicación con Railway API
+   api.js — Sesión estricta, Cliente HTTP Centralizado, Radar WebSocket y Railway API
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -19,6 +19,116 @@ function buildUrl(path) {
     return `${base}${cleanPath}`;
 }
 
+function safeGet(key) {
+    try {
+        return localStorage.getItem(key) || '';
+    } catch (err) {
+        return '';
+    }
+}
+
+/* ==========================================================================
+   🔐 SESIÓN ESTRICTA — una sola credencial por contexto
+   --------------------------------------------------------------------------
+   • Dentro de Telegram: SOLO el initData firmado (X-Telegram-Init-Data). Nunca se envía
+     un token de sesión web, aunque haya uno guardado en el navegador.
+   • Fuera de Telegram: SOLO el token de sesión (Authorization: Bearer). Nunca un initData
+     cacheado: el servidor prueba primero el initData y solo después el token, de modo que un
+     initData antiguo de otro usuario (válido hasta 24 h) suplantaría al operador actual.
+   • El initData no se persiste en ningún sitio. Si no hay ninguna credencial, no se envía nada
+     y el servidor responde 401.
+   • `epoch` sube cada vez que la sesión se invalida (cierre de sesión, cambio de usuario):
+     toda respuesta en vuelo de la sesión anterior se descarta en lugar de pintarse.
+   ========================================================================== */
+export const session = {
+    epoch: 0,
+    boundKey: null,
+
+    telegramInitData() {
+        const raw = tgApp.tg?.initData;
+        return (typeof raw === 'string' && raw.trim() !== '') ? raw : '';
+    },
+
+    webToken() {
+        return safeGet('bunker_session_token');
+    },
+
+    /** 'telegram' | 'web' | 'none'. Telegram tiene prioridad absoluta: es la identidad firmada del cliente. */
+    mode() {
+        if (this.telegramInitData()) return 'telegram';
+        return this.webToken() ? 'web' : 'none';
+    },
+
+    /** { mode, type: 'init_data' | 'token', value } o null. Única fuente de credenciales (REST y WebSocket). */
+    credentials() {
+        const initData = this.telegramInitData();
+        if (initData) return { mode: 'telegram', type: 'init_data', value: initData };
+        const token = this.webToken();
+        if (token) return { mode: 'web', type: 'token', value: token };
+        return null;
+    },
+
+    headers(creds = this.credentials()) {
+        if (!creds) return {};
+        return creds.type === 'init_data'
+            ? { 'X-Telegram-Init-Data': creds.value }
+            : { 'Authorization': `Bearer ${creds.value}` };
+    },
+
+    /** Id del operador de ESTA sesión (solo para la interfaz; la autoridad es siempre el servidor). */
+    userId() {
+        const mode = this.mode();
+        if (mode === 'telegram') {
+            const id = tgApp.tg?.initDataUnsafe?.user?.id;
+            return id ? String(id) : null;
+        }
+        if (mode === 'web') {
+            const id = state.webUser?.id;
+            return id ? String(id) : null;
+        }
+        return null;
+    },
+
+    key() {
+        return `${this.mode()}:${this.userId() || ''}`;
+    },
+
+    /**
+     * Fija la identidad de la sesión. Devuelve { changed, previous, key }: `changed` es true si ya
+     * había una identidad distinta, y entonces el llamador debe purgar todo lo cargado.
+     */
+    bind() {
+        const key = this.key();
+        const previous = this.boundKey;
+        this.boundKey = key;
+        return { changed: previous !== null && previous !== key, previous, key };
+    },
+
+    unbind() {
+        this.boundKey = null;
+    },
+
+    /** Invalida la sesión actual: las respuestas en vuelo pendientes se descartarán. */
+    invalidate() {
+        this.epoch += 1;
+        return this.epoch;
+    },
+
+    /** Elimina las credenciales persistidas, incluido el initData cacheado por versiones anteriores. */
+    purgeStored() {
+        ['bunker_session_token', 'bunker_init_data'].forEach(key => {
+            try { localStorage.removeItem(key); } catch (err) { /* almacenamiento bloqueado */ }
+        });
+    },
+
+    /** El initData cacheado por versiones anteriores ya no se usa jamás: se borra al arrancar. */
+    purgeLegacy() {
+        try { localStorage.removeItem('bunker_init_data'); } catch (err) { /* almacenamiento bloqueado */ }
+    }
+};
+
+const STALE_RESULT = Object.freeze({ __error: 'stale_session', __status: 0, __stale: true });
+
 /** Mensaje legible de un cuerpo de error de FastAPI (detail puede ser string, lista u objeto). */
 function errorDetail(errData, status) {
     const detail = errData && errData.detail;
@@ -27,88 +137,80 @@ function errorDetail(errData, status) {
 
 export const api = {
     /**
-     * GET autenticado. Devuelve el JSON o { __error, __status } (nunca lanza).
-     * opts.timeoutMs aborta la petición pasado ese tiempo (__error: 'timeout').
+     * Petición autenticada con la credencial ÚNICA de la sesión. Devuelve el JSON o
+     * { __error, __status } (nunca lanza). Si la sesión cambió mientras la petición estaba en vuelo,
+     * devuelve { __stale: true } y NO dispara ningún manejador: el llamador debe ignorarla.
+     * opts.timeoutMs aborta la petición (__error: 'timeout'); opts.auth marca los endpoints de login,
+     * cuyo 401 es un fallo normal y no una sesión caducada.
      */
-    async get(path, opts = {}) {
+    async request(method, path, body, opts = {}) {
+        const epoch = session.epoch;
+        const creds = session.credentials();
         let timer = null;
         try {
-            const url = buildUrl(path);
-            const init = { headers: tgApp.getAuthHeaders() };
-
+            const init = { method, headers: { ...session.headers(creds) } };
+            if (body !== undefined) {
+                init.headers['Content-Type'] = 'application/json';
+                init.body = JSON.stringify(body);
+            }
             if (opts.timeoutMs && typeof AbortController !== 'undefined') {
                 const controller = new AbortController();
                 timer = setTimeout(() => controller.abort(), opts.timeoutMs);
                 init.signal = controller.signal;
             }
 
-            const res = await fetch(url, init);
+            const res = await fetch(buildUrl(path), init);
 
             if (res.status === 401) {
-                this.handleSessionExpired();
+                if (epoch !== session.epoch) return STALE_RESULT;
+                if (!opts.auth) this.handleSessionExpired(creds ? creds.mode : 'none');
                 return { __error: 'unauthorized', __status: 401 };
             }
 
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
+                if (epoch !== session.epoch) return STALE_RESULT;
                 return { __error: errorDetail(errData, res.status), __status: res.status };
             }
 
-            return await res.json();
+            const data = await res.json();
+            return epoch !== session.epoch ? STALE_RESULT : data;
         } catch (err) {
-            if (err && err.name === 'AbortError') {
-                return { __error: 'timeout', __status: 0 };
-            }
-            console.error(`[API GET ERROR] ${path}:`, err);
+            if (epoch !== session.epoch) return STALE_RESULT;
+            if (err && err.name === 'AbortError') return { __error: 'timeout', __status: 0 };
+            console.error(`[API ${method} ERROR] ${path}:`, err);
             return { __error: 'network', __status: 0 };
         } finally {
             if (timer) clearTimeout(timer);
         }
     },
 
-    async post(path, body = {}) {
-        try {
-            const url = buildUrl(path);
-            const res = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...tgApp.getAuthHeaders()
-                },
-                body: JSON.stringify(body)
-            });
-
-            if (res.status === 401) {
-                this.handleSessionExpired();
-                return { __error: 'unauthorized', __status: 401 };
-            }
-
-            if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                return { __error: errorDetail(errData, res.status), __status: res.status };
-            }
-
-            return await res.json();
-        } catch (err) {
-            console.error(`[API POST ERROR] ${path}:`, err);
-            return { __error: 'network', __status: 0 };
-        }
+    async get(path, opts = {}) {
+        return await this.request('GET', path, undefined, opts);
     },
 
-    handleSessionExpired() {
-        if (window.Telegram?.WebApp?.initData) return;
-        localStorage.removeItem('bunker_session_token');
+    async post(path, body = {}, opts = {}) {
+        return await this.request('POST', path, body, opts);
+    },
+
+    /** 401 según el contexto de la petición: cada modo tiene su propia salida y ninguna mezcla identidades. */
+    handleSessionExpired(mode) {
+        if (mode === 'telegram') {
+            // initData caducado (>24 h) o rechazado: no hay nada que renovar desde la Mini App.
+            if (window.app?.onTelegramSessionExpired) window.app.onTelegramSessionExpired();
+            return;
+        }
+        if (window.app?.onWebSessionExpired) {
+            window.app.onWebSessionExpired();
+            return;
+        }
+        session.purgeStored();
         state.isAuthenticated = false;
-        // El radar en vivo depende de la misma sesión: se cierra para no reintentar con credenciales caducadas.
-        if (window.app?.disconnectLiveRadar) {
-            window.app.disconnectLiveRadar();
-        } else if (state.wsClient) {
+        if (state.wsClient) {
             state.wsClient.close();
             state.wsClient = null;
         }
-        if (window.app?.showLoginGate) {
-            window.app.showLoginGate('login_expired');
-        }
+        if (window.app?.showLoginGate) window.app.showLoginGate('login_expired');
     },
 
     // --- Endpoints de Telemetría y Ecosistema ---
@@ -196,7 +298,7 @@ export const api = {
     // --- Sesión Web y Autenticación Widget ---
 
     async exchangeWebToken(tempToken) {
-        return await this.post('/auth/exchange-token', { token: tempToken });
+        return await this.post('/auth/exchange-token', { token: tempToken }, { auth: true });
     },
 
     async verifyWebSession(sessionToken) {
@@ -213,7 +315,7 @@ export const api = {
     },
 
     async authenticateWidget(userPayload) {
-        return await this.post('/auth/telegram-widget', userPayload);
+        return await this.post('/auth/telegram-widget', userPayload, { auth: true });
     }
 };
 
@@ -254,14 +356,6 @@ const WS_OPEN = 1;
 function deriveWsBase() {
     if (CONFIG.WS_BASE) return CONFIG.WS_BASE;
     return (CONFIG.API_BASE || '').replace(/^http/i, 'ws');
-}
-
-function safeStorageGet(key) {
-    try {
-        return localStorage.getItem(key);
-    } catch (err) {
-        return null;
-    }
 }
 
 export class BunkerWebSocketClient {
@@ -417,19 +511,10 @@ export class BunkerWebSocketClient {
     // ------------------------------------------------------------------
     // Conexión
     // ------------------------------------------------------------------
+    /** Misma credencial única que el REST (session.credentials): jamás se mezclan initData y token. */
     _credentials() {
         if (typeof this.options.getCredentials === 'function') return this.options.getCredentials();
-
-        const initData = tgApp.tg?.initData;
-        if (initData && initData.trim() !== '') return { type: 'init_data', value: initData };
-
-        const token = safeStorageGet('bunker_session_token');
-        if (token) return { type: 'token', value: token };
-
-        const cached = safeStorageGet('bunker_init_data');
-        if (cached) return { type: 'init_data', value: cached };
-
-        return null;
+        return session.credentials();
     }
 
     _buildUrl(creds) {
