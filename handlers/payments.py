@@ -26,6 +26,28 @@ import logging
 import re
 import time
 from aiogram import Router, F, Bot
+try:
+    from telegram_html import normalize_telegram_html, telegram_html_to_plain  # type: ignore[import-not-found]
+except ImportError:  # Compatibilidad con entornos sin la dependencia opcional.
+    def normalize_telegram_html(value: str) -> str:
+        """Normaliza HTML simple sin depender del paquete opcional."""
+        if not value:
+            return ""
+        text = str(value)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+        text = re.sub(r"</?(p|div|span|b|strong|i|em|u|s|strike|code|pre|a|blockquote|ul|ol|li|h[1-6])[^>]*>", "", text, flags=re.I)
+        return text.strip()
+
+    def telegram_html_to_plain(value: str) -> str:
+        """Convierte etiquetas HTML a texto plano de forma conservadora."""
+        if not value:
+            return ""
+        text = html.unescape(str(value))
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+        text = re.sub(r"</?[^>]+>", "", text)
+        text = text.replace("\xa0", " ")
+        return text.strip()
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -315,6 +337,18 @@ def _sync_current_license(chat_id: int):
         ).fetchone()
 
 
+_LICENSE_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def license_lock(chat_id: int) -> asyncio.Lock:
+    """Serializa leer-vigencia → aprobar por comunidad: dos compras simultáneas no se pisan los días.
+    Válido porque el proceso corre en UNA sola réplica (requisito de SQLite en Railway)."""
+    lock = _LICENSE_LOCKS.get(int(chat_id))
+    if lock is None:
+        lock = _LICENSE_LOCKS[int(chat_id)] = asyncio.Lock()
+    return lock
+
+
 async def compute_license_grant(chat_id: int, purchased_tier: str, base_days: int = 30) -> tuple[str, int]:
     """
     Calcula el nivel y los días a conceder sin que el cliente pierda tiempo pagado:
@@ -347,6 +381,8 @@ def _sync_record_vip_badge(chat_id: int, user_id: int) -> None:
     """Registra que ESTE bot promovió al usuario solo por el título VIP (para revertirlo al expirar)."""
     db_module = _get_db_module()
     with db_module.get_db_connection() as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")   # toma el lock de escritura de entrada (WAL + busy_timeout)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS vip_badge_promotions ("
             "group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
@@ -456,6 +492,14 @@ PRECHECKOUT_SLA_SECONDS = 2.0
 
 _ISSUED_OFFERS: dict[str, tuple[int, float]] = {}            # payload -> (importe XTR, instante)
 _CHANNEL_PLAN_CACHE: dict[int, tuple[float, dict | None]] = {}  # plan_id -> (instante, plan)
+# Generación por plan + época global. Una lectura de disco que empezó ANTES de una invalidación
+# no puede volver a sembrar la caché con el estado viejo (p. ej. "active" de un plan recién pausado).
+_PLAN_CACHE_EPOCH = 0
+_PLAN_CACHE_GEN: dict[int, int] = {}
+
+
+def _plan_cache_token(plan_id: int) -> tuple[int, int]:
+    return _PLAN_CACHE_EPOCH, _PLAN_CACHE_GEN.get(int(plan_id), 0)
 
 
 def _register_offer(payload: str, amount: int) -> None:
@@ -479,7 +523,10 @@ def _offer_matches(payload: str, amount: int):
     return entry[0] == int(amount)
 
 
-def _cache_channel_plan(plan_id: int, plan) -> None:
+def _cache_channel_plan(plan_id: int, plan, token: tuple[int, int] | None = None) -> None:
+    """token = _plan_cache_token() tomado ANTES de leer de disco; si hubo invalidación entre medias, no se cachea."""
+    if token is not None and token != _plan_cache_token(plan_id):
+        return
     _CHANNEL_PLAN_CACHE[int(plan_id)] = (time.monotonic(), dict(plan) if plan else None)
 
 
@@ -492,22 +539,26 @@ def _cached_channel_plan(plan_id: int, max_age: float = CHANNEL_PLAN_CACHE_TTL):
 
 
 async def get_channel_plan_cached(plan_id: int):
-    """Lectura de plan con caché de 60 s (la fuente de verdad sigue siendo la base de datos)."""
+    """Lectura de plan con caché de CHANNEL_PLAN_CACHE_TTL (10 s); la fuente de verdad es la base de datos."""
     hit, plan = _cached_channel_plan(plan_id)
     if hit:
         return plan
+    token = _plan_cache_token(plan_id)
     plan = await get_channel_plan(plan_id)
-    _cache_channel_plan(plan_id, plan)
+    _cache_channel_plan(plan_id, plan, token)
     return plan
 
 
 def invalidate_channel_plan_cache(plan_id: int | None = None) -> None:
     """Llamar al pausar, editar o borrar un plan para que el pre-checkout lo note al instante."""
+    global _PLAN_CACHE_EPOCH
     if plan_id is None:
+        _PLAN_CACHE_EPOCH += 1
         _CHANNEL_PLAN_CACHE.clear()
         for key in [k for k in _ISSUED_OFFERS if k.startswith("chan_sub_")]:
             _ISSUED_OFFERS.pop(key, None)
         return
+    _PLAN_CACHE_GEN[int(plan_id)] = _PLAN_CACHE_GEN.get(int(plan_id), 0) + 1
     _CHANNEL_PLAN_CACHE.pop(int(plan_id), None)
     for key in [k for k in _ISSUED_OFFERS if k.startswith("chan_sub_")]:
         parts = key.split("_")
@@ -516,8 +567,9 @@ def invalidate_channel_plan_cache(plan_id: int | None = None) -> None:
 
 
 async def _refresh_channel_plan_cache(plan_id: int) -> None:
+    token = _plan_cache_token(plan_id)
     try:
-        _cache_channel_plan(plan_id, await asyncio.wait_for(get_channel_plan(plan_id), timeout=10))
+        _cache_channel_plan(plan_id, await asyncio.wait_for(get_channel_plan(plan_id), timeout=10), token)
     except Exception as ex:
         logger.debug(f"Aviso refrescando caché del plan {plan_id}: {ex}")
 
@@ -1052,8 +1104,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             plan_id = int(parts[1])
             channel_id = int(parts[2])
 
+            token = _plan_cache_token(plan_id)
             target_plan = await get_channel_plan(plan_id)
-            _cache_channel_plan(plan_id, target_plan)
+            _cache_channel_plan(plan_id, target_plan, token)
             if not target_plan or target_plan.get("channel_id") != channel_id or target_plan.get("status") != "active":
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
@@ -1066,7 +1119,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             media_type = target_plan.get("media_type")
             target_link = target_plan.get("target_link")
 
-            caption = promo_text.strip() if promo_text and promo_text.strip() else f"💎 <b>{plan_name}</b>\n\n{duration_days} días — {stars_price} ⭐"
+            # Mismo normalizador que la vista previa de la Mini App: el HTML del operador siempre es válido.
+            caption = (normalize_telegram_html(promo_text.strip()) if promo_text and promo_text.strip()
+                       else f"💎 <b>{html.escape(str(plan_name))}</b>\n\n{duration_days} días — {stars_price} ⭐")
 
             if media_id and media_type:
                 try:
@@ -1085,7 +1140,9 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                     pass
 
             title = f"Membresía: {plan_name}"[:32]
-            desc = (f"Acceso exclusivo al canal por {duration_days} días." if not promo_text else promo_text[:250])[:255]
+            # La descripción de una factura es texto plano: sin etiquetas ni entidades cortadas a la mitad.
+            plain_promo = telegram_html_to_plain(promo_text).strip() if promo_text else ""
+            desc = (plain_promo or f"Acceso exclusivo al canal por {duration_days} días.")[:255]
             payload = f"chan_sub_{channel_id}_{plan_id}_{duration_days}"
 
             kb_rows = [
@@ -1346,7 +1403,7 @@ PRECHECKOUT_DECLINE_MESSAGE = (
 async def _validate_channel_offer(payload: str, channel_id: int, plan_id: int, amount: int) -> bool:
     """
     Orden de validación sin bloquear el SLA:
-      1. Caché de planes fresca (≤ 60 s) → decisión en RAM.
+      1. Caché de planes fresca (≤ CHANNEL_PLAN_CACHE_TTL = 10 s) → decisión en RAM.
       2. Oferta emitida por este proceso → aprobada en RAM; la caché se refresca en segundo plano.
       3. Oferta desconocida (reinicio) → lectura de disco acotada a 1,2 s; si se agota el
          presupuesto se aprueba, porque la factura la emitió el propio bot y el importe es
@@ -1362,13 +1419,14 @@ async def _validate_channel_offer(payload: str, channel_id: int, plan_id: int, a
     if known is not None:
         _spawn(_refresh_channel_plan_cache(plan_id))
         return known
+    token = _plan_cache_token(plan_id)
     try:
         plan = await asyncio.wait_for(get_channel_plan(plan_id), timeout=PRECHECKOUT_DB_BUDGET_SECONDS)
     except asyncio.TimeoutError:
         logger.warning(f"⏱️ [Pre-Checkout] Presupuesto de disco agotado para {payload!r}; se aprueba la oferta emitida por el bot.")
         _spawn(_refresh_channel_plan_cache(plan_id))
         return True
-    _cache_channel_plan(plan_id, plan)
+    _cache_channel_plan(plan_id, plan, token)
     return bool(
         plan and plan.get("channel_id") == channel_id and plan.get("status") == "active"
         and amount == int(plan.get("stars_price") or 0)
@@ -1471,8 +1529,9 @@ async def process_successful_payment(message: Message, bot: Bot):
             chat_id = int(parts[2])
 
             tier_db = "pro" if plan_type == "pro" else "ultra_pro"
-            granted_tier, granted_days = await compute_license_grant(chat_id, tier_db, base_days=30)
-            await approve_group(group_id=chat_id, tier=granted_tier, duration_days=granted_days)
+            async with license_lock(chat_id):
+                granted_tier, granted_days = await compute_license_grant(chat_id, tier_db, base_days=30)
+                await approve_group(group_id=chat_id, tier=granted_tier, duration_days=granted_days)
             license_granted = True
             logger.info(f"⭐ [Licencia] {chat_id} → {granted_tier} por {granted_days} días (compra: {tier_db}).")
             if granted_tier != tier_db:
@@ -1527,6 +1586,9 @@ async def process_successful_payment(message: Message, bot: Bot):
             target_plan = await get_channel_plan(plan_id)
             if not target_plan or target_plan.get("channel_id") != channel_id:
                 raise ValueError(f"El plan {plan_id} ya no existe para el canal {channel_id}")
+            if target_plan.get("status") != "active":
+                # Solo ocurre si el pre-checkout aprobó por presupuesto de disco agotado justo tras una pausa.
+                raise ValueError(f"El plan {plan_id} está pausado: no se entrega y se reembolsa")
             target_link = target_plan.get("target_link") if target_plan else None
             ch_settings = await get_channel_settings(channel_id)
             custom_welcome = ch_settings.get("custom_welcome") if ch_settings else ""
@@ -1546,6 +1608,9 @@ async def process_successful_payment(message: Message, bot: Bot):
                 duration_days=duration_days,
                 invite_link=invite_link
             )
+            # Desde aquí la membresía EXISTE (registro + enlace): un fallo al notificar no debe
+            # reembolsar, o el usuario quedaría con acceso y con su dinero.
+            membership_delivered = True
 
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
@@ -1556,7 +1621,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 kb_rows.append([InlineKeyboardButton(text=t["btn_view_target"], url=target_url)])
 
             join_markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-            welcome_extra = f"\n\n💬 <i>{custom_welcome}</i>" if custom_welcome else ""
+            welcome_extra = f"\n\n💬 <i>{normalize_telegram_html(custom_welcome)}</i>" if custom_welcome else ""
 
             success_text = (
                 f"💎 <b>¡Membresía de Canal Activada con Éxito!</b>\n\n"
@@ -1573,12 +1638,14 @@ async def process_successful_payment(message: Message, bot: Bot):
                 f"Use the interactive buttons below to join:{welcome_extra}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
-            await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
-            membership_delivered = True
+            try:
+                await message.answer(success_text, reply_markup=join_markup, parse_mode="HTML")
+            except TelegramBadRequest:
+                await message.answer(telegram_html_to_plain(success_text), reply_markup=join_markup, parse_mode=None)
             logger.info(f"✅ [Membresía Activada]: Usuario {user_id} en canal {channel_id} por {duration_days} días ({stars_paid} Stars).")
         except Exception as e:
             if membership_delivered:
-                logger.error(f"Membresía {payload!r} entregada; error posterior no crítico para {user_id}: {e}")
+                logger.error(f"Membresía {payload!r} registrada pero no se pudo notificar a {user_id}: {e}")
             else:
                 logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
                 await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de membresía fallida: {e}")

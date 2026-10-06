@@ -1689,7 +1689,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
         backoff = 2.0
         while True:
             try:
-                await clone_bot.delete_webhook(drop_pending_updates=True)
+                await clone_bot.delete_webhook(drop_pending_updates=False)   # ver nota en main(): pagos pendientes
                 bot_info = await clone_bot.get_me()
                 bot_username = bot_info.username or "BotClon"
                 break
@@ -1890,11 +1890,92 @@ class ActivityTrackerMiddleware(BaseMiddleware):
 # ==========================================
 # 🚀 FUNCIÓN PRINCIPAL DE ARRANQUE (MAIN)
 # ==========================================
+# ==========================================
+# 🔒 FASE 8.1 · INSTANCIA ÚNICA + VERIFICACIÓN DE SQLITE WAL
+# ==========================================
+# SQLite en un volumen de Railway solo es seguro con UN proceso escritor: dos réplicas (o el solape
+# de un redeploy) compiten por el lock del archivo y, además, dos long-polling del mismo token se
+# expulsan mutuamente (TelegramConflictError). La caché de planes y los asyncio.Lock de licencias
+# también asumen un único proceso. Este candado lo hace cumplir en tiempo de ejecución, no solo
+# en la configuración de Railway.
+_INSTANCE_LOCK_HANDLE = None
+
+
+def _instance_lock_path() -> str:
+    explicit = os.getenv("INSTANCE_LOCK_PATH", "").strip()
+    if explicit:
+        return explicit
+    base = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if not base:
+        import database.database as _db  # type: ignore[import-not-found]
+        db_file = next((getattr(_db, n) for n in ("DB_PATH", "DB_FILE", "DATABASE_PATH", "DB_NAME")
+                        if isinstance(getattr(_db, n, None), str)), "")
+        base = os.path.dirname(os.path.abspath(db_file)) if db_file else os.getcwd()
+    return os.path.join(base, ".bunker_instance.lock")
+
+
+async def _enforce_single_instance(timeout_s: float = None) -> None:
+    """
+    Candado exclusivo (fcntl.flock) junto a la base de datos. Durante un redeploy la instancia nueva
+    ESPERA a que la vieja libere el candado (hasta INSTANCE_LOCK_WAIT_S, 90 s por defecto) en vez de
+    escribir a la vez; si no lo obtiene, sale con error y Railway la reintenta.
+    """
+    global _INSTANCE_LOCK_HANDLE
+    try:
+        import fcntl
+    except ImportError:          # Windows / desarrollo local: sin garantía, solo aviso
+        logger.warning("⚠️ [Instancia] fcntl no disponible: no se puede garantizar instancia única.")
+        return
+    if timeout_s is None:
+        timeout_s = float(os.getenv("INSTANCE_LOCK_WAIT_S", "90") or 90)
+    path = _instance_lock_path()
+    handle = open(path, "a+")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise RuntimeError(
+                    f"Otra instancia mantiene {path}. The Bunker OS debe correr con UNA sola réplica "
+                    f"(SQLite + long polling). Revisa 'Replicas' en Railway."
+                )
+            logger.warning("⏳ [Instancia] Otra instancia sigue activa (¿redeploy en curso?); esperando el candado…")
+            await asyncio.sleep(2)
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()} replica={os.getenv('RAILWAY_REPLICA_ID', '-')} since={int(time.time())}\n")
+    handle.flush()
+    _INSTANCE_LOCK_HANDLE = handle   # se libera solo al terminar el proceso
+    logger.info(f"🔒 [Instancia] Candado exclusivo adquirido: {path}")
+
+
+def _verify_sqlite_wal() -> None:
+    """Comprueba (y si falta, activa) WAL y que las conexiones traigan busy_timeout."""
+    with get_db_connection() as conn:
+        mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if mode != "wal":
+            mode = str(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]).lower()
+            logger.warning(f"⚠️ [SQLite] journal_mode no era WAL; activado ahora → {mode}. Fíjalo en init_db().")
+        busy = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        sync = int(conn.execute("PRAGMA synchronous").fetchone()[0])
+    if mode != "wal":
+        logger.critical(f"❌ [SQLite] No se pudo activar WAL (modo={mode}). ¿El volumen soporta mmap/locks?")
+    if busy < 1000:
+        logger.critical(f"❌ [SQLite] busy_timeout={busy} ms en get_db_connection(): con escritores concurrentes "
+                        f"habrá 'database is locked'. Configura PRAGMA busy_timeout >= 5000 al abrir cada conexión.")
+    logger.info(f"🗄️ [SQLite] journal_mode={mode} busy_timeout={busy}ms synchronous={sync}")
+
+
 async def main():
     global master_bot_instance
 
     # 0. Base de datos primero: todo lo demás depende del esquema.
+    await _enforce_single_instance()
     init_db()
+    _verify_sqlite_wal()
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
     start_analytics_flusher()
     logger.info("📈 [Analítica en Caliente]: Búfer de volcado por lotes activo.")
@@ -1974,7 +2055,9 @@ async def main():
     try:
         for _att in range(3):
             try:
-                await master_bot.delete_webhook(drop_pending_updates=True)
+                # NO descartar pendientes: entre ellos puede haber successful_payment de Stars ya
+                # cobrados durante el redeploy; descartarlos = cobro sin entrega.
+                await master_bot.delete_webhook(drop_pending_updates=False)
                 break
             except Exception as w_err:
                 logger.warning(f"Reintento de delete_webhook ({_att + 1}/3): {w_err}")

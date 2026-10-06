@@ -460,10 +460,12 @@ export class BunkerWebSocketClient {
         this._pongTimer = null;
         this._reconnectTimer = null;
         this._analyticsTimer = null;
+        this._netResetTimer = null;
         this._lastAnalyticsAt = 0;
 
         this._onOnline = this._onOnline.bind(this);
         this._onOffline = this._onOffline.bind(this);
+        this._onNetworkChange = this._onNetworkChange.bind(this);
     }
 
     // ------------------------------------------------------------------
@@ -569,6 +571,7 @@ export class BunkerWebSocketClient {
     _clearTimers() {
         this._stopHeartbeat();
         if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null; }
+        if (this._netResetTimer) { clearTimeout(this._netResetTimer); this._netResetTimer = null; }
         if (this._analyticsTimer) { clearTimeout(this._analyticsTimer); this._analyticsTimer = null; }
     }
 
@@ -599,9 +602,16 @@ export class BunkerWebSocketClient {
             return;
         }
 
-        // Sin red no se intenta: el evento "online" reanuda de inmediato.
+        // Sin red no se intenta. El evento "online" reanuda al instante, pero en WebViews de iOS/Android
+        // ese evento no siempre llega: se programa además un sondeo lento para no quedar "offline" para siempre.
         if (typeof navigator !== 'undefined' && navigator.onLine === false) {
             this._setStatus('offline', { reason: 'navigator_offline' });
+            if (!this._reconnectTimer) {
+                this._reconnectTimer = setTimeout(() => {
+                    this._reconnectTimer = null;
+                    this._open(true);
+                }, this.options.backoffMaxMs);
+            }
             return;
         }
 
@@ -736,10 +746,17 @@ export class BunkerWebSocketClient {
         }, delay);
     }
 
+    _netInfo() {
+        return typeof navigator !== 'undefined' ? navigator.connection || null : null;
+    }
+
     _bindEnv() {
         if (this._envBound || typeof window === 'undefined' || !window.addEventListener) return;
         window.addEventListener('online', this._onOnline);
         window.addEventListener('offline', this._onOffline);
+        // Network Information API (Chrome/WebView Android): cambio Wi-Fi ↔ datos SIN pasar por offline.
+        const net = this._netInfo();
+        if (net && typeof net.addEventListener === 'function') net.addEventListener('change', this._onNetworkChange);
         this._envBound = true;
     }
 
@@ -747,19 +764,64 @@ export class BunkerWebSocketClient {
         if (!this._envBound) return;
         window.removeEventListener('online', this._onOnline);
         window.removeEventListener('offline', this._onOffline);
+        const net = this._netInfo();
+        if (net && typeof net.removeEventListener === 'function') net.removeEventListener('change', this._onNetworkChange);
+        if (this._netResetTimer) { clearTimeout(this._netResetTimer); this._netResetTimer = null; }
         this._envBound = false;
     }
 
+    /**
+     * Reseteo forzado del socket ante un cambio de red. Se agrupan los eventos (400 ms): al alternar
+     * Wi-Fi ↔ datos el navegador puede emitir offline/online/change en ráfaga y cada apertura cuenta
+     * contra el rate-limit de conexiones del servidor.
+     */
+    _networkReset(reason) {
+        if (this._userClosed || this._paused || this._fatal) return;
+        if (this._netResetTimer) clearTimeout(this._netResetTimer);
+        this._netResetTimer = setTimeout(() => {
+            this._netResetTimer = null;
+            if (this._userClosed || this._paused || this._fatal) return;
+            // Se detienen heartbeat y pong del socket viejo: un pong pendiente no debe matar al nuevo.
+            this._clearTimers();
+            this._dropSocket(1000, reason);
+            this.attempt = 0;
+            this._open(true);
+        }, 400);
+    }
+
     _onOnline() {
-    if (this._userClosed || this._paused || this._fatal) return;
-    this._dropSocket(1000, 'network_online_reset');
-    this.attempt = 0;
-    this._open(true);
-}
+        this._networkReset('network_online_reset');
+    }
+
+    _onNetworkChange() {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) return;   // lo gestiona _onOffline
+        this._networkReset('network_change_reset');
+    }
 
     _onOffline() {
         if (this._userClosed || this._paused) return;
+        if (this._netResetTimer) { clearTimeout(this._netResetTimer); this._netResetTimer = null; }
+        // El socket de la interfaz que se cae queda medio abierto (zombi): se descarta ya, sin esperar
+        // a que el heartbeat lo detecte 30 s después.
+        this._clearTimers();
+        this._dropSocket(1000, 'network_offline');
         this._setStatus('offline', { reason: 'navigator_offline' });
+        this._open(true);   // con onLine === false solo programa el sondeo lento de respaldo
+    }
+
+    /**
+     * Verifica en el acto que el socket sigue vivo (p. ej. al volver la Mini App a primer plano: los
+     * timers en segundo plano se congelan y el socket puede estar muerto aunque readyState sea OPEN).
+     */
+    probe() {
+        if (this._userClosed || this._paused || this._fatal) return false;
+        if (!this.ws) {
+            if (!this._reconnectTimer) this._open(true);
+            return false;
+        }
+        if (!this.isOpen) return false;
+        this._heartbeat();
+        return true;
     }
 
     // ------------------------------------------------------------------
