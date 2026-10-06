@@ -751,10 +751,11 @@ export class BunkerWebSocketClient {
     }
 
     _onOnline() {
-        if (this._userClosed || this._paused || this._fatal || this.ws) return;
-        this.attempt = 0;
-        this._open(true);
-    }
+    if (this._userClosed || this._paused || this._fatal) return;
+    this._dropSocket(1000, 'network_online_reset');
+    this.attempt = 0;
+    this._open(true);
+}
 
     _onOffline() {
         if (this._userClosed || this._paused) return;

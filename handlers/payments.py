@@ -450,7 +450,7 @@ async def record_channel_subscription(**kwargs):
 # usuario no puede alterarlos; la validación solo protege contra ofertas desactualizadas.
 OFFER_TTL_SECONDS = 72 * 3600
 OFFER_REGISTRY_MAX = 20000
-CHANNEL_PLAN_CACHE_TTL = 60.0
+CHANNEL_PLAN_CACHE_TTL = 10.0
 PRECHECKOUT_DB_BUDGET_SECONDS = 1.2
 PRECHECKOUT_SLA_SECONDS = 2.0
 
