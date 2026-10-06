@@ -3,6 +3,8 @@
    app.js — Orquestador Central Modular, Enrutador de Eventos y Ciclo de Vida
    Fase 5/6/7/8: Analítica en vivo, checkout Stars, Estudio de Canales reactivo, sesión estricta
    y gestión interactiva de Planes de Membresía del canal.
+   v8.2: modal nativo del canal de registro, sincronización real de chats, difusión personalizada con
+   acciones rápidas (vista previa · difundir · limpiar) y consola de control de grupos operativa.
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -13,6 +15,9 @@ import { api, session, BunkerWebSocketClient } from './api.js';
 import { ui } from './ui.js';
 
 const STUDIO_ALIAS_RE = /^@[A-Za-z][A-Za-z0-9_]{4,31}$/;
+const CHAT_ID_RE = /^-?\d{5,20}$/;
+const CLONE_TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
+const SWITCH_LABEL_KEYS = { captcha: 'captcha_pro', autolower: 'autolower_title', shield: 'shield_title', linklock: 'linklock_title' };
 const STUDIO_TME_RE = /^(?:t\.me|telegram\.me)\/\S+$/i;
 
 function isHttpUrl(value) {
@@ -67,12 +72,34 @@ export function validateStudioForm(raw) {
     if (days === null) errors.duration_days = { key: 'studio_err_days', vars: { min: cfg.DAYS_MIN, max: cfg.DAYS_MAX } };
     else values.duration_days = days;
 
+    // --- Difusión personalizada (v8.2): mismas reglas que channel_plans_api.validate_broadcast_fields ---
+    const target = String(raw?.broadcast_target ?? '').trim();
+    if (target === '' || STUDIO_ALIAS_RE.test(target) || CHAT_ID_RE.test(target)) values.broadcast_target = target;
+    else errors.broadcast_target = { key: 'bc_err_target' };
+
+    const intervals = cfg.BROADCAST_INTERVALS || [6, 12, 24, 48];
+    const interval = parseInt(String(raw?.broadcast_interval ?? cfg.DEFAULT_INTERVAL ?? 12).trim(), 10);
+    if (intervals.includes(interval)) values.broadcast_interval = interval;
+    else errors.broadcast_interval = { key: 'bc_err_interval' };
+
+    const promo = String(raw?.promo_text ?? '').replace(/\r\n/g, '\n').trim();
+    const promoMax = cfg.PROMO_MAX || 1000;
+    if (promo.length > promoMax) errors.promo_text = { key: 'bc_err_promo_long', vars: { max: promoMax } };
+    else if (target !== '' && promo === '' && !errors.broadcast_target) errors.promo_text = { key: 'bc_err_promo_required' };
+    else values.promo_text = promo;
+
     return { valid: Object.keys(errors).length === 0, values, errors };
 }
 
 export const app = {
     // Estado interno del Estudio de Canales (guardado reactivo)
     _studio: { channelId: null, timer: null, saving: false, dirty: false, last: null },
+
+    // v8.2: difusión en curso, modal del canal de registro e interruptor con petición en vuelo
+    _broadcastBusy: false,
+    _logChannel: null,
+    _switchBusy: null,
+    _consoleBusy: {},
     validateStudioForm,
 
     // Estado interno de los Planes de Membresía del canal seleccionado (la UI se dibuja desde aquí)
@@ -109,6 +136,7 @@ export const app = {
         this.initCharCounter();
         this.bindChannelSelectListener();
         this.bindChannelStudio();
+        ui.renderSecuritySwitches(null, { idle: true });
         this.initUrlRouting();
         this.initAuth();
     },
@@ -303,42 +331,104 @@ export const app = {
         tgApp.hapticSelection();
     },
 
+    /**
+     * Activa/desactiva un módulo de moderación de la comunidad seleccionada. Solo se permite con el estado
+     * real ya sincronizado desde el backend (nunca sobre un valor inventado); una petición a la vez.
+     */
     async toggleSecuritySwitch(key) {
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
-        if (!selectedGroup) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero una comunidad administrada.' : '⚠️ Select a managed community first.');
-            return;
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
+        if (!state.securitySwitches || String(state.switchesChatId) !== String(chatId)) {
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '⏳', ui.t('gc_switch_loading'));
+            return false;
         }
+        if (this._switchBusy) return false;
 
+        const name = ui.t(SWITCH_LABEL_KEYS[key] || key);
         const previousVal = Boolean(state.securitySwitches[key]);
         const newVal = !previousVal;
-        state.securitySwitches[key] = newVal;
+        const epoch = session.epoch;
+        this._switchBusy = key;
+        tgApp.hapticImpact('light');
+        ui.renderSecuritySwitches(state.securitySwitches, { busyKey: key });
 
-        const el = document.getElementById(`switch-${key}`);
-        if (el) {
-            el.className = newVal ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
-            el.innerText = newVal 
-                ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
-                : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
+        const res = await api.updateChatSettings(chatId, { [key]: newVal });
+
+        this._switchBusy = null;
+        if (res?.__stale || epoch !== session.epoch) return false;
+        if (String(state.switchesChatId) !== String(chatId)) {
+            ui.renderSecuritySwitches(state.securitySwitches, { loading: !state.securitySwitches });
+            return false;
         }
-
-        const payload = {};
-        payload[key] = newVal;
-        const res = await api.updateChatSettings(selectedGroup, payload);
-
         if (res?.__error) {
-            state.securitySwitches[key] = previousVal;
-            if (el) {
-                el.className = previousVal ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
-                el.innerText = previousVal 
-                    ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
-                    : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
-            }
-            alert(state.currentLang === 'es' ? `⚠️ Error al guardar: ${res.__error}` : `⚠️ Save error: ${res.__error}`);
-            return;
+            ui.renderSecuritySwitches(state.securitySwitches);
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', ui.tf('gc_switch_toast_error', { name, error: this.consoleErrorMessage(res) }));
+            return false;
         }
+        state.securitySwitches = { ...state.securitySwitches, [key]: newVal };
+        ui.renderSecuritySwitches(state.securitySwitches);
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', newVal ? '🟢' : '🔴', ui.tf(newVal ? 'gc_switch_toast_on' : 'gc_switch_toast_off', { name }));
+        return true;
+    },
 
-        tgApp.hapticImpact('medium');
+    // ---- Utilidades de la consola de grupos (v8.2) ----
+    selectedGroupId() {
+        return document.getElementById('group-owner-select')?.value || state.selectedChatId || null;
+    },
+
+    consoleToast(tone, icon, title, body = '') {
+        ui.showToast({ key: 'console-action', force: true, icon, tone, ttl: CONFIG.CONSOLE?.TOAST_MS || 3600, title, body });
+    },
+
+    consolePickFirst() {
+        tgApp.hapticNotification('warning');
+        this.consoleToast('warn', '⚠️', ui.t('gc_pick_first'));
+        return false;
+    },
+
+    consoleErrorMessage(res) {
+        if (res?.__status === 403) return ui.t('plans_err_forbidden');
+        if (res?.__error === 'timeout' || res?.__error === 'network') return ui.t('load_error');
+        return String(res?.__error || ui.t('gc_err_generic'));
+    },
+
+    /**
+     * Confirmación nativa: Telegram.WebApp.showConfirm (los WebViews de Telegram pueden descartar
+     * window.confirm igual que window.prompt); fuera de Telegram, window.confirm.
+     */
+    confirmAction(message) {
+        const wa = window.Telegram?.WebApp;
+        const native = wa && wa.initData && typeof wa.showConfirm === 'function'
+            && (typeof wa.isVersionAtLeast !== 'function' || wa.isVersionAtLeast('6.2'));
+        if (native) {
+            return new Promise(resolve => {
+                try {
+                    wa.showConfirm(String(message).slice(0, 250), ok => resolve(Boolean(ok)));
+                } catch (err) {
+                    resolve(window.confirm(message));
+                }
+            });
+        }
+        return Promise.resolve(window.confirm(message));
+    },
+
+    /** Ejecuta una acción de la consola con su botón ocupado; devuelve la respuesta o null si quedó obsoleta. */
+    async runConsoleAction(buttonId, chatId, request) {
+        if (this._consoleBusy[buttonId]) return null;
+        const epoch = session.epoch;
+        this._consoleBusy[buttonId] = true;
+        ui.setButtonBusy(buttonId, true);
+        try {
+            const res = await request(chatId);
+            if (res?.__stale || epoch !== session.epoch) return null;
+            return res;
+        } finally {
+            delete this._consoleBusy[buttonId];
+            ui.setButtonBusy(buttonId, false);
+        }
     },
 
     toggleLanguage() {
@@ -362,6 +452,11 @@ export const app = {
         this.renderPlans();
         const previewPlan = this._plans.previewId !== null ? this.planById(this._plans.previewId) : null;
         if (previewPlan) ui.renderPlanPreview(previewPlan);
+
+        // v8.2: estados dinámicos sin data-i18n (interruptores, difusión y vista previa abierta).
+        ui.renderSecuritySwitches(state.securitySwitches, { loading: Boolean(state.switchesChatId) && !state.securitySwitches, idle: !state.switchesChatId, busyKey: this._switchBusy });
+        ui.setBroadcastStatus(this._studio.broadcast || null);
+        if (this._lastBroadcastPreview) ui.renderBroadcastPreview(this._lastBroadcastPreview);
 
         if (state.selectedChatId && state.data.currentChatDashboard) {
             this.loadChatDashboard(state.selectedChatId);
@@ -517,7 +612,14 @@ export const app = {
         state.selectedChatId = null;
         state.deepLinkTab = null;
         state.activeContext = 'global';
-        state.securitySwitches = { captcha: true, autolower: true, shield: true, linklock: false };
+        state.securitySwitches = null;     // desconocido hasta leer el dashboard de una comunidad
+        state.switchesChatId = null;
+        this._switchBusy = null;
+        this._consoleBusy = {};
+        this._broadcastBusy = false;
+        this._logChannel = null;
+        this._lastBroadcastPreview = null;
+        studio.broadcast = null;
         state.data = {
             stats: { subscribers: 0, revenue_stars: 0, verified: 0, expelled: 0, purges: 0 },
             channels: [],
@@ -705,47 +807,59 @@ export const app = {
         }
     },
 
+    /**
+     * POST /api/sync-chats: el servidor audita en Telegram los chats registrados, vincula los que administra
+     * el operador y devuelve los listados ya limpios; los selectores se pueblan sin otra petición.
+     */
     async syncChats() {
         if (state.isSyncing) return;
         state.isSyncing = true;
+        const epoch = session.epoch;
 
         const syncButtons = document.querySelectorAll('.sync-btn-trigger');
         syncButtons.forEach(btn => {
-            btn.dataset.originalText = btn.innerText;
-            btn.innerText = `⏳ ${ui.t('syncing')}`;
+            if (!btn.dataset.originalHtml) btn.dataset.originalHtml = btn.innerHTML;
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> <span>${ui.escapeHtml(ui.t('syncing'))}</span>`;
             btn.disabled = true;
+        });
+        const restoreButtons = () => syncButtons.forEach(btn => {
+            if (btn.dataset.originalHtml) btn.innerHTML = btn.dataset.originalHtml;
+            btn.disabled = false;
         });
 
         tgApp.hapticImpact('medium');
 
-        const res = await api.syncChats();
-        if (res?.__stale) {
+        try {
+            const res = await api.syncChats();
+            if (res?.__stale || epoch !== session.epoch) return;
+
+            if (res?.__error) {
+                tgApp.hapticNotification('error');
+                ui.showToast({ key: 'sync', force: true, icon: '⚠️', tone: 'error', ttl: 4500, title: ui.t('sync_toast_error'), body: String(res.__error) });
+                return;
+            }
+
+            const tasks = [this.loadStats(), this.loadSubscribers()];
+            if (Array.isArray(res?.channels)) this.applyChannels(res.channels); else tasks.push(this.loadChannels());
+            if (Array.isArray(res?.groups)) this.applyGroups(res.groups); else tasks.push(this.loadGroups());
+            await Promise.all(tasks);
+            if (epoch !== session.epoch) return;
+
+            tgApp.hapticNotification('success');
+            ui.showToast({
+                key: 'sync', force: true, icon: '🔄', tone: 'success', ttl: 4500,
+                title: ui.t('sync_toast_title'),
+                body: res?.throttled
+                    ? ui.t('sync_toast_throttled')
+                    : ui.tf('sync_toast_body', {
+                        channels: res?.total_channels ?? state.data.channels.length,
+                        groups: res?.total_groups ?? state.data.groups.length,
+                        linked: res?.newly_linked ?? 0
+                    })
+            });
+        } finally {
+            restoreButtons();
             state.isSyncing = false;
-            return;
-        }
-        await Promise.all([
-            this.loadStats(),
-            this.loadChannels(),
-            this.loadGroups(),
-            this.loadSubscribers()
-        ]);
-
-        syncButtons.forEach(btn => {
-            btn.innerText = btn.dataset.originalText || ui.t('sync');
-            btn.disabled = false;
-        });
-        state.isSyncing = false;
-
-        tgApp.hapticNotification('success');
-
-        if (res && res.status === 'success') {
-            alert(state.currentLang === 'es'
-                ? `✅ Sincronización Exitosa con The Bunker Bot:\n\n• Canales detectados: ${res.total_channels}\n• Comunidades detectadas: ${res.total_groups}`
-                : `✅ Synchronization Successful with The Bunker Bot:\n\n• Detected Channels: ${res.total_channels}\n• Detected Groups: ${res.total_groups}`);
-        } else if (res?.__error) {
-            alert(state.currentLang === 'es' ? `⚠️ Error de sincronización: ${res.__error}` : `⚠️ Synchronization error: ${res.__error}`);
-        } else {
-            alert(state.currentLang === 'es' ? '✅ Canales y grupos sincronizados.' : '✅ Channels and groups synced.');
         }
     },
 
@@ -758,7 +872,21 @@ export const app = {
         return {
             target_link: '',
             stars_price: CONFIG.STUDIO.DEFAULT_PRICE,
-            duration_days: CONFIG.STUDIO.DEFAULT_DAYS
+            duration_days: CONFIG.STUDIO.DEFAULT_DAYS,
+            broadcast_target: '',
+            broadcast_interval: CONFIG.STUDIO.DEFAULT_INTERVAL ?? 12,
+            promo_text: ''
+        };
+    },
+
+    /** Configuración de difusión que devuelve el servidor (dashboard o respuesta del guardado). */
+    broadcastFromServer(data) {
+        if (!data || data.broadcast_interval === undefined) return null;
+        return {
+            broadcast_target: data.broadcast_target || '',
+            broadcast_interval: Number(data.broadcast_interval) || (CONFIG.STUDIO.DEFAULT_INTERVAL ?? 12),
+            promo_text: data.promo_text || '',
+            broadcast_enabled: Boolean(data.broadcast_enabled)
         };
     },
 
@@ -770,13 +898,19 @@ export const app = {
         return api.fetchChatDashboard(channelId).then(data => {
             if (!data || data.__error || data.__stale) return;
             if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
+            const broadcast = this.broadcastFromServer(data);
             const values = {
                 target_link: data.target_link || '',
                 stars_price: data.stars_price || defaults.stars_price,
-                duration_days: data.duration_days || defaults.duration_days
+                duration_days: data.duration_days || defaults.duration_days,
+                broadcast_target: broadcast ? broadcast.broadcast_target : defaults.broadcast_target,
+                broadcast_interval: broadcast ? broadcast.broadcast_interval : defaults.broadcast_interval,
+                promo_text: broadcast ? broadcast.promo_text : defaults.promo_text
             };
             ui.fillStudioForm(values);
             studio.last = values;
+            studio.broadcast = broadcast;
+            ui.setBroadcastStatus(broadcast);
         });
     },
 
@@ -808,6 +942,8 @@ export const app = {
 
         if (!channelId) {
             ui.fillStudioForm(this.studioDefaults());
+            studio.broadcast = null;
+            ui.setBroadcastStatus(null);
             this.loadChannelPlans(null);
             return;
         }
@@ -1189,7 +1325,7 @@ export const app = {
     },
 
     applyStudioValidation(result) {
-        const map = { target_link: 'studio-target-link', stars_price: 'studio-stars-price', duration_days: 'studio-duration-days' };
+        const map = ui.STUDIO_FIELDS;
         Object.entries(map).forEach(([field, id]) => {
             const err = result.errors[field];
             ui.setFieldError(id, err ? ui.tf(err.key, err.vars) : '');
@@ -1197,6 +1333,7 @@ export const app = {
     },
 
     onStudioInput() {
+        ui.updatePromoCounter();
         const studio = this._studio;
         if (!studio.channelId) {
             ui.setStudioStatus('invalid', ui.t('studio_pick_channel'));
@@ -1265,19 +1402,28 @@ export const app = {
         if (studio.channelId !== channelId) return !res?.__error;
 
         if (res?.__error) {
-            ui.setStudioStatus('error', res.__status === 403
-                ? ui.t('studio_status_forbidden')
-                : ui.tf('studio_status_error', { error: res.__error }));
+            // v8.2: el servidor verifica el chat destino en Telegram; sus errores llegan como "campo: motivo".
+            const fieldMatch = /^(broadcast_target|broadcast_interval|promo_text):\s*(.+)$/.exec(String(res.__error));
+            if (fieldMatch && (res.__status === 422 || res.__status === 403)) {
+                ui.setFieldError(ui.STUDIO_FIELDS[fieldMatch[1]], fieldMatch[2]);
+                ui.setStudioStatus('invalid', ui.t('studio_status_invalid'));
+            } else {
+                ui.setStudioStatus('error', res.__status === 403
+                    ? ui.t('studio_status_forbidden')
+                    : ui.tf('studio_status_error', { error: res.__error }));
+            }
             tgApp.hapticNotification('error');
             return false;
         }
 
         studio.last = payload;
+        if (res?.broadcast) {
+            studio.broadcast = this.broadcastFromServer(res.broadcast);
+            ui.setBroadcastStatus(studio.broadcast);
+        }
         const current = validateStudioForm(ui.readStudioForm());
         const sameAsSent = current.valid
-            && current.values.target_link === payload.target_link
-            && current.values.stars_price === payload.stars_price
-            && current.values.duration_days === payload.duration_days;
+            && Object.keys(payload).every(key => current.values[key] === payload[key]);
 
         if (!sameAsSent) {
             // El operador siguió escribiendo durante el guardado: sus cambios nuevos se guardan a continuación.
@@ -1317,9 +1463,19 @@ export const app = {
             stars_price: Number(data.stars_price),
             duration_days: Number(data.duration_days)
         };
-        const matches = server.target_link === trimSlash(payload.target_link)
+        let matches = server.target_link === trimSlash(payload.target_link)
             && server.stars_price === payload.stars_price
             && server.duration_days === payload.duration_days;
+        // Difusión (v8.2): solo se verifica si el backend la expone en el dashboard.
+        const broadcast = this.broadcastFromServer(data);
+        if (broadcast) {
+            matches = matches
+                && broadcast.broadcast_target === payload.broadcast_target
+                && broadcast.broadcast_interval === payload.broadcast_interval
+                && broadcast.promo_text === payload.promo_text;
+            studio.broadcast = broadcast;
+            ui.setBroadcastStatus(broadcast);
+        }
 
         if (matches) {
             ui.setStudioStatus('saved', ui.tf('studio_status_saved', { time }));
@@ -1334,6 +1490,147 @@ export const app = {
         return await this.saveChannelStudio({ auto: false });
     },
 
+    // ======================================================================
+    // 📡 DIFUSIÓN PERSONALIZADA — acciones rápidas del Estudio (v8.2)
+    // ======================================================================
+    /** Nombre legible del destino de la difusión (destino configurado o el propio canal). */
+    broadcastTargetLabel(values) {
+        if (values?.broadcast_target) return values.broadcast_target;
+        const channelId = this._studio.channelId;
+        const channel = state.data.channels.find(c => String(c.id) === String(channelId));
+        return channel ? channel.title : ui.t('bc_preview_target_self');
+    },
+
+    /** 👁️ Vista previa: el texto se formatea con ui.safeTelegramHtml (la misma gramática que publica el bot). */
+    previewCustomBroadcast() {
+        const result = validateStudioForm(ui.readStudioForm());
+        this.applyStudioValidation(result);
+        const promo = result.values.promo_text ?? String(ui.readStudioForm().promo_text || '').trim();
+        if (!promo) {
+            tgApp.hapticNotification('warning');
+            ui.setFieldError(ui.STUDIO_FIELDS.promo_text, ui.t('bc_err_empty'));
+            this.consoleToast('warn', '✍️', ui.t('bc_err_empty'));
+            return false;
+        }
+        tgApp.hapticImpact('light');
+        this._lastBroadcastPreview = {
+            promoText: promo,
+            targetLabel: result.values.broadcast_target || '',
+            interval: result.values.broadcast_interval || (CONFIG.STUDIO.DEFAULT_INTERVAL ?? 12),
+            scheduled: Boolean(result.values.broadcast_target)
+        };
+        ui.renderBroadcastPreview(this._lastBroadcastPreview);
+        return true;
+    },
+
+    closeBroadcastPreview() {
+        this._lastBroadcastPreview = null;
+        ui.closeBroadcastPreview();
+    },
+
+    /** Espera a que termine un guardado en curso del Estudio (máx. ~12 s). */
+    async waitStudioIdle() {
+        const started = Date.now();
+        while (this._studio.saving && Date.now() - started < 12000) {
+            await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        return !this._studio.saving;
+    },
+
+    /**
+     * 📢 Difundir ahora: guarda primero lo que hay en el formulario (el servidor publica la configuración
+     * GUARDADA, la misma que muestra la vista previa) y después publica en el destino o en el propio canal.
+     */
+    async broadcastCustomBroadcast() {
+        const studio = this._studio;
+        const channelId = studio.channelId;
+        if (!channelId) {
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '⚠️', ui.t('studio_pick_channel'));
+            return false;
+        }
+        if (this._broadcastBusy) return false;
+
+        const result = validateStudioForm(ui.readStudioForm());
+        this.applyStudioValidation(result);
+        if (!result.valid) {
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', ui.t('bc_toast_save_first'));
+            return false;
+        }
+        if (!result.values.promo_text) {
+            tgApp.hapticNotification('warning');
+            ui.setFieldError(ui.STUDIO_FIELDS.promo_text, ui.t('bc_err_empty'));
+            this.consoleToast('warn', '✍️', ui.t('bc_err_empty'));
+            return false;
+        }
+
+        const targetLabel = this.broadcastTargetLabel(result.values);
+        if (!await this.confirmAction(ui.tf('bc_confirm_send', { target: targetLabel }))) return false;
+
+        const epoch = session.epoch;
+        this._broadcastBusy = true;
+        ui.setBroadcastBusy(true);
+        tgApp.hapticImpact('medium');
+        try {
+            await this.waitStudioIdle();
+            if (epoch !== session.epoch || studio.channelId !== channelId) return false;
+            const unsaved = studio.dirty || studio.timer || !studio.last
+                || Object.keys(result.values).some(key => studio.last[key] !== result.values[key]);
+            if (unsaved) {
+                const saved = await this.saveChannelStudio({ auto: false });
+                if (!saved || epoch !== session.epoch || studio.channelId !== channelId) {
+                    if (epoch === session.epoch) this.consoleToast('error', '⚠️', ui.t('bc_toast_save_first'));
+                    return false;
+                }
+            }
+
+            const res = await api.sendCustomBroadcast(channelId, { lang: state.currentLang });
+            if (res?.__stale || epoch !== session.epoch || studio.channelId !== channelId) return false;
+            if (res?.__error) {
+                tgApp.hapticNotification('error');
+                this.consoleToast('error', '⚠️', ui.tf('bc_toast_error', { error: this.planErrorMessage(res) }));
+                return false;
+            }
+            tgApp.hapticNotification('success');
+            this.consoleToast('success', '📢', ui.tf('bc_toast_sent', { target: res.target_label || targetLabel }));
+            this.closeBroadcastPreview();
+            this.loadStudioFromServer(channelId);
+            return true;
+        } finally {
+            this._broadcastBusy = false;
+            ui.setBroadcastBusy(false);
+        }
+    },
+
+    /** 🗑️ Limpia la difusión (destino, intervalo y texto) y lo guarda: desactiva la difusión automática. */
+    async clearBroadcastForm() {
+        const studio = this._studio;
+        if (!await this.confirmAction(ui.t('bc_confirm_clear'))) return false;
+        const defaults = this.studioDefaults();
+        const fields = ui.STUDIO_FIELDS;
+        [fields.broadcast_target, fields.broadcast_interval, fields.promo_text].forEach(id => {
+            const el = document.getElementById(id);
+            if (el && document.activeElement === el) el.blur();
+            ui.setFieldError(id, '');
+        });
+        ui.fillStudioForm({
+            broadcast_target: defaults.broadcast_target,
+            broadcast_interval: defaults.broadcast_interval,
+            promo_text: defaults.promo_text
+        });
+        this.closeBroadcastPreview();
+        tgApp.hapticImpact('medium');
+        if (!studio.channelId) {
+            this.consoleToast('info', '🗑️', ui.t('bc_toast_cleared'));
+            return true;
+        }
+        studio.dirty = true;
+        const saved = await this.saveChannelStudio({ auto: false });
+        if (saved) this.consoleToast('success', '🗑️', ui.t('bc_toast_cleared'));
+        return saved;
+    },
+
     async loadChannels() {
         const data = await api.fetchChannels();
         if (data?.__stale) return;
@@ -1341,7 +1638,12 @@ export const app = {
             ui.renderChatListError('channels-list', ui.t('load_error'), 'loadChannels');
             return;
         }
-        state.data.channels = (data && data.channels) || [];
+        this.applyChannels((data && data.channels) || []);
+    },
+
+    /** Pinta la lista de canales y puebla #channel-owner-select (desde GET /channels o POST /sync-chats). */
+    applyChannels(channels) {
+        state.data.channels = Array.isArray(channels) ? channels : [];
         ui.renderChatList('channels-list', state.data.channels, ui.t('no_channels'));
         ui.populateSelect('channel-owner-select', state.data.channels, ui.t('no_channels'));
 
@@ -1369,10 +1671,21 @@ export const app = {
             ui.renderChatListError('groups-list', ui.t('load_error'), 'loadGroups');
             return;
         }
-        state.data.groups = (data && data.groups) || [];
+        this.applyGroups((data && data.groups) || []);
+    },
+
+    /** Pinta la lista de comunidades y puebla #group-owner-select y #analytics-chat-select. */
+    applyGroups(groups) {
+        state.data.groups = Array.isArray(groups) ? groups : [];
         ui.renderChatList('groups-list', state.data.groups, ui.t('no_groups'));
         ui.populateSelect('group-owner-select', state.data.groups, ui.t('no_groups'));
         ui.populateSelect('analytics-chat-select', state.data.groups, ui.t('no_groups'), 'group');
+        const selected = document.getElementById('group-owner-select')?.value || '';
+        if (!selected) {
+            state.securitySwitches = null;
+            state.switchesChatId = null;
+            ui.renderSecuritySwitches(null, { idle: true });
+        }
     },
 
     async loadSubscribers() {
@@ -1412,6 +1725,14 @@ export const app = {
 
         // La analítica en vivo solo existe para grupos: los canales no generan mensajes rastreables.
         const isChannel = state.data.channels.some(c => String(c.id) === chatId);
+
+        // Consola de grupos (v8.2): hasta leer el dashboard de ESTA comunidad no se muestra ningún estado.
+        if (String(state.switchesChatId) !== chatId) {
+            state.securitySwitches = null;
+            state.switchesChatId = chatId;
+            this._switchBusy = null;
+            ui.renderSecuritySwitches(null, { loading: true });
+        }
         const hasLiveForChat = Boolean(
             state.wsClient && state.wsClient.chatId === chatId && state.wsClient.status !== 'denied'
         );
@@ -1717,82 +2038,117 @@ export const app = {
             if (client && client.status === 'paused') {
                 this._silentUntil = Date.now() + 15000;   // la reconexión al volver del segundo plano es silenciosa
                 client.resume();
+            } else if (client && typeof client.probe === 'function') {
+                // < 60 s en segundo plano: el socket no se pausó, pero los timers estuvieron congelados y la red
+                // pudo cambiar (Wi-Fi ↔ datos). Ping inmediato: si no hay pong en PONG_TIMEOUT_MS se reconecta.
+                client.probe();
             }
         });
     },
 
     async loadChatDashboard(chatId) {
+        const epoch = session.epoch;
+        const chatEpoch = state.chatEpoch;
         const data = await api.fetchChatDashboard(chatId);
-        if (data && !data.__error) {
-            state.data.currentChatDashboard = data;
-            if (data.title && state.wsClient && String(state.wsClient.chatId) === String(chatId)) {
-                ui.setRadarTarget(data.title);
-            }
+        if (!data || data.__error || data.__stale || epoch !== session.epoch) return;
+        // El operador eligió otra comunidad mientras se cargaba (configureChat avanza chatEpoch):
+        // esta respuesta ya no le corresponde y no debe pisar los interruptores de la nueva.
+        if (chatEpoch !== state.chatEpoch) return;
 
-            // 1. Canal de Registro (Log Channel)
-            const logEl = document.getElementById('chat-log-channel');
-            if (logEl) {
-                const isEnabled = Boolean(data.log_channel?.enabled);
-                logEl.innerText = isEnabled 
-                    ? `${ui.t('status_enabled')} (${ui.escapeHtml(data.log_channel.channel_id)})` 
-                    : ui.t('status_disabled');
-                logEl.className = isEnabled 
-                    ? 'text-xs font-bold text-emerald-400 mt-1 truncate' 
-                    : 'text-xs font-bold text-neutral-400 mt-1 truncate';
-            }
+        state.data.currentChatDashboard = data;
+        if (data.title && state.wsClient && String(state.wsClient.chatId) === String(chatId)) {
+            ui.setRadarTarget(data.title);
+        }
 
-            // 2. Estado del Plan Tarifario
-            const planStatusEl = document.getElementById('chat-plan-status');
-            if (planStatusEl) {
-                const isActive = data.plan?.status === 'active';
-                planStatusEl.innerText = isActive 
-                    ? `${ui.t('tariff_active')} (${ui.escapeHtml(data.plan.name)})` 
-                    : ui.t('tariff_empty');
-                planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
-            }
+        // 1. Canal de Registro (Log Channel)
+        ui.renderLogChannelStatus(data.log_channel);
 
-            // 3. Sincronizar interruptores de seguridad reales de la base de datos
-            if (data.switches) {
-                state.securitySwitches = { ...state.securitySwitches, ...data.switches };
-                ['captcha', 'autolower', 'shield', 'linklock'].forEach(k => {
-                    const el = document.getElementById(`switch-${k}`);
-                    if (el) {
-                        const active = Boolean(state.securitySwitches[k]);
-                        el.className = active ? "text-emerald-400 font-bold" : "text-rose-400 font-bold";
-                        el.innerText = active 
-                            ? (state.currentLang === 'es' ? "ACTIVO 🟢" : "ACTIVE 🟢")
-                            : (state.currentLang === 'es' ? "BLOQUEADO 🔴" : "BLOCKED 🔴");
-                    }
-                });
-            }
+        // 2. Estado del Plan Tarifario
+        const planStatusEl = document.getElementById('chat-plan-status');
+        if (planStatusEl) {
+            const isActive = data.plan?.status === 'active';
+            planStatusEl.innerText = isActive
+                ? `${ui.t('tariff_active')} (${data.plan.name || ''})`
+                : ui.t('tariff_empty');
+            planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
+        }
 
-            // 4. Modo de Spam
-            const spamModeEl = document.getElementById('chat-spam-mode');
-            if (spamModeEl && data.protection?.spam_mode) {
-                spamModeEl.value = data.protection.spam_mode;
-            }
+        // 3. Interruptores reales de la base de datos (Aduana Captcha, AutoLower, Antinota, LinkLock)
+        if (data.switches && typeof data.switches === 'object' && !this._switchBusy) {
+            const keys = CONFIG.CONSOLE?.SWITCH_KEYS || ['captcha', 'autolower', 'shield', 'linklock'];
+            state.securitySwitches = Object.fromEntries(keys.map(k => [k, Boolean(data.switches[k])]));
+            state.switchesChatId = String(chatId);
+            ui.renderSecuritySwitches(state.securitySwitches);
+        }
+
+        // 4. Modo de Spam
+        const spamModeEl = document.getElementById('chat-spam-mode');
+        if (spamModeEl && data.protection?.spam_mode) {
+            spamModeEl.value = data.protection.spam_mode;
         }
     },
 
+    // ======================================================================
+    // 🧾 CANAL DE REGISTRO — modal nativo (window.prompt se descarta en iOS/Android WebView)
+    // ======================================================================
     openLogChannelModal() {
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
-        if (!selectedGroup) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero una comunidad administrada.' : '⚠️ Select a managed community first.');
-            return;
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
+        const group = state.data.groups.find(g => String(g.id) === String(chatId));
+        const dashboard = state.data.currentChatDashboard;
+        const sameChat = dashboard && String(dashboard.chat_id ?? chatId) === String(chatId);
+        const current = sameChat && dashboard.log_channel?.enabled ? String(dashboard.log_channel.channel_id || '') : '';
+        this._logChannel = { chatId: String(chatId), epoch: session.epoch, busy: false };
+        ui.openLogChannelView({ community: group ? group.title : String(chatId), current });
+        tgApp.hapticImpact('light');
+    },
+
+    closeLogChannelModal() {
+        this._logChannel = null;
+        ui.closeLogChannelView();
+    },
+
+    async saveLogChannel() {
+        const ctx = this._logChannel;
+        if (!ctx || ctx.busy) return false;
+        if (ctx.epoch !== session.epoch) {
+            this.closeLogChannelModal();
+            return false;
         }
-        const currentLog = state.data.currentChatDashboard?.log_channel?.channel_id || '';
-        const newLog = prompt(
-            state.currentLang === 'es' 
-                ? 'Ingresa el ID o @alias del canal de registro para auditorías:' 
-                : 'Enter the ID or @alias of the log channel for audits:', 
-            currentLog
-        );
-        if (newLog !== null) {
-            api.updateChatSettings(selectedGroup, { log_channel_id: newLog.trim() }).then(() => {
-                this.loadChatDashboard(selectedGroup);
-                tgApp.hapticNotification('success');
-            });
+        const input = document.getElementById('log-channel-input');
+        const value = String(input?.value || '').trim();
+        if (value && !(STUDIO_ALIAS_RE.test(value) || CHAT_ID_RE.test(value))) {
+            ui.setFieldError('log-channel-input', ui.t('logm_err_format'));
+            tgApp.hapticNotification('error');
+            return false;
         }
+        ui.setFieldError('log-channel-input', '');
+
+        ctx.busy = true;
+        ui.setLogChannelBusy(true);
+        const res = await api.updateChatSettings(ctx.chatId, { log_channel_id: value });
+        ctx.busy = false;
+        if (res?.__stale || ctx.epoch !== session.epoch || this._logChannel !== ctx) return false;
+        ui.setLogChannelBusy(false);
+
+        if (res?.__error) {
+            const message = String(res.__error).replace(/^log_channel_id:\s*/, '');
+            if (res.__status === 422 || res.__status === 403) {
+                ui.setFieldError('log-channel-input', message);
+            } else {
+                this.consoleToast('error', '⚠️', ui.t('logm_toast_error'), message);
+            }
+            tgApp.hapticNotification('error');
+            return false;
+        }
+
+        const savedId = res?.log_channel_id !== undefined ? String(res.log_channel_id) : value;
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', savedId ? '🧾' : '🚫', ui.t(savedId ? 'logm_toast_saved' : 'logm_toast_disabled'), savedId);
+        ui.renderLogChannelStatus({ enabled: Boolean(savedId), channel_id: savedId });
+        this.closeLogChannelModal();
+        if (String(state.selectedChatId) === ctx.chatId) this.loadChatDashboard(ctx.chatId);
+        return true;
     },
 
     async loadChatStats(chatId) {
@@ -1851,96 +2207,85 @@ export const app = {
         }
     },
 
+    /** 🧬 Despliegue de Bot Clon → api.updateChatSettings(chatId, { action: 'deploy_clone', bot_token }) */
     async deployClone() {
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
         const tokenInput = document.getElementById('clone-bot-token');
-        const token = tokenInput?.value?.trim();
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
-
+        const token = String(tokenInput?.value || '').trim();
         if (!token) {
-            alert(state.currentLang === 'es' ? '⚠️ Ingresa el Bot Token generado en @BotFather.' : '⚠️ Enter the Bot Token from @BotFather.');
-            return;
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '🔑', ui.t('gc_clone_err_token'));
+            return false;
         }
-
-        if (!selectedGroup) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero la comunidad administrada.' : '⚠️ Select the managed community first.');
-            return;
+        if (!CLONE_TOKEN_RE.test(token)) {
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '🔑', ui.t('gc_clone_err_format'));
+            return false;
         }
-
-        const res = await api.deployBotClone(selectedGroup, token);
-
-        if (res?.status === 'success') {
-            tgApp.hapticNotification('success');
-            alert(state.currentLang === 'es'
-                ? `🚀 Bot Clon (@${res.clone_username || 'Bot'}) desplegado y activo en memoria exitosamente.`
-                : `🚀 Bot Clone (@${res.clone_username || 'Bot'}) deployed and active in memory.`);
-            if (tokenInput) tokenInput.value = '';
-        } else {
-            alert(state.currentLang === 'es'
-                ? `❌ Error al desplegar clon: ${res?.__error || 'Token inválido o bot inaccesible.'}`
-                : `❌ Failed to deploy clone: ${res?.__error || 'Invalid token.'}`);
+        tgApp.hapticImpact('medium');
+        const res = await this.runConsoleAction('btn-deploy-clone', chatId, id => api.updateChatSettings(id, { action: 'deploy_clone', bot_token: token }));
+        if (!res) return false;
+        if (res.__error || res.status !== 'success') {
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '❌', ui.tf('gc_clone_toast_error', { error: this.consoleErrorMessage(res) }));
+            return false;
         }
+        if (tokenInput) tokenInput.value = '';
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '🚀', ui.tf('gc_clone_toast_ok', { name: res.clone_username || 'Bot' }));
+        return true;
     },
 
+    /** 📡 Centinela MTProto → api.updateChatSettings(chatId, { action: 'connect_sentinel', session_string }) */
     async connectSentinel() {
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
         const sessionInput = document.getElementById('sentinel-session-string');
-        const sessionString = sessionInput?.value?.trim();
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
+        const sessionString = String(sessionInput?.value || '').trim();
 
         // El REST solo admite una String Session; el acceso por teléfono (código + 2FA) se hace en el bot.
         if (sessionString && /^\+?[\d\s()\-]{7,16}$/.test(sessionString)) {
-            alert(ui.t('sentinel_phone_hint'));
-            return;
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '📱', ui.t('sentinel_phone_hint'));
+            return false;
         }
-
         if (!sessionString) {
-            alert(state.currentLang === 'es' ? '⚠️ Pega la String Session generada para tu Centinela MTProto.' : '⚠️ Paste the String Session for your MTProto Sentinel.');
-            return;
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '🔑', ui.t('gc_sentinel_err_session'));
+            return false;
         }
-
-        if (!selectedGroup) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero la comunidad administrada.' : '⚠️ Select the managed community first.');
-            return;
+        tgApp.hapticImpact('medium');
+        const res = await this.runConsoleAction('btn-connect-sentinel', chatId, id => api.updateChatSettings(id, { action: 'connect_sentinel', session_string: sessionString }));
+        if (!res) return false;
+        if (res.__error || res.status !== 'success') {
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '❌', ui.tf('gc_sentinel_toast_error', { error: this.consoleErrorMessage(res) }));
+            return false;
         }
-
-        const res = await api.connectSentinel(selectedGroup, sessionString);
-
-        if (res?.status === 'success') {
-            tgApp.hapticNotification('success');
-            alert(state.currentLang === 'es'
-                ? '📡 Centinela Acústico MTProto conectado al clúster de The Bunker exitosamente.'
-                : '📡 MTProto Acoustic Sentinel connected to The Bunker cluster successfully.');
-            if (sessionInput) sessionInput.value = '';
-        } else {
-            alert(state.currentLang === 'es'
-                ? `❌ Error al conectar centinela: ${res?.__error || 'Error de sesión.'}`
-                : `❌ Failed to connect sentinel: ${res?.__error || 'Session error.'}`);
-        }
+        if (sessionInput) sessionInput.value = '';
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '📡', ui.t('gc_sentinel_toast_ok'));
+        return true;
     },
 
+    /** 💀 Ghost Purge → api.updateChatSettings(chatId, { action: 'run_ghost_purge' }) */
     async runGhostPurge() {
-        const selectedGroup = document.getElementById('group-owner-select')?.value || state.selectedChatId;
-
-        if (!selectedGroup) {
-            alert(state.currentLang === 'es' ? '⚠️ Selecciona primero la comunidad a purgar.' : '⚠️ Select the community to purge first.');
-            return;
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
+        tgApp.hapticNotification('warning');
+        if (!await this.confirmAction(ui.t('gc_purge_confirm'))) return false;
+        tgApp.hapticImpact('heavy');
+        const res = await this.runConsoleAction('btn-ghost-purge', chatId, id => api.updateChatSettings(id, { action: 'run_ghost_purge' }));
+        if (!res) return false;
+        if (res.__error || res.status !== 'success') {
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '❌', ui.tf('gc_purge_toast_error', { error: this.consoleErrorMessage(res) }));
+            return false;
         }
-
-        if (!confirm(state.currentLang === 'es' ? '💀 ¿Deseas iniciar la purga de cuentas fantasma y perfiles eliminados?' : '💀 Start purging ghost accounts and deleted profiles?')) {
-            return;
-        }
-
-        const res = await api.triggerGhostPurge(selectedGroup);
-
-        if (res?.status === 'success') {
-            tgApp.hapticImpact('heavy');
-            alert(state.currentLang === 'es'
-                ? '⚡ Orden de Ghost Purge enviada al Búnker Bot. La purga se está ejecutando en segundo plano.'
-                : '⚡ Ghost Purge command sent. Purge is running in background.');
-        } else {
-            alert(state.currentLang === 'es'
-                ? `❌ Error al iniciar Ghost Purge: ${res?.__error || 'Fallo de comunicación.'}`
-                : `❌ Error triggering Ghost Purge: ${res?.__error || 'Communication failure.'}`);
-        }
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '⚡', ui.t('gc_purge_toast_ok'));
+        return true;
     },
 
     /**

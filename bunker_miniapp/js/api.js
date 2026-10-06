@@ -337,6 +337,27 @@ export const api = {
         return await this.post(`/channel/${channel}/plan/${plan}/invite-link`, {});
     },
 
+    // --- Difusión personalizada del Estudio de Canales (v8.2) ---
+
+    /** GET /api/channel/{channel_id}/broadcast-config → { broadcast_target, broadcast_interval, promo_text, broadcast_enabled } */
+    async fetchBroadcastConfig(channelId) {
+        const channel = numericId(channelId);
+        if (!channel) return INVALID_ID_RESULT;
+        return await this.get(`/channel/${channel}/broadcast-config`);
+    },
+
+    /**
+     * POST /api/channel/{channel_id}/custom-broadcast → { sent, message_id, target_chat_id, target_label }
+     * Publica YA la difusión GUARDADA en el chat destino (o en el propio canal si no hay destino).
+     * Enfriamiento por canal en el servidor (429) y texto obligatorio (409).
+     */
+    async sendCustomBroadcast(channelId, options = {}) {
+        const channel = numericId(channelId);
+        if (!channel) return INVALID_ID_RESULT;
+        const body = options && options.lang ? { lang: options.lang } : {};
+        return await this.post(`/channel/${channel}/custom-broadcast`, body);
+    },
+
     // --- Acciones Tácticas Ultra Pro ---
 
     async deployBotClone(chatId, botToken) {

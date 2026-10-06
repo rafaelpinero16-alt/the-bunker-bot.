@@ -19,6 +19,7 @@ import html
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any, Optional, Set, Dict
@@ -483,26 +484,34 @@ _ADMIN_ACCESS_CACHE: Dict[tuple, tuple] = {}
 _ADMIN_ACCESS_CACHE_MAX = 20000
 
 
-async def _is_live_chat_admin(user_id: int, chat_id: int) -> bool:
-    """Verifica en Telegram si el usuario es creador/administrador (caché 5 min / 1 min negativa)."""
+async def _live_member_status(user_id: int, chat_id: int, fresh: bool = False) -> str:
+    """
+    Estado real del usuario en el chat según Telegram ('creator', 'administrator', 'member', 'left', …).
+    Caché 5 min si es staff, 1 min si no, 30 s ante error. fresh=True ignora la caché (sincronización
+    pedida explícitamente por el operador). '' si no se pudo consultar.
+    """
     key = (int(chat_id), int(user_id))
     now = time.monotonic()
     cached = _ADMIN_ACCESS_CACHE.get(key)
-    if cached and cached[1] > now:
+    if cached and cached[1] > now and not fresh:
         return cached[0]
     if master_bot_instance is None:
-        return False
+        return ""
     try:
         member = await asyncio.wait_for(master_bot_instance.get_chat_member(chat_id, user_id), timeout=4)
-        status = getattr(member.status, "value", member.status)
-        verdict = status in ("creator", "administrator")
-        ttl = 300.0 if verdict else 60.0
+        status = str(getattr(member.status, "value", member.status) or "")
+        ttl = 300.0 if status in ("creator", "administrator") else 60.0
     except Exception:
-        verdict, ttl = False, 30.0
+        status, ttl = "", 30.0
     if len(_ADMIN_ACCESS_CACHE) >= _ADMIN_ACCESS_CACHE_MAX:
         _ADMIN_ACCESS_CACHE.clear()
-    _ADMIN_ACCESS_CACHE[key] = (verdict, now + ttl)
-    return verdict
+    _ADMIN_ACCESS_CACHE[key] = (status, now + ttl)
+    return status
+
+
+async def _is_live_chat_admin(user_id: int, chat_id: int, fresh: bool = False) -> bool:
+    """Verifica en Telegram si el usuario es creador/administrador del chat."""
+    return await _live_member_status(user_id, chat_id, fresh=fresh) in ("creator", "administrator")
 
 
 async def assert_chat_access(user_id: int, chat_id: int):
@@ -534,6 +543,172 @@ def _get_global_groups_sync():
         cursor = conn.cursor()
         cursor.execute("SELECT group_id, group_name FROM user_groups WHERE chat_type != 'channel' OR chat_type IS NULL")
         return cursor.fetchall()
+
+
+def _get_registered_chats_sync():
+    """Todos los chats que el bot conoce (uno por group_id), con su nombre y tipo registrados."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT group_id, MAX(group_name), MAX(chat_type) FROM user_groups GROUP BY group_id"
+        ).fetchall()
+
+
+# ==========================================
+# 🔄 v8.2 · SINCRONIZACIÓN REAL DE CANALES Y GRUPOS DEL OPERADOR
+# ==========================================
+# El registro inicial solo vincula a quien añadió/promovió al bot. Si fue otro administrador, el
+# creador real no aparecía en los selectores. La auditoría consulta a Telegram (get_chat_member)
+# el estado del operador en cada chat que el bot conoce y vincula los que administra.
+SYNC_LINK_ROLES = {r.strip() for r in os.getenv("SYNC_LINK_ROLES", "creator,administrator").split(",") if r.strip()}
+SYNC_AUDIT_MAX_CHATS = max(1, int(os.getenv("SYNC_AUDIT_MAX_CHATS", "400") or 400))
+SYNC_AUDIT_CONCURRENCY = max(1, int(os.getenv("SYNC_AUDIT_CONCURRENCY", "8") or 8))
+SYNC_AUDIT_COOLDOWN_S = float(os.getenv("SYNC_AUDIT_COOLDOWN_S", "60") or 60)
+SYNC_AUTOHEAL_INTERVAL_S = 600.0
+_SYNC_AUDIT_LAST: Dict[int, float] = {}
+_SYNC_AUDIT_LOCKS: Dict[int, asyncio.Lock] = {}
+
+
+def _norm_chat_type(raw: Any, fallback: str = "supergroup") -> str:
+    value = str(getattr(raw, "value", raw) or "").lower()
+    return value if value in ("channel", "group", "supergroup") else fallback
+
+
+async def audit_user_chat_links(user_id: int, force: bool = False) -> Dict[str, int]:
+    """
+    Recorre los chats registrados que el operador aún no tiene vinculados y, si Telegram confirma que
+    es creador/administrador (SYNC_LINK_ROLES), lo vincula en user_groups con register_user_group().
+    Concurrencia acotada (SYNC_AUDIT_CONCURRENCY) para respetar los límites de la Bot API, tope de
+    SYNC_AUDIT_MAX_CHATS por pasada y enfriamiento por usuario (SYNC_AUDIT_COOLDOWN_S) salvo force.
+    """
+    uid = int(user_id)
+    result = {"audited": 0, "linked": 0, "skipped": 0}
+    if master_bot_instance is None:
+        return result
+    lock = _SYNC_AUDIT_LOCKS.setdefault(uid, asyncio.Lock())
+    if lock.locked():
+        async with lock:          # una auditoría en curso ya cubre esta petición
+            return result
+    async with lock:
+        now = time.monotonic()
+        last = _SYNC_AUDIT_LAST.get(uid)
+        if last is not None and now - last < (SYNC_AUDIT_COOLDOWN_S if force else SYNC_AUTOHEAL_INTERVAL_S):
+            result["skipped"] = 1
+            return result
+        _SYNC_AUDIT_LAST[uid] = now
+
+        try:
+            registered = await asyncio.to_thread(_get_registered_chats_sync)
+            linked = {int(c[0]) for c in (await get_user_channels(uid) or [])} | {int(g[0]) for g in (await get_user_groups(uid) or [])}
+        except Exception as ex:
+            logger.warning(f"⚠️ [Sync] No se pudo leer el registro de chats: {ex}")
+            return result
+
+        pending = [row for row in registered if row and row[0] is not None and int(row[0]) not in linked][:SYNC_AUDIT_MAX_CHATS]
+        semaphore = asyncio.Semaphore(SYNC_AUDIT_CONCURRENCY)
+
+        async def check(row) -> None:
+            chat_id = int(row[0])
+            async with semaphore:
+                status = await _live_member_status(uid, chat_id, fresh=True)
+            result["audited"] += 1
+            if status not in SYNC_LINK_ROLES:
+                return
+            try:
+                await register_user_group(
+                    user_id=uid,
+                    group_id=chat_id,
+                    group_name=row[1] or f"Chat {chat_id}",
+                    chat_type=_norm_chat_type(row[2], "channel" if str(row[2]) == "channel" else "supergroup"),
+                )
+                result["linked"] += 1
+                logger.info(f"🔗 [Sync] Usuario {uid} vinculado a {chat_id} ({status}).")
+            except Exception as ex:
+                logger.warning(f"⚠️ [Sync] No se pudo vincular {chat_id} a {uid}: {ex}")
+
+        await asyncio.gather(*(check(row) for row in pending))
+        return result
+
+
+async def _owned_chat_rows(user_id: int, kind: str) -> list:
+    """Filas (id, nombre) del operador para kind ∈ {'channel','group'}; vista global solo para super-admins."""
+    getter_active = get_active_user_channels if kind == "channel" else get_active_user_groups
+    getter = get_user_channels if kind == "channel" else get_user_groups
+    rows: list = []
+    if master_bot_instance:
+        try:
+            rows = await getter_active(master_bot_instance, user_id)
+        except Exception:
+            rows = await getter(user_id)
+    else:
+        rows = await getter(user_id)
+    if not rows and is_super_admin(user_id):
+        rows = await asyncio.to_thread(_get_global_channels_sync if kind == "channel" else _get_global_groups_sync)
+    return list(rows or [])
+
+
+async def _build_chat_entries(rows: list, kind: str) -> list:
+    """Entradas limpias para los selectores: id, título, miembros y tipo reales (consultas en paralelo)."""
+    semaphore = asyncio.Semaphore(SYNC_AUDIT_CONCURRENCY)
+    seen: set = set()
+
+    async def entry(row):
+        chat_id = int(row[0])
+        if chat_id in seen:
+            return None
+        seen.add(chat_id)
+        title = row[1] if len(row) > 1 and row[1] else f"Chat {chat_id}"
+        chat_type = "channel" if kind == "channel" else "supergroup"
+        members = 0
+        if master_bot_instance:
+            async with semaphore:
+                try:
+                    chat_obj = await asyncio.wait_for(master_bot_instance.get_chat(chat_id), timeout=5)
+                    title = chat_obj.title or title
+                    chat_type = _norm_chat_type(chat_obj.type, chat_type)
+                    members = await asyncio.wait_for(master_bot_instance.get_chat_member_count(chat_id), timeout=5)
+                except Exception:
+                    pass
+        try:
+            tier = await get_group_tier(chat_id)
+        except Exception:
+            tier = "free"
+        try:
+            timeseries = await get_chat_timeseries_stats(chat_id)
+            curve = list((timeseries or {}).get("messages", []))[-7:]
+        except Exception:
+            curve = []
+        if len(curve) < 7:
+            curve = [0] * (7 - len(curve)) + curve
+        return {
+            "id": str(chat_id),
+            "title": str(title),
+            "type": chat_type,
+            "license_status": "active" if tier != "free" else "expired",
+            "members": int(members or 0),
+            "activity": curve,
+            "joined": 0,
+            "left": 0,
+            "avatar_url": None,
+        }
+
+    entries = [e for e in await asyncio.gather(*(entry(r) for r in rows if r and r[0] is not None)) if e]
+    # Un chat registrado con el tipo equivocado se muestra donde corresponde según Telegram.
+    if kind == "channel":
+        entries = [e for e in entries if e["type"] == "channel"]
+    else:
+        entries = [e for e in entries if e["type"] != "channel"]
+    entries.sort(key=lambda e: e["title"].lower())
+    return entries
+
+
+async def _list_operator_chats(user_id: int, kind: str) -> list:
+    """Listado del operador; si está vacío, autocura con una auditoría (máx. una cada 10 min)."""
+    rows = await _owned_chat_rows(user_id, kind)
+    if not rows:
+        audit = await audit_user_chat_links(user_id, force=False)
+        if audit.get("linked"):
+            rows = await _owned_chat_rows(user_id, kind)
+    return await _build_chat_entries(rows, kind)
 
 
 def _get_groups_count_sync():
@@ -638,51 +813,9 @@ async def api_channels(
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
-        channels = []
-        if master_bot_instance:
-            try:
-                channels = await get_active_user_channels(master_bot_instance, user_id)
-            except Exception:
-                channels = await get_user_channels(user_id)
-        else:
-            channels = await get_user_channels(user_id)
-
-        # La vista global solo se expone a super-admins (antes se filtraba a cualquiera).
-        if not channels and is_super_admin(user_id):
-            channels = await asyncio.to_thread(_get_global_channels_sync)
-
-        res = []
-        for ch_id, ch_name in channels:
-            tier = await get_group_tier(ch_id)
-            member_count = 0
-            resolved_title = ch_name
-            if master_bot_instance:
-                try:
-                    chat_obj = await master_bot_instance.get_chat(ch_id)
-                    resolved_title = chat_obj.title or ch_name
-                    member_count = await master_bot_instance.get_chat_member_count(ch_id)
-                except Exception:
-                    pass
-
-            timeseries = await get_chat_timeseries_stats(ch_id)
-            activity_curve = timeseries.get("messages", [])[-7:]
-            if len(activity_curve) < 7:
-                activity_curve = [0] * (7 - len(activity_curve)) + activity_curve
-
-            res.append({
-                "id": str(ch_id),
-                "title": resolved_title,
-                "type": "channel",
-                "license_status": "active" if tier != "free" else "expired",
-                "members": member_count,
-                "activity": activity_curve,
-                "joined": 0,
-                "left": 0,
-                "avatar_url": None
-            })
-        return {"channels": res}
+        return {"channels": await _list_operator_chats(user_id, "channel")}
     except Exception as e:
-        logger.error(f"❌ [API Channels Error]: {e}")
+        logger.error(f"❌ [API Channels Error]: {e}", exc_info=True)
         return {"channels": []}
 
 
@@ -693,50 +826,9 @@ async def api_groups(
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
-        groups_list = []
-        if master_bot_instance:
-            try:
-                groups_list = await get_active_user_groups(master_bot_instance, user_id)
-            except Exception:
-                groups_list = await get_user_groups(user_id)
-        else:
-            groups_list = await get_user_groups(user_id)
-
-        if not groups_list and is_super_admin(user_id):
-            groups_list = await asyncio.to_thread(_get_global_groups_sync)
-
-        res = []
-        for g_id, g_name in groups_list:
-            tier = await get_group_tier(g_id)
-            member_count = 0
-            resolved_title = g_name
-            if master_bot_instance:
-                try:
-                    chat_obj = await master_bot_instance.get_chat(g_id)
-                    resolved_title = chat_obj.title or g_name
-                    member_count = await master_bot_instance.get_chat_member_count(g_id)
-                except Exception:
-                    pass
-
-            timeseries = await get_chat_timeseries_stats(g_id)
-            activity_curve = timeseries.get("messages", [])[-7:]
-            if len(activity_curve) < 7:
-                activity_curve = [0] * (7 - len(activity_curve)) + activity_curve
-
-            res.append({
-                "id": str(g_id),
-                "title": resolved_title,
-                "type": "supergroup",
-                "license_status": "active" if tier != "free" else "expired",
-                "members": member_count,
-                "activity": activity_curve,
-                "joined": 0,
-                "left": 0,
-                "avatar_url": None
-            })
-        return {"groups": res}
+        return {"groups": await _list_operator_chats(user_id, "group")}
     except Exception as e:
-        logger.error(f"❌ [API Groups Error]: {e}")
+        logger.error(f"❌ [API Groups Error]: {e}", exc_info=True)
         return {"groups": []}
 
 
@@ -745,6 +837,10 @@ async def api_sync_chats(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
+    """
+    Sincronización explícita: audita en Telegram los chats registrados, vincula los que el operador
+    administra y devuelve los listados ya limpios (la Mini App puebla los selectores sin otra llamada).
+    """
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     # Solo los super-admins quedan vinculados al grupo de administración maestro.
     if is_super_admin(user_id):
@@ -758,33 +854,18 @@ async def api_sync_chats(
         except Exception:
             pass
 
-    synced_channels = 0
-    synced_groups = 0
-
-    if master_bot_instance:
-        try:
-            channels = await get_active_user_channels(master_bot_instance, user_id)
-            groups_list = await get_active_user_groups(master_bot_instance, user_id)
-            synced_channels = len(channels)
-            synced_groups = len(groups_list)
-        except Exception:
-            channels = await get_user_channels(user_id)
-            groups_list = await get_user_groups(user_id)
-            synced_channels = len(channels)
-            synced_groups = len(groups_list)
-    else:
-        channels = await get_user_channels(user_id)
-        groups_list = await get_user_groups(user_id)
-        synced_channels = len(channels)
-        synced_groups = len(groups_list)
-
-    if synced_groups == 0 and is_super_admin(user_id):
-        synced_groups = await asyncio.to_thread(_get_groups_count_sync)
-
+    audit = await audit_user_chat_links(user_id, force=True)
+    channels = await _build_chat_entries(await _owned_chat_rows(user_id, "channel"), "channel")
+    groups = await _build_chat_entries(await _owned_chat_rows(user_id, "group"), "group")
     return {
         "status": "success",
-        "total_channels": synced_channels,
-        "total_groups": max(1, synced_groups)
+        "total_channels": len(channels),
+        "total_groups": len(groups),
+        "audited": audit.get("audited", 0),
+        "newly_linked": audit.get("linked", 0),
+        "throttled": bool(audit.get("skipped")),
+        "channels": channels,
+        "groups": groups,
     }
 
 
@@ -850,6 +931,13 @@ async def api_chat_dashboard(
                 data.setdefault("title", f"Chat {chat_id}")
         else:
             data.setdefault("title", f"Chat {chat_id}")
+
+        # v8.2: difusión personalizada del Estudio (chat destino, intervalo, texto promocional).
+        if load_broadcast_config is not None:
+            try:
+                data.update(public_broadcast_config(await load_broadcast_config(numeric_id, _plan_deps())))
+            except Exception as ex:
+                logger.debug(f"Sin configuración de difusión para {numeric_id}: {ex}")
 
         return data
     except HTTPException:
@@ -1030,6 +1118,75 @@ async def api_import_backup(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# v8.2: servicio de difusión personalizada (vive en channel_plans_api.py junto a los planes de canal).
+try:
+    from channel_plans_api import (  # type: ignore[import-not-found]
+        PlanApiError,
+        load_broadcast_config,
+        load_db_deps as _load_plan_deps,
+        public_broadcast_config,
+        run_custom_broadcast_scheduler,
+        save_broadcast_config,
+    )
+except ImportError:
+    class PlanApiError(Exception):  # type: ignore[no-redef]
+        status, detail = 500, ""
+    load_broadcast_config = save_broadcast_config = run_custom_broadcast_scheduler = None  # type: ignore[assignment]
+    public_broadcast_config = _load_plan_deps = None  # type: ignore[assignment]
+
+_PLAN_DEPS_CACHE: Dict[str, Any] = {}
+
+
+def _plan_deps():
+    if "deps" not in _PLAN_DEPS_CACHE:
+        _PLAN_DEPS_CACHE["deps"] = _load_plan_deps()
+    return _PLAN_DEPS_CACHE["deps"]
+
+
+_LOG_CHANNEL_ALIAS_RE = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+_LOG_CHANNEL_ID_RE = re.compile(r"^-?\d{5,20}$")
+
+
+async def _validate_log_channel(user_id: int, chat_id: int, raw: Any) -> str:
+    """
+    Normaliza y verifica el canal de auditorías antes de guardarlo:
+      • '' → desactiva el registro.
+      • @alias o ID numérico → se resuelve en Telegram; el operador debe ser creador/administrador del
+        canal de registro y el bot debe poder publicar en él (si no, los logs se perderían en silencio).
+    Devuelve el ID numérico como texto.
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    if not (_LOG_CHANNEL_ALIAS_RE.match(value) or _LOG_CHANNEL_ID_RE.match(value)):
+        raise HTTPException(status_code=422, detail="log_channel_id: usa un @alias público o el ID numérico (-100…) del canal.")
+    if master_bot_instance is None:
+        raise HTTPException(status_code=503, detail="log_channel_id: el bot no está disponible para verificar el canal.")
+    lookup: Any = int(value) if value.lstrip("-").isdigit() else value
+    try:
+        target = await asyncio.wait_for(master_bot_instance.get_chat(lookup), timeout=6)
+    except Exception:
+        raise HTTPException(status_code=422, detail="log_channel_id: no se encontró el canal. Añade el bot como administrador y revisa el ID/@alias.")
+    target_id = int(target.id)
+    if target_id == int(chat_id):
+        raise HTTPException(status_code=422, detail="log_channel_id: el canal de registro debe ser distinto de la comunidad auditada.")
+    if not (is_super_admin(user_id) or await _is_live_chat_admin(user_id, target_id, fresh=True)):
+        raise HTTPException(status_code=403, detail="log_channel_id: debes ser creador o administrador del canal de registro.")
+    try:
+        me = await master_bot_instance.get_me()
+        member = await asyncio.wait_for(master_bot_instance.get_chat_member(target_id, me.id), timeout=6)
+        status = str(getattr(member.status, "value", member.status) or "")
+        kind = _norm_chat_type(target.type, "supergroup")
+        can_post = status == "creator" or (
+            status == "administrator" and (kind != "channel" or bool(getattr(member, "can_post_messages", False)))
+        ) or (kind != "channel" and status == "member")
+    except Exception:
+        can_post = False
+    if not can_post:
+        raise HTTPException(status_code=422, detail="log_channel_id: el bot debe ser administrador con permiso para publicar en el canal de registro.")
+    return str(target_id)
+
+
 @api_router.post("/chat/{chat_id}/settings")
 async def api_update_chat_settings(
     chat_id: str,
@@ -1099,13 +1256,37 @@ async def api_update_chat_settings(
                 "message": "Ghost Purge iniciada en segundo plano."
             }
 
-        # 4. Actualización general
-        await update_chat_operational_settings(numeric_id, payload or {})
+        if action:
+            raise HTTPException(status_code=400, detail=f"Acción desconocida: {action}")
+
+        payload = dict(payload or {})
+        response_extra: Dict[str, Any] = {}
+
+        # 4. Canal de registro (auditorías): validado contra Telegram antes de guardarse.
+        if "log_channel_id" in payload:
+            payload["log_channel_id"] = await _validate_log_channel(user_id, numeric_id, payload.get("log_channel_id"))
+            response_extra["log_channel_id"] = payload["log_channel_id"]
+
+        # 5. Difusión personalizada del Estudio: se valida y guarda ANTES que el resto (si falla, nada cambia).
+        broadcast_keys = ("broadcast_target", "broadcast_interval", "promo_text")
+        if any(k in payload for k in broadcast_keys):
+            if save_broadcast_config is None:
+                raise HTTPException(status_code=503, detail="Difusión personalizada no disponible en este despliegue.")
+            broadcast_fields = {k: payload.pop(k) for k in broadcast_keys if k in payload}
+            try:
+                response_extra["broadcast"] = await save_broadcast_config(
+                    numeric_id, user_id, broadcast_fields, _plan_deps(), master_bot_instance, _is_live_chat_admin)
+            except PlanApiError as err:
+                raise HTTPException(status_code=err.status, detail=err.detail)
+
+        # 6. Actualización general (interruptores, Estudio: enlace VIP, tarifa, duración, …)
+        if payload:
+            await update_chat_operational_settings(numeric_id, payload)
 
         # Notificar en vivo a los WebSockets de la sala
-        _spawn(emit_radar_event(numeric_id, "settings_updated", payload or {}))
+        _spawn(emit_radar_event(numeric_id, "settings_updated", payload))
 
-        return {"status": "success", "chat_id": chat_id, "updated": payload}
+        return {"status": "success", "chat_id": chat_id, "updated": payload, **response_extra}
     except HTTPException:
         raise
     except ValueError:
@@ -1487,9 +1668,16 @@ async def websocket_radar(
 # 1. Importa la función constructora del router de planes de canal
 # Si el módulo no existe en este despliegue, se omite de forma segura.
 try:
-    from channel_plans_api import build_channel_plans_router  # type: ignore[import-not-found]
+    from channel_plans_api import (
+        build_channel_plans_router,
+        run_custom_broadcast_scheduler,
+        save_broadcast_config,
+    )
 except ImportError:
     build_channel_plans_router = None
+    run_custom_broadcast_scheduler = None
+    save_broadcast_config = None
+    logger.warning("[FastAPI] No se encontró 'channel_plans_api'; se omite el router de planes de canal.")
 
 # 2. Inclúyelo en tu api_router existente
 if build_channel_plans_router is not None:
@@ -1498,8 +1686,6 @@ if build_channel_plans_router is not None:
         assert_owner=assert_chat_ownership,
         get_bot=lambda: master_bot_instance,
     ))
-else:
-    logger.warning("[FastAPI] No se encontró 'channel_plans_api'; se omite el router de planes de canal.")
 
 
 app.include_router(api_router, prefix="/api")
@@ -1631,6 +1817,22 @@ async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot = None):
                 chat_type=chat_type
             )
             logger.info(f"🎯 [Auto-Detección]: '{chat_title}' ({event.chat.id}) vinculado.")
+
+            # v8.2: si quien añadió el bot no es el creador, el creador real también queda vinculado
+            # (antes no veía su propio chat en los selectores de la Mini App).
+            if bot is not None:
+                with contextlib.suppress(Exception):
+                    admins = await asyncio.wait_for(bot.get_chat_administrators(event.chat.id), timeout=6)
+                    for adm in admins:
+                        adm_status = str(getattr(adm.status, "value", adm.status) or "")
+                        if adm_status == "creator" and adm.user and not adm.user.is_bot and adm.user.id != promoter_id:
+                            await register_user_group(
+                                user_id=adm.user.id,
+                                group_id=event.chat.id,
+                                group_name=chat_title,
+                                chat_type=chat_type
+                            )
+                            logger.info(f"👑 [Auto-Detección]: creador {adm.user.id} vinculado a {event.chat.id}.")
     except Exception as e:
         logger.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
 
@@ -2035,6 +2237,11 @@ async def main():
             _spawn(radar_result, name="voice_radar")
     except Exception as e:
         logger.warning(f"⚠️ [Radar MTProto]: {e}")
+
+    # v8.2: difusión personalizada del Estudio (chat destino + intervalo). Desactivable con
+    # CUSTOM_BROADCAST_SCHEDULER=0 (p. ej. si otro worker ya publica esas promociones).
+    if run_custom_broadcast_scheduler is not None and os.getenv("CUSTOM_BROADCAST_SCHEDULER", "1").strip().lower() not in ("0", "false", "no", "off"):
+        _spawn(run_custom_broadcast_scheduler(lambda: master_bot_instance), name="custom_broadcast_scheduler")
 
     # Inicialización del worker de difusión recurrente de planes en canales
     if hasattr(ecosystem, "start_channel_broadcast_worker"):

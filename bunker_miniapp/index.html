@@ -512,30 +512,53 @@
                                 <!-- Estado del guardado reactivo (se guarda solo al editar; el botón fuerza el guardado) -->
                                 <p id="studio-save-status" role="status" aria-live="polite" data-status="idle" class="text-[10px] font-semibold min-h-[14px] leading-tight text-neutral-500"></p>
 
-                                <!-- Parámetros Tácticos de Difusión (Ecosistema Worker) -->
+                                <!-- Parámetros Tácticos de Difusión (v8.2: persistidos con el Estudio y verificados en Telegram) -->
                                 <div class="pt-2 border-t border-neutral-800/80 space-y-2">
-                                    <div class="flex items-center justify-between">
-                                        <span class="text-[10px] font-bold text-[#00f3ff] uppercase tracking-wide">Difusión Automática de Promoción</span>
-                                        <span class="text-[9px] text-emerald-400 font-mono">Ultra Ready 🟢</span>
+                                    <div class="flex items-center justify-between gap-2">
+                                        <span class="text-[10px] font-bold text-[#00f3ff] uppercase tracking-wide" data-i18n="bc_section_title">Difusión Automática de Promoción</span>
+                                        <span id="studio-broadcast-status" class="text-[9px] text-neutral-500 font-mono shrink-0">Sin programar ⚪</span>
                                     </div>
                                     <div class="grid grid-cols-2 gap-2">
                                         <div>
-                                            <span class="text-[9px] text-theme-muted">Chat Destino (@alias o ID):</span>
-                                            <input type="text" id="studio-broadcast-target" placeholder="@MiComunidad" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-0.5 focus:outline-none focus:border-[#00f3ff]">
+                                            <label for="studio-broadcast-target" class="text-[9px] text-theme-muted" data-i18n="bc_target_label">Chat Destino (@alias o ID):</label>
+                                            <input type="text" id="studio-broadcast-target" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="33" placeholder="@MiComunidad" data-i18n-placeholder="bc_target_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-0.5 focus:outline-none focus:border-[#00f3ff]">
+                                            <p id="studio-broadcast-target-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                         </div>
                                         <div>
-                                            <span class="text-[9px] text-theme-muted">Intervalo de Repetición:</span>
+                                            <label for="studio-broadcast-interval" class="text-[9px] text-theme-muted" data-i18n="bc_interval_label">Intervalo de Repetición:</label>
                                             <select id="studio-broadcast-interval" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-0.5 focus:outline-none focus:border-[#00f3ff]">
-                                                <option value="6">Cada 6 Horas</option>
-                                                <option value="12" selected>Cada 12 Horas</option>
-                                                <option value="24">Cada 24 Horas (Diario)</option>
-                                                <option value="48">Cada 48 Horas</option>
+                                                <option value="6" data-i18n="bc_interval_6">Cada 6 Horas</option>
+                                                <option value="12" selected data-i18n="bc_interval_12">Cada 12 Horas</option>
+                                                <option value="24" data-i18n="bc_interval_24">Cada 24 Horas (Diario)</option>
+                                                <option value="48" data-i18n="bc_interval_48">Cada 48 Horas</option>
                                             </select>
+                                            <p id="studio-broadcast-interval-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                         </div>
                                     </div>
+                                    <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="bc_target_hint">Vacío = sin difusión automática; "Difundir Ahora" publicará en el propio canal.</p>
                                     <div>
-                                        <span class="text-[9px] text-theme-muted">Texto del Mensaje Promocional / Payload:</span>
-                                        <textarea id="studio-promo-text" rows="2" placeholder="¡Accede a nuestro contenido VIP con beneficios exclusivos aquí!" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-0.5 focus:outline-none focus:border-[#00f3ff] resize-none"></textarea>
+                                        <div class="flex items-center justify-between">
+                                            <label for="studio-promo-text" class="text-[9px] text-theme-muted" data-i18n="bc_promo_label">Texto del Mensaje Promocional / Payload:</label>
+                                            <span id="studio-promo-counter" class="text-[9px] text-neutral-500 font-mono">0/1000</span>
+                                        </div>
+                                        <textarea id="studio-promo-text" rows="3" maxlength="1000" placeholder="¡Accede a nuestro contenido VIP con beneficios exclusivos aquí!" data-i18n-placeholder="bc_promo_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-0.5 focus:outline-none focus:border-[#00f3ff] resize-none"></textarea>
+                                        <p id="studio-promo-text-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                    </div>
+
+                                    <!-- Botonera táctica de difusión (v8.2) -->
+                                    <div class="grid grid-cols-3 gap-1.5 pt-1">
+                                        <button type="button" id="bc-preview-btn" onclick="app.previewCustomBroadcast()" class="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl border border-[#00f3ff]/40 bg-[#00f3ff]/10 text-[#00f3ff] transition active:scale-95 hover:bg-[#00f3ff]/20 disabled:opacity-40 disabled:cursor-wait">
+                                            <span class="text-base leading-none">👁️</span>
+                                            <span class="text-[8px] font-bold uppercase leading-none truncate max-w-full" data-i18n="bc_btn_preview">Vista Previa</span>
+                                        </button>
+                                        <button type="button" id="bc-send-btn" onclick="app.broadcastCustomBroadcast()" class="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl border border-[#ff00ff]/40 bg-[#ff00ff]/10 text-[#ff00ff] transition active:scale-95 hover:bg-[#ff00ff]/20 disabled:opacity-40 disabled:cursor-wait">
+                                            <span id="bc-send-icon" class="text-base leading-none">📢</span>
+                                            <span class="text-[8px] font-bold uppercase leading-none truncate max-w-full" data-i18n="bc_btn_send">Difundir Ahora</span>
+                                        </button>
+                                        <button type="button" id="bc-clear-btn" onclick="app.clearBroadcastForm()" class="flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-400 transition active:scale-95 hover:bg-rose-500/20 disabled:opacity-40 disabled:cursor-wait">
+                                            <span class="text-base leading-none">🗑️</span>
+                                            <span class="text-[8px] font-bold uppercase leading-none truncate max-w-full" data-i18n="bc_btn_clear">Limpiar</span>
+                                        </button>
                                     </div>
                                 </div>
                             </div>
@@ -643,33 +666,33 @@
                                 <i class="fa-solid fa-shield-halved"></i> <span data-i18n="perimeter_title">Matriz de Moderación & Filtros</span>
                             </h4>
                             <div class="space-y-2 text-xs">
-                                <div onclick="app.toggleSecuritySwitch('captcha')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                <div id="switch-row-captcha" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('captcha')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('captcha'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
                                     <div>
                                         <p class="text-theme-main font-bold" data-i18n="captcha_pro">Aduana Captcha Pro</p>
                                         <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
                                     </div>
-                                    <span id="switch-captcha" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
+                                    <span id="switch-captcha" class="text-neutral-500 font-bold">Sincronizando…</span>
                                 </div>
-                                <div onclick="app.toggleSecuritySwitch('autolower')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                <div id="switch-row-autolower" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('autolower')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('autolower'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
                                     <div>
                                         <p class="text-theme-main font-bold" data-i18n="autolower_title">AutoLower de Micrófonos (2%)</p>
                                         <p class="text-[10px] text-theme-muted" data-i18n="autolower_desc">Atenuación acústica de fondo</p>
                                     </div>
-                                    <span id="switch-autolower" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
+                                    <span id="switch-autolower" class="text-neutral-500 font-bold">Sincronizando…</span>
                                 </div>
-                                <div onclick="app.toggleSecuritySwitch('shield')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                <div id="switch-row-shield" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('shield')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('shield'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
                                     <div>
                                         <p class="text-theme-main font-bold" data-i18n="shield_title">Escudo Antinota</p>
                                         <p class="text-[10px] text-theme-muted" data-i18n="shield_desc">Corte de pantalla compartida</p>
                                     </div>
-                                    <span id="switch-shield" class="text-emerald-400 font-bold">ACTIVO 🟢</span>
+                                    <span id="switch-shield" class="text-neutral-500 font-bold">Sincronizando…</span>
                                 </div>
-                                <div onclick="app.toggleSecuritySwitch('linklock')" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
+                                <div id="switch-row-linklock" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('linklock')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('linklock'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
                                     <div>
                                         <p class="text-theme-main font-bold" data-i18n="linklock_title">Cerradura de Enlaces Web</p>
                                         <p class="text-[10px] text-theme-muted" data-i18n="linklock_desc">Purga inmediata de URLs no permitidas</p>
                                     </div>
-                                    <span id="switch-linklock" class="text-rose-400 font-bold">BLOQUEADO 🔴</span>
+                                    <span id="switch-linklock" class="text-neutral-500 font-bold">Sincronizando…</span>
                                 </div>
                             </div>
                         </div>
@@ -677,33 +700,33 @@
                         <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->
                         <div class="space-y-3 pt-3 border-t border-neutral-800">
                             <h4 class="text-xs font-bold text-[#ff00ff] uppercase tracking-wider flex items-center gap-1.5">
-                                <i class="fa-solid fa-dna"></i> <span>Herramientas Ultra & Clones MTProto</span>
+                                <i class="fa-solid fa-dna"></i> <span data-i18n="gc_ultra_title">Herramientas Ultra & Clones MTProto</span>
                             </h4>
 
                             <!-- Despliegue de Clon -->
                             <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
-                                <span class="text-[10px] text-theme-muted uppercase font-bold block">Token de Bot Clon (BotFather):</span>
+                                <label for="clone-bot-token" class="text-[10px] text-theme-muted uppercase font-bold block" data-i18n="gc_clone_label">Token de Bot Clon (BotFather):</label>
                                 <div class="flex gap-2">
-                                    <input type="text" id="clone-bot-token" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" class="flex-1 bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#ff00ff]">
-                                    <button onclick="app.deployClone()" class="bg-[#ff00ff]/20 text-[#ff00ff] border border-[#ff00ff]/40 px-3 py-2 rounded-lg text-xs font-bold hover:bg-[#ff00ff]/30 transition active:scale-95">Desplegar</button>
+                                    <input type="password" id="clone-bot-token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" class="flex-1 bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#ff00ff]">
+                                    <button type="button" id="btn-deploy-clone" onclick="app.deployClone()" class="bg-[#ff00ff]/20 text-[#ff00ff] border border-[#ff00ff]/40 px-3 py-2 rounded-lg text-xs font-bold hover:bg-[#ff00ff]/30 transition active:scale-95 disabled:opacity-50 disabled:cursor-wait"><span data-i18n="gc_btn_deploy">Desplegar</span></button>
                                 </div>
                             </div>
 
                             <!-- Sesión de Centinela MTProto -->
                             <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
                                 <div class="flex items-center justify-between">
-                                    <span class="text-[10px] text-theme-muted uppercase font-bold">Centinela Acústico MTProto:</span>
+                                    <label for="sentinel-session-string" class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="gc_sentinel_label">Centinela Acústico MTProto:</label>
                                     <span class="text-[9px] text-[#00f3ff]">String Session</span>
                                 </div>
                                 <input type="password" id="sentinel-session-string" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="String Session (Pyrogram)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#00f3ff]">
-                                <button onclick="app.connectSentinel()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center justify-center gap-2">
-                                    <i class="fa-solid fa-plug"></i> Conectar Centinela
+                                <button type="button" id="btn-connect-sentinel" onclick="app.connectSentinel()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-wait">
+                                    <i class="fa-solid fa-plug"></i> <span data-i18n="gc_btn_sentinel">Conectar Centinela</span>
                                 </button>
                             </div>
 
                             <!-- Botón Táctico Ghost Purge -->
-                            <button onclick="app.runGhostPurge()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
-                                <i class="fa-solid fa-skull-crossbones"></i> Ejecutar Ghost Purge (Cuentas Fantasma)
+                            <button type="button" id="btn-ghost-purge" onclick="app.runGhostPurge()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-wait">
+                                <i class="fa-solid fa-skull-crossbones"></i> <span data-i18n="gc_btn_purge">Ejecutar Ghost Purge (Cuentas Fantasma)</span>
                             </button>
                         </div>
                     </div>
@@ -946,6 +969,48 @@
                 </div>
                 <div id="plan-preview-body"></div>
                 <button type="button" onclick="app.closePlanPreview()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2.5 rounded-xl font-extrabold text-xs uppercase transition active:scale-95" data-i18n="btn_close">Cerrar</button>
+            </div>
+        </div>
+
+        <!-- v8.2 · Modal nativo del Canal de Registro (sustituye a window.prompt, que los WebViews de Telegram descartan) -->
+        <div id="modal-log-channel" role="dialog" aria-modal="true" aria-labelledby="log-channel-title" class="hidden fixed inset-0 z-[236] bg-black/90 backdrop-blur-md flex justify-center items-center p-4" onclick="if (event.target === this) app.closeLogChannelModal()">
+            <form id="log-channel-form" novalidate onsubmit="event.preventDefault(); app.saveLogChannel();" class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-5 w-full max-w-sm text-white relative space-y-3 max-h-[90vh] overflow-y-auto">
+                <button type="button" onclick="app.closeLogChannelModal()" aria-label="Cerrar" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <div class="pr-8">
+                    <span class="text-[10px] text-[#00f3ff] uppercase tracking-wider font-bold" data-i18n="logm_badge">AUDITORÍA</span>
+                    <h2 id="log-channel-title" class="text-base font-extrabold text-white uppercase tracking-wider mt-0.5" data-i18n="logm_title">Canal de Registro</h2>
+                    <p class="text-[10px] text-neutral-400 mt-1 leading-snug" data-i18n="logm_desc">Los eventos de moderación de esta comunidad se publicarán en este canal.</p>
+                </div>
+                <div class="bg-black/50 border border-neutral-800 rounded-xl p-2.5 space-y-1 text-[10px] font-mono">
+                    <p class="flex justify-between gap-2"><span class="text-neutral-500" data-i18n="logm_community">Comunidad:</span> <span id="log-channel-community" class="text-[#00f3ff] truncate">—</span></p>
+                    <p class="flex justify-between gap-2"><span class="text-neutral-500" data-i18n="logm_current">Actual:</span> <span id="log-channel-current" class="text-neutral-300 truncate">—</span></p>
+                </div>
+                <div class="space-y-1">
+                    <label for="log-channel-input" class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="logm_label">ID numérico o @alias del canal</label>
+                    <input type="text" id="log-channel-input" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="33" enterkeyhint="done" placeholder="-1001234567890 o @MiCanalDeLogs" data-i18n-placeholder="logm_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2.5 text-xs text-white font-mono focus:outline-none focus:border-[#00f3ff]">
+                    <p id="log-channel-input-error" role="alert" class="hidden text-[10px] text-rose-400"></p>
+                    <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="logm_help">El bot debe ser administrador del canal con permiso para publicar. Deja el campo vacío y guarda para desactivar el registro.</p>
+                </div>
+                <div class="grid grid-cols-2 gap-2 pt-1">
+                    <button type="button" onclick="app.closeLogChannelModal()" class="py-2.5 rounded-xl border border-neutral-600 text-neutral-300 text-xs font-bold uppercase transition active:scale-95 hover:bg-white/5" data-i18n="logm_cancel">Cancelar</button>
+                    <button type="submit" id="log-channel-save-btn" class="py-2.5 rounded-xl bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 text-xs font-extrabold uppercase transition active:scale-95 hover:bg-[#00f3ff]/30 disabled:opacity-50 disabled:cursor-wait"><span id="log-channel-save-label" data-i18n="logm_save">Guardar</span></button>
+                </div>
+            </form>
+        </div>
+
+        <!-- v8.2 · Vista previa de la difusión personalizada del Estudio -->
+        <div id="modal-broadcast-preview" role="dialog" aria-modal="true" aria-labelledby="broadcast-preview-title" class="hidden fixed inset-0 z-[235] bg-black/90 backdrop-blur-md flex justify-center items-center p-4" onclick="if (event.target === this) app.closeBroadcastPreview()">
+            <div class="glass-panel border-t-2 border-t-[#ff00ff] rounded-3xl p-5 w-full max-w-sm text-white relative space-y-3 max-h-[90vh] overflow-y-auto">
+                <button type="button" onclick="app.closeBroadcastPreview()" aria-label="Cerrar" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <div>
+                    <h2 id="broadcast-preview-title" class="text-base font-extrabold text-[#ff00ff] uppercase tracking-wider pr-8" data-i18n="bc_preview_title">Vista previa de la difusión</h2>
+                    <p class="text-[10px] text-neutral-400 mt-0.5" data-i18n="bc_preview_hint">Así se publicará tu promoción en Telegram.</p>
+                </div>
+                <div id="broadcast-preview-body"></div>
+                <div class="grid grid-cols-2 gap-2">
+                    <button type="button" onclick="app.closeBroadcastPreview()" class="py-2.5 rounded-xl border border-neutral-600 text-neutral-300 text-xs font-bold uppercase transition active:scale-95 hover:bg-white/5" data-i18n="btn_close">Cerrar</button>
+                    <button type="button" id="bc-preview-send-btn" onclick="app.broadcastCustomBroadcast()" class="py-2.5 rounded-xl bg-[#ff00ff] text-black text-xs font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">📢 <span data-i18n="bc_btn_send">Difundir Ahora</span></button>
+                </div>
             </div>
         </div>
 

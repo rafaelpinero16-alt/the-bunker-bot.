@@ -700,27 +700,51 @@ export const ui = {
     // ======================================================================
 
     /**
-     * HTML de Telegram → HTML seguro para la vista previa. Se escapa TODO y solo se restauran las etiquetas
-     * simples sin atributos (b, i, u, s, code y sus alias). Las etiquetas se balancean: un <b> sin cerrar no
-     * debe "sangrar" a los bloques siguientes de la tarjeta, y un cierre huérfano se descarta.
+     * HTML de Telegram → HTML seguro para la vista previa. MISMA gramática que telegram_html.py
+     * (normalize_telegram_html), que es lo que el backend publica: la vista previa no puede "arreglar"
+     * algo que Telegram luego rechazaría o mostraría distinto.
+     *  · Solo b, i, u, s, code sin atributos; los alias (strong, em, ins, strike, del) se canonicalizan.
+     *  · Las entidades válidas de Telegram (&lt; &gt; &amp; &quot; &#NN; &#xHH;) se respetan
+     *    (antes se escapaban dos veces: "A &amp; B" se veía literal en la vista previa).
+     *  · Todo lo demás se escapa. Cierres huérfanos se descartan; los cruces se corrigen cerrando y
+     *    reabriendo; lo abierto se cierra al final. Dentro de <code> no se abren otras etiquetas.
      */
     safeTelegramHtml(text) {
-        const parts = this.escapeHtml(text).split(/(&lt;\/?(?:b|strong|i|em|u|ins|s|strike|del|code)&gt;)/gi);
+        const ALIASES = { b: 'b', strong: 'b', i: 'i', em: 'i', u: 'u', ins: 'u', s: 's', strike: 's', del: 's', code: 'code' };
+        const TOKEN = /(<(\/?)(b|strong|i|em|u|ins|s|strike|del|code)>)|(&(?:lt|gt|amp|quot|#\d{1,7}|#x[0-9a-fA-F]{1,6});)/gi;
+        const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const textPart = (s) => esc(s).replace(/\r?\n/g, '<br>');
+        const src = text === null || text === undefined ? '' : String(text);
+        const out = [];
         const stack = [];
-        const out = parts.map(part => {
-            const tag = part.match(/^&lt;(\/?)(b|strong|i|em|u|ins|s|strike|del|code)&gt;$/i);
-            if (!tag) return part.replace(/\r?\n/g, '<br>');
-            const name = tag[2].toLowerCase();
-            if (!tag[1]) {
+        let pos = 0;
+        let m;
+        TOKEN.lastIndex = 0;
+        while ((m = TOKEN.exec(src)) !== null) {
+            out.push(textPart(src.slice(pos, m.index)));
+            pos = TOKEN.lastIndex;
+            if (m[4]) { out.push(m[4]); continue; }
+            const closing = Boolean(m[2]);
+            const name = ALIASES[m[3].toLowerCase()];
+            const inCode = stack.includes('code');
+            if (!closing) {
+                if (inCode) { out.push(esc(m[1])); continue; }
                 stack.push(name);
-                return `<${name}>`;
+                out.push(`<${name}>`);
+                continue;
             }
-            if (stack.length && stack[stack.length - 1] === name) {
-                stack.pop();
-                return `</${name}>`;
+            if (!stack.includes(name)) { if (inCode) out.push(esc(m[1])); continue; }
+            if (inCode && name !== 'code') { out.push(esc(m[1])); continue; }
+            const reopen = [];
+            while (stack.length) {
+                const top = stack.pop();
+                out.push(`</${top}>`);
+                if (top === name) break;
+                reopen.push(top);
             }
-            return '';
-        });
+            for (let k = reopen.length - 1; k >= 0; k--) { stack.push(reopen[k]); out.push(`<${reopen[k]}>`); }
+        }
+        out.push(textPart(src.slice(pos)));
         while (stack.length) out.push(`</${stack.pop()}>`);
         return out.join('');
     },
@@ -926,19 +950,175 @@ export const ui = {
     // 🎬 ESTUDIO DE CANALES — formulario reactivo
     // ======================================================================
     STUDIO_FIELDS: {
-        target_link:   'studio-target-link',
-        stars_price:   'studio-stars-price',
-        duration_days: 'studio-duration-days'
+        target_link:        'studio-target-link',
+        stars_price:        'studio-stars-price',
+        duration_days:      'studio-duration-days',
+        broadcast_target:   'studio-broadcast-target',
+        broadcast_interval: 'studio-broadcast-interval',
+        promo_text:         'studio-promo-text'
     },
 
-    /** Valores crudos (texto) de los tres campos del Estudio. */
+    /** Valores crudos (texto) de los campos del Estudio: entrega VIP + difusión personalizada (v8.2). */
     readStudioForm() {
         const read = (id) => byId(id)?.value ?? '';
+        const f = this.STUDIO_FIELDS;
         return {
-            target_link: read(this.STUDIO_FIELDS.target_link),
-            stars_price: read(this.STUDIO_FIELDS.stars_price),
-            duration_days: read(this.STUDIO_FIELDS.duration_days)
+            target_link: read(f.target_link),
+            stars_price: read(f.stars_price),
+            duration_days: read(f.duration_days),
+            broadcast_target: read(f.broadcast_target),
+            broadcast_interval: read(f.broadcast_interval),
+            promo_text: read(f.promo_text)
         };
+    },
+
+    /** Contador de caracteres del texto promocional (rojo al superar el límite). */
+    updatePromoCounter() {
+        const area = byId(this.STUDIO_FIELDS.promo_text);
+        const counter = byId('studio-promo-counter');
+        if (!area || !counter) return;
+        const max = CONFIG.STUDIO?.PROMO_MAX || 1000;
+        const len = area.value.length;
+        counter.textContent = `${len}/${max}`;
+        counter.className = `text-[9px] font-mono ${len > max ? 'text-rose-400' : len > max * 0.9 ? 'text-amber-300' : 'text-neutral-500'}`;
+    },
+
+    /** Indicador de la difusión automática guardada en el servidor. */
+    setBroadcastStatus(cfg) {
+        const el = byId('studio-broadcast-status');
+        if (!el) return;
+        const on = Boolean(cfg && cfg.broadcast_enabled);
+        el.textContent = on ? this.tf('bc_status_on', { h: cfg.broadcast_interval }) : this.t('bc_status_off');
+        el.className = `text-[9px] font-mono shrink-0 ${on ? 'text-emerald-400' : 'text-neutral-500'}`;
+    },
+
+    /**
+     * Vista previa de la difusión personalizada. El texto pasa por safeTelegramHtml (misma gramática que
+     * telegram_html.py en el backend): lo que se ve aquí es exactamente lo que se publica.
+     */
+    renderBroadcastPreview({ promoText = '', targetLabel = '', interval = 12, scheduled = false } = {}) {
+        const body = byId('broadcast-preview-body');
+        if (!body) return;
+        const target = targetLabel
+            ? this.tf('bc_preview_target', { target: targetLabel })
+            : this.t('bc_preview_target_self');
+        const schedule = scheduled ? this.tf('bc_preview_schedule', { h: interval }) : this.t('bc_preview_schedule_off');
+        body.innerHTML = `
+        <div class="space-y-2.5">
+            <div class="flex flex-wrap gap-1.5 text-[9px] font-mono">
+                <span class="px-2 py-0.5 rounded-lg bg-black/50 border border-neutral-700 text-neutral-300">📍 ${this.escapeHtml(target)}</span>
+                <span class="px-2 py-0.5 rounded-lg bg-black/50 border border-neutral-700 text-neutral-300">⏱️ ${this.escapeHtml(schedule)}</span>
+            </div>
+            <div data-role="broadcast-preview" class="rounded-2xl bg-[#17212b] border border-white/10 overflow-hidden text-left">
+                <div class="p-3.5 space-y-2.5">
+                    <div class="text-[12px] text-neutral-200 leading-relaxed break-words">${this.safeTelegramHtml(promoText)}</div>
+                    <p class="text-[10px] text-neutral-400 italic">🛡️ Cloud Media Management</p>
+                </div>
+                <div class="px-3.5 pb-3.5">
+                    <div class="py-2 rounded-lg bg-white/10 text-center text-[11px] font-semibold text-[#8ab4f8]">${this.escapeHtml(this.t('bc_preview_buy'))}</div>
+                </div>
+            </div>
+            <p class="text-[9px] text-neutral-500 leading-snug">${this.escapeHtml(this.t('bc_preview_buy_note'))}</p>
+        </div>`;
+        this.setVisible('modal-broadcast-preview', true);
+    },
+
+    closeBroadcastPreview() {
+        this.setVisible('modal-broadcast-preview', false);
+        const body = byId('broadcast-preview-body');
+        if (body) body.innerHTML = '';
+    },
+
+    /** Deshabilita los botones de difusión mientras se publica (evita dobles envíos). */
+    setBroadcastBusy(busy) {
+        ['bc-send-btn', 'bc-preview-send-btn', 'bc-clear-btn'].forEach(id => this.setButtonBusy(id, busy));
+        const icon = byId('bc-send-icon');
+        if (icon) icon.innerHTML = busy ? '<i class="fa-solid fa-spinner fa-spin text-sm"></i>' : '📢';
+    },
+
+    /** Botón ocupado genérico (disabled + aria-busy). */
+    setButtonBusy(id, busy) {
+        const btn = byId(id);
+        if (!btn) return;
+        btn.disabled = Boolean(busy);
+        btn.setAttribute('aria-busy', busy ? 'true' : 'false');
+    },
+
+    // ======================================================================
+    // 🧾 CANAL DE REGISTRO — modal nativo (v8.2)
+    // ======================================================================
+    openLogChannelView({ community = '', current = '' } = {}) {
+        this.setText('log-channel-community', community || '—');
+        this.setText('log-channel-current', current || this.t('logm_none'));
+        const input = byId('log-channel-input');
+        if (input) input.value = current || '';
+        this.setFieldError('log-channel-input', '');
+        this.setLogChannelBusy(false);
+        this.setVisible('modal-log-channel', true);
+        // En móviles el foco abre el teclado al instante; un pequeño retraso evita saltos de la animación.
+        if (input) setTimeout(() => { try { input.focus({ preventScroll: true }); } catch (err) { input.focus(); } }, 120);
+    },
+
+    closeLogChannelView() {
+        const input = byId('log-channel-input');
+        if (input) input.blur();
+        this.setVisible('modal-log-channel', false);
+        this.setLogChannelBusy(false);
+    },
+
+    isLogChannelOpen() {
+        const el = byId('modal-log-channel');
+        return Boolean(el && !el.classList.contains('hidden'));
+    },
+
+    setLogChannelBusy(busy) {
+        this.setButtonBusy('log-channel-save-btn', busy);
+        this.setText('log-channel-save-label', this.t(busy ? 'logm_saving' : 'logm_save'));
+        const input = byId('log-channel-input');
+        if (input) input.readOnly = Boolean(busy);
+    },
+
+    /** Texto del panel "Log Channel" de la comunidad. */
+    renderLogChannelStatus(logChannel) {
+        const logEl = byId('chat-log-channel');
+        if (!logEl) return;
+        const enabled = Boolean(logChannel?.enabled && logChannel?.channel_id);
+        logEl.textContent = enabled ? `${this.t('status_enabled')} (${logChannel.channel_id})` : this.t('status_disabled');
+        logEl.className = enabled ? 'text-xs font-bold text-emerald-400 mt-1 truncate' : 'text-xs font-bold text-neutral-400 mt-1 truncate';
+    },
+
+    // ======================================================================
+    // 🛡️ CONSOLA DE GRUPOS — interruptores de moderación (v8.2)
+    // ======================================================================
+    /**
+     * Pinta los interruptores. loading=true: estado aún desconocido (nunca se muestra un valor inventado).
+     * idle=true: no hay comunidad seleccionada ('—'). busyKey: interruptor con una petición en curso.
+     */
+    renderSecuritySwitches(switches, { loading = false, busyKey = null, idle = false } = {}) {
+        (CONFIG.CONSOLE?.SWITCH_KEYS || ['captcha', 'autolower', 'shield', 'linklock']).forEach(key => {
+            const label = byId(`switch-${key}`);
+            const row = byId(`switch-row-${key}`);
+            const known = !loading && switches && Object.prototype.hasOwnProperty.call(switches, key);
+            const active = known && Boolean(switches[key]);
+            const busy = busyKey === key;
+            if (label) {
+                if (!known || busy) {
+                    label.innerHTML = busy
+                        ? '<i class="fa-solid fa-spinner fa-spin"></i>'
+                        : (idle ? '—' : this.escapeHtml(this.t('gc_switch_loading')));
+                    label.className = 'text-neutral-500 font-bold';
+                } else {
+                    label.textContent = this.t(active ? 'gc_switch_on' : 'gc_switch_off');
+                    label.className = active ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold';
+                }
+            }
+            if (row) {
+                row.setAttribute('aria-checked', active ? 'true' : 'false');
+                row.setAttribute('aria-disabled', (!known || busy) ? 'true' : 'false');
+                row.classList.toggle('opacity-60', !known || busy);
+                row.classList.toggle('cursor-wait', busy);
+            }
+        });
     },
 
     /**
@@ -950,9 +1130,16 @@ export const ui = {
         Object.entries(fields).forEach(([key, id]) => {
             const el = byId(id);
             if (!el || document.activeElement === el) return;
-            const value = values?.[key];
-            el.value = (value === null || value === undefined) ? '' : String(value);
+            if (!values || !Object.prototype.hasOwnProperty.call(values, key)) return;   // campo no incluido: se respeta
+            const value = values[key];
+            const text = (value === null || value === undefined) ? '' : String(value);
+            if (el.tagName === 'SELECT' && !Array.from(el.options).some(o => o.value === text)) {
+                el.value = String(CONFIG.STUDIO?.DEFAULT_INTERVAL ?? 12);   // valor desconocido → intervalo por defecto
+            } else {
+                el.value = text;
+            }
         });
+        this.updatePromoCounter();
     },
 
     /** Marca (o limpia) el error de un campo del Estudio. `message` vacío limpia. */
@@ -1038,8 +1225,16 @@ export const ui = {
         this.fillStudioForm({
             target_link: '',
             stars_price: CONFIG.STUDIO?.DEFAULT_PRICE ?? 150,
-            duration_days: CONFIG.STUDIO?.DEFAULT_DAYS ?? 30
+            duration_days: CONFIG.STUDIO?.DEFAULT_DAYS ?? 30,
+            broadcast_target: '',
+            broadcast_interval: CONFIG.STUDIO?.DEFAULT_INTERVAL ?? 12,
+            promo_text: ''
         });
+        this.updatePromoCounter();
+        this.setBroadcastStatus(null);
+        this.closeBroadcastPreview();
+        this.closeLogChannelView();
+        this.renderSecuritySwitches(null, { idle: true });
         this.clearStudioErrors();
         this.setStudioStatus('idle');
         this.setText('channel-id-display', 'ID: —');
