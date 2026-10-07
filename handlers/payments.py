@@ -117,7 +117,7 @@ RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/")
 
 # ==========================================
 # 💰 TARIFAS Y CONFIGURACIÓN DE FACTURACIÓN

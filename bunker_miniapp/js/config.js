@@ -11,7 +11,7 @@
 
 export const CONFIG = {
     BOT_USERNAME: 'thebunkerapp_bot',
-    WEBAPP_URL: 'https://thebunkerapp2.netlify.app/',
+    WEBAPP_URL: 'https://the-bunker-bot-bunkerminiapp.vercel.app/',
     API_BASE: 'https://the-bunker-bot-production.up.railway.app',
 
     // 📡 Radar en vivo: el WebSocket del backend vive en el mismo dominio de Railway

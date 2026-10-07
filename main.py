@@ -239,7 +239,7 @@ from middlewares.anti_spam import AntiSpamMiddleware
 # ==========================================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_GROUP_ID_RAW = os.getenv("ADMIN_GROUP_ID", "-1004351489258").strip()
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/").strip()
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/").strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ BOT_TOKEN no está definido en las variables de entorno.")
