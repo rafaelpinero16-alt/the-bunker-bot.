@@ -337,6 +337,42 @@ export const api = {
         return await this.post(`/channel/${channel}/plan/${plan}/invite-link`, {});
     },
 
+    // --- Paridad 1:1 Mini App ↔ bot (v8.3) ---
+
+    /** GET /api/chat/{chat_id}/configuration → { configuration: { aduana, acoustic, tips, perimeter, meta } } */
+    async fetchChatConfiguration(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/configuration`, { timeoutMs: 12000 });
+    },
+
+    /**
+     * POST /api/chat/{chat_id}/configuration — árbol completo o parcial ({ aduana: { captcha_enabled: true } }).
+     * El servidor valida todo el lote (422 "campo: motivo") y lo guarda en una única transacción.
+     */
+    async updateChatConfiguration(chatId, configuration) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/configuration`, { configuration }, { timeoutMs: 15000 });
+    },
+
+    /**
+     * POST /api/channel/{channel_id}/plan/create → { plan, purchase_link, delivery: { ready, invite_link } }
+     * Inserta un plan activo en channel_plans; delivery indica si el bot podrá invitar a los compradores.
+     */
+    async createChannelPlan(channelId, planData) {
+        const channel = numericId(channelId);
+        if (!channel) return INVALID_ID_RESULT;
+        const body = {
+            plan_name: planData?.plan_name ?? '',
+            stars_price: planData?.stars_price,
+            duration_days: planData?.duration_days,
+            target_link: planData?.target_link ?? '',
+            promo_text: planData?.promo_text ?? ''
+        };
+        return await this.post(`/channel/${channel}/plan/create`, body, { timeoutMs: 15000 });
+    },
+
     // --- Difusión personalizada del Estudio de Canales (v8.2) ---
 
     /** GET /api/channel/{channel_id}/broadcast-config → { broadcast_target, broadcast_interval, promo_text, broadcast_enabled } */

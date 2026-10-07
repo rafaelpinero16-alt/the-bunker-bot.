@@ -485,31 +485,67 @@
                             </select>
                         </div>
 
-                        <!-- Entrega VIP & Automatización de Broadcast -->
-                        <div class="bg-black/50 p-4 rounded-2xl border border-neutral-800 space-y-3">
-                            <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-2">
-                                <i class="fa-solid fa-link"></i> <span data-i18n="vip_delivery_title">Enlace VIP & Entrega Automática</span>
-                            </h4>
-                            <div class="space-y-2.5 text-xs">
+                        <!-- v8.3 · GENERADOR VISUAL CRUD DE PLANES (crea registros reales en channel_plans) -->
+                        <div id="plan-form-panel" class="bg-black/50 p-4 rounded-2xl border border-[#ff00ff]/30 space-y-3 shadow-[0_0_18px_rgba(255,0,255,0.08)]">
+                            <div>
+                                <h4 class="text-xs font-bold text-[#ff00ff] uppercase tracking-wider flex items-center gap-2">
+                                    <i class="fa-solid fa-gem"></i> <span data-i18n="pf_title">Generador de Planes VIP</span>
+                                </h4>
+                                <p class="text-[10px] text-neutral-400 mt-1 leading-snug" data-i18n="pf_desc">Crea un plan real en el catálogo del canal.</p>
+                            </div>
+                            <form id="plan-form" novalidate onsubmit="event.preventDefault(); app.createPlanFromForm();" class="space-y-2.5 text-xs">
                                 <div>
-                                    <span class="text-[10px] text-theme-muted" data-i18n="vip_target_label">Destino VIP (Canal Privado / Recurso):</span>
-                                    <input type="text" id="studio-target-link" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" placeholder="https://t.me/+... (Se incrustará en un Botón Inline)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#00f3ff]">
-                                    <p id="studio-target-link-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                    <label for="plan-form-name" class="text-[10px] text-theme-muted" data-i18n="pf_name_label">Nombre del Plan:</label>
+                                    <input type="text" id="plan-form-name" maxlength="64" autocomplete="off" placeholder="VIP Mensual" data-i18n-placeholder="pf_name_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#ff00ff]">
+                                    <p id="plan-form-name-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                 </div>
                                 <div class="grid grid-cols-2 gap-2">
                                     <div>
-                                        <span class="text-[10px] text-theme-muted" data-i18n="stars_rate_label">Tarifa en Stars (XTR):</span>
-                                        <input type="number" id="studio-stars-price" inputmode="numeric" min="1" max="10000" step="1" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
-                                        <p id="studio-stars-price-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        <label for="plan-form-price" class="text-[10px] text-theme-muted" data-i18n="pf_price_label">Tarifa en Stars (XTR):</label>
+                                        <input type="number" id="plan-form-price" inputmode="numeric" min="1" max="10000" step="1" value="150" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#ff00ff]">
+                                        <p id="plan-form-price-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                     </div>
                                     <div>
-                                        <span class="text-[10px] text-theme-muted" data-i18n="duration_days_label">Duración (Días):</span>
-                                        <input type="number" id="studio-duration-days" inputmode="numeric" min="1" max="365" step="1" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
-                                        <p id="studio-duration-days-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        <label for="plan-form-days" class="text-[10px] text-theme-muted" data-i18n="pf_days_label">Duración (Días):</label>
+                                        <input type="number" id="plan-form-days" inputmode="numeric" min="1" max="365" step="1" value="30" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#ff00ff]">
+                                        <p id="plan-form-days-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                     </div>
                                 </div>
+                                <div>
+                                    <label for="plan-form-link" class="text-[10px] text-theme-muted" data-i18n="pf_link_label">Destino VIP (opcional):</label>
+                                    <input type="text" id="plan-form-link" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="256" placeholder="https://t.me/+... o @alias" data-i18n-placeholder="pf_link_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-neutral-200 mt-1 focus:outline-none focus:border-[#ff00ff]">
+                                    <p id="plan-form-link-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                </div>
+                                <div>
+                                    <div class="flex items-center justify-between">
+                                        <label for="plan-form-promo" class="text-[10px] text-theme-muted" data-i18n="pf_promo_label">Texto Promocional / Payload:</label>
+                                        <span id="plan-form-promo-counter" class="text-[9px] text-neutral-500 font-mono">0/1000</span>
+                                    </div>
+                                    <textarea id="plan-form-promo" rows="3" maxlength="1000" placeholder="Describe el beneficio." data-i18n-placeholder="pf_promo_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#ff00ff] resize-none"></textarea>
+                                    <p id="plan-form-promo-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                </div>
+                                <div class="grid grid-cols-4 gap-1.5 pt-1">
+                                    <button type="submit" id="pf-create-btn" class="col-span-4 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[#ff00ff] text-black font-extrabold uppercase text-[11px] transition active:scale-95 shadow-[0_0_15px_rgba(255,0,255,0.35)] disabled:opacity-50 disabled:cursor-wait">
+                                        <span id="pf-create-icon">💾</span> <span id="pf-create-label" data-i18n="pf_btn_create">Crear y Activar</span>
+                                    </button>
+                                    <button type="button" id="pf-preview-btn" onclick="app.previewPlanForm()" class="col-span-4 sm:col-span-1 flex sm:flex-col items-center justify-center gap-1 py-2 rounded-xl border border-[#00f3ff]/40 bg-[#00f3ff]/10 text-[#00f3ff] transition active:scale-95 disabled:opacity-40">
+                                        <span class="text-base leading-none">👁️</span><span class="text-[8px] font-bold uppercase" data-i18n="pf_btn_preview">Previsualizar</span>
+                                    </button>
+                                    <button type="button" id="pf-broadcast-btn" onclick="app.broadcastPlanForm()" class="col-span-2 sm:col-span-2 flex sm:flex-col items-center justify-center gap-1 py-2 rounded-xl border border-[#ff00ff]/40 bg-[#ff00ff]/10 text-[#ff00ff] transition active:scale-95 disabled:opacity-40 disabled:cursor-wait">
+                                        <span class="text-base leading-none">📢</span><span class="text-[8px] font-bold uppercase" data-i18n="pf_btn_broadcast">Difundir</span>
+                                    </button>
+                                    <button type="button" id="pf-clear-btn" onclick="app.clearPlanForm()" class="col-span-2 sm:col-span-1 flex sm:flex-col items-center justify-center gap-1 py-2 rounded-xl border border-rose-500/40 bg-rose-500/10 text-rose-400 transition active:scale-95 disabled:opacity-40">
+                                        <span class="text-base leading-none">🗑️</span><span class="text-[8px] font-bold uppercase" data-i18n="pf_btn_clear">Limpiar</span>
+                                    </button>
+                                </div>
+                                <div id="plan-form-result" class="hidden rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-2.5 space-y-1 text-[10px] font-mono"></div>
+                            </form>
+                        </div>
 
-                                <!-- Estado del guardado reactivo (se guarda solo al editar; el botón fuerza el guardado) -->
+                        <!-- Difusión automática de promoción (persistida con el Estudio y verificada en Telegram) -->
+                        <div class="bg-black/50 p-4 rounded-2xl border border-neutral-800 space-y-3">
+                            <div class="space-y-2.5 text-xs">
+                                <!-- Estado del guardado reactivo de la difusión -->
                                 <p id="studio-save-status" role="status" aria-live="polite" data-status="idle" class="text-[10px] font-semibold min-h-[14px] leading-tight text-neutral-500"></p>
 
                                 <!-- Parámetros Tácticos de Difusión (v8.2: persistidos con el Estudio y verificados en Telegram) -->
@@ -660,41 +696,242 @@
                             </select>
                         </div>
 
-                        <!-- BLOQUE 1: MATRIZ DE MODERACIÓN Y CERRADURAS TÁCTICAS -->
-                        <div class="space-y-2.5 pt-2">
-                            <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-1.5">
-                                <i class="fa-solid fa-shield-halved"></i> <span data-i18n="perimeter_title">Matriz de Moderación & Filtros</span>
-                            </h4>
-                            <div class="space-y-2 text-xs">
-                                <div id="switch-row-captcha" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('captcha')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('captcha'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                    <div>
-                                        <p class="text-theme-main font-bold" data-i18n="captcha_pro">Aduana Captcha Pro</p>
-                                        <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
-                                    </div>
-                                    <span id="switch-captcha" class="text-neutral-500 font-bold">Sincronizando…</span>
-                                </div>
-                                <div id="switch-row-autolower" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('autolower')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('autolower'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                    <div>
-                                        <p class="text-theme-main font-bold" data-i18n="autolower_title">AutoLower de Micrófonos (2%)</p>
-                                        <p class="text-[10px] text-theme-muted" data-i18n="autolower_desc">Atenuación acústica de fondo</p>
-                                    </div>
-                                    <span id="switch-autolower" class="text-neutral-500 font-bold">Sincronizando…</span>
-                                </div>
-                                <div id="switch-row-shield" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('shield')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('shield'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                    <div>
-                                        <p class="text-theme-main font-bold" data-i18n="shield_title">Escudo Antinota</p>
-                                        <p class="text-[10px] text-theme-muted" data-i18n="shield_desc">Corte de pantalla compartida</p>
-                                    </div>
-                                    <span id="switch-shield" class="text-neutral-500 font-bold">Sincronizando…</span>
-                                </div>
-                                <div id="switch-row-linklock" role="switch" tabindex="0" aria-checked="false" onclick="app.toggleSecuritySwitch('linklock')" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); app.toggleSecuritySwitch('linklock'); }" class="cursor-pointer flex items-center justify-between bg-black/50 p-3 rounded-xl border border-neutral-800 hover:border-[#00f3ff]/40 transition">
-                                    <div>
-                                        <p class="text-theme-main font-bold" data-i18n="linklock_title">Cerradura de Enlaces Web</p>
-                                        <p class="text-[10px] text-theme-muted" data-i18n="linklock_desc">Purga inmediata de URLs no permitidas</p>
-                                    </div>
-                                    <span id="switch-linklock" class="text-neutral-500 font-bold">Sincronizando…</span>
-                                </div>
+                        <!-- v8.3 · CONSOLA DE PROGRAMACIÓN 1:1 (mismas columnas que lee el bot) -->
+                        <div id="cfg-console" class="space-y-2.5 pt-2">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-sliders"></i> <span data-i18n="cfg_title">Programación del Bot</span>
+                                </h4>
+                                <span id="cfg-console-state" class="text-[9px] font-mono text-neutral-500" data-i18n="cfg_pick">Selecciona una comunidad para programar el bot.</span>
                             </div>
+                            <p class="text-[10px] text-neutral-500 leading-snug" data-i18n="cfg_desc">Cada cambio rige el comportamiento del bot en la comunidad al instante.</p>
+                            <details id="cfg-section-aduana" data-section="aduana" class="cfg-section group bg-black/50 rounded-2xl border border-neutral-800 open:border-[#00f3ff]/40 transition" open>
+                                <summary class="list-none cursor-pointer select-none p-3.5 flex items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <span class="w-8 h-8 shrink-0 rounded-xl bg-[#00f3ff]/10 border border-[#00f3ff]/30 text-[#00f3ff] flex items-center justify-center"><i class="fa-solid fa-user-shield"></i></span>
+                                        <div class="min-w-0">
+                                            <p class="text-xs font-extrabold text-theme-main uppercase tracking-wide" data-i18n="cfg_sec_aduana">Aduana & Bienvenida</p>
+                                            <p class="text-[10px] text-theme-muted truncate" data-i18n="cfg_sec_aduana_desc">Reto de verificación para nuevos miembros y mensaje de bienvenida.</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <span id="cfg-status-aduana" class="text-[9px] font-mono text-neutral-500"></span>
+                                        <i class="fa-solid fa-chevron-down text-neutral-500 text-[10px] transition group-open:rotate-180"></i>
+                                    </div>
+                                </summary>
+                                <div class="px-3.5 pb-3.5 space-y-2.5 text-xs">
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_captcha_enabled">Aduana Captcha Pro</p>
+                                            <p class="text-[10px] text-theme-muted" data-i18n="captcha_desc">Desafío privado antes de ingresar</p>
+                                        </div>
+                                        <button type="button" id="cfg-captcha_enabled" role="switch" aria-checked="false" data-field="captcha_enabled" onclick="app.toggleConfigSwitch('captcha_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Aduana Captcha Pro</span>
+                                        </button>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label for="cfg-captcha_mode" class="text-[10px] text-theme-muted" data-i18n="cfg_captcha_mode">Modo de Reto:</label>
+                                            <select id="cfg-captcha_mode" data-section="aduana" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                                <option value="button" data-i18n="cfg_captcha_mode_button">Botón simple («Soy humano»)</option>
+                                                <option value="math" data-i18n="cfg_captcha_mode_math">Desafío aritmético</option>
+                                            </select>
+                                            <p id="cfg-captcha_mode-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        </div>
+                                        <div>
+                                            <label for="cfg-captcha_timeout" class="text-[10px] text-theme-muted" data-i18n="cfg_captcha_timeout">Tiempo Límite:</label>
+                                            <select id="cfg-captcha_timeout" data-section="aduana" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                                <option value="30">30 s</option>
+                                                <option value="60" selected>60 s</option>
+                                                <option value="120">120 s</option>
+                                                <option value="300">300 s</option>
+                                            </select>
+                                            <p id="cfg-captcha_timeout-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div class="flex items-center justify-between">
+                                            <label for="cfg-custom_welcome" class="text-[10px] text-theme-muted" data-i18n="cfg_custom_welcome">Mensaje de Bienvenida:</label>
+                                            <span id="cfg-custom_welcome-counter" class="text-[9px] text-neutral-500 font-mono">0/1000</span>
+                                        </div>
+                                        <textarea id="cfg-custom_welcome" data-section="aduana" rows="3" maxlength="1000" placeholder="¡Bienvenido {name} a {title}!" data-i18n-placeholder="cfg_welcome_placeholder" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff] resize-none"></textarea>
+                                        <div class="flex items-center gap-1.5 mt-1 flex-wrap">
+                                            <span class="text-[9px] text-neutral-500" data-i18n="cfg_welcome_vars">Variables:</span>
+                                            <button type="button" onclick="app.insertWelcomeVariable('name')" class="px-2 py-0.5 rounded-md bg-[#00f3ff]/10 border border-[#00f3ff]/30 text-[#00f3ff] text-[9px] font-mono active:scale-95">{name}</button>
+                                            <button type="button" onclick="app.insertWelcomeVariable('username')" class="px-2 py-0.5 rounded-md bg-[#00f3ff]/10 border border-[#00f3ff]/30 text-[#00f3ff] text-[9px] font-mono active:scale-95">{username}</button>
+                                            <button type="button" onclick="app.insertWelcomeVariable('title')" class="px-2 py-0.5 rounded-md bg-[#00f3ff]/10 border border-[#00f3ff]/30 text-[#00f3ff] text-[9px] font-mono active:scale-95">{title}</button>
+                                        </div>
+                                        <p id="cfg-custom_welcome-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                    </div>
+                                    <button type="button" id="cfg-save-aduana" onclick="app.saveConfigSection('aduana')" class="w-full py-2 rounded-xl bg-[#00f3ff]/15 text-[#00f3ff] border border-[#00f3ff]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
+                                        <i class="fa-solid fa-floppy-disk mr-1"></i> <span id="cfg-save-label-aduana" data-i18n="cfg_save">Guardar</span>
+                                    </button>
+                                </div>
+                            </details>
+                            <details id="cfg-section-acoustic" data-section="acoustic" class="cfg-section group bg-black/50 rounded-2xl border border-neutral-800 open:border-[#ff00ff]/40 transition">
+                                <summary class="list-none cursor-pointer select-none p-3.5 flex items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <span class="w-8 h-8 shrink-0 rounded-xl bg-[#ff00ff]/10 border border-[#ff00ff]/30 text-[#ff00ff] flex items-center justify-center"><i class="fa-solid fa-microphone-lines"></i></span>
+                                        <div class="min-w-0">
+                                            <p class="text-xs font-extrabold text-theme-main uppercase tracking-wide" data-i18n="cfg_sec_acoustic">Acústica & Videochat</p>
+                                            <p class="text-[10px] text-theme-muted truncate" data-i18n="cfg_sec_acoustic_desc">Atenuación automática, escudo de pantalla y tarifas del videochat.</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <span id="cfg-status-acoustic" class="text-[9px] font-mono text-neutral-500"></span>
+                                        <i class="fa-solid fa-chevron-down text-neutral-500 text-[10px] transition group-open:rotate-180"></i>
+                                    </div>
+                                </summary>
+                                <div class="px-3.5 pb-3.5 space-y-2.5 text-xs">
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_autolower_enabled">AutoLower de Micrófonos</p>
+                                            <p class="text-[10px] text-theme-muted" data-i18n="autolower_desc">Atenuación acústica de fondo</p>
+                                        </div>
+                                        <button type="button" id="cfg-autolower_enabled" role="switch" aria-checked="false" data-field="autolower_enabled" onclick="app.toggleConfigSwitch('autolower_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">AutoLower de Micrófonos</span>
+                                        </button>
+                                    </div>
+                                    <div>
+                                        <div class="flex items-center justify-between">
+                                            <label for="cfg-autolower_pct" class="text-[10px] text-theme-muted" data-i18n="cfg_autolower_pct">Atenuación:</label>
+                                            <span id="cfg-autolower_pct-value" class="text-[10px] font-mono font-bold text-[#00f3ff]">2%</span>
+                                        </div>
+                                        <input type="range" id="cfg-autolower_pct" data-section="acoustic" min="1" max="10" step="1" value="2" class="cfg-input w-full mt-1 accent-[#00f3ff]">
+                                        <p id="cfg-autolower_pct-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_shield_enabled">Escudo Antinota (Screen-Sharing Shield)</p>
+                                            <p class="text-[10px] text-theme-muted" data-i18n="shield_desc">Corte de pantalla compartida</p>
+                                        </div>
+                                        <button type="button" id="cfg-shield_enabled" role="switch" aria-checked="false" data-field="shield_enabled" onclick="app.toggleConfigSwitch('shield_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Escudo Antinota (Screen-Sharing Shield)</span>
+                                        </button>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label for="cfg-micvip_price" class="text-[10px] text-theme-muted" data-i18n="cfg_micvip_price">Pase VIP 24h (MicVIP) ⭐:</label>
+                                            <input type="number" id="cfg-micvip_price" data-section="acoustic" inputmode="numeric" min="1" max="10000" step="1" value="50" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                            <p id="cfg-micvip_price-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        </div>
+                                        <div>
+                                            <label for="cfg-speaker_price" class="text-[10px] text-theme-muted" data-i18n="cfg_speaker_price">Turno Prioritario (Cola AMA) ⭐:</label>
+                                            <input type="number" id="cfg-speaker_price" data-section="acoustic" inputmode="numeric" min="1" max="10000" step="1" value="25" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                            <p id="cfg-speaker_price-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        </div>
+                                    </div>
+                                    <button type="button" id="cfg-save-acoustic" onclick="app.saveConfigSection('acoustic')" class="w-full py-2 rounded-xl bg-[#ff00ff]/15 text-[#ff00ff] border border-[#ff00ff]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
+                                        <i class="fa-solid fa-floppy-disk mr-1"></i> <span id="cfg-save-label-acoustic" data-i18n="cfg_save">Guardar</span>
+                                    </button>
+                                </div>
+                            </details>
+                            <details id="cfg-section-tips" data-section="tips" class="cfg-section group bg-black/50 rounded-2xl border border-neutral-800 open:border-[#fbbf24]/40 transition">
+                                <summary class="list-none cursor-pointer select-none p-3.5 flex items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <span class="w-8 h-8 shrink-0 rounded-xl bg-[#fbbf24]/10 border border-[#fbbf24]/30 text-[#fbbf24] flex items-center justify-center"><i class="fa-solid fa-star"></i></span>
+                                        <div class="min-w-0">
+                                            <p class="text-xs font-extrabold text-theme-main uppercase tracking-wide" data-i18n="cfg_sec_tips">Propinas & Monetización</p>
+                                            <p class="text-[10px] text-theme-muted truncate" data-i18n="cfg_sec_tips_desc">Aportes voluntarios en Telegram Stars para la comunidad.</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <span id="cfg-status-tips" class="text-[9px] font-mono text-neutral-500"></span>
+                                        <i class="fa-solid fa-chevron-down text-neutral-500 text-[10px] transition group-open:rotate-180"></i>
+                                    </div>
+                                </summary>
+                                <div class="px-3.5 pb-3.5 space-y-2.5 text-xs">
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_tips_enabled">Propinas en Stars</p>
+                                        </div>
+                                        <button type="button" id="cfg-tips_enabled" role="switch" aria-checked="false" data-field="tips_enabled" onclick="app.toggleConfigSwitch('tips_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Propinas en Stars</span>
+                                        </button>
+                                    </div>
+                                    <div>
+                                        <label for="cfg-tips_presets" class="text-[10px] text-theme-muted" data-i18n="cfg_tips_presets">Montos rápidos (separados por coma):</label>
+                                        <input type="text" id="cfg-tips_presets" data-section="tips" inputmode="numeric" autocomplete="off" maxlength="60" placeholder="15, 50, 100, 250, 500" data-i18n-placeholder="cfg_tips_presets_placeholder" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-amber-300 font-mono mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                        <p id="cfg-tips_presets-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_custom_tips_allowed">Permitir monto libre</p>
+                                        </div>
+                                        <button type="button" id="cfg-custom_tips_allowed" role="switch" aria-checked="false" data-field="custom_tips_allowed" onclick="app.toggleConfigSwitch('custom_tips_allowed')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Permitir monto libre</span>
+                                        </button>
+                                    </div>
+                                    <button type="button" id="cfg-save-tips" onclick="app.saveConfigSection('tips')" class="w-full py-2 rounded-xl bg-[#fbbf24]/15 text-[#fbbf24] border border-[#fbbf24]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
+                                        <i class="fa-solid fa-floppy-disk mr-1"></i> <span id="cfg-save-label-tips" data-i18n="cfg_save">Guardar</span>
+                                    </button>
+                                </div>
+                            </details>
+                            <details id="cfg-section-perimeter" data-section="perimeter" class="cfg-section group bg-black/50 rounded-2xl border border-neutral-800 open:border-[#34d399]/40 transition">
+                                <summary class="list-none cursor-pointer select-none p-3.5 flex items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <span class="w-8 h-8 shrink-0 rounded-xl bg-[#34d399]/10 border border-[#34d399]/30 text-[#34d399] flex items-center justify-center"><i class="fa-solid fa-shield-halved"></i></span>
+                                        <div class="min-w-0">
+                                            <p class="text-xs font-extrabold text-theme-main uppercase tracking-wide" data-i18n="cfg_sec_perimeter">Perímetro & Filtros</p>
+                                            <p class="text-[10px] text-theme-muted truncate" data-i18n="cfg_sec_perimeter_desc">Enlaces, inundación de mensajes y limpieza de avisos de servicio.</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <span id="cfg-status-perimeter" class="text-[9px] font-mono text-neutral-500"></span>
+                                        <i class="fa-solid fa-chevron-down text-neutral-500 text-[10px] transition group-open:rotate-180"></i>
+                                    </div>
+                                </summary>
+                                <div class="px-3.5 pb-3.5 space-y-2.5 text-xs">
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_linklock_enabled">Cerradura de Enlaces (LinkLock)</p>
+                                            <p class="text-[10px] text-theme-muted" data-i18n="linklock_desc">Purga inmediata de URLs no permitidas</p>
+                                        </div>
+                                        <button type="button" id="cfg-linklock_enabled" role="switch" aria-checked="false" data-field="linklock_enabled" onclick="app.toggleConfigSwitch('linklock_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Cerradura de Enlaces (LinkLock)</span>
+                                        </button>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_antiflood_enabled">Anti-Flood</p>
+                                        </div>
+                                        <button type="button" id="cfg-antiflood_enabled" role="switch" aria-checked="false" data-field="antiflood_enabled" onclick="app.toggleConfigSwitch('antiflood_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Anti-Flood</span>
+                                        </button>
+                                    </div>
+                                    <div class="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label for="cfg-antiflood_rate" class="text-[10px] text-theme-muted" data-i18n="cfg_antiflood_rate">Mensajes permitidos:</label>
+                                            <input type="number" id="cfg-antiflood_rate" data-section="perimeter" inputmode="numeric" min="3" max="50" step="1" value="10" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                            <p id="cfg-antiflood_rate-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        </div>
+                                        <div>
+                                            <label for="cfg-antiflood_window" class="text-[10px] text-theme-muted" data-i18n="cfg_antiflood_window">por ventana de (s):</label>
+                                            <input type="number" id="cfg-antiflood_window" data-section="perimeter" inputmode="numeric" min="5" max="120" step="1" value="15" class="cfg-input w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                                            <p id="cfg-antiflood_window-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
+                                        <div class="min-w-0">
+                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_service_cleaner_enabled">Purga de mensajes de servicio (uniones/salidas)</p>
+                                        </div>
+                                        <button type="button" id="cfg-service_cleaner_enabled" role="switch" aria-checked="false" data-field="service_cleaner_enabled" onclick="app.toggleConfigSwitch('service_cleaner_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
+                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
+                                            <span class="sr-only">Purga de mensajes de servicio (uniones/salidas)</span>
+                                        </button>
+                                    </div>
+                                    <button type="button" id="cfg-save-perimeter" onclick="app.saveConfigSection('perimeter')" class="w-full py-2 rounded-xl bg-[#34d399]/15 text-[#34d399] border border-[#34d399]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
+                                        <i class="fa-solid fa-floppy-disk mr-1"></i> <span id="cfg-save-label-perimeter" data-i18n="cfg_save">Guardar</span>
+                                    </button>
+                                </div>
+                            </details>
                         </div>
 
                         <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->

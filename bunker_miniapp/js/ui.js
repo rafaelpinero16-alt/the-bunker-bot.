@@ -949,27 +949,242 @@ export const ui = {
     // ======================================================================
     // 🎬 ESTUDIO DE CANALES — formulario reactivo
     // ======================================================================
+    /**
+     * Campos del Estudio que se guardan de forma reactiva: la difusión automática de promoción (v8.2).
+     * Enlace VIP, tarifa y duración ya no son "ajustes sueltos" del canal: viven en cada plan que crea el
+     * Generador de Planes (v8.3) dentro de channel_plans, que es lo que cobra y entrega el bot.
+     */
     STUDIO_FIELDS: {
-        target_link:        'studio-target-link',
-        stars_price:        'studio-stars-price',
-        duration_days:      'studio-duration-days',
         broadcast_target:   'studio-broadcast-target',
         broadcast_interval: 'studio-broadcast-interval',
         promo_text:         'studio-promo-text'
     },
 
-    /** Valores crudos (texto) de los campos del Estudio: entrega VIP + difusión personalizada (v8.2). */
+    /** Valores crudos (texto) de la difusión del Estudio. */
     readStudioForm() {
         const read = (id) => byId(id)?.value ?? '';
         const f = this.STUDIO_FIELDS;
         return {
-            target_link: read(f.target_link),
-            stars_price: read(f.stars_price),
-            duration_days: read(f.duration_days),
             broadcast_target: read(f.broadcast_target),
             broadcast_interval: read(f.broadcast_interval),
             promo_text: read(f.promo_text)
         };
+    },
+
+    // ======================================================================
+    // ➕ GENERADOR DE PLANES (v8.3)
+    // ======================================================================
+    PLAN_FORM_FIELDS: {
+        plan_name:     'plan-form-name',
+        stars_price:   'plan-form-price',
+        duration_days: 'plan-form-days',
+        target_link:   'plan-form-link',
+        promo_text:    'plan-form-promo'
+    },
+
+    readPlanForm() {
+        const read = (id) => byId(id)?.value ?? '';
+        const f = this.PLAN_FORM_FIELDS;
+        return Object.fromEntries(Object.entries(f).map(([key, id]) => [key, read(id)]));
+    },
+
+    /** Restablece el formulario a sus valores por defecto (también con el foco: es una acción explícita). */
+    resetPlanForm() {
+        const defaults = {
+            plan_name: '', target_link: '', promo_text: '',
+            stars_price: String(CONFIG.PLAN_FORM?.DEFAULT_PRICE ?? 150),
+            duration_days: String(CONFIG.PLAN_FORM?.DEFAULT_DAYS ?? 30)
+        };
+        Object.entries(this.PLAN_FORM_FIELDS).forEach(([key, id]) => {
+            const el = byId(id);
+            if (el) el.value = defaults[key];
+            this.setFieldError(id, '');
+        });
+        this.updatePlanPromoCounter();
+        this.renderPlanFormResult(null);
+    },
+
+    clearPlanFormErrors() {
+        Object.values(this.PLAN_FORM_FIELDS).forEach(id => this.setFieldError(id, ''));
+    },
+
+    updatePlanPromoCounter() {
+        const area = byId(this.PLAN_FORM_FIELDS.promo_text);
+        const counter = byId('plan-form-promo-counter');
+        if (!area || !counter) return;
+        const max = CONFIG.PLAN_FORM?.PROMO_MAX || 1000;
+        const len = area.value.length;
+        counter.textContent = `${len}/${max}`;
+        counter.className = `text-[9px] font-mono ${len > max ? 'text-rose-400' : len > max * 0.9 ? 'text-amber-300' : 'text-neutral-500'}`;
+    },
+
+    /** Botones del generador ocupados (crear / difundir) con spinner en el botón principal. */
+    setPlanFormBusy(busy) {
+        ['pf-create-btn', 'pf-broadcast-btn', 'pf-clear-btn', 'pf-preview-btn'].forEach(id => this.setButtonBusy(id, busy));
+        const icon = byId('pf-create-icon');
+        if (icon) icon.innerHTML = busy ? '<i class="fa-solid fa-spinner fa-spin"></i>' : '💾';
+        this.setText('pf-create-label', this.t(busy ? 'pf_creating' : 'pf_btn_create'));
+    },
+
+    /**
+     * Resultado de la creación: enlace de compra y, si el bot puede invitar, el enlace de verificación de
+     * un solo uso (solo para el propietario). null lo oculta.
+     */
+    renderPlanFormResult(result) {
+        const box = byId('plan-form-result');
+        if (!box) return;
+        if (!result || !result.plan) {
+            box.innerHTML = '';
+            box.classList.add('hidden');
+            return;
+        }
+        const rows = [];
+        if (result.purchase_link) {
+            rows.push(`<p class="text-emerald-300 break-all">🔗 <span class="select-all">${this.escapeHtml(result.purchase_link)}</span></p>`);
+        }
+        const check = result.delivery || {};
+        if (check.ready && check.invite_link) {
+            rows.push(`<p class="text-neutral-400">${this.escapeHtml(this.t('pf_check_link'))}: <span class="text-[#00f3ff] select-all break-all">${this.escapeHtml(check.invite_link)}</span></p>`);
+        } else {
+            rows.push(`<p class="text-amber-300">⚠️ ${this.escapeHtml(this.t('pf_toast_created_warn'))}</p>`);
+        }
+        box.className = `rounded-xl border p-2.5 space-y-1 text-[10px] font-mono ${check.ready ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-amber-400/40 bg-amber-400/5'}`;
+        box.innerHTML = `<p class="text-white font-bold">💎 ${this.escapeHtml(result.plan.name)} · ${this.escapeHtml(this.fmtNum(result.plan.stars_price))} ⭐ · ${this.escapeHtml(this.tf('plans_days', { n: this.fmtNum(result.plan.duration_days) }))}</p>${rows.join('')}`;
+    },
+
+    // ======================================================================
+    // 🎛️ CONSOLA DE PROGRAMACIÓN 1:1 (v8.3)
+    // ======================================================================
+    /** Campos de cada módulo. Los de tipo 'switch' se aplican al instante; el resto con "Guardar". */
+    CONFIG_LAYOUT: {
+        aduana: {
+            captcha_enabled: 'switch', captcha_mode: 'select', captcha_timeout: 'int', custom_welcome: 'text'
+        },
+        acoustic: {
+            autolower_enabled: 'switch', autolower_pct: 'int', shield_enabled: 'switch', micvip_price: 'int', speaker_price: 'int'
+        },
+        tips: {
+            tips_enabled: 'switch', tips_presets: 'presets', custom_tips_allowed: 'switch'
+        },
+        perimeter: {
+            linklock_enabled: 'switch', antiflood_enabled: 'switch', antiflood_rate: 'int', antiflood_window: 'int',
+            service_cleaner_enabled: 'switch'
+        }
+    },
+
+    configSectionOf(field) {
+        return Object.keys(this.CONFIG_LAYOUT).find(sec => Object.prototype.hasOwnProperty.call(this.CONFIG_LAYOUT[sec], field)) || null;
+    },
+
+    /** Interruptor visual (role="switch"). busy=true muestra el pulso mientras viaja la petición. */
+    setConfigSwitch(field, on, { busy = false, disabled = false } = {}) {
+        const btn = byId(`cfg-${field}`);
+        if (!btn) return;
+        const knob = btn.querySelector('.cfg-switch-knob');
+        btn.setAttribute('aria-checked', on ? 'true' : 'false');
+        btn.disabled = Boolean(disabled || busy);
+        btn.classList.toggle('bg-[#00f3ff]/30', Boolean(on));
+        btn.classList.toggle('border-[#00f3ff]', Boolean(on));
+        btn.classList.toggle('bg-neutral-800', !on);
+        btn.classList.toggle('border-neutral-600', !on);
+        btn.classList.toggle('animate-pulse', Boolean(busy));
+        if (knob) {
+            knob.classList.toggle('left-0.5', !on);
+            knob.classList.toggle('left-6', Boolean(on));
+            knob.classList.toggle('bg-[#00f3ff]', Boolean(on));
+            knob.classList.toggle('shadow-[0_0_10px_#00f3ff]', Boolean(on));
+            knob.classList.toggle('bg-neutral-400', !on);
+        }
+    },
+
+    getConfigSwitch(field) {
+        return byId(`cfg-${field}`)?.getAttribute('aria-checked') === 'true';
+    },
+
+    updateAutolowerLabel() {
+        const range = byId('cfg-autolower_pct');
+        this.setText('cfg-autolower_pct-value', `${range ? range.value : 2}%`);
+    },
+
+    updateWelcomeCounter() {
+        const area = byId('cfg-custom_welcome');
+        const counter = byId('cfg-custom_welcome-counter');
+        if (!area || !counter) return;
+        const max = CONFIG.CHAT_CONFIG?.WELCOME_MAX || 1000;
+        counter.textContent = `${area.value.length}/${max}`;
+        counter.className = `text-[9px] font-mono ${area.value.length > max ? 'text-rose-400' : 'text-neutral-500'}`;
+    },
+
+    /**
+     * Pinta la configuración recibida del servidor. `skipSections` protege los módulos con ediciones sin
+     * guardar, y un campo con el foco nunca se pisa (el operador puede estar escribiendo).
+     */
+    renderChatConfiguration(config, { skipSections = [] } = {}) {
+        if (!config) return;
+        Object.entries(this.CONFIG_LAYOUT).forEach(([section, fields]) => {
+            if (skipSections.includes(section)) return;
+            const values = config[section] || {};
+            Object.entries(fields).forEach(([field, kind]) => {
+                if (!Object.prototype.hasOwnProperty.call(values, field)) return;
+                const value = values[field];
+                if (kind === 'switch') {
+                    this.setConfigSwitch(field, Boolean(value));
+                    return;
+                }
+                const el = byId(`cfg-${field}`);
+                if (!el || document.activeElement === el) return;
+                el.value = kind === 'presets' ? (Array.isArray(value) ? value.join(', ') : String(value ?? '')) : String(value ?? '');
+                this.setFieldError(`cfg-${field}`, '');
+            });
+        });
+        this.updateAutolowerLabel();
+        this.updateWelcomeCounter();
+    },
+
+    /** Valores crudos de los campos NO interruptor de un módulo. */
+    readConfigSection(section) {
+        const fields = this.CONFIG_LAYOUT[section] || {};
+        const out = {};
+        Object.entries(fields).forEach(([field, kind]) => {
+            if (kind === 'switch') return;
+            out[field] = byId(`cfg-${field}`)?.value ?? '';
+        });
+        return out;
+    },
+
+    /** Estado del módulo: idle | dirty | saving | saved | invalid | error | remote. */
+    setConfigSectionStatus(section, kind, text = '') {
+        const el = byId(`cfg-status-${section}`);
+        if (!el) return;
+        const tone = {
+            dirty: 'text-amber-300', saving: 'text-[#00f3ff]', saved: 'text-emerald-400',
+            invalid: 'text-rose-400', error: 'text-rose-400', remote: 'text-[#ff00ff]'
+        }[kind] || 'text-neutral-500';
+        el.textContent = text;
+        el.className = `text-[9px] font-mono ${tone}`;
+    },
+
+    setConfigSectionBusy(section, busy) {
+        this.setButtonBusy(`cfg-save-${section}`, busy);
+        this.setText(`cfg-save-label-${section}`, this.t(busy ? 'cfg_saving' : 'cfg_save'));
+    },
+
+    /**
+     * Estado global de la consola: 'idle' (sin comunidad), 'loading' o 'ready'. Fuera de 'ready' todos los
+     * controles quedan deshabilitados: nunca se edita sobre valores que no vinieron del servidor.
+     */
+    setConsoleState(kind, message = '') {
+        const ready = kind === 'ready';
+        document.querySelectorAll('#cfg-console .cfg-input, #cfg-console .cfg-switch, #cfg-console [id^="cfg-save-"]').forEach(el => {
+            if (el.tagName === 'BUTTON' && el.id.startsWith('cfg-save-label')) return;
+            el.disabled = !ready;
+        });
+        const label = byId('cfg-console-state');
+        if (label) {
+            label.textContent = message || (kind === 'loading' ? this.t('cfg_loading') : kind === 'idle' ? this.t('cfg_pick') : '');
+            label.className = `text-[9px] font-mono ${kind === 'loading' ? 'text-[#00f3ff] animate-pulse' : 'text-neutral-500'}`;
+        }
+        if (!ready) Object.keys(this.CONFIG_LAYOUT).forEach(sec => this.setConfigSectionStatus(sec, 'idle'));
     },
 
     /** Contador de caracteres del texto promocional (rojo al superar el límite). */
@@ -1095,29 +1310,11 @@ export const ui = {
      * idle=true: no hay comunidad seleccionada ('—'). busyKey: interruptor con una petición en curso.
      */
     renderSecuritySwitches(switches, { loading = false, busyKey = null, idle = false } = {}) {
-        (CONFIG.CONSOLE?.SWITCH_KEYS || ['captcha', 'autolower', 'shield', 'linklock']).forEach(key => {
-            const label = byId(`switch-${key}`);
-            const row = byId(`switch-row-${key}`);
-            const known = !loading && switches && Object.prototype.hasOwnProperty.call(switches, key);
-            const active = known && Boolean(switches[key]);
-            const busy = busyKey === key;
-            if (label) {
-                if (!known || busy) {
-                    label.innerHTML = busy
-                        ? '<i class="fa-solid fa-spinner fa-spin"></i>'
-                        : (idle ? '—' : this.escapeHtml(this.t('gc_switch_loading')));
-                    label.className = 'text-neutral-500 font-bold';
-                } else {
-                    label.textContent = this.t(active ? 'gc_switch_on' : 'gc_switch_off');
-                    label.className = active ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold';
-                }
-            }
-            if (row) {
-                row.setAttribute('aria-checked', active ? 'true' : 'false');
-                row.setAttribute('aria-disabled', (!known || busy) ? 'true' : 'false');
-                row.classList.toggle('opacity-60', !known || busy);
-                row.classList.toggle('cursor-wait', busy);
-            }
+        // Compatibilidad v8.2: los interruptores heredados son ahora campos de la consola de programación.
+        const legacy = CONFIG.CHAT_CONFIG?.LEGACY_SWITCHES || {};
+        Object.entries(legacy).forEach(([key, field]) => {
+            const known = !loading && !idle && switches && Object.prototype.hasOwnProperty.call(switches, key);
+            this.setConfigSwitch(field, known && Boolean(switches[key]), { busy: busyKey === key, disabled: !known });
         });
     },
 
@@ -1223,18 +1420,22 @@ export const ui = {
             logEl.className = 'text-xs font-bold text-neutral-400 mt-1 truncate';
         }
         this.fillStudioForm({
-            target_link: '',
-            stars_price: CONFIG.STUDIO?.DEFAULT_PRICE ?? 150,
-            duration_days: CONFIG.STUDIO?.DEFAULT_DAYS ?? 30,
             broadcast_target: '',
             broadcast_interval: CONFIG.STUDIO?.DEFAULT_INTERVAL ?? 12,
             promo_text: ''
         });
+        this.resetPlanForm();
         this.updatePromoCounter();
         this.setBroadcastStatus(null);
         this.closeBroadcastPreview();
         this.closeLogChannelView();
-        this.renderSecuritySwitches(null, { idle: true });
+        Object.keys(this.CONFIG_LAYOUT).forEach(section => {
+            Object.entries(this.CONFIG_LAYOUT[section]).forEach(([field, kind]) => {
+                if (kind === 'switch') this.setConfigSwitch(field, false, { disabled: true });
+                else this.setFieldError(`cfg-${field}`, '');
+            });
+        });
+        this.setConsoleState('idle');
         this.clearStudioErrors();
         this.setStudioStatus('idle');
         this.setText('channel-id-display', 'ID: —');

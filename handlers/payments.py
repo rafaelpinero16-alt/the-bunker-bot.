@@ -30,14 +30,17 @@ try:
     from telegram_html import normalize_telegram_html, telegram_html_to_plain  # type: ignore[import-not-found]
 except ImportError:  # Compatibilidad con entornos sin la dependencia opcional.
     def normalize_telegram_html(value: str) -> str:
-        """Normaliza HTML simple sin depender del paquete opcional."""
+        """
+        Respaldo SEGURO sin telegram_html.py: quita las etiquetas y ESCAPA el resto. El resultado se envía
+        con parse_mode=HTML, así que un '<' o '&' sin escapar haría fallar el mensaje ("can't parse
+        entities"). Se pierde el formato, nunca la entrega. Despliega telegram_html.py para conservarlo.
+        """
         if not value:
             return ""
-        text = str(value)
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = str(value).replace("\r\n", "\n").replace("\r", "\n")
         text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
-        text = re.sub(r"</?(p|div|span|b|strong|i|em|u|s|strike|code|pre|a|blockquote|ul|ol|li|h[1-6])[^>]*>", "", text, flags=re.I)
-        return text.strip()
+        text = html.unescape(re.sub(r"</?[A-Za-z][^>]*>", "", text))
+        return html.escape(text.strip(), quote=False)
 
     def telegram_html_to_plain(value: str) -> str:
         """Convierte etiquetas HTML a texto plano de forma conservadora."""
@@ -462,6 +465,39 @@ async def get_tips_config(chat_id: int) -> dict:
         return await _call_db_fn("get_tips_config", chat_id) or {}
     except Exception:
         return {}
+
+
+DEFAULT_TIP_PRESETS = (15, 50, 100, 250, 500)
+
+
+async def get_tip_rules(chat_id: int) -> dict:
+    """
+    Reglas de propinas que el operador programa desde la Mini App (v8.3): interruptor general, presets y
+    monto libre. Si la base de datos no responde se permite la propina con los presets por defecto:
+    perder una donación por un fallo transitorio es peor que aceptarla.
+    """
+    cfg = await get_tips_config(chat_id)
+    if not cfg:
+        return {"enabled": True, "presets": list(DEFAULT_TIP_PRESETS), "custom_allowed": True, "known": False}
+    presets = []
+    for value in cfg.get("presets") or DEFAULT_TIP_PRESETS:
+        try:
+            amount = int(value)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= amount <= MAX_TIP_STARS and amount not in presets:
+            presets.append(amount)
+    return {
+        "enabled": bool(cfg.get("enabled")),
+        "presets": sorted(presets)[:6] or list(DEFAULT_TIP_PRESETS),
+        "custom_allowed": bool(cfg.get("custom_allowed", 1)),
+        "known": True,
+    }
+
+
+def _tips_disabled_text(lang: str) -> str:
+    return ("⛔ Las propinas están desactivadas en esta comunidad." if lang == "es"
+            else "⛔ Tips are disabled in this community.")
 
 
 async def get_channel_plan(plan_id: int):
@@ -905,35 +941,44 @@ TEXTS = {
 # 🌟 MENÚ DE SELECCIÓN Y EMISIÓN DE PROPINAS EN STARS
 # ==========================================
 async def show_tip_selection(message: Message, group_id: int, lang: str = "es"):
-    """Despliega presets rápidos de Stars y el botón interactivo para monto personalizado."""
+    """Despliega los presets que el operador programó (Mini App) y, si lo permite, el monto libre."""
+    rules = await get_tip_rules(group_id)
+    if not rules["enabled"]:
+        await message.answer(_tips_disabled_text(lang), parse_mode="HTML")
+        return
+
     btn_custom_text = "✍️ Donar otro monto / Custom amount" if lang == "es" else "✍️ Custom amount / Other amount"
+    presets = rules["presets"]
+    rows = [
+        [InlineKeyboardButton(text=f"⭐ {amount}", callback_data=f"paytip_{group_id}_{amount}") for amount in presets[i:i + 3]]
+        for i in range(0, len(presets), 3)
+    ]
+    if rules["custom_allowed"]:
+        rows.append([InlineKeyboardButton(text=btn_custom_text, callback_data=f"paytip_custom_{group_id}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="⭐ 15", callback_data=f"paytip_{group_id}_15"),
-            InlineKeyboardButton(text="⭐ 50", callback_data=f"paytip_{group_id}_50"),
-            InlineKeyboardButton(text="⭐ 100", callback_data=f"paytip_{group_id}_100")
-        ],
-        [
-            InlineKeyboardButton(text="⭐ 250", callback_data=f"paytip_{group_id}_250"),
-            InlineKeyboardButton(text="⭐ 500", callback_data=f"paytip_{group_id}_500")
-        ],
-        [
-            InlineKeyboardButton(text=btn_custom_text, callback_data=f"paytip_custom_{group_id}")
-        ]
-    ])
-
-    text = (
-        "⭐ <b>Aporte Voluntario a la Comunidad</b>\n\n"
-        "Selecciona uno de los montos predeterminados o pulsa <b>«Donar otro monto»</b> "
-        "para ingresar la cantidad exacta de Telegram Stars que deseas enviar.\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    ) if lang == "es" else (
-        "⭐ <b>Voluntary Community Tip</b>\n\n"
-        "Select one of the preset amounts below or tap <b>«Custom amount»</b> "
-        "to specify the exact amount of Telegram Stars you wish to contribute.\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    )
+    if rules["custom_allowed"]:
+        text = (
+            "⭐ <b>Aporte Voluntario a la Comunidad</b>\n\n"
+            "Selecciona uno de los montos predeterminados o pulsa <b>«Donar otro monto»</b> "
+            "para ingresar la cantidad exacta de Telegram Stars que deseas enviar.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            "⭐ <b>Voluntary Community Tip</b>\n\n"
+            "Select one of the preset amounts below or tap <b>«Custom amount»</b> "
+            "to specify the exact amount of Telegram Stars you wish to contribute.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        )
+    else:
+        text = (
+            "⭐ <b>Aporte Voluntario a la Comunidad</b>\n\n"
+            "Selecciona uno de los montos disponibles para enviar tu aporte en Telegram Stars.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        ) if lang == "es" else (
+            "⭐ <b>Voluntary Community Tip</b>\n\n"
+            "Select one of the available amounts to send your tip in Telegram Stars.\n\n"
+            "🛡️ <i>Cloud Media Management</i>"
+        )
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
@@ -1229,8 +1274,12 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 await show_tip_selection(message, chat_id, lang)
                 return
 
-            # Si ya trae monto fijo definido, genera la factura directa
-            if tip_amount > MAX_TIP_STARS:
+            # Si ya trae monto fijo definido, genera la factura directa (respetando lo programado en la Mini App)
+            rules = await get_tip_rules(chat_id)
+            if not rules["enabled"]:
+                await message.answer(_tips_disabled_text(lang), parse_mode="HTML")
+                return
+            if tip_amount > MAX_TIP_STARS or (tip_amount not in rules["presets"] and not rules["custom_allowed"]):
                 await show_tip_selection(message, chat_id, lang)
                 return
             await send_stars_tip_invoice(bot, message.chat.id, chat_id, tip_amount, lang)
@@ -1313,6 +1362,14 @@ async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
         except ValueError:
             await callback.answer()
             return
+        rules = await get_tip_rules(group_id)
+        if not rules["enabled"] or not rules["custom_allowed"]:
+            await callback.answer(
+                _tips_disabled_text(lang) if not rules["enabled"] else
+                ("El monto libre está desactivado en esta comunidad." if lang == "es" else "Custom amounts are disabled here."),
+                show_alert=True,
+            )
+            return
         _open_custom_tip(bot.id, callback.from_user.id, group_id)
 
         cancel_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1339,9 +1396,20 @@ async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
         except ValueError:
             await callback.answer()
             return
-        await callback.answer()
         if group_id >= 0 or not (1 <= amount <= MAX_TIP_STARS):
+            await callback.answer()
             return
+        rules = await get_tip_rules(group_id)
+        if not rules["enabled"] or (amount not in rules["presets"] and not rules["custom_allowed"]):
+            # Botón de un menú antiguo (presets cambiados desde la Mini App) o callback manipulado.
+            await callback.answer(
+                _tips_disabled_text(lang) if not rules["enabled"] else
+                ("Ese monto ya no está disponible. Abre de nuevo el menú de propinas." if lang == "es"
+                 else "That amount is no longer available. Open the tip menu again."),
+                show_alert=True,
+            )
+            return
+        await callback.answer()
         try:
             await send_stars_tip_invoice(bot, callback.from_user.id, group_id, amount, lang)
         except Exception as ex:
@@ -1384,6 +1452,13 @@ async def process_custom_tip_input(message: Message, bot: Bot):
         return
 
     amount = int(text_val)
+    rules = await get_tip_rules(group_id)
+    if not rules["enabled"] or not rules["custom_allowed"]:
+        # El operador desactivó el monto libre mientras el usuario escribía.
+        await message.answer(_tips_disabled_text(lang) if not rules["enabled"] else
+                             ("El monto libre está desactivado en esta comunidad." if lang == "es"
+                              else "Custom amounts are disabled here."))
+        return
     try:
         await send_stars_tip_invoice(bot, message.chat.id, group_id, amount, lang)
     except Exception as ex:

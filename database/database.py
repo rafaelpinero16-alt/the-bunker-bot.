@@ -405,6 +405,12 @@ def init_db():
             ("ai_response_mode", "TEXT DEFAULT 'mention_only'"),
             ("ai_response_chance", "INTEGER DEFAULT 15"),
             ("ai_personality_tone", "TEXT DEFAULT 'guardian'"),
+            # v8.3 · Paridad Mini App ↔ bot
+            ("autolower_pct", "INTEGER DEFAULT 2"),
+            ("tips_presets", "TEXT DEFAULT '[15, 50, 100, 250, 500]'"),
+            ("tips_custom_allowed", "INTEGER DEFAULT 1"),
+            ("config_updated_at", "INTEGER"),
+            ("config_updated_by", "INTEGER"),
         ]
 
         _ensure_columns(cursor, "group_settings", settings_columns)
@@ -1588,7 +1594,8 @@ def get_tips_config(group_id: int) -> dict:
         try:
             cursor.execute("""
                 SELECT tips_enabled, tips_amount, tips_target_channel,
-                       tips_custom_text, tips_media_id, tips_media_type
+                       tips_custom_text, tips_media_id, tips_media_type,
+                       tips_presets, tips_custom_allowed
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
@@ -1600,12 +1607,15 @@ def get_tips_config(group_id: int) -> dict:
                     "tips_custom_text": row[3] if row[3] else None,
                     "tips_media_id": row[4] if row[4] else None,
                     "tips_media_type": row[5] if row[5] else None,
+                    "presets": _parse_tip_presets(row[6]),
+                    "custom_allowed": 1 if row[7] is None else int(bool(row[7])),
                 }
         except sqlite3.OperationalError:
             pass
         return {
             "enabled": 0, "amount": 10, "target_channel": "",
-            "tips_custom_text": None, "tips_media_id": None, "tips_media_type": None
+            "tips_custom_text": None, "tips_media_id": None, "tips_media_type": None,
+            "presets": list(DEFAULT_TIP_PRESETS), "custom_allowed": 1
         }
 
 
@@ -2359,6 +2369,13 @@ def _sanitize_target_link(target_link: str = None) -> str:
     return clean if clean else None
 
 
+PLAN_NAME_MAX = 64
+PLAN_PROMO_MAX = 1000
+PLAN_PRICE_RANGE = (1, 10000)      # una factura XTR admite de 1 a 10 000 Stars
+PLAN_DAYS_RANGE = (1, 365)
+PLAN_MEDIA_TYPES = {"photo", "video", "animation"}
+
+
 @db_async
 def create_channel_plan(
     channel_id: int,
@@ -2370,7 +2387,32 @@ def create_channel_plan(
     media_type: str = None,
     target_link: str = None
 ) -> int:
-    with get_db_connection() as conn:
+    """
+    Inserta un plan en `channel_plans` con status='active' dentro de BEGIN IMMEDIATE.
+
+    La firma conserva el orden posicional histórico (… promo_text, media_id, media_type, target_link)
+    porque el asistente de planes del bot (handlers/user_private.py) la llama así; la Mini App usa
+    argumentos con nombre. Los rangos se validan aquí también: ningún llamador puede crear un plan
+    imposible de cobrar (Stars fuera de 1-10 000 o duración fuera de 1-365 días).
+    """
+    name = (plan_name or "").strip()
+    days = _as_int(duration_days, 0)
+    price = _as_int(stars_price, 0)
+    if not name or len(name) > PLAN_NAME_MAX:
+        raise ValueError(f"plan_name: entre 1 y {PLAN_NAME_MAX} caracteres.")
+    if not PLAN_DAYS_RANGE[0] <= days <= PLAN_DAYS_RANGE[1]:
+        raise ValueError(f"duration_days: entre {PLAN_DAYS_RANGE[0]} y {PLAN_DAYS_RANGE[1]} días.")
+    if not PLAN_PRICE_RANGE[0] <= price <= PLAN_PRICE_RANGE[1]:
+        raise ValueError(f"stars_price: entre {PLAN_PRICE_RANGE[0]} y {PLAN_PRICE_RANGE[1]} Stars.")
+    promo = (promo_text or "").strip() or None
+    if promo and len(promo) > PLAN_PROMO_MAX:
+        raise ValueError(f"promo_text: máximo {PLAN_PROMO_MAX} caracteres.")
+    if media_type is not None and media_type not in PLAN_MEDIA_TYPES:
+        raise ValueError("media_type: debe ser photo, video o animation.")
+    if (media_id is None) != (media_type is None):
+        raise ValueError("media_id y media_type van juntos.")
+
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO channel_plans (
@@ -2379,10 +2421,9 @@ def create_channel_plan(
             )
             VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
         """, (
-            channel_id, (plan_name or "").strip(), duration_days, stars_price,
-            promo_text, media_id, media_type, _sanitize_target_link(target_link)
+            int(channel_id), name, days, price,
+            promo, media_id, media_type, _sanitize_target_link(target_link)
         ))
-        conn.commit()
         return cursor.lastrowid
 
 
@@ -2998,6 +3039,288 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
             query = f"UPDATE group_settings SET {', '.join(updates)} WHERE group_id = ?"
             cursor.execute(query, tuple(params))
         conn.commit()
+
+
+# ==========================================
+# 🎛️ v8.3 · CONFIGURACIÓN OPERATIVA COMPLETA (paridad 1:1 Mini App ↔ bot)
+# ==========================================
+# Contrato de datos: cada campo de la API apunta a la MISMA columna de `group_settings` que leen los
+# handlers del bot (get_captcha_config, get_autolower_status, get_mic_vip_price, get_tips_config, …).
+# Así un cambio hecho desde la Mini App rige el comportamiento del bot sin tablas paralelas.
+DEFAULT_TIP_PRESETS = (15, 50, 100, 250, 500)
+TIP_MAX_STARS = 10000
+WELCOME_MAX = 1000
+WELCOME_VARIABLES = ("name", "username", "title")
+CAPTCHA_MODE_CODES = {"button": 1, "math": 2}          # captcha_mode en group_settings (1 = botón)
+CAPTCHA_MODE_NAMES = {v: k for k, v in CAPTCHA_MODE_CODES.items()}
+CAPTCHA_TIMEOUT_RANGE = (30, 300)
+AUTOLOWER_PCT_RANGE = (1, 10)
+STARS_PRICE_RANGE = (1, 10000)
+ANTIFLOOD_RATE_RANGE = (3, 50)
+ANTIFLOOD_WINDOW_RANGE = (5, 120)
+_WELCOME_VAR_RE = re.compile(r"\{([^{}]*)\}")
+
+
+class ChatConfigError(ValueError):
+    """Errores de validación por campo: {campo: mensaje}."""
+
+    def __init__(self, errors: dict):
+        self.errors = dict(errors)
+        first = next(iter(self.errors.items()))
+        super().__init__(f"{first[0]}: {first[1]}")
+
+
+# campo de la API → (sección, columna, tipo)
+CHAT_CONFIG_FIELDS = {
+    "captcha_enabled":         ("aduana",    "captcha_status",       "bool"),
+    "captcha_mode":            ("aduana",    "captcha_mode",         "captcha_mode"),
+    "captcha_timeout":         ("aduana",    "captcha_time",         "captcha_timeout"),
+    "custom_welcome":          ("aduana",    "captcha_text",         "welcome"),
+    "autolower_enabled":       ("acoustic",  "autolower",            "bool"),
+    "autolower_pct":           ("acoustic",  "autolower_pct",        "autolower_pct"),
+    "shield_enabled":          ("acoustic",  "screen_shield_status", "bool"),
+    "micvip_price":            ("acoustic",  "mic_vip_price",        "stars"),
+    "speaker_price":           ("acoustic",  "speaker_queue_price",  "stars"),
+    "tips_enabled":            ("tips",      "tips_enabled",         "bool"),
+    "tips_presets":            ("tips",      "tips_presets",         "tip_presets"),
+    "custom_tips_allowed":     ("tips",      "tips_custom_allowed",  "bool"),
+    "linklock_enabled":        ("perimeter", "lock_links",           "bool"),
+    "antiflood_enabled":       ("perimeter", "antispam",             "bool"),
+    "antiflood_rate":          ("perimeter", "antiflood_msgs",       "antiflood_rate"),
+    "antiflood_window":        ("perimeter", "antiflood_time",       "antiflood_window"),
+    "service_cleaner_enabled": ("perimeter", "service_msgs_mode",    "bool"),
+}
+CHAT_CONFIG_SECTIONS = ("aduana", "acoustic", "tips", "perimeter")
+
+CHAT_CONFIG_DEFAULTS = {
+    "captcha_enabled": False, "captcha_mode": "button", "captcha_timeout": 60, "custom_welcome": "",
+    "autolower_enabled": True, "autolower_pct": 2, "shield_enabled": True, "micvip_price": 50, "speaker_price": 25,
+    "tips_enabled": False, "tips_presets": list(DEFAULT_TIP_PRESETS), "custom_tips_allowed": True,
+    "linklock_enabled": False, "antiflood_enabled": False, "antiflood_rate": 10, "antiflood_window": 15,
+    "service_cleaner_enabled": True,
+}
+
+
+def _parse_tip_presets(raw) -> list:
+    """Lee los presets guardados (JSON); ante cualquier dato corrupto devuelve los presets por defecto."""
+    try:
+        values = json.loads(raw) if isinstance(raw, str) else raw
+        clean = sorted({int(v) for v in values if 1 <= int(v) <= TIP_MAX_STARS})
+        return clean[:6] if clean else list(DEFAULT_TIP_PRESETS)
+    except (TypeError, ValueError):
+        return list(DEFAULT_TIP_PRESETS)
+
+
+def _coerce_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in ("1", "true", "on", "yes", "si", "sí"):
+        return True
+    if isinstance(value, str) and value.strip().lower() in ("0", "false", "off", "no"):
+        return False
+    raise ValueError("debe ser verdadero o falso.")
+
+
+def _coerce_int_range(value, lo: int, hi: int, unit: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"debe ser un número entero entre {lo} y {hi}{unit}.")
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError(f"debe ser un número entero entre {lo} y {hi}{unit}.")
+    if not lo <= number <= hi:
+        raise ValueError(f"debe estar entre {lo} y {hi}{unit}.")
+    return number
+
+
+def _coerce_tip_presets(value) -> list:
+    if isinstance(value, str):
+        parts = [p for p in re.split(r"[\s,;]+", value.strip()) if p]
+    elif isinstance(value, (list, tuple)):
+        parts = list(value)
+    else:
+        raise ValueError("usa una lista de montos separados por coma (ej. 15, 50, 100).")
+    if not 1 <= len(parts) <= 6:
+        raise ValueError("indica entre 1 y 6 montos.")
+    amounts = set()
+    for part in parts:
+        amounts.add(_coerce_int_range(part, 1, TIP_MAX_STARS, " Stars"))
+    return sorted(amounts)
+
+
+def _coerce_welcome(value) -> str:
+    text = "" if value is None else str(value).replace("\r\n", "\n").strip()
+    if len(text) > WELCOME_MAX:
+        raise ValueError(f"máximo {WELCOME_MAX} caracteres.")
+    unknown = sorted({v for v in _WELCOME_VAR_RE.findall(text) if v not in WELCOME_VARIABLES})
+    if unknown:
+        allowed = ", ".join("{" + v + "}" for v in WELCOME_VARIABLES)
+        raise ValueError(f"variable desconocida {{{unknown[0]}}}; usa solo {allowed}.")
+    return text
+
+
+def validate_chat_configuration(payload: dict) -> dict:
+    """
+    Valida y normaliza una configuración (parcial o completa). Acepta el árbol por secciones
+    ({"aduana": {...}, "tips": {...}}) o los campos en plano. Devuelve {campo: valor_api}.
+    Lanza ChatConfigError con TODOS los campos inválidos; los desconocidos también son error
+    (un typo nunca debe "guardarse" en silencio sin efecto).
+    """
+    if not isinstance(payload, dict):
+        raise ChatConfigError({"configuration": "se esperaba un objeto JSON."})
+    flat = {}
+    for key, value in payload.items():
+        if key in CHAT_CONFIG_SECTIONS and isinstance(value, dict):
+            flat.update(value)
+        else:
+            flat[key] = value
+
+    clean, errors = {}, {}
+    for field, value in flat.items():
+        spec = CHAT_CONFIG_FIELDS.get(field)
+        if spec is None:
+            errors[field] = "campo desconocido."
+            continue
+        kind = spec[2]
+        try:
+            if kind == "bool":
+                clean[field] = _coerce_bool(value)
+            elif kind == "captcha_mode":
+                mode = str(value or "").strip().lower()
+                if mode not in CAPTCHA_MODE_CODES:
+                    raise ValueError("usa 'button' o 'math'.")
+                clean[field] = mode
+            elif kind == "captcha_timeout":
+                clean[field] = _coerce_int_range(value, *CAPTCHA_TIMEOUT_RANGE, " s")
+            elif kind == "welcome":
+                clean[field] = _coerce_welcome(value)
+            elif kind == "autolower_pct":
+                clean[field] = _coerce_int_range(value, *AUTOLOWER_PCT_RANGE, " %")
+            elif kind == "stars":
+                clean[field] = _coerce_int_range(value, *STARS_PRICE_RANGE, " Stars")
+            elif kind == "tip_presets":
+                clean[field] = _coerce_tip_presets(value)
+            elif kind == "antiflood_rate":
+                clean[field] = _coerce_int_range(value, *ANTIFLOOD_RATE_RANGE, " mensajes")
+            elif kind == "antiflood_window":
+                clean[field] = _coerce_int_range(value, *ANTIFLOOD_WINDOW_RANGE, " s")
+        except ValueError as exc:
+            errors[field] = str(exc)
+    if errors:
+        raise ChatConfigError(errors)
+    if not clean:
+        raise ChatConfigError({"configuration": "no hay ningún campo que guardar."})
+    return clean
+
+
+def _to_db_value(field: str, value):
+    kind = CHAT_CONFIG_FIELDS[field][2]
+    if kind == "bool":
+        return 1 if value else 0
+    if kind == "captcha_mode":
+        return CAPTCHA_MODE_CODES[value]
+    if kind == "tip_presets":
+        return json.dumps(value)
+    if kind == "welcome":
+        return value or None
+    return int(value)
+
+
+def _from_db_value(field: str, raw):
+    default = CHAT_CONFIG_DEFAULTS[field]
+    if raw is None:
+        return list(default) if isinstance(default, list) else default
+    kind = CHAT_CONFIG_FIELDS[field][2]
+    try:
+        if kind == "bool":
+            return bool(int(raw))
+        if kind == "captcha_mode":
+            return CAPTCHA_MODE_NAMES.get(int(raw), "button")
+        if kind == "tip_presets":
+            return _parse_tip_presets(raw)
+        if kind == "welcome":
+            return str(raw)
+        return int(raw)
+    except (TypeError, ValueError):
+        return list(default) if isinstance(default, list) else default
+
+
+def _read_chat_configuration(conn, chat_id: int) -> dict:
+    columns = [spec[1] for spec in CHAT_CONFIG_FIELDS.values()]
+    row = conn.execute(
+        f"SELECT {', '.join(_ident(c) for c in columns)}, config_updated_at, config_updated_by "
+        "FROM group_settings WHERE group_id = ?", (int(chat_id),)
+    ).fetchone()
+    tree = {section: {} for section in CHAT_CONFIG_SECTIONS}
+    for index, (field, (section, _column, _kind)) in enumerate(CHAT_CONFIG_FIELDS.items()):
+        raw = row[index] if row else None
+        tree[section][field] = _from_db_value(field, raw)
+    # Precio de MicVIP: el bot cobra mic_vip_custom_price si existe (get_mic_vip_custom_config).
+    if row:
+        custom = conn.execute(
+            "SELECT mic_vip_custom_price FROM group_settings WHERE group_id = ?", (int(chat_id),)
+        ).fetchone()
+        if custom and custom[0] is not None and int(custom[0]) > 0:
+            tree["acoustic"]["micvip_price"] = int(custom[0])
+    tree["meta"] = {
+        "chat_id": str(chat_id),
+        "updated_at": row[len(columns)] if row else None,
+        "updated_by": row[len(columns) + 1] if row else None,
+        "welcome_variables": list(WELCOME_VARIABLES),
+    }
+    return tree
+
+
+@db_async
+def get_chat_full_configuration(chat_id: int) -> dict:
+    """Árbol completo {aduana, acoustic, tips, perimeter, meta} con los valores que usa el bot."""
+    with get_db_connection() as conn:
+        try:
+            return _read_chat_configuration(conn, chat_id)
+        except sqlite3.OperationalError:
+            tree = {section: {} for section in CHAT_CONFIG_SECTIONS}
+            for field, (section, _c, _k) in CHAT_CONFIG_FIELDS.items():
+                default = CHAT_CONFIG_DEFAULTS[field]
+                tree[section][field] = list(default) if isinstance(default, list) else default
+            tree["meta"] = {"chat_id": str(chat_id), "updated_at": None, "updated_by": None,
+                            "welcome_variables": list(WELCOME_VARIABLES)}
+            return tree
+
+
+@db_async
+def update_chat_full_configuration(chat_id: int, config_dict: dict, updated_by: int = None) -> dict:
+    """
+    Valida y persiste en lote dentro de UNA transacción BEGIN IMMEDIATE (todo o nada) y devuelve el
+    árbol resultante. El precio de MicVIP se escribe también en mic_vip_custom_price, igual que
+    set_mic_vip_price, para que el bot cobre exactamente lo configurado.
+    """
+    clean = validate_chat_configuration(config_dict)
+    assignments, params = [], []
+    for field, value in clean.items():
+        column = _ident(CHAT_CONFIG_FIELDS[field][1])
+        assignments.append(f"{column} = ?")
+        params.append(_to_db_value(field, value))
+        if field == "micvip_price":
+            assignments.append("mic_vip_custom_price = ?")
+            params.append(int(value))
+    assignments.append("config_updated_at = ?")
+    params.append(int(datetime.now(timezone.utc).timestamp()))
+    assignments.append("config_updated_by = ?")
+    params.append(int(updated_by) if updated_by is not None else None)
+
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(chat_id),))
+        conn.execute(f"UPDATE group_settings SET {', '.join(assignments)} WHERE group_id = ?", (*params, int(chat_id)))
+        return _read_chat_configuration(conn, chat_id)
+
+
+@db_async
+def get_autolower_pct(group_id: int) -> int:
+    """Porcentaje de atenuación de AutoLower (1-10 %) configurado desde la Mini App."""
+    value = _as_int(_get_setting(group_id, "autolower_pct", 2), 2)
+    return max(AUTOLOWER_PCT_RANGE[0], min(AUTOLOWER_PCT_RANGE[1], value))
 
 
 @db_async

@@ -164,6 +164,9 @@ from database.database import (
     revoke_owner_session,
     save_owner_session,
     update_chat_operational_settings,
+    get_chat_full_configuration,
+    update_chat_full_configuration,
+    ChatConfigError,
     update_ghost_purge_scan_time,
     get_community_live_telemetry,
     get_chat_heatmap_matrix,
@@ -1294,6 +1297,68 @@ async def api_update_chat_settings(
     except Exception as e:
         logger.error(f"❌ [Settings API Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# 🎛️ v8.3 · CONFIGURACIÓN OPERATIVA COMPLETA DE LA COMUNIDAD
+# ==========================================
+_CONFIG_MAX_BODY_FIELDS = 64
+
+
+@api_router.get("/chat/{chat_id}/configuration")
+async def api_get_chat_configuration(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """Árbol completo de parámetros que rigen al bot en la comunidad (Aduana, Acústica, Propinas, Perímetro)."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+    await assert_chat_ownership(user_id, numeric_id)
+    configuration = await get_chat_full_configuration(numeric_id)
+    return {"status": "success", "chat_id": str(numeric_id), "configuration": configuration}
+
+
+@api_router.post("/chat/{chat_id}/configuration")
+async def api_update_chat_configuration(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """
+    Valida y persiste en lote (BEGIN IMMEDIATE, todo o nada). Acepta {"configuration": {...}} o el árbol
+    directamente, completo o parcial. Responde 422 con "campo: motivo" ante el primer error y, si guarda,
+    emite 'settings_updated' a la sala del radar con el árbol resultante.
+    """
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+    await assert_chat_ownership(user_id, numeric_id)
+
+    body = payload.get("configuration", payload) if isinstance(payload, dict) else payload
+    if isinstance(body, dict) and sum(len(v) if isinstance(v, dict) else 1 for v in body.values()) > _CONFIG_MAX_BODY_FIELDS:
+        raise HTTPException(status_code=413, detail="configuration: demasiados campos.")
+    try:
+        configuration = await update_chat_full_configuration(numeric_id, body, updated_by=user_id)
+    except ChatConfigError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+    except Exception as e:
+        logger.error(f"❌ [Configuration API Error] chat={numeric_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="No se pudo guardar la configuración.")
+
+    changed = sorted({field
+                      for key, value in body.items()
+                      for field in (value.keys() if isinstance(value, dict) else [key])})
+    _spawn(emit_radar_event(numeric_id, "settings_updated", {"source": "configuration", "changed": changed,
+                                                             "configuration": configuration}))
+    logger.info(f"🎛️ [Configuración] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(changed)}")
+    return {"status": "success", "chat_id": str(numeric_id), "configuration": configuration}
 
 
 @api_router.get("/affiliates/me")

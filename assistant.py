@@ -65,7 +65,8 @@ from database.database import (
     get_ai_chat_context,
     clear_ai_chat_context,
     record_hourly_chat_activity,
-    add_user_reputation_xp
+    add_user_reputation_xp,
+    get_autolower_pct,
 )
 
 try:
@@ -1963,6 +1964,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
             if current_call:
                 night_active, _ = await _is_night_active(chat_id)
                 autolower_enabled = await get_autolower_status(chat_id)
+                # v8.3: Dinamizar porcentaje según la configuración del grupo (1 a 10%)
+                autolower_pct = await get_autolower_pct(chat_id)
+                target_autolower_volume = max(100, min(1000, autolower_pct * 100))
+
                 if autolower_enabled != 1 and not night_active:
                     # Sin Auto-Lower el radar no lee participantes; solo se consulta si
                     # hay un Dashboard conectado escuchando esta sala.
@@ -2136,21 +2141,18 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         _noise_mute_until.pop(mute_key, None)
 
                     if night_active or noise_hold:
-                        # Silencio total. La RPC solo se envía si aún no está silenciado: antes se
-                        # reenviaba a cada participante cada ~3 s (patrón clásico de FloodWait).
+                        # Silencio total. La RPC solo se envía si aún no está silenciado.
                         desired_muted, desired_volume = True, None
                         action_needed = noise_spike or not admin_muted
                     else:
-                        # AutoLower exacto al 2%: muted=False, volume=200.
-                        desired_muted, desired_volume = False, AUTOLOWER_VOLUME
+                        # AutoLower dinámico (1% a 10% según configuración del grupo)
+                        desired_muted, desired_volume = False, target_autolower_volume
                         if admin_muted and mute_key not in _sentinel_muted:
                             # Silencio impuesto a mano por un administrador humano: se respeta.
                             continue
-                        # Corrección: la condición anterior exigía desired_muted=True, por lo que el
-                        # 2% jamás se aplicaba a los miembros generales ni se enviaba su aviso.
                         action_needed = (
                             mute_key in _sentinel_muted
-                            or abs(vol - AUTOLOWER_VOLUME) > AUTOLOWER_TOLERANCE
+                            or abs(vol - target_autolower_volume) > AUTOLOWER_TOLERANCE
                         )
 
                     if action_needed:
@@ -3104,5 +3106,3 @@ async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
             logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
 
     return {"status": "error", "found": found, "purged": purged, "action": action, "message": "Sin cliente MTProto ni bot disponible."}
-
-    return {"status": "error", "message": "No se pudo conectar con el chat para la purga.", "purged": 0}

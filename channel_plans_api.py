@@ -11,6 +11,17 @@ Expone a la Mini App las mismas acciones que el panel "💎 Planes de Membresía
     POST   /api/channel/{channel_id}/plan/{plan_id}/invite-link
     GET    /api/channel/{channel_id}/broadcast-config            (v8.2)
     POST   /api/channel/{channel_id}/custom-broadcast            (v8.2)
+    POST   /api/channel/{channel_id}/plan/create                 (v8.3)
+
+v8.3 · Creación de planes desde la Mini App
+-------------------------------------------
+• `create_plan()` valida (nombre, Stars 1-10 000, días 1-365, destino VIP http(s)/t.me/@alias,
+  texto ≤ 1000) e inserta en `channel_plans` con status='active' vía database.create_channel_plan
+  (BEGIN IMMEDIATE). Tras insertar invalida la caché de planes del pre-checkout.
+• Comprobación de entrega: si el bot es administrador del canal con permiso de invitar, acuña UN
+  enlace de verificación (member_limit=1, caduca en 24 h) que se devuelve SOLO al propietario
+  autenticado, para que compruebe que la entrega automática funcionará. Los compradores siguen
+  recibiendo su propio enlace de un solo uso tras pagar (handlers.payments).
 
 v8.2 · Difusión personalizada del Estudio de Canales
 ----------------------------------------------------
@@ -62,7 +73,9 @@ import asyncio
 import html
 import logging
 import os
+import re
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
@@ -107,6 +120,7 @@ class PlanDeps:
     get_active_subscribers_count: Optional[Callable[[int], Awaitable[Any]]] = None
     invalidate_plan_cache: Optional[Callable[[Optional[int]], Any]] = None
     db_connect: Optional[Callable[[], Any]] = None   # database.database.get_db_connection (v8.2)
+    create_channel_plan: Optional[Callable[..., Awaitable[Any]]] = None   # database.create_channel_plan (v8.3)
 
 
 def load_db_deps() -> PlanDeps:
@@ -128,6 +142,7 @@ def load_db_deps() -> PlanDeps:
         get_active_subscribers_count=getattr(db, "get_active_subscribers_count", None),
         invalidate_plan_cache=invalidate,
         db_connect=getattr(db, "get_db_connection", None),
+        create_channel_plan=getattr(db, "create_channel_plan", None),
     )
 
 
@@ -286,6 +301,128 @@ async def generate_invite_link(channel_id: int, plan_id: int, deps: PlanDeps, bo
         "link": purchase_link(username, plan_id, channel_id),
         "kind": "purchase",
     }
+
+
+# ==========================================
+# ➕ v8.3 · CREACIÓN DE PLANES
+# ==========================================
+PLAN_NAME_MAX = 64
+PLAN_PRICE_RANGE = (1, 10000)
+PLAN_DAYS_RANGE = (1, 365)
+PLAN_PROMO_MAX = 1000
+PLAN_LINK_MAX = 256
+DELIVERY_CHECK_TTL_SECONDS = 24 * 3600
+_PLAN_ALIAS_RE = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+_PLAN_TME_RE = re.compile(r"^(?:t\.me|telegram\.me)/\S+$", re.IGNORECASE)
+
+
+def _whole(value: Any, lo: int, hi: int, field: str, unit: str) -> int:
+    text = str(value if value is not None else "").strip()
+    if isinstance(value, bool) or not text.isdigit():
+        raise PlanApiError(422, f"{field}: debe ser un número entero entre {lo} y {hi}{unit}.")
+    number = int(text)
+    if not lo <= number <= hi:
+        raise PlanApiError(422, f"{field}: debe estar entre {lo} y {hi}{unit}.")
+    return number
+
+
+def normalize_target_link(raw: Any) -> str:
+    """Destino VIP → URL apta para un botón inline (https, t.me o @alias). '' si está vacío."""
+    link = str(raw or "").strip()
+    if not link:
+        return ""
+    if len(link) > PLAN_LINK_MAX or any(ch.isspace() for ch in link):
+        raise PlanApiError(422, "target_link: enlace inválido (sin espacios, máximo 256 caracteres).")
+    if _PLAN_ALIAS_RE.match(link):
+        return f"https://t.me/{link[1:]}"
+    if _PLAN_TME_RE.match(link):
+        return f"https://{link}"
+    parsed = urllib.parse.urlparse(link)
+    if parsed.scheme in ("https", "http") and "." in (parsed.hostname or ""):
+        return link
+    raise PlanApiError(422, "target_link: usa un enlace https://, t.me/+… o un @alias.")
+
+
+def validate_plan_payload(payload: Any) -> Dict[str, Any]:
+    """Valida el cuerpo de creación. Errores → PlanApiError 422 "campo: motivo" (el primero)."""
+    if not isinstance(payload, dict):
+        raise PlanApiError(422, "plan: se esperaba un objeto JSON.")
+    name = str(payload.get("plan_name") or payload.get("name") or "").strip()
+    if not name or len(name) > PLAN_NAME_MAX:
+        raise PlanApiError(422, f"plan_name: entre 1 y {PLAN_NAME_MAX} caracteres.")
+    price = _whole(payload.get("stars_price"), *PLAN_PRICE_RANGE, "stars_price", " Stars")
+    days = _whole(payload.get("duration_days"), *PLAN_DAYS_RANGE, "duration_days", " días")
+    promo = str(payload.get("promo_text") or "").replace("\r\n", "\n").strip()
+    if len(promo) > PLAN_PROMO_MAX:
+        raise PlanApiError(422, f"promo_text: máximo {PLAN_PROMO_MAX} caracteres.")
+    return {
+        "plan_name": name,
+        "stars_price": price,
+        "duration_days": days,
+        "target_link": normalize_target_link(payload.get("target_link")),
+        "promo_text": promo,
+    }
+
+
+async def _delivery_check(bot: Any, channel_id: int, plan_id: int) -> Dict[str, Any]:
+    """
+    ¿Podrá el bot entregar el acceso tras el pago? Requiere ser administrador con can_invite_users.
+    Si sí, acuña un enlace de verificación de un solo uso (24 h) para el propietario.
+    """
+    if bot is None:
+        return {"ready": False, "reason": "bot_unavailable", "invite_link": None}
+    try:
+        me = await bot.get_me()
+        member = await asyncio.wait_for(bot.get_chat_member(int(channel_id), me.id), timeout=6)
+    except Exception as ex:
+        logger.info("ℹ️ [Planes] Sin acceso del bot al canal %s: %s", channel_id, ex)
+        return {"ready": False, "reason": "bot_not_member", "invite_link": None}
+    status = str(getattr(getattr(member, "status", ""), "value", getattr(member, "status", "")) or "")
+    can_invite = status == "creator" or (status == "administrator" and bool(getattr(member, "can_invite_users", False)))
+    if not can_invite:
+        return {"ready": False, "reason": "missing_invite_permission", "invite_link": None}
+    try:
+        link = await bot.create_chat_invite_link(
+            chat_id=int(channel_id),
+            name=f"Bunker plan {int(plan_id)} check"[:32],
+            member_limit=1,
+            expire_date=int(time.time()) + DELIVERY_CHECK_TTL_SECONDS,
+        )
+        return {"ready": True, "reason": None, "invite_link": getattr(link, "invite_link", None),
+                "expires_in": DELIVERY_CHECK_TTL_SECONDS}
+    except Exception as ex:
+        logger.warning("⚠️ [Planes] No se pudo acuñar el enlace de verificación en %s: %s", channel_id, ex)
+        return {"ready": False, "reason": "invite_failed", "invite_link": None}
+
+
+async def create_plan(channel_id: int, payload: Any, deps: PlanDeps, bot: Any) -> Dict[str, Any]:
+    """Crea un plan activo en `channel_plans` y devuelve el plan, su enlace de compra y la comprobación de entrega."""
+    if deps.create_channel_plan is None:
+        raise PlanApiError(503, "Este despliegue no permite crear planes desde la Mini App.")
+    data = validate_plan_payload(payload)
+    try:
+        plan_id = await deps.create_channel_plan(
+            int(channel_id), data["plan_name"], data["duration_days"], data["stars_price"],
+            promo_text=data["promo_text"] or None, target_link=data["target_link"] or None,
+        )
+    except ValueError as err:
+        raise PlanApiError(422, str(err))
+    plan_id = int(plan_id)
+    _invalidate(deps, plan_id)
+
+    plan = await deps.get_channel_plan(plan_id) or {
+        "plan_id": plan_id, "plan_name": data["plan_name"], "duration_days": data["duration_days"],
+        "stars_price": data["stars_price"], "status": "active", "promo_text": data["promo_text"],
+        "target_link": data["target_link"],
+    }
+    link = None
+    if bot is not None:
+        with _suppress_log("No se pudo resolver el usuario del bot"):
+            link = purchase_link(await _bot_username(bot), plan_id, int(channel_id))
+    delivery = await _delivery_check(bot, int(channel_id), plan_id)
+    logger.info("💎 [Planes] Canal %s: plan %s creado desde la Mini App (%s Stars / %s días).",
+                channel_id, plan_id, data["stars_price"], data["duration_days"])
+    return {"status": "success", "plan": serialize_plan(plan), "purchase_link": link, "delivery": delivery}
 
 
 # ==========================================
@@ -874,6 +1011,18 @@ def build_channel_plans_router(
             cid = await authorize(channel_id, x_telegram_init_data, authorization)
             lang = (payload or {}).get("lang", "es") if isinstance(payload, dict) else "es"
             return await broadcast_plan(cid, plan_id, deps(), get_bot(), lang=lang)
+        return await guarded(run)
+
+    @router.post("/channel/{channel_id}/plan/create")
+    async def api_create_plan(
+        channel_id: str,
+        payload: dict = Body(...),
+        x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+        authorization: str = Header(None),
+    ):
+        async def run():
+            cid = await authorize(channel_id, x_telegram_init_data, authorization)
+            return await create_plan(cid, payload, deps(), get_bot())
         return await guarded(run)
 
     @router.get("/channel/{channel_id}/broadcast-config")

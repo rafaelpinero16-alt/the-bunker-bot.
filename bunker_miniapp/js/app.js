@@ -5,6 +5,7 @@
    y gestión interactiva de Planes de Membresía del canal.
    v8.2: modal nativo del canal de registro, sincronización real de chats, difusión personalizada con
    acciones rápidas (vista previa · difundir · limpiar) y consola de control de grupos operativa.
+   v8.3: generador CRUD de planes (channel_plans) y consola de programación 1:1 del bot por módulos.
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -31,48 +32,14 @@ function isHttpUrl(value) {
 }
 
 /**
- * Valida y normaliza el formulario del Estudio de Canales (función pura, sin DOM).
- * Devuelve { valid, values, errors }: `values` listo para enviar a updateChatSettings y `errors`
- * como { campo: { key, vars } } con claves i18n. El enlace VIP acaba siendo un botón inline de
- * Telegram: se rechaza cualquier esquema que no sea http(s), t.me o @alias (un javascript: o un
- * enlace malformado haría fallar la entrega al suscriptor).
+ * Valida y normaliza la difusión del Estudio de Canales (función pura, sin DOM). Mismas reglas que
+ * channel_plans_api.validate_broadcast_fields. Devuelve { valid, values, errors } con claves i18n.
  */
 export function validateStudioForm(raw) {
     const cfg = CONFIG.STUDIO;
     const errors = {};
     const values = {};
 
-    const link = String(raw?.target_link ?? '').trim();
-    if (link.length > cfg.LINK_MAX) {
-        errors.target_link = { key: 'studio_err_link_long', vars: { max: cfg.LINK_MAX } };
-    } else if (link === '') {
-        values.target_link = '';
-    } else if (STUDIO_ALIAS_RE.test(link)) {
-        values.target_link = `https://t.me/${link.slice(1)}`;
-    } else if (STUDIO_TME_RE.test(link)) {
-        values.target_link = `https://${link}`;
-    } else if (isHttpUrl(link)) {
-        values.target_link = link;
-    } else {
-        errors.target_link = { key: 'studio_err_link' };
-    }
-
-    const wholeNumber = (text, min, max) => {
-        const clean = String(text ?? '').trim();
-        if (!/^\d+$/.test(clean)) return null;
-        const n = parseInt(clean, 10);
-        return (n >= min && n <= max) ? n : null;
-    };
-
-    const price = wholeNumber(raw?.stars_price, cfg.PRICE_MIN, cfg.PRICE_MAX);
-    if (price === null) errors.stars_price = { key: 'studio_err_price', vars: { min: cfg.PRICE_MIN, max: cfg.PRICE_MAX } };
-    else values.stars_price = price;
-
-    const days = wholeNumber(raw?.duration_days, cfg.DAYS_MIN, cfg.DAYS_MAX);
-    if (days === null) errors.duration_days = { key: 'studio_err_days', vars: { min: cfg.DAYS_MIN, max: cfg.DAYS_MAX } };
-    else values.duration_days = days;
-
-    // --- Difusión personalizada (v8.2): mismas reglas que channel_plans_api.validate_broadcast_fields ---
     const target = String(raw?.broadcast_target ?? '').trim();
     if (target === '' || STUDIO_ALIAS_RE.test(target) || CHAT_ID_RE.test(target)) values.broadcast_target = target;
     else errors.broadcast_target = { key: 'bc_err_target' };
@@ -91,9 +58,101 @@ export function validateStudioForm(raw) {
     return { valid: Object.keys(errors).length === 0, values, errors };
 }
 
+function wholeNumberIn(text, min, max) {
+    const clean = String(text ?? '').trim();
+    if (!/^\d+$/.test(clean)) return null;
+    const n = parseInt(clean, 10);
+    return (n >= min && n <= max) ? n : null;
+}
+
+/**
+ * Valida el Generador de Planes (función pura). Mismas reglas que channel_plans_api.validate_plan_payload:
+ * el destino VIP acaba en un botón inline, así que solo se aceptan http(s), t.me o @alias.
+ */
+export function validatePlanForm(raw) {
+    const cfg = CONFIG.PLAN_FORM;
+    const errors = {};
+    const values = {};
+
+    const name = String(raw?.plan_name ?? '').trim();
+    if (!name || name.length > cfg.NAME_MAX) errors.plan_name = { key: 'pf_err_name', vars: { max: cfg.NAME_MAX } };
+    else values.plan_name = name;
+
+    const price = wholeNumberIn(raw?.stars_price, cfg.PRICE_MIN, cfg.PRICE_MAX);
+    if (price === null) errors.stars_price = { key: 'pf_err_price', vars: { min: cfg.PRICE_MIN, max: cfg.PRICE_MAX } };
+    else values.stars_price = price;
+
+    const days = wholeNumberIn(raw?.duration_days, cfg.DAYS_MIN, cfg.DAYS_MAX);
+    if (days === null) errors.duration_days = { key: 'pf_err_days', vars: { min: cfg.DAYS_MIN, max: cfg.DAYS_MAX } };
+    else values.duration_days = days;
+
+    const link = String(raw?.target_link ?? '').trim();
+    if (link === '') values.target_link = '';
+    else if (link.length > cfg.LINK_MAX) errors.target_link = { key: 'pf_err_link' };
+    else if (STUDIO_ALIAS_RE.test(link)) values.target_link = `https://t.me/${link.slice(1)}`;
+    else if (STUDIO_TME_RE.test(link)) values.target_link = `https://${link}`;
+    else if (isHttpUrl(link)) values.target_link = link;
+    else errors.target_link = { key: 'pf_err_link' };
+
+    const promo = String(raw?.promo_text ?? '').replace(/\r\n/g, '\n').trim();
+    if (promo.length > cfg.PROMO_MAX) errors.promo_text = { key: 'pf_err_promo', vars: { max: cfg.PROMO_MAX } };
+    else values.promo_text = promo;
+
+    return { valid: Object.keys(errors).length === 0, values, errors };
+}
+
+/**
+ * Valida los campos NO interruptor de un módulo de la consola (función pura). Mismas reglas que
+ * database.validate_chat_configuration; devuelve { valid, values, errors } con claves i18n.
+ */
+export function validateConfigSection(section, raw) {
+    const c = CONFIG.CHAT_CONFIG;
+    const errors = {};
+    const values = {};
+    const range = (field, min, max) => {
+        const n = wholeNumberIn(raw?.[field], min, max);
+        if (n === null) errors[field] = { key: 'cfg_err_range', vars: { min, max } };
+        else values[field] = n;
+    };
+
+    if (section === 'aduana') {
+        const mode = String(raw?.captcha_mode ?? '').trim();
+        if (c.CAPTCHA_MODES.includes(mode)) values.captcha_mode = mode;
+        else errors.captcha_mode = { key: 'cfg_err_bool' };
+        range('captcha_timeout', 30, 300);
+        const welcome = String(raw?.custom_welcome ?? '').replace(/\r\n/g, '\n').trim();
+        const unknown = [...welcome.matchAll(/\{([^{}]*)\}/g)].map(m => m[1]).find(v => !c.WELCOME_VARIABLES.includes(v));
+        if (welcome.length > c.WELCOME_MAX) errors.custom_welcome = { key: 'cfg_err_welcome_long', vars: { max: c.WELCOME_MAX } };
+        else if (unknown !== undefined) errors.custom_welcome = { key: 'cfg_err_welcome_var', vars: { var: unknown } };
+        else values.custom_welcome = welcome;
+    } else if (section === 'acoustic') {
+        range('autolower_pct', c.AUTOLOWER_PCT_MIN, c.AUTOLOWER_PCT_MAX);
+        range('micvip_price', c.STARS_MIN, c.STARS_MAX);
+        range('speaker_price', c.STARS_MIN, c.STARS_MAX);
+    } else if (section === 'tips') {
+        const parts = String(raw?.tips_presets ?? '').split(/[\s,;]+/).filter(Boolean);
+        const amounts = parts.map(p => wholeNumberIn(p, c.STARS_MIN, c.STARS_MAX));
+        if (!parts.length || parts.length > c.TIP_PRESETS_MAX || amounts.some(a => a === null)) {
+            errors.tips_presets = { key: 'cfg_err_presets', vars: { max: c.TIP_PRESETS_MAX } };
+        } else {
+            values.tips_presets = [...new Set(amounts)].sort((a, b) => a - b);
+        }
+    } else if (section === 'perimeter') {
+        range('antiflood_rate', c.ANTIFLOOD_RATE_MIN, c.ANTIFLOOD_RATE_MAX);
+        range('antiflood_window', c.ANTIFLOOD_WINDOW_MIN, c.ANTIFLOOD_WINDOW_MAX);
+    }
+    return { valid: Object.keys(errors).length === 0, values, errors };
+}
+
 export const app = {
     // Estado interno del Estudio de Canales (guardado reactivo)
     _studio: { channelId: null, timer: null, saving: false, dirty: false, last: null },
+
+    // v8.3: generador de planes y consola de programación por comunidad
+    _planForm: { busy: false, lastCreated: null },
+    _chatConfig: { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {}, seq: 0 },
+    validatePlanForm,
+    validateConfigSection,
 
     // v8.2: difusión en curso, modal del canal de registro e interruptor con petición en vuelo
     _broadcastBusy: false,
@@ -136,7 +195,10 @@ export const app = {
         this.initCharCounter();
         this.bindChannelSelectListener();
         this.bindChannelStudio();
-        ui.renderSecuritySwitches(null, { idle: true });
+        this.bindPlanForm();
+        this.bindConfigConsole();
+        ui.setConsoleState('idle');
+        ui.resetPlanForm();
         this.initUrlRouting();
         this.initAuth();
     },
@@ -336,42 +398,217 @@ export const app = {
      * real ya sincronizado desde el backend (nunca sobre un valor inventado); una petición a la vez.
      */
     async toggleSecuritySwitch(key) {
+        // Compatibilidad v8.2: los cuatro interruptores heredados son campos de la consola de programación.
+        const field = (CONFIG.CHAT_CONFIG?.LEGACY_SWITCHES || {})[key];
+        if (!field) return false;
+        return await this.toggleConfigSwitch(field);
+    },
+
+    // ======================================================================
+    // 🎛️ CONSOLA DE PROGRAMACIÓN 1:1 (v8.3) — GET/POST /api/chat/{id}/configuration
+    // ======================================================================
+    bindConfigConsole() {
+        document.querySelectorAll('#cfg-console .cfg-input').forEach(el => {
+            if (el.dataset.cfgBound) return;
+            el.dataset.cfgBound = 'true';
+            const section = el.dataset.section;
+            const onEdit = () => {
+                if (el.id === 'cfg-autolower_pct') ui.updateAutolowerLabel();
+                if (el.id === 'cfg-custom_welcome') ui.updateWelcomeCounter();
+                ui.setFieldError(el.id, '');
+                this.markConfigDirty(section);
+            };
+            el.addEventListener('input', onEdit);
+            el.addEventListener('change', onEdit);
+        });
+    },
+
+    markConfigDirty(section) {
+        const cc = this._chatConfig;
+        if (!cc.data || !section) return;
+        cc.dirty[section] = true;
+        ui.setConfigSectionStatus(section, 'dirty', ui.t('cfg_status_dirty'));
+    },
+
+    sectionTitle(section) {
+        return ui.t(`cfg_sec_${section}`);
+    },
+
+    /** Carga el árbol de configuración de la comunidad (descarta respuestas de otra comunidad o sesión). */
+    async loadChatConfiguration(chatId, { keepDirty = false } = {}) {
+        const cc = this._chatConfig;
+        const seq = ++cc.seq;
+        const epoch = session.epoch;
+        if (!keepDirty || cc.chatId !== String(chatId)) {
+            Object.assign(cc, { chatId: String(chatId), data: null, dirty: {}, saving: {}, switchBusy: {} });
+            ui.setConsoleState('loading');
+        }
+        const res = await api.fetchChatConfiguration(chatId);
+        if (res?.__stale || epoch !== session.epoch || seq !== cc.seq || cc.chatId !== String(chatId)) return;
+        if (res?.__error) {
+            ui.setConsoleState('idle', ui.tf('cfg_status_error', { error: this.consoleErrorMessage(res) }));
+            return;
+        }
+        cc.data = res.configuration || null;
+        ui.setConsoleState('ready');
+        const skip = Object.keys(cc.dirty).filter(sec => cc.dirty[sec]);
+        ui.renderChatConfiguration(cc.data, { skipSections: skip });
+        this.syncLegacySwitchState();
+    },
+
+    /** Mantiene state.securitySwitches (v8.2) coherente con la configuración real. */
+    syncLegacySwitchState() {
+        const cc = this._chatConfig;
+        if (!cc.data) return;
+        const legacy = CONFIG.CHAT_CONFIG?.LEGACY_SWITCHES || {};
+        state.securitySwitches = Object.fromEntries(Object.entries(legacy).map(([key, field]) => {
+            const section = ui.configSectionOf(field);
+            return [key, Boolean(cc.data?.[section]?.[field])];
+        }));
+        state.switchesChatId = cc.chatId;
+    },
+
+    /** Interruptor de un módulo: se aplica al instante (POST parcial), con reversión si falla. */
+    async toggleConfigSwitch(field) {
         const chatId = this.selectedGroupId();
         if (!chatId) return this.consolePickFirst();
-        if (!state.securitySwitches || String(state.switchesChatId) !== String(chatId)) {
+        const cc = this._chatConfig;
+        const section = ui.configSectionOf(field);
+        if (!section || !cc.data || cc.chatId !== String(chatId)) {
             tgApp.hapticNotification('warning');
-            this.consoleToast('warn', '⏳', ui.t('gc_switch_loading'));
+            this.consoleToast('warn', '⏳', ui.t('cfg_loading'));
             return false;
         }
-        if (this._switchBusy) return false;
+        if (cc.switchBusy[field]) return false;
 
-        const name = ui.t(SWITCH_LABEL_KEYS[key] || key);
-        const previousVal = Boolean(state.securitySwitches[key]);
-        const newVal = !previousVal;
+        const previous = Boolean(cc.data[section]?.[field]);
+        const next = !previous;
         const epoch = session.epoch;
-        this._switchBusy = key;
+        const name = ui.t(`cfg_${field}`);
+        cc.switchBusy[field] = true;
+        ui.setConfigSwitch(field, next, { busy: true });
         tgApp.hapticImpact('light');
-        ui.renderSecuritySwitches(state.securitySwitches, { busyKey: key });
 
-        const res = await api.updateChatSettings(chatId, { [key]: newVal });
+        const res = await api.updateChatConfiguration(chatId, { [section]: { [field]: next } });
 
-        this._switchBusy = null;
-        if (res?.__stale || epoch !== session.epoch) return false;
-        if (String(state.switchesChatId) !== String(chatId)) {
-            ui.renderSecuritySwitches(state.securitySwitches, { loading: !state.securitySwitches });
-            return false;
-        }
+        delete cc.switchBusy[field];
+        if (res?.__stale || epoch !== session.epoch || cc.chatId !== String(chatId)) return false;
         if (res?.__error) {
-            ui.renderSecuritySwitches(state.securitySwitches);
+            ui.setConfigSwitch(field, previous);
             tgApp.hapticNotification('error');
             this.consoleToast('error', '⚠️', ui.tf('gc_switch_toast_error', { name, error: this.consoleErrorMessage(res) }));
             return false;
         }
-        state.securitySwitches = { ...state.securitySwitches, [key]: newVal };
-        ui.renderSecuritySwitches(state.securitySwitches);
+        this.applyServerConfiguration(res.configuration, { onlySwitches: true });
         tgApp.hapticNotification('success');
-        this.consoleToast('success', newVal ? '🟢' : '🔴', ui.tf(newVal ? 'gc_switch_toast_on' : 'gc_switch_toast_off', { name }));
+        this.consoleToast('success', next ? '🟢' : '🔴', ui.tf(next ? 'cfg_toast_switch_on' : 'cfg_toast_switch_off', { name }));
         return true;
+    },
+
+    /**
+     * Aplica el árbol devuelto por el servidor. onlySwitches=true solo repinta interruptores (los campos con
+     * ediciones pendientes de otros módulos no se pisan).
+     */
+    applyServerConfiguration(configuration, { onlySwitches = false, sections = null } = {}) {
+        const cc = this._chatConfig;
+        if (!configuration) return;
+        cc.data = configuration;
+        if (onlySwitches) {
+            Object.entries(ui.CONFIG_LAYOUT).forEach(([section, fields]) => {
+                Object.entries(fields).forEach(([field, kind]) => {
+                    if (kind === 'switch' && !cc.switchBusy[field]) ui.setConfigSwitch(field, Boolean(configuration[section]?.[field]));
+                });
+            });
+        } else {
+            // Con `sections` solo se repintan esos módulos; sin él, todos menos los que tienen ediciones pendientes.
+            const all = Object.keys(ui.CONFIG_LAYOUT);
+            const skip = sections ? all.filter(sec => !sections.includes(sec)) : all.filter(sec => cc.dirty[sec]);
+            ui.renderChatConfiguration(configuration, { skipSections: skip });
+        }
+        this.syncLegacySwitchState();
+    },
+
+    /** 💾 Guardar módulo: valida en cliente, envía el lote del módulo y refleja lo que guardó el servidor. */
+    async saveConfigSection(section) {
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
+        const cc = this._chatConfig;
+        if (!cc.data || cc.chatId !== String(chatId) || cc.saving[section]) return false;
+
+        const result = validateConfigSection(section, ui.readConfigSection(section));
+        Object.keys(ui.CONFIG_LAYOUT[section]).forEach(field => {
+            const err = result.errors[field];
+            if (ui.CONFIG_LAYOUT[section][field] !== 'switch') ui.setFieldError(`cfg-${field}`, err ? ui.tf(err.key, err.vars) : '');
+        });
+        if (!result.valid) {
+            ui.setConfigSectionStatus(section, 'invalid', ui.t('cfg_status_invalid'));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+
+        const epoch = session.epoch;
+        cc.saving[section] = true;
+        ui.setConfigSectionBusy(section, true);
+        ui.setConfigSectionStatus(section, 'saving', ui.t('cfg_saving'));
+        tgApp.hapticImpact('medium');
+        const res = await api.updateChatConfiguration(chatId, { [section]: result.values });
+        delete cc.saving[section];
+        ui.setConfigSectionBusy(section, false);
+        if (res?.__stale || epoch !== session.epoch || cc.chatId !== String(chatId)) return false;
+
+        if (res?.__error) {
+            const match = /^([a-z_]+):\s*(.+)$/.exec(String(res.__error));
+            if (match && res.__status === 422 && document.getElementById(`cfg-${match[1]}`)) {
+                ui.setFieldError(`cfg-${match[1]}`, match[2]);
+                ui.setConfigSectionStatus(section, 'invalid', ui.t('cfg_status_invalid'));
+            } else {
+                ui.setConfigSectionStatus(section, 'error', ui.tf('cfg_status_error', { error: this.consoleErrorMessage(res) }));
+            }
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', ui.tf('cfg_toast_error', { section: this.sectionTitle(section), error: this.consoleErrorMessage(res) }));
+            return false;
+        }
+
+        cc.dirty[section] = false;
+        this.applyServerConfiguration(res.configuration, { sections: [section] });
+        const time = new Date().toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false });
+        ui.setConfigSectionStatus(section, 'saved', ui.tf('cfg_status_saved', { time }));
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '✅', ui.tf('cfg_toast_saved', { section: this.sectionTitle(section) }));
+        return true;
+    },
+
+    /** Inserta {name} / {username} / {title} en el cursor del mensaje de bienvenida. */
+    insertWelcomeVariable(name) {
+        const area = document.getElementById('cfg-custom_welcome');
+        if (!area || area.disabled || !(CONFIG.CHAT_CONFIG?.WELCOME_VARIABLES || []).includes(name)) return;
+        const token = `{${name}}`;
+        const start = area.selectionStart ?? area.value.length;
+        const end = area.selectionEnd ?? area.value.length;
+        area.value = `${area.value.slice(0, start)}${token}${area.value.slice(end)}`;
+        const pos = start + token.length;
+        try { area.setSelectionRange(pos, pos); } catch (err) { /* algunos WebViews no lo admiten */ }
+        area.focus();
+        ui.updateWelcomeCounter();
+        this.markConfigDirty('aduana');
+        tgApp.hapticSelection();
+    },
+
+    /** Evento 'settings_updated' del radar: otro dispositivo (o el bot) cambió la configuración. */
+    onRemoteSettingsUpdated(chatId, data) {
+        const cc = this._chatConfig;
+        if (cc.chatId !== String(chatId)) return;
+        if (data?.configuration && cc.data) {
+            const before = JSON.stringify(cc.data);
+            this.applyServerConfiguration(data.configuration);
+            if (before !== JSON.stringify(cc.data)) {
+                Object.keys(ui.CONFIG_LAYOUT).forEach(sec => {
+                    if (!cc.dirty[sec] && !cc.saving[sec]) ui.setConfigSectionStatus(sec, 'remote', ui.t('cfg_status_remote'));
+                });
+            }
+        } else {
+            this.loadChatConfiguration(chatId, { keepDirty: true });
+        }
     },
 
     // ---- Utilidades de la consola de grupos (v8.2) ----
@@ -454,7 +691,11 @@ export const app = {
         if (previewPlan) ui.renderPlanPreview(previewPlan);
 
         // v8.2: estados dinámicos sin data-i18n (interruptores, difusión y vista previa abierta).
-        ui.renderSecuritySwitches(state.securitySwitches, { loading: Boolean(state.switchesChatId) && !state.securitySwitches, idle: !state.switchesChatId, busyKey: this._switchBusy });
+        const cc = this._chatConfig;
+        if (!cc.chatId) ui.setConsoleState('idle');
+        else if (!cc.data) ui.setConsoleState('loading');
+        if (this._planForm.lastCreated) ui.renderPlanFormResult(this._planForm.lastCreated);
+        ui.updatePlanPromoCounter();
         ui.setBroadcastStatus(this._studio.broadcast || null);
         if (this._lastBroadcastPreview) ui.renderBroadcastPreview(this._lastBroadcastPreview);
 
@@ -613,6 +854,9 @@ export const app = {
         state.deepLinkTab = null;
         state.activeContext = 'global';
         state.securitySwitches = null;     // desconocido hasta leer el dashboard de una comunidad
+        this._chatConfig.seq += 1;          // invalida cargas de configuración en vuelo
+        Object.assign(this._chatConfig, { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {} });
+        this._planForm = { busy: false, lastCreated: null };
         state.switchesChatId = null;
         this._switchBusy = null;
         this._consoleBusy = {};
@@ -870,9 +1114,6 @@ export const app = {
 
     studioDefaults() {
         return {
-            target_link: '',
-            stars_price: CONFIG.STUDIO.DEFAULT_PRICE,
-            duration_days: CONFIG.STUDIO.DEFAULT_DAYS,
             broadcast_target: '',
             broadcast_interval: CONFIG.STUDIO.DEFAULT_INTERVAL ?? 12,
             promo_text: ''
@@ -900,9 +1141,6 @@ export const app = {
             if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
             const broadcast = this.broadcastFromServer(data);
             const values = {
-                target_link: data.target_link || '',
-                stars_price: data.stars_price || defaults.stars_price,
-                duration_days: data.duration_days || defaults.duration_days,
                 broadcast_target: broadcast ? broadcast.broadcast_target : defaults.broadcast_target,
                 broadcast_interval: broadcast ? broadcast.broadcast_interval : defaults.broadcast_interval,
                 promo_text: broadcast ? broadcast.promo_text : defaults.promo_text
@@ -1457,30 +1695,18 @@ export const app = {
         if (!data || data.__error || data.__stale) return;   // sin lectura no hay veredicto: se queda "Guardado ✓"
         if (epoch !== session.epoch || studio.channelId !== channelId || studio.dirty) return;
 
-        const trimSlash = (value) => String(value ?? '').trim().replace(/\/+$/, '');
-        const server = {
-            target_link: trimSlash(data.target_link),
-            stars_price: Number(data.stars_price),
-            duration_days: Number(data.duration_days)
-        };
-        let matches = server.target_link === trimSlash(payload.target_link)
-            && server.stars_price === payload.stars_price
-            && server.duration_days === payload.duration_days;
-        // Difusión (v8.2): solo se verifica si el backend la expone en el dashboard.
+        // La difusión solo se verifica si el backend la expone en el dashboard.
         const broadcast = this.broadcastFromServer(data);
-        if (broadcast) {
-            matches = matches
-                && broadcast.broadcast_target === payload.broadcast_target
-                && broadcast.broadcast_interval === payload.broadcast_interval
-                && broadcast.promo_text === payload.promo_text;
-            studio.broadcast = broadcast;
-            ui.setBroadcastStatus(broadcast);
-        }
-
+        if (!broadcast) return;
+        studio.broadcast = broadcast;
+        ui.setBroadcastStatus(broadcast);
+        const matches = broadcast.broadcast_target === payload.broadcast_target
+            && broadcast.broadcast_interval === payload.broadcast_interval
+            && broadcast.promo_text === payload.promo_text;
         if (matches) {
             ui.setStudioStatus('saved', ui.tf('studio_status_saved', { time }));
         } else {
-            const values = `${server.stars_price} ⭐ · ${server.duration_days} ${ui.t('studio_days_unit')}`;
+            const values = `${broadcast.broadcast_target || '—'} · ${broadcast.broadcast_interval} h`;
             ui.setStudioStatus('mismatch', ui.tf('studio_status_mismatch', { values }));
         }
     },
@@ -1488,6 +1714,162 @@ export const app = {
     /** Alias de compatibilidad: versiones anteriores del HTML llamaban a openChannelStudio() (Telegram cachea agresivamente). */
     async openChannelStudio() {
         return await this.saveChannelStudio({ auto: false });
+    },
+
+    // ======================================================================
+    // ➕ GENERADOR DE PLANES — CRUD real sobre channel_plans (v8.3)
+    // ======================================================================
+    bindPlanForm() {
+        Object.values(ui.PLAN_FORM_FIELDS).forEach(id => {
+            const el = document.getElementById(id);
+            if (!el || el.dataset.planBound) return;
+            el.dataset.planBound = 'true';
+            el.addEventListener('input', () => {
+                ui.setFieldError(id, '');
+                if (id === ui.PLAN_FORM_FIELDS.promo_text) ui.updatePlanPromoCounter();
+            });
+        });
+    },
+
+    applyPlanFormValidation(result) {
+        Object.entries(ui.PLAN_FORM_FIELDS).forEach(([field, id]) => {
+            const err = result.errors[field];
+            ui.setFieldError(id, err ? ui.tf(err.key, err.vars) : '');
+        });
+    },
+
+    /** Valida el formulario y devuelve los valores o null (marcando los errores). */
+    readValidPlanForm() {
+        const result = validatePlanForm(ui.readPlanForm());
+        this.applyPlanFormValidation(result);
+        if (!result.valid) {
+            tgApp.hapticNotification('error');
+            this.planToast('error', '⚠️', ui.t('pf_toast_invalid'));
+            return null;
+        }
+        return result.values;
+    },
+
+    /**
+     * 💾 Crear y Activar: POST /api/channel/{id}/plan/create. Spinner durante la petición, toast háptico
+     * verde, formulario vacío y lista inferior refrescada. Devuelve la respuesta del servidor o null.
+     */
+    async createPlanFromForm() {
+        const channelId = this._studio.channelId;
+        if (!channelId) {
+            tgApp.hapticNotification('warning');
+            this.planToast('warn', '⚠️', ui.t('studio_pick_channel'));
+            return null;
+        }
+        if (this._planForm.busy) return null;
+        const values = this.readValidPlanForm();
+        if (!values) return null;
+
+        const epoch = session.epoch;
+        this._planForm.busy = true;
+        ui.setPlanFormBusy(true);
+        tgApp.hapticImpact('medium');
+        try {
+            const res = await api.createChannelPlan(channelId, values);
+            if (res?.__stale || epoch !== session.epoch || this._studio.channelId !== channelId) return null;
+            if (res?.__error) {
+                const match = /^(plan_name|stars_price|duration_days|target_link|promo_text):\s*(.+)$/.exec(String(res.__error));
+                if (match && res.__status === 422) ui.setFieldError(ui.PLAN_FORM_FIELDS[match[1]], match[2]);
+                tgApp.hapticNotification('error');
+                this.planToast('error', '⚠️', ui.tf('pf_toast_error', { error: this.planErrorMessage(res) }));
+                return null;
+            }
+            const ready = Boolean(res.delivery?.ready);
+            tgApp.hapticNotification(ready ? 'success' : 'warning');
+            ui.showToast({
+                key: 'plan-action', force: true, icon: '💎', tone: ready ? 'success' : 'warn', ttl: 5200,
+                title: ui.tf('pf_toast_created', { name: res.plan?.name || values.plan_name }),
+                body: ui.t(ready ? 'pf_toast_created_body' : 'pf_toast_created_warn')
+            });
+            ui.resetPlanForm();
+            this._planForm.lastCreated = res;
+            ui.renderPlanFormResult(res);
+            if (res.plan && res.purchase_link) this._plans.links[res.plan.plan_id] = res.purchase_link;
+            await this.loadChannelPlans(channelId, { silent: true });
+            return res;
+        } finally {
+            this._planForm.busy = false;
+            ui.setPlanFormBusy(false);
+        }
+    },
+
+    /** 👁️ Previsualizar Tarjeta: la misma tarjeta que el listado (texto con ui.safeTelegramHtml). */
+    previewPlanForm() {
+        const result = validatePlanForm(ui.readPlanForm());
+        this.applyPlanFormValidation(result);
+        const raw = ui.readPlanForm();
+        tgApp.hapticImpact('light');
+        ui.renderPlanPreview({
+            name: result.values.plan_name || raw.plan_name || '—',
+            duration_days: result.values.duration_days ?? (parseInt(raw.duration_days, 10) || 0),
+            stars_price: result.values.stars_price ?? (parseInt(raw.stars_price, 10) || 0),
+            promo_text: result.values.promo_text ?? raw.promo_text,
+            target_link: result.values.target_link || '',
+            has_media: false,
+            media_type: ''
+        });
+    },
+
+    /**
+     * 📢 Difundir al Canal: si el formulario tiene un plan nuevo, se crea y activa primero (con confirmación)
+     * y después se publica con su botón de compra. Con el formulario vacío se difunde el último plan creado.
+     */
+    async broadcastPlanForm() {
+        const channelId = this._studio.channelId;
+        if (!channelId) {
+            tgApp.hapticNotification('warning');
+            this.planToast('warn', '⚠️', ui.t('studio_pick_channel'));
+            return false;
+        }
+        if (this._planForm.busy) return false;
+
+        const raw = ui.readPlanForm();
+        const formEmpty = !String(raw.plan_name || '').trim() && !String(raw.promo_text || '').trim() && !String(raw.target_link || '').trim();
+        let plan = formEmpty ? this._planForm.lastCreated?.plan : null;
+
+        if (!plan) {
+            const values = this.readValidPlanForm();
+            if (!values) return false;
+            if (!await this.confirmAction(ui.tf('pf_confirm_broadcast_new', { name: values.plan_name }))) return false;
+            const created = await this.createPlanFromForm();
+            if (!created?.plan) return false;
+            plan = created.plan;
+        } else if (!await this.confirmAction(ui.tf('pf_confirm_broadcast', { name: plan.name }))) {
+            return false;
+        }
+
+        if (this._plans.channelId !== channelId) await this.loadChannelPlans(channelId, { silent: true });
+        if (!this.planById(plan.plan_id)) {
+            await this.loadChannelPlans(channelId, { silent: true });
+        }
+        const epoch = session.epoch;
+        this._planForm.busy = true;
+        ui.setButtonBusy('pf-broadcast-btn', true);
+        try {
+            const res = await api.broadcastChannelPlan(channelId, plan.plan_id, { lang: state.currentLang });
+            if (res?.__stale || epoch !== session.epoch) return false;
+            if (res?.__error) return this.planFailed(res, channelId);
+            tgApp.hapticNotification('success');
+            this.planToast('success', '📢', ui.t('plans_toast_broadcast'));
+            return true;
+        } finally {
+            this._planForm.busy = false;
+            ui.setButtonBusy('pf-broadcast-btn', false);
+        }
+    },
+
+    /** 🗑️ Limpiar Formulario. */
+    clearPlanForm() {
+        if (this._planForm.busy) return;
+        ui.resetPlanForm();
+        this._planForm.lastCreated = null;
+        tgApp.hapticImpact('light');
+        this.planToast('info', '🗑️', ui.t('pf_toast_cleared'));
     },
 
     // ======================================================================
@@ -1684,7 +2066,9 @@ export const app = {
         if (!selected) {
             state.securitySwitches = null;
             state.switchesChatId = null;
-            ui.renderSecuritySwitches(null, { idle: true });
+            this._chatConfig.seq += 1;
+            Object.assign(this._chatConfig, { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {} });
+            ui.setConsoleState('idle');
         }
     },
 
@@ -1726,12 +2110,11 @@ export const app = {
         // La analítica en vivo solo existe para grupos: los canales no generan mensajes rastreables.
         const isChannel = state.data.channels.some(c => String(c.id) === chatId);
 
-        // Consola de grupos (v8.2): hasta leer el dashboard de ESTA comunidad no se muestra ningún estado.
-        if (String(state.switchesChatId) !== chatId) {
-            state.securitySwitches = null;
-            state.switchesChatId = chatId;
-            this._switchBusy = null;
-            ui.renderSecuritySwitches(null, { loading: true });
+        // Consola de programación (v8.3): hasta leer la configuración de ESTA comunidad nada es editable.
+        if (isChannel) {
+            this._chatConfig.seq += 1;
+            Object.assign(this._chatConfig, { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {} });
+            ui.setConsoleState('idle');
         }
         const hasLiveForChat = Boolean(
             state.wsClient && state.wsClient.chatId === chatId && state.wsClient.status !== 'denied'
@@ -1749,6 +2132,7 @@ export const app = {
         if (opts.tab === 'analytics') this.switchTab('analytics');
 
         const tasks = [
+            isChannel ? Promise.resolve() : this.loadChatConfiguration(chatId, { keepDirty: this._chatConfig.chatId === chatId }),
             this.loadChatDashboard(chatId),
             this.loadChatStats(chatId),
             this.loadChatAdminStats(chatId),
@@ -1799,7 +2183,11 @@ export const app = {
         client.on('voice_call_started', (data) => { if (isCurrent()) this.onVoiceCall(true, data); });
         client.on('voice_call_ended', (data) => { if (isCurrent()) this.onVoiceCall(false, data); });
         client.on('stars_payment', (data) => { if (isCurrent()) this.onStarsPayment(data); });
-        client.on('settings_updated', () => { if (isCurrent()) this.scheduleDashboardReload(chatId); });
+        client.on('settings_updated', (data) => {
+            if (!isCurrent()) return;
+            this.scheduleDashboardReload(chatId);
+            this.onRemoteSettingsUpdated(chatId, data);
+        });
         client.on('gap', () => { if (isCurrent()) this.scheduleAnalyticsRefresh(500); });
         client.on('auth_failed', ({ code }) => { if (isCurrent()) this.onRadarAuthFailed(code); });
         client.on('reconnected', () => {
@@ -2073,12 +2461,12 @@ export const app = {
             planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
         }
 
-        // 3. Interruptores reales de la base de datos (Aduana Captcha, AutoLower, Antinota, LinkLock)
-        if (data.switches && typeof data.switches === 'object' && !this._switchBusy) {
+        // 3. Los interruptores los pinta la consola de programación (GET /configuration), que es la fuente
+        //    de verdad; el resumen del dashboard solo se usa si la consola aún no cargó esta comunidad.
+        if (data.switches && typeof data.switches === 'object' && this._chatConfig.chatId !== String(chatId)) {
             const keys = CONFIG.CONSOLE?.SWITCH_KEYS || ['captcha', 'autolower', 'shield', 'linklock'];
             state.securitySwitches = Object.fromEntries(keys.map(k => [k, Boolean(data.switches[k])]));
             state.switchesChatId = String(chatId);
-            ui.renderSecuritySwitches(state.securitySwitches);
         }
 
         // 4. Modo de Spam
