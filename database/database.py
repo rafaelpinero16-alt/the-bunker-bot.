@@ -17,6 +17,7 @@ import contextlib
 import functools
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ import secrets
 import sqlite3
 import threading
 import urllib.parse
+from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
 from database.vault import encrypt_secret, decrypt_secret
 
@@ -411,6 +413,9 @@ def init_db():
             ("autolower_pct", "INTEGER DEFAULT 2"),
             ("tips_presets", "TEXT DEFAULT '[15, 50, 100, 250, 500]'"),
             ("tips_custom_allowed", "INTEGER DEFAULT 1"),
+            # Agradecimiento de propinas editable (PRO / ULTRA PRO) y enlace de retorno cacheado
+            ("tips_thanks_text", "TEXT"),
+            ("tips_return_link", "TEXT"),
             ("config_updated_at", "INTEGER"),
             ("config_updated_by", "INTEGER"),
         ]
@@ -1597,7 +1602,8 @@ def get_tips_config(group_id: int) -> dict:
             cursor.execute("""
                 SELECT tips_enabled, tips_amount, tips_target_channel,
                        tips_custom_text, tips_media_id, tips_media_type,
-                       tips_presets, tips_custom_allowed
+                       tips_presets, tips_custom_allowed,
+                       tips_thanks_text, tips_return_link
                 FROM group_settings WHERE group_id = ?
             """, (group_id,))
             row = cursor.fetchone()
@@ -1611,13 +1617,16 @@ def get_tips_config(group_id: int) -> dict:
                     "tips_media_type": row[5] if row[5] else None,
                     "presets": _parse_tip_presets(row[6]),
                     "custom_allowed": 1 if row[7] is None else int(bool(row[7])),
+                    "tips_thanks_text": row[8] if row[8] else None,
+                    "tips_return_link": row[9] if row[9] else None,
                 }
         except sqlite3.OperationalError:
             pass
         return {
             "enabled": 0, "amount": 10, "target_channel": "",
             "tips_custom_text": None, "tips_media_id": None, "tips_media_type": None,
-            "presets": list(DEFAULT_TIP_PRESETS), "custom_allowed": 1
+            "presets": list(DEFAULT_TIP_PRESETS), "custom_allowed": 1,
+            "tips_thanks_text": None, "tips_return_link": None
         }
 
 
@@ -1625,7 +1634,8 @@ def get_tips_config(group_id: int) -> dict:
 def set_tips_config(group_id: int, field: str, value):
     valid_fields = [
         "tips_enabled", "tips_amount", "tips_target_channel",
-        "tips_custom_text", "tips_media_id", "tips_media_type"
+        "tips_custom_text", "tips_media_id", "tips_media_type",
+        "tips_thanks_text", "tips_return_link"
     ]
     if field not in valid_fields:
         return
@@ -3061,6 +3071,16 @@ STARS_PRICE_RANGE = (1, 10000)
 ANTIFLOOD_RATE_RANGE = (3, 50)
 ANTIFLOOD_WINDOW_RANGE = (5, 120)
 _WELCOME_VAR_RE = re.compile(r"\{([^{}]*)\}")
+# Agradecimiento de propinas (PRO / ULTRA PRO): mismas variables que renderiza payments.send_tip_thanks.
+TIPS_THANKS_MAX = 3000
+TIPS_THANKS_VARIABLES = ("stars", "mention", "user_name", "community")
+_TIPS_THANKS_VAR_ALIASES = ("amount", "name")      # alias heredados que el bot también sustituye
+# Etiquetas que Telegram admite con parse_mode=HTML; cualquier otra hace fallar el envío.
+_TG_HTML_TAGS = {
+    "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre",
+    "a", "tg-spoiler", "span", "blockquote", "tg-emoji",
+}
+_TG_HTML_ATTRS = {"a": {"href"}, "span": {"class"}, "code": {"class"}, "tg-emoji": {"emoji-id"}, "blockquote": {"expandable"}}
 
 
 class ChatConfigError(ValueError):
@@ -3086,6 +3106,7 @@ CHAT_CONFIG_FIELDS = {
     "tips_enabled":            ("tips",      "tips_enabled",         "bool"),
     "tips_presets":            ("tips",      "tips_presets",         "tip_presets"),
     "custom_tips_allowed":     ("tips",      "tips_custom_allowed",  "bool"),
+    "tips_thanks_text":        ("tips",      "tips_thanks_text",     "tips_thanks"),
     "linklock_enabled":        ("perimeter", "lock_links",           "bool"),
     "antiflood_enabled":       ("perimeter", "antispam",             "bool"),
     "antiflood_rate":          ("perimeter", "antiflood_msgs",       "antiflood_rate"),
@@ -3098,6 +3119,7 @@ CHAT_CONFIG_DEFAULTS = {
     "captcha_enabled": False, "captcha_mode": "button", "captcha_timeout": 60, "custom_welcome": "",
     "autolower_enabled": True, "autolower_pct": 2, "shield_enabled": True, "micvip_price": 50, "speaker_price": 25,
     "tips_enabled": False, "tips_presets": list(DEFAULT_TIP_PRESETS), "custom_tips_allowed": True,
+    "tips_thanks_text": "",
     "linklock_enabled": False, "antiflood_enabled": False, "antiflood_rate": 10, "antiflood_window": 15,
     "service_cleaner_enabled": True,
 }
@@ -3163,6 +3185,78 @@ def _coerce_welcome(value) -> str:
     return text
 
 
+class _TelegramHTMLCheck(HTMLParser):
+    """Comprueba que el texto solo use etiquetas HTML de Telegram, bien anidadas y cerradas."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack: list = []
+        self.error = None
+
+    def handle_starttag(self, tag, attrs):
+        if self.error:
+            return
+        if tag not in _TG_HTML_TAGS:
+            self.error = f"etiqueta <{tag}> no admitida por Telegram."
+            return
+        allowed = _TG_HTML_ATTRS.get(tag, set())
+        for name, attr_value in attrs:
+            if name not in allowed:
+                self.error = f"atributo '{name}' no admitido en <{tag}>."
+                return
+            if tag == "a" and name == "href":
+                href = (attr_value or "").strip().lower()
+                if not href.startswith(("http://", "https://", "tg://")):
+                    self.error = "los enlaces <a href> deben usar http(s):// o tg://."
+                    return
+            if tag == "span" and name == "class" and attr_value != "tg-spoiler":
+                self.error = "<span> solo admite class=\"tg-spoiler\"."
+                return
+        self.stack.append(tag)
+
+    def handle_startendtag(self, tag, attrs):
+        self.error = self.error or f"etiqueta <{tag}/> no admitida por Telegram."
+
+    def handle_endtag(self, tag):
+        if self.error:
+            return
+        if not self.stack or self.stack[-1] != tag:
+            self.error = f"cierre </{tag}> sin abrir o mal anidado."
+            return
+        self.stack.pop()
+
+
+def _coerce_tips_thanks(value) -> str:
+    """
+    Agradecimiento de propinas: hasta 3000 caracteres, HTML de Telegram válido y solo las
+    variables {stars}, {mention}, {user_name} y {community}. "" o None restaura el texto oficial.
+    """
+    text = "" if value is None else str(value).replace("\r\n", "\n").strip()
+    if not text:
+        return ""
+    if len(text) > TIPS_THANKS_MAX:
+        raise ValueError(f"máximo {TIPS_THANKS_MAX} caracteres.")
+    accepted = set(TIPS_THANKS_VARIABLES) | set(_TIPS_THANKS_VAR_ALIASES)
+    unknown = sorted({v for v in _WELCOME_VAR_RE.findall(text) if v not in accepted})
+    if unknown:
+        allowed = ", ".join("{" + v + "}" for v in TIPS_THANKS_VARIABLES)
+        raise ValueError(f"variable desconocida {{{unknown[0]}}}; usa solo {allowed}.")
+    checker = _TelegramHTMLCheck()
+    try:
+        checker.feed(text)
+        checker.close()
+    except Exception:
+        raise ValueError("el formato HTML no es válido.")
+    if checker.error:
+        raise ValueError(checker.error)
+    if checker.stack:
+        raise ValueError(f"falta cerrar la etiqueta <{checker.stack[-1]}>.")
+    # Un '<' o '&' suelto (p. ej. "1 < 2") haría fallar parse_mode=HTML: se exige escaparlo.
+    if re.search(r"<(?![a-zA-Z/])", text) or re.search(r"&(?![a-zA-Z]+;|#\d+;|#x[0-9a-fA-F]+;)", text):
+        raise ValueError("escapa los símbolos sueltos: usa &lt; para '<' y &amp; para '&'.")
+    return text
+
+
 def validate_chat_configuration(payload: dict) -> dict:
     """
     Valida y normaliza una configuración (parcial o completa). Acepta el árbol por secciones
@@ -3198,6 +3292,8 @@ def validate_chat_configuration(payload: dict) -> dict:
                 clean[field] = _coerce_int_range(value, *CAPTCHA_TIMEOUT_RANGE, " s")
             elif kind == "welcome":
                 clean[field] = _coerce_welcome(value)
+            elif kind == "tips_thanks":
+                clean[field] = _coerce_tips_thanks(value)
             elif kind == "autolower_pct":
                 clean[field] = _coerce_int_range(value, *AUTOLOWER_PCT_RANGE, " %")
             elif kind == "stars":
@@ -3225,8 +3321,8 @@ def _to_db_value(field: str, value):
         return CAPTCHA_MODE_CODES[value]
     if kind == "tip_presets":
         return json.dumps(value)
-    if kind == "welcome":
-        return value or None
+    if kind in ("welcome", "tips_thanks"):
+        return value or None          # "" → NULL: el bot vuelve al texto oficial
     return int(value)
 
 
@@ -3242,7 +3338,7 @@ def _from_db_value(field: str, raw):
             return CAPTCHA_MODE_NAMES.get(int(raw), "button")
         if kind == "tip_presets":
             return _parse_tip_presets(raw)
-        if kind == "welcome":
+        if kind in ("welcome", "tips_thanks"):
             return str(raw)
         return int(raw)
     except (TypeError, ValueError):
@@ -3271,6 +3367,8 @@ def _read_chat_configuration(conn, chat_id: int) -> dict:
         "updated_at": row[len(columns)] if row else None,
         "updated_by": row[len(columns) + 1] if row else None,
         "welcome_variables": list(WELCOME_VARIABLES),
+        "tips_thanks_variables": list(TIPS_THANKS_VARIABLES),
+        "tips_thanks_max": TIPS_THANKS_MAX,
     }
     return tree
 
@@ -3287,7 +3385,9 @@ def get_chat_full_configuration(chat_id: int) -> dict:
                 default = CHAT_CONFIG_DEFAULTS[field]
                 tree[section][field] = list(default) if isinstance(default, list) else default
             tree["meta"] = {"chat_id": str(chat_id), "updated_at": None, "updated_by": None,
-                            "welcome_variables": list(WELCOME_VARIABLES)}
+                            "welcome_variables": list(WELCOME_VARIABLES),
+                            "tips_thanks_variables": list(TIPS_THANKS_VARIABLES),
+                            "tips_thanks_max": TIPS_THANKS_MAX}
             return tree
 
 
@@ -3418,7 +3518,7 @@ if "BACKUP_SECRET_SALT" not in os.environ:
     logger.warning("⚠️ [DB] BACKUP_SECRET_SALT no definido; se usa la sal por defecto (configúrala en Railway).")
 
 # Columnas de estado en tiempo de ejecución que NO deben viajar entre grupos en un backup.
-_IMPORT_EXCLUDED_COLUMNS = {"group_id", "panic_active", "night_mode_status", "purge_last_free_scan"}
+_IMPORT_EXCLUDED_COLUMNS = {"group_id", "panic_active", "night_mode_status", "purge_last_free_scan", "tips_return_link"}
 _IMPORT_ALLOWED_TYPES = (int, float, str, type(None))
 
 

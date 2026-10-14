@@ -500,6 +500,163 @@ def _tips_disabled_text(lang: str) -> str:
             else "⛔ Tips are disabled in this community.")
 
 
+# ==========================================
+# 💖 AGRADECIMIENTO DE PROPINAS (ÚNICO MENSAJE PRIVADO + RETORNO A LA COMUNIDAD)
+# ==========================================
+TIPS_THANKS_MAX_LEN = 3000
+TIPS_THANKS_VARIABLES = ("stars", "mention", "user_name", "community")
+_TIP_RETURN_CACHE: dict[int, tuple[float, str, str]] = {}   # chat_id -> (instante, url, título)
+TIP_RETURN_CACHE_TTL = 600.0
+TIP_RETURN_LINK_NAME = "The Bunker · Retorno"
+_SIGNATURE = "🛡️ <i>Cloud Media Management</i>"
+
+DEFAULT_TIP_THANKS = {
+    "es": (
+        "🌟 <b>¡Muchas gracias por tu contribución, {mention}!</b>\n\n"
+        "Tu aporte voluntario de <b>{stars} Telegram Stars (XTR)</b> fue recibido y acreditado "
+        "en la tesorería de <b>{community}</b>.\n\n"
+        "Tu apoyo impulsa las transmisiones y las herramientas de la comunidad.\n\n"
+        + _SIGNATURE
+    ),
+    "en": (
+        "🌟 <b>Thank you so much for your contribution, {mention}!</b>\n\n"
+        "Your voluntary contribution of <b>{stars} Telegram Stars (XTR)</b> was received and credited "
+        "to the <b>{community}</b> treasury.\n\n"
+        "Your support powers the community's broadcasts and tools.\n\n"
+        + _SIGNATURE
+    ),
+}
+
+
+async def _set_tips_field(chat_id: int, field: str, value) -> None:
+    try:
+        await _call_db_fn("set_tips_config", chat_id, field, value)
+    except Exception as ex:
+        logger.debug(f"Aviso guardando {field} de propinas en {chat_id}: {ex}")
+
+
+async def resolve_chat_return_link(bot: Bot, chat_id: int, chat=None) -> tuple[str | None, str]:
+    """
+    URL para volver al grupo/canal de origen y su título. Orden:
+      1. @username público → https://t.me/<username>
+      2. Enlace principal que Telegram ya expone en getChat (no se modifica)
+      3. Enlace propio del bot guardado en tips_return_link
+      4. create_chat_invite_link (se guarda para no crear uno nuevo en cada propina)
+      5. Enlace interno t.me/c/… (abre el chat a quien ya es miembro)
+    No se usa export_chat_invite_link: revoca el enlace principal del dueño y rompería los
+    enlaces que ya compartió. Si el chat exige aprobación, el enlace creado también la exige.
+    """
+    now = time.monotonic()
+    cached = _TIP_RETURN_CACHE.get(chat_id)
+    if cached and now - cached[0] < TIP_RETURN_CACHE_TTL:
+        return cached[1], cached[2]
+
+    if chat is None:
+        try:
+            chat = await bot.get_chat(chat_id)
+        except Exception as ex:
+            logger.debug(f"Aviso resolviendo chat de retorno {chat_id}: {ex}")
+    title = (getattr(chat, "title", None) or "").strip()
+
+    url = None
+    username = getattr(chat, "username", None)
+    if username:
+        url = f"https://t.me/{username}"
+    elif getattr(chat, "invite_link", None):
+        url = chat.invite_link
+    else:
+        cfg = await get_tips_config(chat_id)
+        url = cfg.get("tips_return_link") or None
+        if not url:
+            try:
+                link = await bot.create_chat_invite_link(
+                    chat_id=chat_id,
+                    name=TIP_RETURN_LINK_NAME,
+                    creates_join_request=bool(getattr(chat, "join_by_request", False)),
+                )
+                url = link.invite_link
+                await _set_tips_field(chat_id, "tips_return_link", url)
+            except Exception as ex:
+                logger.warning(f"⚠️ [Propinas] No se pudo crear enlace de retorno para {chat_id} (¿bot sin permiso de invitar?): {ex}")
+        if not url and str(chat_id).startswith("-100"):
+            url = f"https://t.me/c/{str(chat_id)[4:]}/999999999"
+
+    if url:
+        _TIP_RETURN_CACHE[chat_id] = (now, url, title)
+    return url, title
+
+
+def render_tip_thanks(template: str, stars: int, user_id: int, full_name: str, community: str) -> str:
+    """Sustituye las variables permitidas con valores escapados (el HTML de la plantilla queda válido)."""
+    name = html.escape(full_name or "Miembro")
+    values = {
+        "stars": str(int(stars)),
+        "amount": str(int(stars)),
+        "mention": f'<a href="tg://user?id={int(user_id)}">{name}</a>',
+        "user_name": name,
+        "name": name,
+        "community": html.escape(community or "la comunidad"),
+    }
+    text = template
+    for key, value in values.items():
+        text = text.replace("{" + key + "}", value)
+    return text
+
+
+async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "es",
+                          full_name: str = "", chat_id: int | None = None) -> bool:
+    """
+    ÚNICO mensaje de agradecimiento al donante, en privado:
+      • Texto personalizado si la comunidad es PRO / ULTRA PRO y lo configuró; si no, el oficial.
+      • Un solo botón: volver al grupo/canal de origen. Sin Command Center ni Mini App.
+    Devuelve True si el mensaje se entregó.
+    """
+    lang = lang if lang in DEFAULT_TIP_THANKS else "es"
+    target = chat_id or user_id
+    try:
+        chat = await bot.get_chat(group_id)
+    except Exception:
+        chat = None
+    community = (getattr(chat, "title", None) or ("la comunidad" if lang == "es" else "the community")).strip()
+
+    template = DEFAULT_TIP_THANKS[lang]
+    custom = False
+    tier = (await get_group_tier(group_id) or "free").lower()
+    if tier in ("pro", "ultra_pro"):
+        cfg = await get_tips_config(group_id)
+        if (cfg.get("tips_thanks_text") or "").strip():
+            template = cfg["tips_thanks_text"].strip()
+            custom = True
+    text = render_tip_thanks(template, stars, user_id, full_name, community)
+    if custom and "Cloud Media Management" not in text:
+        text = f"{text}\n\n{_SIGNATURE}"
+
+    markup = None
+    url, _title = await resolve_chat_return_link(bot, group_id, chat=chat)
+    if url:
+        label = f"🔙 Volver a {community}" if lang == "es" else f"🔙 Back to {community}"
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label[:64], url=url)]])
+
+    try:
+        await bot.send_message(chat_id=target, text=text[:4096], reply_markup=markup, parse_mode="HTML")
+        return True
+    except TelegramBadRequest as ex:
+        # HTML inválido en la plantilla personalizada o URL rechazada: un único reintento con el texto oficial.
+        logger.warning(f"⚠️ [Propinas] Agradecimiento rechazado en {group_id} ({ex}); se usa el texto oficial.")
+        if "button" in str(ex).lower() or "url" in str(ex).lower():
+            markup = None
+        fallback = render_tip_thanks(DEFAULT_TIP_THANKS[lang], stars, user_id, full_name, community)
+        try:
+            await bot.send_message(chat_id=target, text=fallback, reply_markup=markup, parse_mode="HTML")
+            return True
+        except Exception as ex2:
+            logger.error(f"❌ [Propinas] No se pudo enviar el agradecimiento a {user_id}: {ex2}")
+            return False
+    except Exception as ex:
+        logger.error(f"❌ [Propinas] No se pudo enviar el agradecimiento a {user_id}: {ex}")
+        return False
+
+
 async def get_channel_plan(plan_id: int):
     return await _call_db_fn("get_channel_plan", plan_id)
 
@@ -1853,38 +2010,19 @@ async def process_successful_payment(message: Message, bot: Bot):
             await record_group_tip(chat_id, user_id, stars_paid)
             benefit_granted = True
 
-            # Despacho de agradecimiento si existe la función en user_private
-            try:
-                package = __package__ or __name__.rpartition(".")[0]
-                up_mod = (
-                    importlib.import_module(".user_private", package=package)
-                    if package else importlib.import_module("handlers.user_private")
-                )
-                send_thanks_fn = getattr(up_mod, "send_tip_thanks", None)
-                if send_thanks_fn:
-                    await send_thanks_fn(
-                        bot=bot,
-                        user_id=user_id,
-                        stars=stars_paid,
-                        group_id=chat_id,
-                        lang=lang
-                    )
-            except Exception as thanks_err:
-                logger.debug(f"Aviso en agradecimiento de propina: {thanks_err}")
-
-            kb_rows = []
-            try:
-                chat_info = await bot.get_chat(chat_id)
-                if chat_info and getattr(chat_info, "username", None):
-                    kb_rows.append([InlineKeyboardButton(text=t["btn_return_group"], url=f"https://t.me/{chat_info.username}")])
-            except Exception:
-                pass
-
-            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],)
-            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
-            confirm_text = t["pmt_tip_ok"].format(stars=stars_paid)
-            await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
+            # Un único mensaje privado de agradecimiento, con botón de retorno a la comunidad.
+            delivered = await send_tip_thanks(
+                bot=bot,
+                user_id=user_id,
+                stars=stars_paid,
+                group_id=chat_id,
+                lang=lang,
+                full_name=message.from_user.full_name or "",
+                chat_id=message.chat.id,
+            )
+            if not delivered:
+                with contextlib.suppress(Exception):
+                    await message.answer(t["pmt_tip_ok"].format(stars=stars_paid), parse_mode="HTML")
 
             # Anuncio opcional en la comunidad
             if chat_id:

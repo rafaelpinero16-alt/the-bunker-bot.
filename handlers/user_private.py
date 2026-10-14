@@ -549,6 +549,7 @@ TIPS_AMOUNT_STATES = {}
 TIPS_TARGET_STATES = {}
 TIPS_TEXT_STATES = {}
 TIPS_MEDIA_STATES = {}
+TIPS_THANKS_STATES = {}   # 💌 Edición del agradecimiento de propinas (PRO / ULTRA PRO)
 SENTINEL_PAYLOAD_TEXT_STATES = {}
 SENTINEL_PAYLOAD_MEDIA_STATES = {}
 SENTINEL_PAYLOAD_AUTODEL_STATES = {}
@@ -568,7 +569,7 @@ ALL_STATE_DICTS = (
     CAPTCHA_STATES, CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES,
     VC_SCHED_STATES, NIGHT_STATES, DB_REG_STATES, MOD_TARGET_STATES, MIC_VIP_STATES, MIC_TAG_STATES,
     PODCAST_DUCK_STATES, SPEAKER_PRICE_STATES, TIPS_AMOUNT_STATES, TIPS_TARGET_STATES, TIPS_TEXT_STATES,
-    TIPS_MEDIA_STATES, 
+    TIPS_MEDIA_STATES, TIPS_THANKS_STATES,
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
     SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES
@@ -2528,6 +2529,7 @@ def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict, chat_type
 # ==========================================================================================
 TIPS_TARGET_LIMITS = {"free": 1, "pro": 3, "ultra_pro": 10}   # Canales destino por licencia
 TIPS_TEXT_MAX_LEN = 4000
+TIPS_THANKS_MAX_LEN = 3000   # Mismo tope que payments.TIPS_THANKS_MAX_LEN
 TIPS_MAX_AMOUNT = 999999         # Margen bajo el límite de 1024 caracteres de un caption con multimedia
 TIPS_BROADCAST_COOLDOWN = 30     # Segundos de enfriamiento por grupo (anti doble-clic / anti-flood)
 _TIPS_LAST_BROADCAST: dict = {}
@@ -2611,7 +2613,9 @@ def build_tips_panel_text(lang: str, cfg: dict, tier: str, total_stars: int, tar
         f"• <b>{tr(lang, 'Monto Sugerido', 'Suggested Amount')}:</b> <code>{_tips_amount(cfg)} Stars</code>\n"
         f"• <b>{tr(lang, 'Recaudación Total', 'Total Raised')}:</b> <code>{total_stars} ⭐</code>\n"
         f"• <b>{tr(lang, 'Canales Destino', 'Target Channels')}:</b> <code>{len(targets)}/{_tips_limit(tier)}</code> "
-        f"({active_n} {tr(lang, 'activos', 'active')})\n\n"
+        f"({active_n} {tr(lang, 'activos', 'active')})\n"
+        f"• <b>{tr(lang, 'Agradecimiento', 'Thank-you message')}:</b> "
+        f"{tr(lang, '✅ Personalizado', '✅ Custom') if (cfg or {}).get('tips_thanks_text') and tier in ('pro', 'ultra_pro') else tr(lang, '⚪ Oficial', '⚪ Official')}\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
 
@@ -2645,6 +2649,15 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
         rows.append([InlineKeyboardButton(text=f"✍️ {tr(lang, 'Editar Texto', 'Edit Text')} (PRO) {'✅' if has_text else '⬜'}", callback_data=f"tips_settext_{group_id}_{lang}")])
     else:
         rows.append([InlineKeyboardButton(text=f"🔒 {tr(lang, 'Texto Personalizado', 'Custom Text')} (PRO)", callback_data=f"pay_pro_{group_id}_{lang}")])
+
+    has_thanks = bool(_tips_cfg(cfg, "tips_thanks_text"))
+    if tier in ("pro", "ultra_pro"):
+        rows.append([
+            InlineKeyboardButton(text=f"💌 {tr(lang, 'Agradecimiento', 'Thank-you')} (PRO) {'✅' if has_thanks else '⬜'}", callback_data=f"tips_setthanks_{group_id}_{lang}"),
+            InlineKeyboardButton(text=f"👁️ {tr(lang, 'Vista previa', 'Preview')}", callback_data=f"tips_previewthanks_{group_id}_{lang}"),
+        ])
+    else:
+        rows.append([InlineKeyboardButton(text=f"🔒 {tr(lang, 'Agradecimiento Personalizado', 'Custom Thank-you')} (PRO)", callback_data=f"pay_pro_{group_id}_{lang}")])
 
     if tier == "ultra_pro":
         rows.append([InlineKeyboardButton(text=f"🖼️ {tr(lang, 'Adjuntar Multimedia', 'Attach Media')} (ULTRA PRO) {'✅' if has_media else '⬜'}", callback_data=f"tips_setmedia_{group_id}_{lang}")])
@@ -5087,6 +5100,43 @@ async def handle_private_inputs(message: Message, bot: Bot):
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
+    # 11c-bis. MENSAJE DE AGRADECIMIENTO DE PROPINAS (PRO / ULTRA PRO)
+    if tips_key in TIPS_THANKS_STATES:
+        st = TIPS_THANKS_STATES[tips_key]
+        group_id = st["group_id"]
+        cancel_kb = _cancel_kb(t, f"tips_menu_{group_id}_{lang}")
+        tier = _tips_tier(await get_effective_group_tier(group_id, user_id))
+        plain = (message.text or message.caption or "").strip()
+
+        if tier not in ("pro", "ultra_pro"):
+            TIPS_THANKS_STATES.pop(tips_key, None)
+            resp = await message.answer(tr(lang, "⭐ Requiere plan PRO o ULTRA PRO.", "⭐ Requires a PRO or ULTRA PRO plan.") + PERIMETER_SIGNATURE,
+                                        reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
+        elif not plain:
+            resp = await message.answer(tr(lang, "⚠️ Envía el mensaje como <b>texto</b>; no puede estar vacío.", "⚠️ Send the message as <b>text</b>; it cannot be empty.") + PERIMETER_SIGNATURE,
+                                        reply_markup=cancel_kb, parse_mode="HTML")
+        elif len(plain) > TIPS_THANKS_MAX_LEN:
+            resp = await message.answer(tr(lang, f"⚠️ El texto excede {TIPS_THANKS_MAX_LEN} caracteres ({len(plain)}). Acórtalo.",
+                                           f"⚠️ The text exceeds {TIPS_THANKS_MAX_LEN} characters ({len(plain)}). Shorten it.") + PERIMETER_SIGNATURE,
+                                        reply_markup=cancel_kb, parse_mode="HTML")
+        else:
+            TIPS_THANKS_STATES.pop(tips_key, None)
+            new_value = None if plain == "-" else (message.html_text if (message.entities or message.caption_entities) else html.escape(plain)).strip()
+            try:
+                await set_tips_config(group_id, "tips_thanks_text", new_value)
+            except Exception as ex:
+                logging.error(f"❌ [Tips] Error guardando agradecimiento en group={group_id}: {ex}")
+                resp = await message.answer(tips_target_error_text(lang, "save_failed"), reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
+            else:
+                notice = (tr(lang, "♻️ <b>Se restauró el agradecimiento oficial.</b>", "♻️ <b>Official thank-you message restored.</b>")
+                          if new_value is None else
+                          tr(lang, "✅ <b>¡Mensaje de agradecimiento actualizado!</b> Usa 👁️ Vista previa para revisarlo.",
+                             "✅ <b>Thank-you message updated!</b> Use 👁️ Preview to check it."))
+                await _tips_finish(bot, message, st, group_id, lang, notice + PERIMETER_SIGNATURE)
+                return
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
     # 11d. ADJUNTAR MULTIMEDIA A PROPINAS (EXCLUSIVO ULTRA PRO)
     if tips_key in TIPS_MEDIA_STATES:
         st = TIPS_MEDIA_STATES[tips_key]
@@ -5729,6 +5779,43 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                    f"You can use Telegram formatting and the <code>{{amount}}</code> placeholder to insert the suggested amount.") + PERIMETER_SIGNATURE,
                 _cancel_kb(t, back_ctx)
             )
+            return
+
+        elif sub == "setthanks":
+            if tier not in ("pro", "ultra_pro"):
+                await callback.answer(tr(lang, "⭐ Requiere plan PRO o ULTRA PRO.", "⭐ Requires a PRO or ULTRA PRO plan."), show_alert=True)
+                return
+            await callback.answer()
+            await _tips_open_prompt(
+                callback, TIPS_THANKS_STATES, state_key, group_id, lang,
+                tr(lang,
+                   "💌 <b>Mensaje de Agradecimiento (PRO / ULTRA PRO):</b>\n\n"
+                   "Escribe el mensaje que recibirá en privado cada persona que envíe una propina "
+                   f"(máx. {TIPS_THANKS_MAX_LEN} caracteres). Puedes usar formato de Telegram y estas variables:\n"
+                   "• <code>{stars}</code> — Stars donadas\n"
+                   "• <code>{mention}</code> — mención al donante\n"
+                   "• <code>{user_name}</code> — nombre del donante\n"
+                   "• <code>{community}</code> — nombre de la comunidad\n\n"
+                   "Envía <code>-</code> para volver al mensaje oficial.",
+                   "💌 <b>Thank-you Message (PRO / ULTRA PRO):</b>\n\n"
+                   "Write the message every tipper will receive privately "
+                   f"(max. {TIPS_THANKS_MAX_LEN} characters). Telegram formatting and these variables are supported:\n"
+                   "• <code>{stars}</code> — Stars donated\n"
+                   "• <code>{mention}</code> — mention of the tipper\n"
+                   "• <code>{user_name}</code> — tipper's name\n"
+                   "• <code>{community}</code> — community name\n\n"
+                   "Send <code>-</code> to restore the official message.") + PERIMETER_SIGNATURE,
+                _cancel_kb(t, back_ctx)
+            )
+            return
+
+        elif sub == "previewthanks":
+            if tier not in ("pro", "ultra_pro"):
+                await callback.answer(tr(lang, "⭐ Requiere plan PRO o ULTRA PRO.", "⭐ Requires a PRO or ULTRA PRO plan."), show_alert=True)
+                return
+            await callback.answer(tr(lang, "👁️ Vista previa enviada a este chat.", "👁️ Preview sent to this chat."))
+            await send_tip_thanks(bot, viewer_id, _tips_amount(cfg), group_id, lang,
+                                  full_name=callback.from_user.full_name or "")
             return
 
         elif sub == "setmedia":
@@ -7786,40 +7873,10 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 # ==========================================
 # 💖 AGRADECIMIENTO OFICIAL DE PROPINAS STARS
 # ==========================================
-async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "es") -> None:
-    """Despacha un mensaje de gratitud oficial del Búnker en privado al donante de Stars."""
-    t = TEXTS.get(lang, TEXTS["es"])
-    thanks_text = (
-        f"🌟 <b>¡Muchas gracias por tu contribución!</b>\n\n"
-        f"Tu aporte voluntario de <b>{stars} Telegram Stars (XTR)</b> ha sido recibido y acreditado con éxito en la tesorería de la comunidad.\n\n"
-        f"Tu apoyo impulsa la infraestructura del Búnker y el mantenimiento de nuestras transmisiones y herramientas de élite.\n\n"
-        f"🛡️ <i>Cloud Media Management</i>"
-    ) if lang == "es" else (
-        f"🌟 <b>Thank you so much for your contribution!</b>\n\n"
-        f"Your voluntary contribution of <b>{stars} Telegram Stars (XTR)</b> has been successfully received and credited to the community treasury.\n\n"
-        f"Your support powers The Bunker's infrastructure, streaming servers, and elite toolset.\n\n"
-        f"🛡️ <i>Cloud Media Management</i>"
-    )
-
-    rows = []
-    try:
-        chat_info = await bot.get_chat(group_id)
-        chat_title = getattr(chat_info, "title", None) or ("la comunidad" if lang == "es" else "the community")
-        btn_label = f"🔙 Volver a {chat_title[:20]}" if lang == "es" else f"🔙 Return to {chat_title[:20]}"
-        if chat_info and getattr(chat_info, "username", None):
-            rows.append([InlineKeyboardButton(text=btn_label, url=f"https://t.me/{chat_info.username}")])
-        elif chat_info and getattr(chat_info, "invite_link", None):
-            rows.append([InlineKeyboardButton(text=btn_label, url=chat_info.invite_link)])
-    except Exception:
-        pass
-    rows.append([InlineKeyboardButton(text=t["btn_saas"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={group_id}"))])
-
-    try:
-        await bot.send_message(
-            chat_id=user_id,
-            text=thanks_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-            parse_mode="HTML"
-        )
-    except Exception as ex:
-        logging.debug(f"Aviso al enviar agradecimiento de propina a {user_id}: {ex}")
+async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "es", full_name: str = "") -> bool:
+    """
+    Compatibilidad: la lógica vive en handlers/payments.py (fuente única). Un solo mensaje privado,
+    texto personalizable para PRO / ULTRA PRO y un único botón de retorno a la comunidad.
+    """
+    from .payments import send_tip_thanks as _payments_send_tip_thanks
+    return await _payments_send_tip_thanks(bot, user_id, stars, group_id, lang, full_name=full_name)
