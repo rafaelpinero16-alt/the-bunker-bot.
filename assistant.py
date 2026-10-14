@@ -2495,7 +2495,8 @@ async def radar_master_loop():
             raise
         except Exception as e:
             logger.debug(f"Aviso en radar master loop: {e}")
-        await asyncio.sleep(25)
+        # get_dialogs(limit=100) cada 25 s provocaba FLOOD_WAIT; descubrimiento de grupos cada 5 min.
+        await asyncio.sleep(300)
 
 
 def _make_sentinel_cleanup(group_id: int):

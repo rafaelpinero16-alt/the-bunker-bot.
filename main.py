@@ -1754,7 +1754,6 @@ if build_channel_plans_router is not None:
 
 
 app.include_router(api_router, prefix="/api")
-app.include_router(api_router)
 
 
 def _resolve_port() -> int:

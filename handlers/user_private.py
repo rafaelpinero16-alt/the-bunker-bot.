@@ -131,7 +131,7 @@ class CallbackAutoAnswerMiddleware(BaseMiddleware):
 router.callback_query.middleware(CallbackAutoAnswerMiddleware())
 
 ADMIN_GROUP_ID = -1004351489258
-WEBAPP_URL = "https://thebunkerapp2.netlify.app/"
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/").strip()
 
 # ------------------------------------------
 # 🖼️ GESTIÓN MAESTRA DE TARJETAS GRÁFICAS HUD (26 IMÁGENES ES/EN)

@@ -76,7 +76,7 @@ logger = logging.getLogger("groups_handler")
 router = Router()
 
 _db_reset_warnings = getattr(_db_module, "reset_warnings", None)
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://thebunkerapp2.netlify.app/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/").strip()
 
 
 def _env_flag(name: str, default: bool) -> bool:

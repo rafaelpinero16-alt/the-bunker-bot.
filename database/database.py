@@ -58,7 +58,9 @@ def _open_connection() -> sqlite3.Connection:
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_SECONDS)
+    # isolation_level=None: el driver no abre transacciones implícitas; las escrituras atómicas
+    # se controlan con BEGIN IMMEDIATE explícito en _write_transaction().
+    conn = sqlite3.connect(DB_PATH, timeout=_DB_TIMEOUT_SECONDS, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     conn.execute(f"PRAGMA busy_timeout = {int(_DB_TIMEOUT_SECONDS * 1000)};")
@@ -499,7 +501,7 @@ def init_default_blacklist():
         "stab", "kill", "nigger", "n1gger", "slave", "hitler", "nazi", "pedofilia", "pedophilia",
         "pedophile", "pedo", "p.e.d.o", "p3do", "p3d0", "paedo"
     ]
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.executemany("INSERT OR IGNORE INTO blacklist (word) VALUES (?)", [(w.lower().strip(),) for w in banned_words])
         conn.commit()

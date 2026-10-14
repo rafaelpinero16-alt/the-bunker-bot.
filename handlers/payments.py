@@ -117,7 +117,7 @@ RAW_ADMINS = os.getenv("ADMIN_IDS", "")
 SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
 SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/").strip()
 
 # ==========================================
 # 💰 TARIFAS Y CONFIGURACIÓN DE FACTURACIÓN
@@ -850,6 +850,8 @@ TEXTS = {
         "btn_return_vc": "🎙️ Return to Voice Chat",
         "btn_return_group": "👥 Back to Community",
         "err_inv": "⚠️ An error occurred while generating the invoice. Please try again.",
+        "err_sub_refund": "⚠️ <b>Delivery incomplete:</b> Could not grant access to the channel at this moment. Your <b>Telegram Stars</b> have been automatically refunded to your balance.\n\n🛡️ <i>Cloud Media Management</i>",
+        "err_sub_refund_failed": "⚠️ <b>Delivery incomplete:</b> Could not grant access to the channel and the automatic refund did not complete. Contact support with this reference: <code>{charge_id}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "err_link": "⚠️ Invalid activation link or expired parameters.",
         "private_only": "⚠️ Please open a private chat with me to access the billing terminal: t.me/{bot_username}"
     },
@@ -931,6 +933,8 @@ TEXTS = {
         "btn_return_vc": "🎙️ Volver al Videochat",
         "btn_return_group": "👥 Volver al Grupo",
         "err_inv": "⚠️ Error al generar la factura. Intenta nuevamente.",
+        "err_sub_refund": "⚠️ <b>Entrega no completada:</b> No fue posible otorgar el acceso al canal en este momento. Tus <b>Telegram Stars</b> han sido reembolsadas automáticamente a tu balance.\n\n🛡️ <i>Cloud Media Management</i>",
+        "err_sub_refund_failed": "⚠️ <b>Entrega no completada:</b> No fue posible otorgar el acceso al canal y el reembolso automático no se completó. Contacta a soporte con esta referencia: <code>{charge_id}</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "err_link": "⚠️ Enlace de facturación no válido, sin entorno asociado o expirado.",
         "private_only": "⚠️️ Inicia un chat privado conmigo para gestionar suscripciones: t.me/{bot_username}"
     }
@@ -1723,9 +1727,11 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Membresía {payload!r} registrada pero no se pudo notificar a {user_id}: {e}")
             else:
                 logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
-                await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de membresía fallida: {e}")
+                refunded = await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de membresía fallida: {e}")
+                # Solo se afirma el reembolso si Telegram lo confirmó; si no, se da la referencia del cargo.
+                notice = t["err_sub_refund"] if refunded else t["err_sub_refund_failed"].format(charge_id=html.escape(charge_id or ""))
                 with contextlib.suppress(Exception):
-                    await message.answer(t["err_inv"], parse_mode="HTML")
+                    await message.answer(notice, parse_mode="HTML")
 
     # CASO 3: PASES VIP DE MICRÓFONO PERSONALIZADOS (24 HORAS)
     elif payload.startswith("vip_mic_"):

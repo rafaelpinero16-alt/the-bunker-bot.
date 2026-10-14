@@ -63,16 +63,14 @@ export const tgApp = {
 
     getAuthHeaders() {
         const headers = {};
+        // initData se usa solo en memoria: nunca se persiste en el navegador.
+        // Se purga el valor que versiones anteriores dejaron guardado.
+        try { localStorage.removeItem('bunker_init_data'); } catch (e) {}
+
         const tgInit = this.tg?.initData;
         if (tgInit && tgInit.trim() !== '') {
-            localStorage.setItem('bunker_init_data', tgInit);
             headers['X-Telegram-Init-Data'] = tgInit;
             return headers;
-        }
-
-        const cachedInit = localStorage.getItem('bunker_init_data');
-        if (cachedInit) {
-            headers['X-Telegram-Init-Data'] = cachedInit;
         }
 
         const sessionToken = localStorage.getItem('bunker_session_token');
