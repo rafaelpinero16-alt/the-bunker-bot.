@@ -1156,21 +1156,43 @@ async def api_import_backup(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# v8.2: servicio de difusión personalizada (vive en channel_plans_api.py junto a los planes de canal).
-try:
-    from channel_plans_api import (  # type: ignore[import-not-found]
-        PlanApiError,
-        load_broadcast_config,
-        load_db_deps as _load_plan_deps,
-        public_broadcast_config,
-        run_custom_broadcast_scheduler,
-        save_broadcast_config,
-    )
-except ImportError:
+# v8.2: servicio de difusión personalizada y planes de canal (channel_plans_api.py).
+# v10: el módulo vive en el paquete handlers/ (handlers/channel_plans_api.py). Se mantiene el respaldo a la
+# raíz del proyecto para que un despliegue a medio migrar no pierda los endpoints de planes ni el programador.
+import importlib
+
+
+def _import_channel_plans_api():
+    """Resuelve channel_plans_api una sola vez: primero handlers/, luego la raíz. None si no existe."""
+    for module_name in ("handlers.channel_plans_api", "channel_plans_api"):
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as ex:
+            # Solo se ignora la ausencia del PROPIO módulo; un import roto dentro de él debe verse en los logs.
+            if ex.name not in (module_name, module_name.split(".")[0]):
+                logger.error(f"❌ [Planes] {module_name} no pudo importar una dependencia: {ex}", exc_info=True)
+                return None
+            continue
+        logger.info(f"💎 [Planes] Módulo de planes de canal cargado desde '{module_name}'.")
+        return module
+    logger.warning("⚠️ [Planes] No se encontró channel_plans_api (handlers/ ni raíz); se omiten sus endpoints.")
+    return None
+
+
+_channel_plans_api = _import_channel_plans_api()
+if _channel_plans_api is not None:
+    PlanApiError = _channel_plans_api.PlanApiError
+    load_broadcast_config = _channel_plans_api.load_broadcast_config
+    _load_plan_deps = _channel_plans_api.load_db_deps
+    public_broadcast_config = _channel_plans_api.public_broadcast_config
+    run_custom_broadcast_scheduler = _channel_plans_api.run_custom_broadcast_scheduler
+    save_broadcast_config = _channel_plans_api.save_broadcast_config
+    build_channel_plans_router = _channel_plans_api.build_channel_plans_router
+else:
     class PlanApiError(Exception):  # type: ignore[no-redef]
         status, detail = 500, ""
     load_broadcast_config = save_broadcast_config = run_custom_broadcast_scheduler = None  # type: ignore[assignment]
-    public_broadcast_config = _load_plan_deps = None  # type: ignore[assignment]
+    public_broadcast_config = _load_plan_deps = build_channel_plans_router = None  # type: ignore[assignment]
 
 _PLAN_DEPS_CACHE: Dict[str, Any] = {}
 
@@ -1874,22 +1896,8 @@ async def websocket_radar(
             snapshot_task.cancel()
         await radar_hub.disconnect(numeric_id, websocket)
 
-# 1. Importa la función constructora del router de planes de canal
-# Si el módulo no existe en este despliegue, se omite de forma segura.
-try:
-    import importlib
-
-    _channel_plans_api = importlib.import_module("channel_plans_api")
-    build_channel_plans_router = _channel_plans_api.build_channel_plans_router
-    run_custom_broadcast_scheduler = _channel_plans_api.run_custom_broadcast_scheduler
-    save_broadcast_config = _channel_plans_api.save_broadcast_config
-except ImportError:
-    build_channel_plans_router = None
-    run_custom_broadcast_scheduler = None
-    save_broadcast_config = None
-    logger.warning("[FastAPI] No se encontró 'channel_plans_api'; se omite el router de planes de canal.")
-
-# 2. Inclúyelo en tu api_router existente
+# Router de planes de canal (handlers/channel_plans_api.py, resuelto una sola vez por
+# _import_channel_plans_api). Si el módulo no existe en este despliegue, se omite de forma segura.
 if build_channel_plans_router is not None:
     api_router.include_router(build_channel_plans_router(
         require_user=require_authenticated_user,

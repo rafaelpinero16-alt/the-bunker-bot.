@@ -69,9 +69,11 @@ Diseño
 • La difusión tiene enfriamiento por (canal, plan) para impedir publicaciones duplicadas por doble
   toque o reintentos, y solo se permite con el plan activo.
 
-Integración en main.py (antes de `app.include_router(api_router, prefix="/api")`):
+Ubicación (v10): handlers/channel_plans_api.py. main.py lo resuelve con _import_channel_plans_api()
+(primero `handlers.channel_plans_api`, después la raíz como respaldo de migración) e integra el router antes
+de `app.include_router(api_router, prefix="/api")`:
 
-    from channel_plans_api import build_channel_plans_router
+    from handlers.channel_plans_api import build_channel_plans_router
     api_router.include_router(build_channel_plans_router(
         require_user=require_authenticated_user,
         assert_owner=assert_chat_ownership,
@@ -92,7 +94,12 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from telegram_html import normalize_telegram_html, visible_length
+try:
+    from telegram_html import normalize_telegram_html, visible_length   # módulo en la raíz del proyecto
+except ModuleNotFoundError as _th_err:                                 # pragma: no cover - según el despliegue
+    if _th_err.name != "telegram_html":
+        raise
+    from handlers.telegram_html import normalize_telegram_html, visible_length  # type: ignore[no-redef]
 
 logger = logging.getLogger("bunker.channel_plans")
 
@@ -1012,11 +1019,16 @@ class _suppress_log:
 
 def _is_isolated(chat_id: int) -> bool:
     """Escudo Anti-Raid activo en el chat destino (sin dependencia dura: el módulo es opcional en pruebas)."""
-    try:
-        import raid_shield  # type: ignore[import-not-found]
-        return raid_shield.is_isolated(chat_id)
-    except Exception:
-        return False
+    for module_name in ("raid_shield", "handlers.raid_shield"):
+        try:
+            module = __import__(module_name, fromlist=["is_isolated"])
+        except ImportError:
+            continue
+        try:
+            return bool(module.is_isolated(chat_id))
+        except Exception:
+            return False
+    return False
 
 
 def _is_permission_error(ex: Exception) -> bool:
