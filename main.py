@@ -487,16 +487,72 @@ def require_authenticated_user(x_telegram_init_data: str = None, authorization: 
     return uid
 
 
+OWNER_LIVE_ROLES = ("creator", "administrator")
+_OWNER_DENIED_DETAIL = "Solo el dueño legítimo de esta comunidad o canal puede operar este panel."
+
+
+def _sync_registered_owner_link(user_id: int, chat_id: int) -> bool:
+    """
+    ¿El usuario está registrado como dueño del chat? Mismas tres fuentes que
+    handlers/user_private.is_legitimate_owner: user_groups (quien vinculó el bot), bot_clones activos
+    y channel_owner_registry (canales sincronizados con el selector nativo de Telegram).
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM user_groups WHERE user_id = ? AND group_id = ? LIMIT 1", (int(user_id), int(chat_id)))
+        if cursor.fetchone():
+            return True
+        try:
+            cursor.execute("SELECT 1 FROM bot_clones WHERE user_id = ? AND group_id = ? AND status != 'revoked' LIMIT 1",
+                           (int(user_id), int(chat_id)))
+            if cursor.fetchone():
+                return True
+            cursor.execute("SELECT 1 FROM channel_owner_registry WHERE user_id = ? AND channel_id = ? LIMIT 1",
+                           (int(user_id), int(chat_id)))
+            return cursor.fetchone() is not None
+        except Exception:      # tablas opcionales en instalaciones antiguas
+            return False
+
+
+async def is_legitimate_chat_owner(user_id: int, chat_id: int) -> bool:
+    """
+    Regla ÚNICA de propiedad (paridad 1:1 con handlers/user_private.is_legitimate_owner):
+      1. Super-admin (arquitecto) → sí.
+      2. Creador del chat según Telegram en vivo → sí.
+      3. Dueño registrado (user_groups / bot_clones / channel_owner_registry) que SIGUE siendo creador o
+         administrador en Telegram → sí. Si perdió el rango o salió del chat, pierde el acceso al panel.
+      4. Dueño registrado y Telegram no responde ('' tras el tiempo límite) → sí, con aviso en el log: una
+         caída de la Bot API no debe dejar fuera al dueño real, y nadie sin registro entra por esta vía.
+    """
+    if not user_id:
+        return False
+    if is_super_admin(user_id) or int(user_id) == CREATOR_FALLBACK_ID:
+        return True
+    status = await _live_member_status(int(user_id), int(chat_id))
+    if status == "creator":
+        return True
+    try:
+        registered = await asyncio.to_thread(_sync_registered_owner_link, int(user_id), int(chat_id))
+    except Exception as ex:
+        logger.error(f"❌ [Propiedad] No se pudo consultar el registro de dueños ({user_id}/{chat_id}): {ex}")
+        return False
+    if not registered:
+        return False
+    if status in OWNER_LIVE_ROLES:
+        return True
+    if status == "":
+        logger.warning(f"⚠️ [Propiedad] Telegram no confirmó el rango de {user_id} en {chat_id}; se mantiene el acceso del dueño registrado.")
+        return True
+    logger.warning(f"⛔ [Propiedad] {user_id} figura como dueño de {chat_id} pero su estado actual es '{status}': acceso denegado.")
+    return False
+
+
 async def assert_chat_ownership(user_id: int, chat_id: int):
+    """Exige al dueño legítimo (is_legitimate_chat_owner). 401 sin sesión, 403 si no es el dueño."""
     if not user_id:
         raise HTTPException(status_code=401, detail="Autenticación requerida.")
-    if is_super_admin(user_id) or user_id == CREATOR_FALLBACK_ID:
-        return
-    owned_channels = await get_user_channels(user_id)
-    owned_groups = await get_user_groups(user_id)
-    owned_ids = {int(c[0]) for c in owned_channels} | {int(g[0]) for g in owned_groups}
-    if chat_id not in owned_ids:
-        raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
+    if not await is_legitimate_chat_owner(int(user_id), int(chat_id)):
+        raise HTTPException(status_code=403, detail=_OWNER_DENIED_DETAIL)
 
 
 _ADMIN_ACCESS_CACHE: Dict[tuple, tuple] = {}
@@ -535,19 +591,11 @@ async def _is_live_chat_admin(user_id: int, chat_id: int, fresh: bool = False) -
 
 async def assert_chat_access(user_id: int, chat_id: int):
     """
-    Acceso a la analítica: propietario registrado (assert_chat_ownership) o cualquier
-    administrador vivo del chat. Así el botón de /metrics funciona para todo el staff,
-    no solo para quien añadió el bot.
+    Acceso a la analítica (REST y /ws/radar). v11: exclusivo del dueño legítimo, igual que el resto de
+    paneles; antes bastaba con ser administrador vivo del chat. Se conserva el nombre por compatibilidad
+    con los llamadores existentes.
     """
-    try:
-        await assert_chat_ownership(user_id, chat_id)
-        return
-    except HTTPException as exc:
-        if getattr(exc, "status_code", None) != 403:
-            raise
-    if await _is_live_chat_admin(user_id, chat_id):
-        return
-    raise HTTPException(status_code=403, detail="No tienes permisos de administración sobre este chat.")
+    await assert_chat_ownership(user_id, chat_id)
 
 
 def _get_global_channels_sync():
@@ -578,7 +626,9 @@ def _get_registered_chats_sync():
 # El registro inicial solo vincula a quien añadió/promovió al bot. Si fue otro administrador, el
 # creador real no aparecía en los selectores. La auditoría consulta a Telegram (get_chat_member)
 # el estado del operador en cada chat que el bot conoce y vincula los que administra.
-SYNC_LINK_ROLES = {r.strip() for r in os.getenv("SYNC_LINK_ROLES", "creator,administrator").split(",") if r.strip()}
+# v11: por defecto la sincronización solo vincula al CREADOR. Antes también vinculaba a cualquier administrador,
+# que así pasaba a figurar como "dueño" y obtenía todos los paneles. Configurable con SYNC_LINK_ROLES.
+SYNC_LINK_ROLES = {r.strip() for r in os.getenv("SYNC_LINK_ROLES", "creator").split(",") if r.strip()} or {"creator"}
 SYNC_AUDIT_MAX_CHATS = max(1, int(os.getenv("SYNC_AUDIT_MAX_CHATS", "400") or 400))
 SYNC_AUDIT_CONCURRENCY = max(1, int(os.getenv("SYNC_AUDIT_CONCURRENCY", "8") or 8))
 SYNC_AUDIT_COOLDOWN_S = float(os.getenv("SYNC_AUDIT_COOLDOWN_S", "60") or 60)

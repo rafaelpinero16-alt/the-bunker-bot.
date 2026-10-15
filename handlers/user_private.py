@@ -1919,20 +1919,96 @@ async def is_registered_owner_db(user_id: int, group_id: int) -> bool:
         return False
 
 
+OWNER_LIVE_ROLES = ("creator", "administrator")
+_OWNER_STATUS_CACHE: dict = {}          # (bot_id, chat_id, user_id) -> (estado, expira)
+_OWNER_STATUS_CACHE_MAX = 20000
+
+
+async def _live_owner_status(bot: Bot, chat_id: int, user_id: int) -> str:
+    """
+    Estado real del usuario en el chat ('creator', 'administrator', 'member', 'left'…). Caché corta para no
+    llamar a getChatMember en cada botón: 5 min si es staff, 1 min si no, 30 s si Telegram falló ('').
+    """
+    key = (bot.id, int(chat_id), int(user_id))
+    now = time.monotonic()
+    cached = _OWNER_STATUS_CACHE.get(key)
+    if cached and cached[1] > now:
+        return cached[0]
+    try:
+        member = await asyncio.wait_for(bot.get_chat_member(chat_id=chat_id, user_id=user_id), timeout=5)
+        status = str(getattr(member.status, "value", member.status) or "")
+        ttl = 300.0 if status in OWNER_LIVE_ROLES else 60.0
+    except Exception:
+        status, ttl = "", 30.0
+    if len(_OWNER_STATUS_CACHE) >= _OWNER_STATUS_CACHE_MAX:
+        _OWNER_STATUS_CACHE.clear()
+    _OWNER_STATUS_CACHE[key] = (status, now + ttl)
+    return status
+
+
 async def is_legitimate_owner(bot: Bot, user_id: int, group_id: int) -> bool:
+    """
+    Regla ÚNICA de propiedad (paridad 1:1 con main.is_legitimate_chat_owner, que protege la Mini App):
+      1. Super-admin → sí.
+      2. Creador del chat según Telegram en vivo → sí.
+      3. Dueño registrado (user_groups / bot_clones / channel_owner_registry) que SIGUE siendo creador o
+         administrador → sí. Si perdió el rango o salió del chat, la consola deja de responderle.
+      4. Dueño registrado y Telegram no responde → sí (con aviso en el log): una caída de la Bot API no deja
+         fuera al dueño real, y nadie sin registro entra por esta vía.
+    """
     if is_super_admin(user_id):
         return True
-    if await is_registered_owner_db(user_id, group_id):
+    status = await _live_owner_status(bot, group_id, user_id)
+    if status == "creator":
         return True
-    if await registry_has_owner(user_id, group_id):
+    registered = await is_registered_owner_db(user_id, group_id) or await registry_has_owner(user_id, group_id)
+    if not registered:
+        return False
+    if status in OWNER_LIVE_ROLES:
         return True
-    try:
-        member = await bot.get_chat_member(chat_id=group_id, user_id=user_id)
-        if member.status == "creator":
-            return True
-    except Exception:
-        pass
+    if status == "":
+        logging.warning(f"⚠️ [Aduana] Telegram no confirmó el rango de {user_id} en {group_id}; se mantiene el acceso del dueño registrado.")
+        return True
+    logging.warning(f"⛔ [Aduana] {user_id} figura como dueño de {group_id} pero su estado actual es '{status}': acceso denegado.")
     return False
+
+
+def _state_target_chat(value) -> int | None:
+    """Comunidad/canal sobre el que actúa una conversación pendiente (int o dict con group_id/channel_id/chat_id)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value < 0 else None
+    if isinstance(value, dict):
+        for field in ("group_id", "channel_id", "chat_id"):
+            raw = value.get(field)
+            try:
+                chat_id = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if chat_id < 0:
+                return chat_id
+    return None
+
+
+async def guard_pending_state_ownership(message: Message, bot: Bot, t: dict) -> bool:
+    """
+    Re-verifica la propiedad ANTES de aplicar cualquier respuesta conversacional. Cada editor (captcha,
+    propinas, centinela, clones, moderación, planes…) guarda el group_id al abrirse; si entre la apertura y
+    la respuesta el usuario dejó de ser el dueño legítimo, la entrada se descarta y se liberan sus estados.
+    Devuelve True si puede continuar.
+    """
+    user_id = message.from_user.id
+    key = (bot.id, user_id)
+    targets = {chat for state_dict in ALL_STATE_DICTS if key in state_dict
+               for chat in [_state_target_chat(state_dict.get(key))] if chat is not None}
+    for chat_id in targets:
+        if not await is_legitimate_owner(bot, user_id, chat_id):
+            logging.warning(f"⛔ [Aduana] Entrada conversacional de {user_id} descartada: ya no es dueño de {chat_id}.")
+            clear_user_states(bot.id, user_id)
+            await message.answer(t["owner_only_alert"])
+            return False
+    return True
 
 
 async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
@@ -4264,6 +4340,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS.get(lang, TEXTS["es"])
+
+    # 🔐 v11 · Propiedad exclusiva: ninguna respuesta pendiente se aplica si el usuario ya no es el dueño.
+    if not await guard_pending_state_ownership(message, bot, t):
+        return
 
     # 🎮 ANUNCIO RECURRENTE DE GAMIFICACIÓN (texto bilingüe, multimedia, botón y enlace)
     if (bot.id, user_id) in GAMI_STATES:
