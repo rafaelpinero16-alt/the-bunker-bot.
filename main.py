@@ -181,6 +181,8 @@ from database.database import (
     get_log_report_config,
     save_log_report_config,
     record_admin_mod_action,
+    # v13 · Matriz del Arquitecto: delegados con acceso de lectura a la analítica
+    has_delegate_permission,
 )
 try:
     import raid_shield  # type: ignore[import-not-found]
@@ -232,6 +234,7 @@ except ImportError:  # pragma: no cover - módulo opcional disponible solo en al
 
 from handlers import (
     admin_group,
+    architect_matrix,
     ecosystem,
     groups,
     moderation,
@@ -487,8 +490,15 @@ def require_authenticated_user(x_telegram_init_data: str = None, authorization: 
     return uid
 
 
-OWNER_LIVE_ROLES = ("creator", "administrator")
-_OWNER_DENIED_DETAIL = "Solo el dueño legítimo de esta comunidad o canal puede operar este panel."
+# 👑 v12 · REGLA DE ORO: solo el CREADOR (en vivo) y los Arquitectos operan los paneles. Un administrador común,
+# con todos o algunos permisos, recibe 403 aunque figure en el registro de dueños.
+OWNER_LIVE_ROLES = ("creator",)
+_OWNER_DENIED_DETAIL = ("⛔ Acceso Denegado: este panel está reservado única y exclusivamente al Dueño (creador) "
+                        "de la comunidad o canal. Los administradores no tienen acceso.")
+# Último rango CONFIRMADO por Telegram; ante una caída de la Bot API impide que un no-creador ya conocido
+# entre por la vía del registro.
+_OWNER_LAST_KNOWN: Dict[tuple, str] = {}
+_OWNER_LAST_KNOWN_MAX = 50000
 
 
 def _sync_registered_owner_link(user_id: int, chat_id: int) -> bool:
@@ -516,34 +526,37 @@ def _sync_registered_owner_link(user_id: int, chat_id: int) -> bool:
 
 async def is_legitimate_chat_owner(user_id: int, chat_id: int) -> bool:
     """
-    Regla ÚNICA de propiedad (paridad 1:1 con handlers/user_private.is_legitimate_owner):
-      1. Super-admin (arquitecto) → sí.
-      2. Creador del chat según Telegram en vivo → sí.
-      3. Dueño registrado (user_groups / bot_clones / channel_owner_registry) que SIGUE siendo creador o
-         administrador en Telegram → sí. Si perdió el rango o salió del chat, pierde el acceso al panel.
-      4. Dueño registrado y Telegram no responde ('' tras el tiempo límite) → sí, con aviso en el log: una
-         caída de la Bot API no debe dejar fuera al dueño real, y nadie sin registro entra por esta vía.
+    Regla ÚNICA y estricta de propiedad (paridad 1:1 con handlers/user_private.is_legitimate_owner):
+      1. Arquitecto Supremo (SUPER_ADMIN_IDS) → sí, en cualquier comunidad o canal.
+      2. Creador ('creator') del chat según Telegram en vivo → sí.
+      3. Cualquier otro rango confirmado ('administrator', 'member', 'left'…) → NO, figure o no en
+         user_groups / bot_clones / channel_owner_registry.
+      4. Telegram no responde → solo el dueño REGISTRADO cuyo último rango confirmado no contradiga ser el
+         creador conserva el acceso (con aviso en el log). Nadie sin registro entra por esta vía.
     """
     if not user_id:
         return False
-    if is_super_admin(user_id) or int(user_id) == CREATOR_FALLBACK_ID:
+    if is_super_admin(user_id):
         return True
     status = await _live_member_status(int(user_id), int(chat_id))
     if status == "creator":
         return True
+    if status:
+        if status == "administrator":
+            logger.warning(f"⛔ [Propiedad] {user_id} es administrador (no creador) de {chat_id}: panel denegado.")
+        return False
+    last_known = _OWNER_LAST_KNOWN.get((int(chat_id), int(user_id)))
+    if last_known and last_known != "creator":
+        logger.warning(f"⛔ [Propiedad] Telegram no respondió y el último rango conocido de {user_id} en {chat_id} es '{last_known}': denegado.")
+        return False
     try:
         registered = await asyncio.to_thread(_sync_registered_owner_link, int(user_id), int(chat_id))
     except Exception as ex:
         logger.error(f"❌ [Propiedad] No se pudo consultar el registro de dueños ({user_id}/{chat_id}): {ex}")
         return False
-    if not registered:
-        return False
-    if status in OWNER_LIVE_ROLES:
-        return True
-    if status == "":
+    if registered:
         logger.warning(f"⚠️ [Propiedad] Telegram no confirmó el rango de {user_id} en {chat_id}; se mantiene el acceso del dueño registrado.")
         return True
-    logger.warning(f"⛔ [Propiedad] {user_id} figura como dueño de {chat_id} pero su estado actual es '{status}': acceso denegado.")
     return False
 
 
@@ -576,6 +589,9 @@ async def _live_member_status(user_id: int, chat_id: int, fresh: bool = False) -
         member = await asyncio.wait_for(master_bot_instance.get_chat_member(chat_id, user_id), timeout=4)
         status = str(getattr(member.status, "value", member.status) or "")
         ttl = 300.0 if status in ("creator", "administrator") else 60.0
+        if len(_OWNER_LAST_KNOWN) >= _OWNER_LAST_KNOWN_MAX:
+            _OWNER_LAST_KNOWN.clear()
+        _OWNER_LAST_KNOWN[key] = status
     except Exception:
         status, ttl = "", 30.0
     if len(_ADMIN_ACCESS_CACHE) >= _ADMIN_ACCESS_CACHE_MAX:
@@ -585,17 +601,34 @@ async def _live_member_status(user_id: int, chat_id: int, fresh: bool = False) -
 
 
 async def _is_live_chat_admin(user_id: int, chat_id: int, fresh: bool = False) -> bool:
-    """Verifica en Telegram si el usuario es creador/administrador del chat."""
+    """Verifica en Telegram si el usuario es creador/administrador del chat (solo uso informativo, NUNCA autoriza)."""
     return await _live_member_status(user_id, chat_id, fresh=fresh) in ("creator", "administrator")
+
+
+async def _is_live_chat_creator(user_id: int, chat_id: int, fresh: bool = False) -> bool:
+    """👑 Autorización de destinos (canal de registro, difusión): Arquitecto o CREADOR en vivo del chat destino."""
+    if is_super_admin(user_id):
+        return True
+    return await _live_member_status(user_id, chat_id, fresh=fresh) == "creator"
 
 
 async def assert_chat_access(user_id: int, chat_id: int):
     """
-    Acceso a la analítica (REST y /ws/radar). v11: exclusivo del dueño legítimo, igual que el resto de
-    paneles; antes bastaba con ser administrador vivo del chat. Se conserva el nombre por compatibilidad
-    con los llamadores existentes.
+    Acceso de SOLO LECTURA a la analítica (REST y /ws/radar): dueño legítimo, Arquitecto o delegado al que el
+    Arquitecto activó `can_view_analytics` en la Matriz (v13). Un administrador común sigue recibiendo 403.
     """
-    await assert_chat_ownership(user_id, chat_id)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Autenticación requerida.")
+    if await is_legitimate_chat_owner(int(user_id), int(chat_id)):
+        return
+    try:
+        delegated = await has_delegate_permission(int(chat_id), int(user_id), "can_view_analytics")
+    except Exception as ex:
+        logger.warning(f"⚠️ [Delegados] Consulta de analítica fallida ({user_id}/{chat_id}): {ex}")
+        delegated = False
+    if delegated and await _live_member_status(int(user_id), int(chat_id)) not in ("left", "kicked"):
+        return
+    raise HTTPException(status_code=403, detail=_OWNER_DENIED_DETAIL)
 
 
 def _get_global_channels_sync():
@@ -628,7 +661,10 @@ def _get_registered_chats_sync():
 # el estado del operador en cada chat que el bot conoce y vincula los que administra.
 # v11: por defecto la sincronización solo vincula al CREADOR. Antes también vinculaba a cualquier administrador,
 # que así pasaba a figurar como "dueño" y obtenía todos los paneles. Configurable con SYNC_LINK_ROLES.
-SYNC_LINK_ROLES = {r.strip() for r in os.getenv("SYNC_LINK_ROLES", "creator").split(",") if r.strip()} or {"creator"}
+# v12: fijo en el creador. Se ignora cualquier SYNC_LINK_ROLES heredado que incluya 'administrator'.
+SYNC_LINK_ROLES = frozenset({"creator"})
+if os.getenv("SYNC_LINK_ROLES", "creator").strip().lower() not in ("", "creator"):
+    logger.warning("⚠️ [Sync] SYNC_LINK_ROLES ignorado: por la Regla de Oro solo se vincula al creador del chat.")
 SYNC_AUDIT_MAX_CHATS = max(1, int(os.getenv("SYNC_AUDIT_MAX_CHATS", "400") or 400))
 SYNC_AUDIT_CONCURRENCY = max(1, int(os.getenv("SYNC_AUDIT_CONCURRENCY", "8") or 8))
 SYNC_AUDIT_COOLDOWN_S = float(os.getenv("SYNC_AUDIT_COOLDOWN_S", "60") or 60)
@@ -953,6 +989,12 @@ async def api_subscribers(
 
 
 async def _resolve_dashboard_plan(user_id: int, community_plan: Any) -> dict:
+    # 👑 El Arquitecto Supremo opera con ULTRA PRO universal en cualquier comunidad.
+    if is_super_admin(user_id):
+        try:
+            return describe_license("ultra_pro", None, "architect")
+        except Exception:
+            return {"tier": "ultra_pro", "name": "ULTRA PRO", "status": "active", "source": "architect"}
     plan = community_plan if isinstance(community_plan, dict) else describe_license("free")
     if plan.get("status") == "active" and plan.get("tier") in ("pro", "ultra_pro"):
         return plan
@@ -1045,7 +1087,7 @@ async def api_chat_stats(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
-        await assert_chat_ownership(user_id, numeric_id)
+        await assert_chat_access(user_id, numeric_id)   # lectura: dueño, Arquitecto o delegado con analítica
         stats = await get_chat_timeseries_stats(numeric_id)
         return stats if isinstance(stats, dict) else {"months": [], "mau": [], "messages": [], "messages_per_user": []}
     except HTTPException:
@@ -1065,7 +1107,7 @@ async def api_chat_admin_stats(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
-        await assert_chat_ownership(user_id, numeric_id)
+        await assert_chat_access(user_id, numeric_id)   # lectura: dueño, Arquitecto o delegado con analítica
         admins = await get_chat_admin_stats(numeric_id)
         return {"admins": admins if isinstance(admins, list) else []}
     except HTTPException:
@@ -1085,7 +1127,7 @@ async def api_chat_top_users(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
-        await assert_chat_ownership(user_id, numeric_id)
+        await assert_chat_access(user_id, numeric_id)   # lectura: dueño, Arquitecto o delegado con analítica
         top_users = await get_chat_top_users(numeric_id, limit=10)
         return {"top_users": top_users if isinstance(top_users, list) else []}
     except HTTPException:
@@ -1108,7 +1150,7 @@ async def api_chat_heatmap(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
-        await assert_chat_ownership(user_id, numeric_id)
+        await assert_chat_access(user_id, numeric_id)   # lectura: dueño, Arquitecto o delegado con analítica
         return await get_chat_heatmap_matrix(numeric_id)
     except HTTPException:
         raise
@@ -1128,7 +1170,7 @@ async def api_chat_top_reputation(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
-        await assert_chat_ownership(user_id, numeric_id)
+        await assert_chat_access(user_id, numeric_id)   # lectura: dueño, Arquitecto o delegado con analítica
         safe_limit = max(1, min(100, int(limit or 10)))
         return {"top": await get_top_reputation(numeric_id, limit=safe_limit)}
     except HTTPException:
@@ -1149,7 +1191,7 @@ async def api_chat_user_reputation(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     try:
         numeric_id = int(chat_id)
-        await assert_chat_ownership(user_id, numeric_id)
+        await assert_chat_access(user_id, numeric_id)   # lectura: dueño, Arquitecto o delegado con analítica
         return await get_user_reputation(numeric_id, target_user_id)
     except HTTPException:
         raise
@@ -1280,8 +1322,8 @@ async def _validate_log_channel(user_id: int, chat_id: int, raw: Any) -> str:
     target_id = int(target.id)
     if target_id == int(chat_id):
         raise HTTPException(status_code=422, detail="log_channel_id: el canal de registro debe ser distinto de la comunidad auditada.")
-    if not (is_super_admin(user_id) or await _is_live_chat_admin(user_id, target_id, fresh=True)):
-        raise HTTPException(status_code=403, detail="log_channel_id: debes ser creador o administrador del canal de registro.")
+    if not await _is_live_chat_creator(user_id, target_id, fresh=True):
+        raise HTTPException(status_code=403, detail="log_channel_id: debes ser el creador del canal de registro.")
     try:
         me = await master_bot_instance.get_me()
         member = await asyncio.wait_for(master_bot_instance.get_chat_member(target_id, me.id), timeout=6)
@@ -1385,7 +1427,7 @@ async def api_update_chat_settings(
             broadcast_fields = {k: payload.pop(k) for k in broadcast_keys if k in payload}
             try:
                 response_extra["broadcast"] = await save_broadcast_config(
-                    numeric_id, user_id, broadcast_fields, _plan_deps(), master_bot_instance, _is_live_chat_admin)
+                    numeric_id, user_id, broadcast_fields, _plan_deps(), master_bot_instance, _is_live_chat_creator)
             except PlanApiError as err:
                 raise HTTPException(status_code=err.status, detail=err.detail)
 
@@ -2069,37 +2111,52 @@ async def on_dispatcher_error(event: ErrorEvent) -> bool:
     return True
 
 
+async def _resolve_creator_id(bot: Optional[Bot], chat_id: int) -> Optional[int]:
+    """ID del creador real del chat según Telegram (None si no se puede determinar)."""
+    if bot is None:
+        return None
+    try:
+        admins = await asyncio.wait_for(bot.get_chat_administrators(chat_id), timeout=6)
+    except Exception as ex:
+        logger.debug(f"No se pudo listar administradores de {chat_id}: {ex}")
+        return None
+    for adm in admins:
+        adm_status = str(getattr(adm.status, "value", adm.status) or "")
+        if adm_status == "creator" and adm.user and not adm.user.is_bot:
+            return int(adm.user.id)
+    return None
+
+
 async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot = None):
+    """
+    👑 v12 · Registro de propiedad estricto: al añadir/promover el bot SOLO se vincula al CREADOR real del chat.
+    Antes se vinculaba también a quien lo añadió (aunque fuera un administrador común), lo que le daba acceso a
+    las consolas y a la Mini App. Si el creador no se puede determinar, el chat queda bajo custodia del
+    Arquitecto (sigue registrado para la auditoría de sincronización, pero ningún administrador gana acceso).
+    """
     try:
         new_status = event.new_chat_member.status
         if new_status in ("administrator", "member"):
+            chat_id = event.chat.id
             chat_type = "channel" if event.chat.type == "channel" else "supergroup"
-            promoter_id = event.from_user.id if event.from_user else CREATOR_FALLBACK_ID
-            chat_title = event.chat.title or f"Chat {event.chat.id}"
+            chat_title = event.chat.title or f"Chat {chat_id}"
+            promoter_id = event.from_user.id if event.from_user else None
+
+            creator_id = await _resolve_creator_id(bot, chat_id)
+            owner_id = creator_id if creator_id is not None else CREATOR_FALLBACK_ID
 
             await register_user_group(
-                user_id=promoter_id,
-                group_id=event.chat.id,
+                user_id=owner_id,
+                group_id=chat_id,
                 group_name=chat_title,
                 chat_type=chat_type
             )
-            logger.info(f"🎯 [Auto-Detección]: '{chat_title}' ({event.chat.id}) vinculado.")
-
-            # v8.2: si quien añadió el bot no es el creador, el creador real también queda vinculado
-            # (antes no veía su propio chat en los selectores de la Mini App).
-            if bot is not None:
-                with contextlib.suppress(Exception):
-                    admins = await asyncio.wait_for(bot.get_chat_administrators(event.chat.id), timeout=6)
-                    for adm in admins:
-                        adm_status = str(getattr(adm.status, "value", adm.status) or "")
-                        if adm_status == "creator" and adm.user and not adm.user.is_bot and adm.user.id != promoter_id:
-                            await register_user_group(
-                                user_id=adm.user.id,
-                                group_id=event.chat.id,
-                                group_name=chat_title,
-                                chat_type=chat_type
-                            )
-                            logger.info(f"👑 [Auto-Detección]: creador {adm.user.id} vinculado a {event.chat.id}.")
+            if creator_id is None:
+                logger.warning(f"⚠️ [Auto-Detección]: '{chat_title}' ({chat_id}) sin creador verificable; custodia del Arquitecto.")
+            else:
+                logger.info(f"👑 [Auto-Detección]: '{chat_title}' ({chat_id}) vinculado a su creador {creator_id}.")
+            if promoter_id is not None and promoter_id != creator_id and not is_super_admin(promoter_id):
+                logger.info(f"⛔ [Auto-Detección]: {promoter_id} añadió el bot a {chat_id} pero NO es el creador; no se le vincula.")
     except Exception as e:
         logger.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
 
@@ -2179,10 +2236,53 @@ class AdminActionTrackerMiddleware(BaseMiddleware):
 
     async def __call__(self, handler, event, data: dict):
         if isinstance(event, ChatMemberUpdated):
+            # 👑 Ascensos, degradaciones o transferencias de propiedad: el rango cacheado se descarta al instante.
+            with contextlib.suppress(Exception):
+                member_user = getattr(event.new_chat_member, "user", None)
+                if member_user is not None:
+                    _ADMIN_ACCESS_CACHE.pop((int(event.chat.id), int(member_user.id)), None)
             try:
                 self._track(event)
             except Exception as ex:
                 logger.debug(f"Aviso clasificando chat_member: {ex}")
+        return await handler(event, data)
+
+
+class OwnerCallbackGuardMiddleware(BaseMiddleware):
+    """
+    👑 v12 · Guardia global (todo el Dispatcher, maestro y clones) para botones de consola definidos FUERA de
+    handlers/user_private.py — p. ej. la factura de licencias `inv_{tier}_{chat_id}_{lang}` de payments.py.
+    Exige que quien pulsa sea el dueño legítimo (creador en vivo) del chat referenciado o un Arquitecto.
+    Los botones de miembros (captcha, compra de turno, propinas…) no se tocan.
+    """
+    GUARDED_PREFIXES = ("inv_",)
+    _CHAT_ID_RE = re.compile(r"^-\d{5,20}$")
+
+    async def __call__(self, handler, event: CallbackQuery, data: dict):
+        raw = getattr(event, "data", None) or ""
+        user = getattr(event, "from_user", None)
+        if raw.startswith(self.GUARDED_PREFIXES) and user and not is_super_admin(user.id):
+            bot = data.get("bot")
+            chat_ids = {int(tok) for tok in raw.split("_") if self._CHAT_ID_RE.match(tok)}
+            for chat_id in chat_ids:
+                allowed = False
+                try:
+                    from handlers.user_private import is_legitimate_owner as _owner_check
+                    allowed = await _owner_check(bot, user.id, chat_id) if bot is not None else \
+                        await is_legitimate_chat_owner(user.id, chat_id)
+                except Exception as ex:
+                    logger.warning(f"⚠️ [Aduana] Verificación de dueño fallida para '{raw[:48]}': {ex}")
+                if not allowed:
+                    logger.warning(f"⛔ [Aduana] Botón de cobro '{raw[:48]}' bloqueado: user={user.id} no es dueño de {chat_id}.")
+                    is_es = bool(user.language_code and user.language_code.startswith("es"))
+                    with contextlib.suppress(Exception):
+                        await event.answer(
+                            "⛔ Acceso Denegado: esta consola está reservada única y exclusivamente para el Dueño de la comunidad o canal."
+                            if is_es else
+                            "⛔ Access Denied: This command center is strictly restricted to the community/channel Owner.",
+                            show_alert=True
+                        )
+                    return None
         return await handler(event, data)
 
 
@@ -2561,10 +2661,15 @@ async def main():
     dp.message.outer_middleware.register(ActivityTrackerMiddleware())
     dp.my_chat_member.outer_middleware.register(ChatAutoDetectMiddleware())
     dp.chat_member.outer_middleware.register(AdminActionTrackerMiddleware())
+    # 👑 Regla de Oro: guardia de propiedad para botones de cobro de licencias (payments.py).
+    dp.callback_query.outer_middleware.register(OwnerCallbackGuardMiddleware())
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
     # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
     dp.include_router(payments.router)
+    # 1a. architect_matrix: Matriz del Arquitecto Supremo (100 % exclusiva de SUPER_ADMIN_IDS). Va ANTES de
+    #     user_private para que sus entradas conversacionales no caigan en el catch-all de la consola privada.
+    dp.include_router(architect_matrix.router)
     # 1b. community_metrics: /metrics · /stats (grupos) y /metrics (privado) con Dashboard en Vivo
     dp.include_router(community_metrics.router)
     # 2. user_private: consolas privadas, Sentinel Settings, sincronización y creador de planes
@@ -2599,6 +2704,9 @@ async def main():
             _spawn(ecosystem.start_channel_broadcast_worker(master_bot), name="channel_broadcast_worker")
         except Exception as e:
             logger.warning(f"⚠️ [Broadcast Worker]: {e}")
+
+    # v13 · Worker de la Matriz: vence licencias concedidas (→ Free) y retira etiquetas MicVIP caducadas.
+    _spawn(architect_matrix.start_architect_matrix_worker(master_bot), name="architect_matrix_worker")
 
     # Carga concurrente de bots clones persistidos en SQLite
     try:

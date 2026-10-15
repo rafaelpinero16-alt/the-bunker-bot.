@@ -186,6 +186,88 @@ async def _message_author_is_admin(bot: Bot, message: Message) -> bool:
 
 
 # ==========================================
+# 👑 v12 · REGLA DE ORO — SOLO CREADOR LEGÍTIMO O ARQUITECTO CONFIGURAN EL BOT
+# ==========================================
+# Los administradores comunes (con todos o algunos permisos) NO pueden usar comandos de configuración ni
+# herramientas ejecutivas del bot. _is_group_admin se conserva solo para decisiones de PROTECCIÓN (inmunidad
+# ante filtros, quién puede añadir bots durante un raid), nunca para conceder acceso a configuración.
+OWNER_ONLY_ALERT = (
+    "⛔ <b>Acceso Denegado:</b> esta herramienta está reservada única y exclusivamente al <b>Dueño</b> de la comunidad.\n"
+    "🇺🇸 <i>Access Denied: this tool is strictly restricted to the community Owner.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+OWNER_ONLY_ALERT_SHORT = "⛔ Acceso Denegado: herramienta exclusiva del Dueño de la comunidad. / Owner only."
+ANONYMOUS_ADMIN_ALERT = (
+    "⛔ <b>Acceso Denegado:</b> los mensajes enviados como administrador anónimo no permiten verificar al Dueño. "
+    "Desactiva el anonimato y repite el comando.\n"
+    "🇺🇸 <i>Anonymous admin messages cannot be verified as the Owner. Disable anonymity and retry.</i>\n\n"
+    "🛡️ <i>Cloud Media Management</i>"
+)
+
+
+async def _is_community_owner(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """
+    Fuente única: handlers.user_private.is_legitimate_owner (Arquitecto → sí · creador en vivo → sí ·
+    administrador común → NO · caída de la Bot API → solo dueño registrado sin rango contradictorio).
+    Se importa en diferido porque user_private importa este módulo. Si no estuviera disponible, se aplica la
+    regla mínima equivalente (Arquitecto o creador confirmado en vivo), nunca una más laxa.
+    """
+    if not user_id:
+        return False
+    if is_super_admin(user_id):
+        return True
+    try:
+        from .user_private import is_legitimate_owner  # import diferido (evita el ciclo de importación)
+    except Exception:
+        is_legitimate_owner = None
+    if is_legitimate_owner is not None:
+        try:
+            return await is_legitimate_owner(bot, user_id, chat_id)
+        except Exception as e:
+            logger.warning(f"[Aduana] is_legitimate_owner falló ({chat_id}/{user_id}): {e}; se aplica la regla mínima.")
+    status = await _get_member_status(bot, chat_id, user_id, fresh=True)
+    return str(getattr(status, "value", status) or "") == "creator"
+
+
+async def _message_author_is_owner(bot: Bot, message: Message) -> bool:
+    """
+    ¿El autor del mensaje es el dueño legítimo? Los mensajes 'en nombre del grupo' (administrador anónimo) o
+    de un canal vinculado NO identifican a una persona: cualquier administrador podría enviarlos, así que se
+    rechazan para configuración.
+    """
+    if message.sender_chat is not None:
+        return False
+    if not message.from_user:
+        return False
+    return await _is_community_owner(bot, message.chat.id, message.from_user.id)
+
+
+async def _deny_owner_only_message(message: Message) -> None:
+    """Aviso estándar de dueño (efímero) y retirada del comando para no ensuciar el chat."""
+    text = ANONYMOUS_ADMIN_ALERT if message.sender_chat is not None else OWNER_ONLY_ALERT
+    logger.warning(
+        f"⛔ [Aduana] Comando '{(message.text or '')[:40]}' bloqueado en {message.chat.id}: "
+        f"autor={getattr(message.from_user, 'id', None)} sender_chat={getattr(message.sender_chat, 'id', None)} no es el Dueño."
+    )
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    try:
+        warn = await message.bot.send_message(chat_id=message.chat.id, text=text, parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, 10))
+    except Exception:
+        pass
+
+
+async def _require_owner_message(bot: Bot, message: Message) -> bool:
+    if await _message_author_is_owner(bot, message):
+        return True
+    await _deny_owner_only_message(message)
+    return False
+
+
+# ==========================================
 # 🎚️ MATRIZ DE RANGOS — AUTOLOWER SELECTIVO & INMUNIDADES
 # ==========================================
 SECURITY_MATRIX_IMMUNE_TIERS = frozenset({"architect", "service", "sentinel", "owner", "admin", "whitelisted"})
@@ -280,6 +362,23 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
     return False
 
 
+ARCHITECT_FALLBACK_ID = 8269470905
+
+
+async def _resolve_chat_creator_id(bot: Bot, chat_id: int) -> Optional[int]:
+    """ID del creador real del chat según Telegram (None si no se puede determinar)."""
+    try:
+        admins = await asyncio.wait_for(bot.get_chat_administrators(chat_id), timeout=6)
+    except Exception as e:
+        logger.debug(f"No se pudo listar administradores de {chat_id}: {e}")
+        return None
+    for adm in admins:
+        status = str(getattr(adm.status, "value", adm.status) or "")
+        if status == "creator" and adm.user and not adm.user.is_bot:
+            return adm.user.id
+    return None
+
+
 # ==========================================
 # 📡 OBSERVADOR UNIVERSAL DE MEMBRESÍA
 # ==========================================
@@ -299,15 +398,25 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     group_id = chat.id
     group_name = chat.title or ("Canal Oficial" if is_channel else "Comunidad")
     user = event.from_user
-    promoter_id = user.id if user else 8269470905
+
+    # 👑 Regla de Oro: el registro de dueños SOLO guarda al CREADOR real del chat. Antes se registraba a quien
+    # añadió/promovió al bot aunque fuera un administrador común, lo que le abría las consolas.
+    creator_id = await _resolve_chat_creator_id(bot, group_id)
+    promoter_is_creator = bool(user) and creator_id is not None and user.id == creator_id
+    owner_to_register = creator_id if creator_id is not None else ARCHITECT_FALLBACK_ID
+    if creator_id is None:
+        logger.warning(f"⚠️ [Aduana] No se pudo determinar el creador de {group_id}; el chat queda bajo custodia del Arquitecto.")
+    elif user and not promoter_is_creator:
+        logger.info(f"👑 [Aduana] {user.id} añadió el bot a {group_id} pero no es el creador; se registra al creador {creator_id}.")
 
     await approve_group(group_id, tier="free")
-    await register_user_group(promoter_id, group_id, group_name, chat_type=chat_type_str)
+    await register_user_group(owner_to_register, group_id, group_name, chat_type=chat_type_str)
 
     bot_info = await bot.get_me()
 
     if is_channel:
-        if user:
+        # La consola solo se ofrece por privado al creador (un administrador común sería rechazado igualmente).
+        if user and promoter_is_creator:
             ch_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🌐 Abrir Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?channel_id={group_id}"))],
                 [InlineKeyboardButton(text="📡 Consola del Canal / Studio Panel", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")]
@@ -905,6 +1014,13 @@ async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
 
     group_id = event.chat.id
     _MEMBER_STATUS_CACHE.pop((group_id, user.id), None)
+    # 👑 Cambio de rango (ascenso, degradación, transferencia de propiedad): la caché de dueño se invalida al
+    # instante para que un administrador degradado o un ex-creador pierdan el acceso sin esperar a que caduque.
+    try:
+        from .user_private import invalidate_owner_status
+        invalidate_owner_status(group_id, user.id)
+    except Exception:
+        pass
 
     new_status = event.new_chat_member.status
     if new_status in ("left", "kicked"):
@@ -1351,13 +1467,8 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     username = message.from_user.username if message.from_user else ""
     user_id = message.from_user.id if message.from_user else 0
 
-    is_authorized = await _message_author_is_admin(bot, message)
-    if not is_authorized and user_id:
-        is_authorized = await is_sentinel_account(group_id, user_id, username or "")
-
-    if not is_authorized:
-        warn = await message.answer("⛔ El comando /purgeghosts es exclusivo para administradores.", parse_mode="HTML")
-        _spawn(auto_delete_msg(warn, 8))
+    # 👑 Regla de Oro: exclusivo del Dueño legítimo o del Arquitecto (ni administradores comunes ni anónimos).
+    if not await _require_owner_message(bot, message):
         return
 
     tier = (await get_group_tier(group_id) or "free").lower()
@@ -1488,16 +1599,10 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
 @router.message(Command("panic"), F.chat.type.in_({"group", "supergroup"}))
 async def panic_command(message: Message, bot: Bot):
     group_id = message.chat.id
-    user_id = message.from_user.id
-    username = message.from_user.username or ""
+    user_id = message.from_user.id if message.from_user else 0
 
-    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, username)):
-        warn = await message.answer(
-            "⛔ El Botón de Pánico es exclusivo para administradores de la comunidad.\n"
-            "🇺🇸 <i>The Panic Button is restricted to community administrators.</i>",
-            parse_mode="HTML"
-        )
-        asyncio.create_task(auto_delete_msg(warn, 8))
+    # 👑 Regla de Oro: el Botón de Pánico es exclusivo del Dueño legítimo o del Arquitecto.
+    if not await _require_owner_message(bot, message):
         return
 
     if await get_panic_status(group_id) == 1:
@@ -1527,11 +1632,17 @@ async def panic_command(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("panic_off_"))
 async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
-    group_id = int(callback.data.split("_")[-1])
+    try:
+        group_id = int(callback.data.split("_")[-1])
+    except ValueError:
+        await callback.answer()
+        return
     user_id = callback.from_user.id
 
-    if not (await _is_group_admin(bot, group_id, user_id) or await is_sentinel_account(group_id, user_id, callback.from_user.username or "")):
-        await callback.answer("⛔ Sólo administradores pueden desactivar el Protocolo.", show_alert=True)
+    # 👑 Regla de Oro: solo el Dueño legítimo o el Arquitecto levantan el Protocolo.
+    if not await _is_community_owner(bot, group_id, user_id):
+        logger.warning(f"⛔ [Aduana] panic_off bloqueado: user={user_id} no es Dueño de {group_id}.")
+        await callback.answer(OWNER_ONLY_ALERT_SHORT, show_alert=True)
         return
 
     result = await deactivate_panic(group_id)
@@ -1599,7 +1710,7 @@ def _parse_on_off(args: list, default_on: bool = True) -> int:
 @router.message(Command("screenshield"), F.chat.type.in_({"group", "supergroup"}))
 async def screenshield_toggle(message: Message, bot: Bot):
     group_id = message.chat.id
-    if not await _is_group_admin(bot, group_id, message.from_user.id):
+    if not await _require_owner_message(bot, message):
         return
     args = message.text.split()[1:]
     status = _parse_on_off(args)
@@ -1613,7 +1724,7 @@ async def screenshield_toggle(message: Message, bot: Bot):
 @router.message(Command("duckvolume"), F.chat.type.in_({"group", "supergroup"}))
 async def duck_volume_command(message: Message, bot: Bot):
     group_id = message.chat.id
-    if not await _is_group_admin(bot, group_id, message.from_user.id):
+    if not await _require_owner_message(bot, message):
         return
     args = message.text.split()[1:]
     if not args or not args[0].strip().isdigit():
@@ -1627,7 +1738,7 @@ async def duck_volume_command(message: Message, bot: Bot):
 @router.message(Command("noiseshield"), F.chat.type.in_({"group", "supergroup"}))
 async def noiseshield_toggle(message: Message, bot: Bot):
     group_id = message.chat.id
-    if not await _is_group_admin(bot, group_id, message.from_user.id):
+    if not await _require_owner_message(bot, message):
         return
     args = message.text.split()[1:]
     status = _parse_on_off(args)
@@ -1644,10 +1755,17 @@ async def noiseshield_toggle(message: Message, bot: Bot):
 @router.message(Command("speakers"), F.chat.type.in_({"group", "supergroup"}))
 async def speakers_command(message: Message, bot: Bot):
     group_id = message.chat.id
-    user_id = message.from_user.id
-    args = message.text.split(maxsplit=2)[1:]
+    user_id = message.from_user.id if message.from_user else 0
+    args = (message.text or "").split(maxsplit=2)[1:]
     sub = args[0].lower() if args else ""
-    is_admin = await _is_group_admin(bot, group_id, user_id)
+    # 👑 Las subórdenes de gestión (next / clear / price) son exclusivas del Dueño o del Arquitecto;
+    # consultar la cola y comprar turno sigue abierto a cualquier miembro.
+    is_admin = False
+    if sub in ("next", "clear", "price"):
+        is_admin = await _message_author_is_owner(bot, message)
+        if not is_admin:
+            await _deny_owner_only_message(message)
+            return
 
     if sub == "next":
         if not is_admin:
@@ -2429,7 +2547,8 @@ async def cmd_top_ranking(message: Message, bot: Bot):
 async def cmd_chat_heatmap(message: Message, bot: Bot):
     """Muestra un resumen táctico de las horas pico de mensajes de la comunidad."""
     group_id = message.chat.id
-    if not await _message_author_is_admin(bot, message):
+    # 👑 Analítica de la comunidad: exclusiva del Dueño legítimo o del Arquitecto.
+    if not await _require_owner_message(bot, message):
         return
 
     data = await get_chat_heatmap_matrix(group_id)
@@ -2502,7 +2621,7 @@ _GAMI_GROUP_TEXTS = {
         "now_ok": "🚀 La tarjeta se publicará en el próximo ciclo (≈1 min).\n\n🛡️ <i>Cloud Media Management</i>",
         "now_inactive": "⚠️ El anuncio está inactivo. Actívalo desde la consola privada.\n\n🛡️ <i>Cloud Media Management</i>",
         "off_ok": "🔴 Anuncio de gamificación desactivado.\n\n🛡️ <i>Cloud Media Management</i>",
-        "admin_only": "⛔ Solo los administradores pueden gestionar el anuncio de gamificación.\n\n🛡️ <i>Cloud Media Management</i>",
+        "admin_only": "⛔ Acceso Denegado: solo el <b>Dueño</b> de la comunidad puede gestionar el anuncio de gamificación.\n\n🛡️ <i>Cloud Media Management</i>",
     },
     "en": {
         "status": (
@@ -2526,7 +2645,7 @@ _GAMI_GROUP_TEXTS = {
         "now_ok": "🚀 The card will be published in the next cycle (≈1 min).\n\n🛡️ <i>Cloud Media Management</i>",
         "now_inactive": "⚠️ The announcement is inactive. Enable it from the private console.\n\n🛡️ <i>Cloud Media Management</i>",
         "off_ok": "🔴 Gamification announcement disabled.\n\n🛡️ <i>Cloud Media Management</i>",
-        "admin_only": "⛔ Only administrators can manage the gamification announcement.\n\n🛡️ <i>Cloud Media Management</i>",
+        "admin_only": "⛔ Access Denied: only the community <b>Owner</b> can manage the gamification announcement.\n\n🛡️ <i>Cloud Media Management</i>",
     },
 }
 
@@ -2547,7 +2666,7 @@ async def gamification_announcement_command(message: Message, bot: Bot):
     /gamification            → estado del anuncio + acceso directo a la consola privada.
     /gamification now|ahora  → adelanta la próxima publicación al siguiente ciclo del worker.
     /gamification off        → desactiva el anuncio de inmediato.
-    Uso exclusivo de administradores; la edición completa (texto ES/EN, multimedia, botón, frecuencia)
+    Uso exclusivo del Dueño legítimo (creador) o del Arquitecto; la edición completa (texto ES/EN, multimedia, botón, frecuencia)
     se realiza en la consola privada, que vuelve a verificar la propiedad de la comunidad.
     """
     group_id = message.chat.id
@@ -2561,8 +2680,10 @@ async def gamification_announcement_command(message: Message, bot: Bot):
     except Exception:
         pass
 
-    if not await _message_author_is_admin(bot, message):
-        warn = await message.answer(gt["admin_only"], parse_mode="HTML")
+    # 👑 Regla de Oro: exclusivo del Dueño legítimo o del Arquitecto (administradores comunes y anónimos fuera).
+    if not await _message_author_is_owner(bot, message):
+        logger.warning(f"⛔ [Aduana] /gamification bloqueado en {group_id}: el autor no es el Dueño.")
+        warn = await message.answer(ANONYMOUS_ADMIN_ALERT if message.sender_chat is not None else gt["admin_only"], parse_mode="HTML")
         _spawn(auto_delete_msg(warn, 8))
         return
 

@@ -557,6 +557,9 @@ def init_db():
         cursor.execute("CREATE TABLE IF NOT EXISTS chat_hourly_activity (group_id INTEGER, day_of_week INTEGER, hour_of_day INTEGER, message_count INTEGER DEFAULT 0, PRIMARY KEY (group_id, day_of_week, hour_of_day))")
         cursor.execute("CREATE TABLE IF NOT EXISTS ai_chat_context (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_context_chat ON ai_chat_context (chat_id, created_at)")
+
+        # v13 · The Bunker Architect Command Matrix (delegados, licencias concedidas, premios y auditoría)
+        _init_architect_matrix_schema(cursor)
         conn.commit()
 
     init_default_blacklist()
@@ -1825,53 +1828,66 @@ def is_group_approved(group_id: int) -> bool:
 
 @db_async
 def get_group_tier(group_id: int) -> str:
+    """
+    Licencia VIGENTE de la comunidad = la mayor entre:
+      • approved_groups (licencia pagada con Stars; caduca y vuelve a 'free' sola),
+      • concesión del Arquitecto a la comunidad (architect_license_grants scope='chat'),
+      • concesión del Arquitecto a cualquiera de sus dueños registrados (scope='user').
+    Comunidades de Arquitectos → ULTRA PRO universal.
+    """
     if is_super_admin(group_id):
         return "ultra_pro"
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        owners = []
         try:
             cursor.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (group_id,))
-            owners = cursor.fetchall()
-            for (uid,) in owners:
-                if is_super_admin(uid):
-                    return "ultra_pro"
+            owners = [uid for (uid,) in cursor.fetchall()]
+            if any(is_super_admin(uid) for uid in owners):
+                return "ultra_pro"
         except sqlite3.OperationalError:
             pass
 
+        tier = "free"
         cursor.execute("SELECT tier, expires_at FROM approved_groups WHERE group_id = ?", (group_id,))
         row = cursor.fetchone()
-        if not row:
-            return "free"
-        tier, expires_at = row
-        if expires_at:
-            cursor.execute("SELECT datetime('now') > ?", (expires_at,))
-            if cursor.fetchone()[0]:
-                cursor.execute("UPDATE approved_groups SET tier = 'free', expires_at = NULL WHERE group_id = ?", (group_id,))
-                conn.commit()
-                tier = "free"
-        return tier
+        if row:
+            tier, expires_at = row
+            if expires_at:
+                cursor.execute("SELECT datetime('now') > ?", (expires_at,))
+                if cursor.fetchone()[0]:
+                    cursor.execute("UPDATE approved_groups SET tier = 'free', expires_at = NULL WHERE group_id = ?", (group_id,))
+                    conn.commit()
+                    tier = "free"
+
+        chat_grant = _architect_best_tier_sync(conn, "chat", [group_id])[0]
+        user_grant = _architect_best_tier_sync(conn, "user", owners)[0]
+        return _max_tier(tier, chat_grant, user_grant)
 
 
 @db_async
 def get_user_global_tier(user_id: int) -> str:
+    """Mayor licencia del usuario: comunidades que posee (pagadas o concedidas) + concesión personal del Arquitecto."""
     if is_super_admin(user_id):
         return "ultra_pro"
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        tiers = ["free"]
+        owned = []
         try:
+            cursor.execute("SELECT group_id FROM user_groups WHERE user_id = ?", (user_id,))
+            owned = [gid for (gid,) in cursor.fetchall()]
             cursor.execute("""
                 SELECT a.tier FROM approved_groups a
                 JOIN user_groups u ON a.group_id = u.group_id
                 WHERE u.user_id = ? AND (a.expires_at IS NULL OR a.expires_at > datetime('now'))
             """, (user_id,))
-            rows = cursor.fetchall()
-            if not rows: return "free"
-            tiers = [r[0] for r in rows]
-            if "ultra_pro" in tiers: return "ultra_pro"
-            if "pro" in tiers: return "pro"
+            tiers.extend(r[0] for r in cursor.fetchall())
         except sqlite3.OperationalError:
             pass
-        return "free"
+        tiers.append(_architect_best_tier_sync(conn, "user", [user_id])[0])
+        tiers.append(_architect_best_tier_sync(conn, "chat", owned)[0])
+        return _max_tier(*tiers)
 
 
 @db_async
@@ -3078,9 +3094,9 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         # approved_groups.tier en bruto y el panel mostraba "Ultra_pro", licencias vencidas como activas
         # o el plan vacío en comunidades blindadas cuyo dueño es un arquitecto.
         tier = normalize_tier(get_group_tier.sync(chat_id))
-        cursor.execute("SELECT expires_at FROM approved_groups WHERE group_id = ?", (chat_id,))
-        exp_row = cursor.fetchone()
-        expires_at = exp_row[0] if exp_row else None
+        # v13: vencimiento y origen reales (pago con Stars o concesión del Arquitecto).
+        license_info = get_effective_license.sync(chat_id)
+        expires_at = license_info.get("expires_at") if license_info.get("tier") == tier else None
 
         cursor.execute("""
             SELECT log_channel_id, spam_detection_mode, timezone, chat_language,
@@ -4632,6 +4648,591 @@ def get_active_raid_shields() -> dict:
                             (_now_ts(),)).fetchall()
     return {int(g): int(u) for g, u in rows}
 
+
+# ==========================================================================================
+# 👑 v13 · THE BUNKER ARCHITECT COMMAND MATRIX (Matriz del Arquitecto Supremo)
+# ==========================================================================================
+# Cuatro tablas exclusivas del Arquitecto:
+#   • architect_delegates        → administradores delegados por comunidad con 6 permisos granulares.
+#   • architect_license_grants   → licencias PRO / ULTRA PRO concedidas sin pasarela (temporales o permanentes).
+#                                  Se SUPERPONEN a approved_groups: nunca la sobrescriben, así una licencia pagada
+#                                  con Stars y una concesión conviven y revocar una no destruye la otra.
+#   • architect_awards           → premios otorgados (XP, niveles, MicVIP, membresías) + estado del anuncio.
+#   • architect_audit            → bitácora inmutable de cada acción del Arquitecto.
+# Todas las marcas de tiempo son epoch UTC (INTEGER): comparables sin ambigüedad de zona horaria.
+
+DELEGATE_PERMISSIONS = (
+    "can_manage_captcha",
+    "can_manage_locks",
+    "can_manage_antispam",
+    "can_manage_broadcast",
+    "can_view_analytics",
+    "can_manage_sentinel",
+)
+ARCHITECT_LICENSE_TIERS = ("pro", "ultra_pro")
+ARCHITECT_LICENSE_SCOPES = ("chat", "user")
+ARCHITECT_LICENSE_DURATIONS = (7, 30, 90, 365, 0)          # 0 = permanente / indefinida
+ARCHITECT_AWARD_TYPES = ("xp", "level", "micvip", "membership")
+_TIER_RANK = {"free": 0, "pro": 1, "ultra_pro": 2}
+_AUDIT_RETENTION_ROWS = 5000
+
+
+def _init_architect_matrix_schema(cursor) -> None:
+    """DDL idempotente de la Matriz. Se invoca desde init_db() y, por seguridad, en el primer uso."""
+    perm_cols = ", ".join(f"{p} INTEGER NOT NULL DEFAULT 0" for p in DELEGATE_PERMISSIONS)
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS architect_delegates (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT,
+            {perm_cols},
+            granted_by INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    _ensure_columns(cursor, "architect_delegates", [(p, "INTEGER NOT NULL DEFAULT 0") for p in DELEGATE_PERMISSIONS])
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_architect_delegates_user ON architect_delegates (user_id)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS architect_license_grants (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL CHECK (scope IN ('chat', 'user')),
+            target_id INTEGER NOT NULL,
+            tier TEXT NOT NULL CHECK (tier IN ('pro', 'ultra_pro')),
+            status TEXT NOT NULL DEFAULT 'active',
+            granted_by INTEGER,
+            granted_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            ended_at INTEGER,
+            ended_by INTEGER,
+            note TEXT
+        )
+    """)
+    # Una sola concesión activa por objetivo (índice parcial): conceder de nuevo REEMPLAZA a la anterior.
+    cursor.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_architect_license_active
+        ON architect_license_grants (scope, target_id) WHERE status = 'active'
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_architect_license_expiry ON architect_license_grants (status, expires_at)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS architect_awards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT,
+            award_type TEXT NOT NULL,
+            amount INTEGER NOT NULL DEFAULT 0,
+            detail TEXT,
+            granted_by INTEGER,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            announced INTEGER NOT NULL DEFAULT 0,
+            tag_applied INTEGER NOT NULL DEFAULT 0,
+            tag_title TEXT,
+            tag_cleared INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_architect_awards_chat ON architect_awards (chat_id, created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_architect_awards_tags ON architect_awards (tag_applied, tag_cleared, expires_at)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS architect_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            chat_id INTEGER,
+            target_id INTEGER,
+            detail TEXT,
+            created_at INTEGER NOT NULL
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_architect_audit_time ON architect_audit (created_at)")
+
+
+_ARCHITECT_SCHEMA_READY = False
+_ARCHITECT_SCHEMA_LOCK = threading.Lock()
+
+
+def _ensure_architect_schema(conn) -> None:
+    """Garantiza el esquema aunque init_db() de una versión anterior ya se hubiera ejecutado."""
+    global _ARCHITECT_SCHEMA_READY
+    if _ARCHITECT_SCHEMA_READY:
+        return
+    with _ARCHITECT_SCHEMA_LOCK:
+        if _ARCHITECT_SCHEMA_READY:
+            return
+        _init_architect_matrix_schema(conn.cursor())
+        if conn.in_transaction:
+            conn.commit()
+        _ARCHITECT_SCHEMA_READY = True
+
+
+def _validate_perm(perm: str) -> str:
+    if perm not in DELEGATE_PERMISSIONS:
+        raise ValueError(f"Permiso de delegado no permitido: {perm!r}")
+    return perm
+
+
+def _delegate_row_to_dict(row) -> dict:
+    data = {"chat_id": row[0], "user_id": row[1], "user_name": row[2] or ""}
+    for idx, perm in enumerate(DELEGATE_PERMISSIONS):
+        data[perm] = int(row[3 + idx] or 0)
+    tail = 3 + len(DELEGATE_PERMISSIONS)
+    data.update({"granted_by": row[tail], "created_at": row[tail + 1], "updated_at": row[tail + 2]})
+    data["active_count"] = sum(data[p] for p in DELEGATE_PERMISSIONS)
+    return data
+
+
+_DELEGATE_SELECT = "SELECT chat_id, user_id, user_name, " + ", ".join(DELEGATE_PERMISSIONS) + \
+                   ", granted_by, created_at, updated_at FROM architect_delegates"
+
+
+# ---------- 🛡️ Administradores delegados ----------
+@db_async
+def upsert_architect_delegate(chat_id: int, user_id: int, user_name: str = "", granted_by: int = None,
+                              permissions: dict = None) -> dict:
+    """Crea (todo en 🔴) o actualiza un delegado. Devuelve el registro resultante."""
+    now = _now_ts()
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        conn.execute("""
+            INSERT INTO architect_delegates (chat_id, user_id, user_name, granted_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                user_name = COALESCE(NULLIF(excluded.user_name, ''), architect_delegates.user_name),
+                updated_at = excluded.updated_at
+        """, (int(chat_id), int(user_id), (user_name or "")[:64], granted_by, now, now))
+        for perm, value in (permissions or {}).items():
+            conn.execute(f"UPDATE architect_delegates SET {_ident(_validate_perm(perm))} = ? WHERE chat_id = ? AND user_id = ?",
+                         (1 if value else 0, int(chat_id), int(user_id)))
+        row = conn.execute(_DELEGATE_SELECT + " WHERE chat_id = ? AND user_id = ?", (int(chat_id), int(user_id))).fetchone()
+    return _delegate_row_to_dict(row)
+
+
+@db_async
+def get_architect_delegate(chat_id: int, user_id: int) -> dict | None:
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        row = conn.execute(_DELEGATE_SELECT + " WHERE chat_id = ? AND user_id = ?", (int(chat_id), int(user_id))).fetchone()
+    return _delegate_row_to_dict(row) if row else None
+
+
+@db_async
+def toggle_architect_delegate_permission(chat_id: int, user_id: int, perm: str) -> dict | None:
+    """Invierte un permiso de forma atómica (BEGIN IMMEDIATE). None si el delegado no existe."""
+    col = _ident(_validate_perm(perm))
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute(f"UPDATE architect_delegates SET {col} = 1 - {col}, updated_at = ? WHERE chat_id = ? AND user_id = ?",
+                           (_now_ts(), int(chat_id), int(user_id)))
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(_DELEGATE_SELECT + " WHERE chat_id = ? AND user_id = ?", (int(chat_id), int(user_id))).fetchone()
+    return _delegate_row_to_dict(row)
+
+
+@db_async
+def set_all_architect_delegate_permissions(chat_id: int, user_id: int, value: bool) -> dict | None:
+    assignments = ", ".join(f"{p} = ?" for p in DELEGATE_PERMISSIONS)
+    flag = 1 if value else 0
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute(f"UPDATE architect_delegates SET {assignments}, updated_at = ? WHERE chat_id = ? AND user_id = ?",
+                           (*([flag] * len(DELEGATE_PERMISSIONS)), _now_ts(), int(chat_id), int(user_id)))
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(_DELEGATE_SELECT + " WHERE chat_id = ? AND user_id = ?", (int(chat_id), int(user_id))).fetchone()
+    return _delegate_row_to_dict(row)
+
+
+@db_async
+def remove_architect_delegate(chat_id: int, user_id: int) -> bool:
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute("DELETE FROM architect_delegates WHERE chat_id = ? AND user_id = ?", (int(chat_id), int(user_id)))
+        return cur.rowcount > 0
+
+
+@db_async
+def list_architect_delegates(chat_id: int) -> list:
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        rows = conn.execute(_DELEGATE_SELECT + " WHERE chat_id = ? ORDER BY created_at", (int(chat_id),)).fetchall()
+    return [_delegate_row_to_dict(r) for r in rows]
+
+
+@db_async
+def get_delegated_chats(user_id: int) -> list:
+    """Comunidades donde el usuario es delegado con AL MENOS un permiso activo: [{chat_id, title, chat_type, perms}]."""
+    any_perm = " OR ".join(f"d.{p} = 1" for p in DELEGATE_PERMISSIONS)
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        rows = conn.execute(f"""
+            SELECT d.chat_id,
+                   (SELECT MAX(group_name) FROM user_groups ug WHERE ug.group_id = d.chat_id),
+                   (SELECT MAX(chat_type) FROM user_groups ug WHERE ug.group_id = d.chat_id),
+                   {", ".join("d." + p for p in DELEGATE_PERMISSIONS)}
+            FROM architect_delegates d
+            WHERE d.user_id = ? AND ({any_perm})
+        """, (int(user_id),)).fetchall()
+    result = []
+    for row in rows:
+        perms = {p: int(row[3 + i] or 0) for i, p in enumerate(DELEGATE_PERMISSIONS)}
+        result.append({"chat_id": row[0], "title": row[1] or f"Chat {row[0]}", "chat_type": row[2] or "supergroup", "perms": perms})
+    return result
+
+
+@db_async
+def has_delegate_permission(chat_id: int, user_id: int, perm: str = "any") -> bool:
+    """perm='any' → al menos un permiso activo. Consulta indexada por PK (barata en cada botón)."""
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        if perm == "any":
+            cond = " OR ".join(f"{p} = 1" for p in DELEGATE_PERMISSIONS)
+        else:
+            cond = f"{_ident(_validate_perm(perm))} = 1"
+        row = conn.execute(f"SELECT 1 FROM architect_delegates WHERE chat_id = ? AND user_id = ? AND ({cond})",
+                           (int(chat_id), int(user_id))).fetchone()
+    return row is not None
+
+
+# ---------- 💎 Licencias concedidas por el Arquitecto ----------
+def _grant_row_to_dict(row) -> dict:
+    keys = ("id", "scope", "target_id", "tier", "status", "granted_by", "granted_at", "expires_at", "ended_at", "ended_by", "note")
+    data = dict(zip(keys, row))
+    data["permanent"] = data["expires_at"] is None
+    return data
+
+
+_GRANT_SELECT = ("SELECT id, scope, target_id, tier, status, granted_by, granted_at, expires_at, ended_at, ended_by, note "
+                 "FROM architect_license_grants")
+
+
+def _architect_best_tier_sync(conn, scope: str, target_ids) -> tuple:
+    """Mejor concesión ACTIVA y no vencida entre varios objetivos → (tier, expires_at|None, grant_id) o ('free', None, None)."""
+    ids = [int(t) for t in target_ids if t is not None]
+    if not ids:
+        return ("free", None, None)
+    marks = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT tier, expires_at, id FROM architect_license_grants "
+            f"WHERE scope = ? AND status = 'active' AND target_id IN ({marks}) "
+            f"AND (expires_at IS NULL OR expires_at > ?)",
+            (scope, *ids, _now_ts()),
+        ).fetchall()
+    except sqlite3.OperationalError:          # esquema aún no creado (arranque en frío de una versión anterior)
+        return ("free", None, None)
+    best = ("free", None, None)
+    for tier, expires_at, grant_id in rows:
+        current = (_TIER_RANK.get(tier, 0), float("inf") if expires_at is None else expires_at)
+        incumbent = (_TIER_RANK.get(best[0], 0), float("inf") if best[1] is None else best[1])
+        if current > incumbent:
+            best = (tier, expires_at, grant_id)
+    return best
+
+
+def _max_tier(*tiers) -> str:
+    return max((normalize_tier(t) for t in tiers), key=lambda t: _TIER_RANK[t])
+
+
+@db_async
+def grant_architect_license(scope: str, target_id: int, tier: str, duration_days: int, granted_by: int,
+                            note: str = None) -> dict:
+    """
+    Concede (o reemplaza) la licencia del objetivo. duration_days=0 → permanente.
+    La concesión activa previa del mismo objetivo pasa a 'replaced' en la misma transacción.
+    """
+    if scope not in ARCHITECT_LICENSE_SCOPES:
+        raise ValueError("scope: debe ser 'chat' o 'user'")
+    tier = normalize_tier(tier)
+    if tier not in ARCHITECT_LICENSE_TIERS:
+        raise ValueError("tier: debe ser 'pro' o 'ultra_pro'")
+    days = int(duration_days)
+    if days not in ARCHITECT_LICENSE_DURATIONS:
+        raise ValueError("duration_days: usa 7, 30, 90, 365 o 0 (permanente)")
+    now = _now_ts()
+    expires_at = None if days == 0 else now + days * 86400
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        conn.execute("""
+            UPDATE architect_license_grants SET status = 'replaced', ended_at = ?, ended_by = ?
+            WHERE scope = ? AND target_id = ? AND status = 'active'
+        """, (now, granted_by, scope, int(target_id)))
+        cur = conn.execute("""
+            INSERT INTO architect_license_grants (scope, target_id, tier, status, granted_by, granted_at, expires_at, note)
+            VALUES (?, ?, ?, 'active', ?, ?, ?, ?)
+        """, (scope, int(target_id), tier, granted_by, now, expires_at, (note or "")[:200] or None))
+        row = conn.execute(_GRANT_SELECT + " WHERE id = ?", (cur.lastrowid,)).fetchone()
+    return _grant_row_to_dict(row)
+
+
+@db_async
+def revoke_architect_license(scope: str, target_id: int, revoked_by: int) -> bool:
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute("""
+            UPDATE architect_license_grants SET status = 'revoked', ended_at = ?, ended_by = ?
+            WHERE scope = ? AND target_id = ? AND status = 'active'
+        """, (_now_ts(), revoked_by, scope, int(target_id)))
+        return cur.rowcount > 0
+
+
+@db_async
+def get_architect_license(scope: str, target_id: int) -> dict | None:
+    """Concesión activa y NO vencida del objetivo (None si no hay)."""
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        row = conn.execute(_GRANT_SELECT + " WHERE scope = ? AND target_id = ? AND status = 'active' "
+                                           "AND (expires_at IS NULL OR expires_at > ?)",
+                           (scope, int(target_id), _now_ts())).fetchone()
+    return _grant_row_to_dict(row) if row else None
+
+
+@db_async
+def list_architect_licenses(limit: int = 10, offset: int = 0) -> tuple:
+    """(concesiones activas vigentes paginadas, total)."""
+    now = _now_ts()
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        total = conn.execute("SELECT COUNT(*) FROM architect_license_grants WHERE status = 'active' "
+                             "AND (expires_at IS NULL OR expires_at > ?)", (now,)).fetchone()[0]
+        rows = conn.execute(_GRANT_SELECT + " WHERE status = 'active' AND (expires_at IS NULL OR expires_at > ?) "
+                                            "ORDER BY COALESCE(expires_at, 9e18) ASC LIMIT ? OFFSET ?",
+                            (now, int(limit), int(offset))).fetchall()
+    return [_grant_row_to_dict(r) for r in rows], int(total)
+
+
+@db_async
+def expire_architect_licenses() -> list:
+    """
+    Cierra las concesiones vencidas (status → 'expired') y las devuelve. La reversión a 'free' es inmediata en
+    get_group_tier / get_user_global_tier porque ya filtran por expires_at; esto deja el historial coherente
+    y permite notificar al Arquitecto.
+    """
+    now = _now_ts()
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        rows = conn.execute(_GRANT_SELECT + " WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?",
+                            (now,)).fetchall()
+        if rows:
+            conn.execute("UPDATE architect_license_grants SET status = 'expired', ended_at = ? "
+                         "WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?", (now, now))
+    return [_grant_row_to_dict(r) for r in rows]
+
+
+@db_async
+def get_effective_license(chat_id: int) -> dict:
+    """Licencia vigente de la comunidad con su ORIGEN y vencimiento reales (para el dashboard y la Matriz)."""
+    with get_db_connection() as conn:
+        base_tier = "free"
+        base_exp = None
+        row = conn.execute("SELECT tier, expires_at FROM approved_groups WHERE group_id = ?", (int(chat_id),)).fetchone()
+        if row:
+            base_tier, base_exp = row[0] or "free", row[1]
+            if base_exp:
+                expired = conn.execute("SELECT datetime('now') > ?", (base_exp,)).fetchone()[0]
+                if expired:
+                    base_tier, base_exp = "free", None
+        owners = [r[0] for r in conn.execute("SELECT user_id FROM user_groups WHERE group_id = ?", (int(chat_id),)).fetchall()]
+        chat_tier, chat_exp, chat_grant = _architect_best_tier_sync(conn, "chat", [chat_id])
+        user_tier, user_exp, user_grant = _architect_best_tier_sync(conn, "user", owners)
+    candidates = [
+        (normalize_tier(base_tier), base_exp, "payment" if normalize_tier(base_tier) != "free" else None, None),
+        (chat_tier, datetime.fromtimestamp(chat_exp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if chat_exp else None,
+         "architect", chat_grant),
+        (user_tier, datetime.fromtimestamp(user_exp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if user_exp else None,
+         "architect_user", user_grant),
+    ]
+    best = max(candidates, key=lambda c: _TIER_RANK[c[0]])
+    if any(is_super_admin(o) for o in owners) or is_super_admin(chat_id):
+        best = ("ultra_pro", None, "architect", best[3])
+    return {"tier": best[0], "expires_at": best[1] if best[0] != "free" else None,
+            "source": best[2] if best[0] != "free" else None, "grant_id": best[3],
+            "base_tier": normalize_tier(base_tier)}
+
+
+# ---------- 🏆 Premios ----------
+def _level_for_xp(xp: int) -> int:
+    return int((max(0, int(xp)) / 100) ** 0.5) + 1
+
+
+def _xp_for_level(level: int) -> int:
+    return ((max(1, int(level)) - 1) ** 2) * 100
+
+
+@db_async
+def architect_grant_xp(group_id: int, user_id: int, full_name: str = "", username: str = "",
+                       xp: int = 0, levels: int = 0) -> dict:
+    """
+    Inyección directa de reputación (sin enfriamiento ni multiplicador). xp suma experiencia; levels sube N
+    niveles completos (lleva la XP al umbral del nivel destino si hace falta). Devuelve antes/después.
+    """
+    xp, levels = max(0, int(xp or 0)), max(0, int(levels or 0))
+    if not xp and not levels:
+        raise ValueError("Indica xp o levels mayores que cero.")
+    if xp > 1_000_000 or levels > 100:
+        raise ValueError("Bonificación fuera de rango (máx. 1 000 000 XP o 100 niveles).")
+    with _write_transaction() as conn:
+        row = conn.execute("SELECT xp, level FROM chat_user_reputation WHERE group_id = ? AND user_id = ?",
+                           (int(group_id), int(user_id))).fetchone()
+        old_xp = int(row[0] or 0) if row else 0
+        old_level = int(row[1] or 1) if row else 1
+        new_xp = old_xp + xp
+        if levels:
+            new_xp = max(new_xp, _xp_for_level(_level_for_xp(old_xp) + levels))
+        new_level = _level_for_xp(new_xp)
+        if row:
+            conn.execute("""
+                UPDATE chat_user_reputation SET xp = ?, level = ?,
+                    full_name = COALESCE(NULLIF(?, ''), full_name), username = COALESCE(NULLIF(?, ''), username)
+                WHERE group_id = ? AND user_id = ?
+            """, (new_xp, new_level, full_name or "", username or "", int(group_id), int(user_id)))
+        else:
+            conn.execute("""
+                INSERT INTO chat_user_reputation (group_id, user_id, full_name, username, xp, level, last_xp_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (int(group_id), int(user_id), full_name or "", username or "", new_xp, new_level))
+    return {"old_xp": old_xp, "old_level": old_level, "xp": new_xp, "level": new_level,
+            "gained_xp": new_xp - old_xp, "leveled_up": new_level > old_level}
+
+
+@db_async
+def record_architect_award(chat_id: int, user_id: int, user_name: str, award_type: str, amount: int,
+                           detail: str = "", granted_by: int = None, expires_at: int = None,
+                           tag_applied: bool = False, tag_title: str = None) -> int:
+    if award_type not in ARCHITECT_AWARD_TYPES:
+        raise ValueError(f"award_type no permitido: {award_type!r}")
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute("""
+            INSERT INTO architect_awards (chat_id, user_id, user_name, award_type, amount, detail, granted_by,
+                                          created_at, expires_at, tag_applied, tag_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (int(chat_id), int(user_id), (user_name or "")[:64], award_type, int(amount), (detail or "")[:300],
+              granted_by, _now_ts(), expires_at, 1 if tag_applied else 0, tag_title))
+        return int(cur.lastrowid)
+
+
+@db_async
+def get_architect_award(award_id: int) -> dict | None:
+    keys = ("id", "chat_id", "user_id", "user_name", "award_type", "amount", "detail", "granted_by",
+            "created_at", "expires_at", "announced", "tag_applied", "tag_title", "tag_cleared")
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        row = conn.execute(f"SELECT {', '.join(keys)} FROM architect_awards WHERE id = ?", (int(award_id),)).fetchone()
+    return dict(zip(keys, row)) if row else None
+
+
+@db_async
+def mark_architect_award_announced(award_id: int) -> bool:
+    """Marca el anuncio como emitido UNA sola vez (devuelve False si ya estaba marcado: evita duplicados)."""
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute("UPDATE architect_awards SET announced = 1 WHERE id = ? AND announced = 0", (int(award_id),))
+        return cur.rowcount > 0
+
+
+@db_async
+def unmark_architect_award_announced(award_id: int) -> None:
+    with _write_transaction() as conn:
+        conn.execute("UPDATE architect_awards SET announced = 0 WHERE id = ?", (int(award_id),))
+
+
+@db_async
+def get_expired_architect_vip_tags(limit: int = 50) -> list:
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        rows = conn.execute("""
+            SELECT id, chat_id, user_id, tag_title FROM architect_awards
+            WHERE award_type = 'micvip' AND tag_applied = 1 AND tag_cleared = 0 AND expires_at IS NOT NULL AND expires_at <= ?
+            ORDER BY expires_at LIMIT ?
+        """, (_now_ts(), int(limit))).fetchall()
+    return [{"id": r[0], "chat_id": r[1], "user_id": r[2], "tag_title": r[3]} for r in rows]
+
+
+@db_async
+def mark_architect_vip_tag_cleared(award_id: int) -> None:
+    with _write_transaction() as conn:
+        conn.execute("UPDATE architect_awards SET tag_cleared = 1 WHERE id = ?", (int(award_id),))
+
+
+# ---------- 🗂️ Directorio y auditoría ----------
+@db_async
+def list_registered_chats(kind: str = "all", limit: int = 8, offset: int = 0) -> tuple:
+    """Comunidades conocidas por el bot (una por chat). kind: 'all' | 'group' | 'channel'. → (filas, total)."""
+    where = ""
+    if kind == "channel":
+        where = "HAVING MAX(chat_type) = 'channel'"
+    elif kind == "group":
+        where = "HAVING MAX(COALESCE(chat_type, 'supergroup')) != 'channel'"
+    with get_db_connection() as conn:
+        base = f"SELECT group_id, MAX(group_name), MAX(COALESCE(chat_type, 'supergroup')) FROM user_groups GROUP BY group_id {where}"
+        total = conn.execute(f"SELECT COUNT(*) FROM ({base})").fetchone()[0]
+        rows = conn.execute(f"{base} ORDER BY LOWER(MAX(group_name)) LIMIT ? OFFSET ?", (int(limit), int(offset))).fetchall()
+    return [{"chat_id": r[0], "title": r[1] or f"Chat {r[0]}", "chat_type": r[2]} for r in rows], int(total)
+
+
+@db_async
+def find_known_user(query: str) -> dict | None:
+    """Resuelve @alias o nombre exacto contra los registros locales (users, reputación, actividad)."""
+    value = (query or "").strip().lstrip("@").lower()
+    if not value:
+        return None
+    with get_db_connection() as conn:
+        for sql in (
+            "SELECT user_id, full_name, username FROM users WHERE LOWER(username) = ? LIMIT 1",
+            "SELECT user_id, full_name, username FROM chat_user_reputation WHERE LOWER(username) = ? ORDER BY xp DESC LIMIT 1",
+            "SELECT user_id, full_name, username FROM chat_user_activity WHERE LOWER(username) = ? ORDER BY last_active DESC LIMIT 1",
+        ):
+            try:
+                row = conn.execute(sql, (value,)).fetchone()
+            except sqlite3.OperationalError:
+                continue
+            if row:
+                return {"user_id": int(row[0]), "full_name": row[1] or "", "username": row[2] or ""}
+    return None
+
+
+@db_async
+def record_architect_audit(actor_id: int, action: str, chat_id: int = None, target_id: int = None, detail: str = "") -> None:
+    with _write_transaction() as conn:
+        _ensure_architect_schema(conn)
+        cur = conn.execute("""
+            INSERT INTO architect_audit (actor_id, action, chat_id, target_id, detail, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (int(actor_id), str(action)[:48], chat_id, target_id, (detail or "")[:300], _now_ts()))
+        if cur.lastrowid and cur.lastrowid % 500 == 0:
+            conn.execute("DELETE FROM architect_audit WHERE id <= ?", (cur.lastrowid - _AUDIT_RETENTION_ROWS,))
+
+
+@db_async
+def get_architect_audit(limit: int = 15) -> list:
+    keys = ("id", "actor_id", "action", "chat_id", "target_id", "detail", "created_at")
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        rows = conn.execute(f"SELECT {', '.join(keys)} FROM architect_audit ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(zip(keys, r)) for r in rows]
+
+
+@db_async
+def get_architect_matrix_summary() -> dict:
+    now = _now_ts()
+    with get_db_connection() as conn:
+        _ensure_architect_schema(conn)
+        any_perm = " OR ".join(f"{p} = 1" for p in DELEGATE_PERMISSIONS)
+        delegates = conn.execute(f"SELECT COUNT(*) FROM architect_delegates WHERE {any_perm}").fetchone()[0]
+        licenses = conn.execute("SELECT COUNT(*) FROM architect_license_grants WHERE status = 'active' "
+                                "AND (expires_at IS NULL OR expires_at > ?)", (now,)).fetchone()[0]
+        awards = conn.execute("SELECT COUNT(*) FROM architect_awards WHERE created_at > ?", (now - 30 * 86400,)).fetchone()[0]
+        chats = conn.execute("SELECT COUNT(DISTINCT group_id) FROM user_groups").fetchone()[0]
+    return {"delegates": int(delegates), "licenses": int(licenses), "awards_30d": int(awards), "chats": int(chats)}
+
+
+# Inicialización del esquema al importar (al final, para que todas las funciones —incluida la Matriz— existan).
 try:
     init_db()
 except Exception:

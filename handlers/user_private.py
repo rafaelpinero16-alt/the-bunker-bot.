@@ -35,6 +35,9 @@ from database.database import (
     GAMI_DEFAULT_BUTTON_TEXTS, GAMI_DEFAULT_INTERVAL_MINUTES, GAMI_TEXT_MAX_CHARS,
 )
 from database.database import (
+    has_delegate_permission, get_delegated_chats,   # 👑 v13 · Matriz del Arquitecto (delegados)
+)
+from database.database import (
     get_or_create_user, get_user_groups, get_user_channels,
     get_group_tier, get_user_global_tier,
     get_antispam_filter, set_antispam_filter,
@@ -129,6 +132,39 @@ class CallbackAutoAnswerMiddleware(BaseMiddleware):
 
 
 router.callback_query.middleware(CallbackAutoAnswerMiddleware())
+
+
+_CALLBACK_CHAT_ID_RE = re.compile(r"^-\d{5,20}$")
+
+
+class OwnerCallbackGuardMiddleware(BaseMiddleware):
+    """
+    👑 v12/v13 · Defensa en profundidad de la Regla de Oro. Antes de ejecutar CUALQUIER botón de esta consola,
+    toma cada ID de chat presente en el callback_data (los IDs de grupos/canales siempre son negativos) y exige
+    que quien pulsa sea su dueño legítimo (creador en vivo), un Arquitecto o un DELEGADO designado por el
+    Arquitecto con el permiso exacto que ese botón requiere (Matriz del Arquitecto). Un administrador común recibe
+    owner_only_alert y el handler ni siquiera se ejecuta; así ningún botón nuevo puede olvidar la verificación.
+    """
+    async def __call__(self, handler, event: CallbackQuery, data: dict):
+        raw = getattr(event, "data", None) or ""
+        user = getattr(event, "from_user", None)
+        bot = data.get("bot")
+        if raw and user and bot is not None and not is_super_admin(user.id):
+            chat_ids = {int(tok) for tok in raw.split("_") if _CALLBACK_CHAT_ID_RE.match(tok)}
+            for chat_id in chat_ids:
+                if not await is_authorized_for_callback(bot, user.id, chat_id, raw):
+                    lang = user_lang(user)
+                    logging.warning(f"⛔ [Aduana] Botón '{raw[:64]}' bloqueado: user={user.id} no es dueño ni delegado autorizado de {chat_id}.")
+                    clear_user_states(bot.id, user.id)
+                    try:
+                        await event.answer(TEXTS.get(lang, TEXTS["es"])["owner_only_alert"], show_alert=True)
+                    except Exception:
+                        pass
+                    return None
+        return await handler(event, data)
+
+
+router.callback_query.middleware(OwnerCallbackGuardMiddleware())
 
 ADMIN_GROUP_ID = -1004351489258
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/").strip()
@@ -574,6 +610,18 @@ ALL_STATE_DICTS = (
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
     SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES
 )
+
+
+
+def register_external_state_store(store: dict) -> None:
+    """
+    👑 v13 · Permite que otros módulos (p. ej. la Matriz del Arquitecto) registren su almacén de estados para que
+    /start, /cancel y la navegación de esta consola también los liberen. Comparación por identidad, no por valor.
+    """
+    global ALL_STATE_DICTS
+    if not any(existing is store for existing in ALL_STATE_DICTS):
+        ALL_STATE_DICTS = ALL_STATE_DICTS + (store,)
+
 
 # ⏳ Caducidad de asistentes multi-paso (segundos) y enfriamiento del mensaje de "sin acción pendiente".
 STATE_TTL_SECONDS = 900
@@ -1418,6 +1466,7 @@ _EXTRA_TEXTS = {
         "btn_sync_placeholder": "Toca «Seleccionar mi canal»",
         "btn_open_studio": "📡 Abrir Estudio",
         "btn_main_menu": "🏠 Menú Principal",
+        "btn_architect": "👑 Matriz del Arquitecto",
         "btn_back_ultra": "🔙 Herramientas ULTRA",
         "btn_back_tool": "🔙 Volver al Módulo",
         "btn_create_plan": "➕ Crear Nuevo Plan",
@@ -1478,6 +1527,7 @@ _EXTRA_TEXTS = {
         "btn_sync_placeholder": "Tap “Select my channel”",
         "btn_open_studio": "📡 Open Studio",
         "btn_main_menu": "🏠 Main Menu",
+        "btn_architect": "👑 Architect Matrix",
         "btn_back_ultra": "🔙 ULTRA Tools",
         "btn_back_tool": "🔙 Back to Module",
         "btn_create_plan": "➕ Create New Plan",
@@ -1809,12 +1859,63 @@ def forget_plan_state(bot_id: int, user_id: int) -> None:
         logging.warning(f"⚠️ [Estados] No se pudo limpiar el asistente de planes de user={user_id}: {ex}")
 
 
-async def get_active_user_groups(bot: Bot, user_id: int) -> list:
-    raw_groups = await get_user_groups(user_id)
-    if not raw_groups:
+async def _delegated_chat_entries(bot: Bot, user_id: int, want_channels: bool, perm: str = "any") -> list:
+    """
+    👑 v13 · Comunidades donde el usuario es DELEGADO del Arquitecto con el permiso `perm` ('any' = alguno),
+    el bot sigue siendo administrador y el delegado no fue expulsado. [(chat_id, título)].
+    """
+    try:
+        delegated = await get_delegated_chats(user_id)
+    except Exception as ex:
+        logging.warning(f"⚠️ [Delegados] No se pudieron leer las delegaciones de {user_id}: {ex}")
         return []
+    if not delegated:
+        return []
+    try:
+        bot_id = (await bot.get_me()).id
+    except Exception:
+        return []
+
+    async def check(entry: dict):
+        perms = entry.get("perms") or {}
+        if perm != "any" and not perms.get(perm):
+            return None
+        chat_id = int(entry["chat_id"])
+        try:
+            bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_id)
+            if str(getattr(bot_member.status, "value", bot_member.status)) not in ("administrator", "creator"):
+                return None
+            chat_obj = await bot.get_chat(chat_id)
+        except Exception:
+            return None
+        is_channel = str(getattr(chat_obj.type, "value", chat_obj.type)) == "channel"
+        if is_channel != want_channels:
+            return None
+        if await _live_owner_status(bot, chat_id, user_id) in ("left", "kicked"):
+            return None
+        CHAT_KIND_CACHE[chat_id] = "c" if is_channel else "g"
+        return (chat_id, f"🛡️ {chat_obj.title or entry.get('title') or chat_id}")
+
+    results = await asyncio.gather(*(check(e) for e in delegated))
+    return [r for r in results if r is not None]
+
+
+def _merge_chat_lists(primary: list, extra: list) -> list:
+    seen = {int(row[0]) for row in primary}
+    return list(primary) + [row for row in extra if int(row[0]) not in seen]
+
+
+async def get_active_user_groups(bot: Bot, user_id: int, include_delegated: str = None) -> list:
+    """
+    Grupos que el usuario puede operar: los que POSEE (creador en vivo) y, si include_delegated se indica,
+    también aquellos donde el Arquitecto lo designó delegado con ese permiso ('any' = cualquiera).
+    """
+    raw_groups = await get_user_groups(user_id)
+    delegated = await _delegated_chat_entries(bot, user_id, False, include_delegated) if include_delegated else []
+    if not raw_groups:
+        return delegated
     if is_super_admin(user_id):
-        return raw_groups
+        return _merge_chat_lists(list(raw_groups), delegated)
     bot_info = await bot.get_me()
     bot_id = bot_info.id
 
@@ -1830,10 +1931,17 @@ async def get_active_user_groups(bot: Bot, user_id: int) -> list:
             return None
 
     results = await asyncio.gather(*(check_ownership(g_id, g_name) for g_id, g_name in raw_groups))
-    return [res for res in results if res is not None]
+    return _merge_chat_lists([res for res in results if res is not None], delegated)
 
 
-async def get_active_user_channels(bot: Bot, user_id: int) -> list:
+async def get_active_user_channels(bot: Bot, user_id: int, include_delegated: str = None) -> list:
+    owned = await _get_owned_user_channels(bot, user_id)
+    if not include_delegated:
+        return owned
+    return _merge_chat_lists(owned, await _delegated_chat_entries(bot, user_id, True, include_delegated))
+
+
+async def _get_owned_user_channels(bot: Bot, user_id: int) -> list:
     candidates: dict = {}
     try:
         for row in (await get_user_channels(user_id)) or []:
@@ -1879,8 +1987,8 @@ async def get_active_user_channels(bot: Bot, user_id: int) -> list:
             except Exception as e:
                 logging.warning(f"⚠️ [Sync Canales] Fallo transitorio verificando propietario user={user_id} channel={c_id}: {e}. Se conserva.")
                 return (c_id, title, False)
-            # Permitir tanto creador como administrador en el canal
-            return (c_id, title, True) if user_member.status in ("creator", "administrator") else None
+            # 👑 Solo el CREADOR del canal lo ve en su selector; un administrador común queda fuera.
+            return (c_id, title, True) if str(getattr(user_member.status, "value", user_member.status)) == "creator" else None
         except Exception:
             return None
 
@@ -1919,25 +2027,35 @@ async def is_registered_owner_db(user_id: int, group_id: int) -> bool:
         return False
 
 
-OWNER_LIVE_ROLES = ("creator", "administrator")
+# 👑 v12 · REGLA DE ORO: solo el CREADOR del chat (verificado en vivo) y los Arquitectos configuran el bot.
+# Un administrador común — con todos o algunos permisos — NUNCA es dueño, figure o no en el registro.
+OWNER_LIVE_ROLES = ("creator",)
 _OWNER_STATUS_CACHE: dict = {}          # (bot_id, chat_id, user_id) -> (estado, expira)
 _OWNER_STATUS_CACHE_MAX = 20000
+# Último rango CONFIRMADO por Telegram (sin caducidad corta). Si alguna vez se vio que el usuario NO es el
+# creador, una caída posterior de la Bot API no le abre la puerta por la vía del registro.
+_OWNER_LAST_KNOWN: dict = {}            # (chat_id, user_id) -> estado confirmado
+_OWNER_LAST_KNOWN_MAX = 50000
 
 
-async def _live_owner_status(bot: Bot, chat_id: int, user_id: int) -> str:
+async def _live_owner_status(bot: Bot, chat_id: int, user_id: int, fresh: bool = False) -> str:
     """
     Estado real del usuario en el chat ('creator', 'administrator', 'member', 'left'…). Caché corta para no
-    llamar a getChatMember en cada botón: 5 min si es staff, 1 min si no, 30 s si Telegram falló ('').
+    llamar a getChatMember en cada botón: 5 min si es el creador, 1 min si no, 30 s si Telegram falló ('').
+    fresh=True ignora la caché (acciones sensibles).
     """
     key = (bot.id, int(chat_id), int(user_id))
     now = time.monotonic()
     cached = _OWNER_STATUS_CACHE.get(key)
-    if cached and cached[1] > now:
+    if cached and cached[1] > now and not fresh:
         return cached[0]
     try:
         member = await asyncio.wait_for(bot.get_chat_member(chat_id=chat_id, user_id=user_id), timeout=5)
         status = str(getattr(member.status, "value", member.status) or "")
-        ttl = 300.0 if status in OWNER_LIVE_ROLES else 60.0
+        ttl = 300.0 if status == "creator" else 60.0
+        if len(_OWNER_LAST_KNOWN) >= _OWNER_LAST_KNOWN_MAX:
+            _OWNER_LAST_KNOWN.clear()
+        _OWNER_LAST_KNOWN[(int(chat_id), int(user_id))] = status
     except Exception:
         status, ttl = "", 30.0
     if len(_OWNER_STATUS_CACHE) >= _OWNER_STATUS_CACHE_MAX:
@@ -1946,30 +2064,43 @@ async def _live_owner_status(bot: Bot, chat_id: int, user_id: int) -> str:
     return status
 
 
+def invalidate_owner_status(chat_id: int, user_id: int) -> None:
+    """Olvida el rango cacheado (cambio de membresía, transferencia de propiedad…)."""
+    for key in [k for k in _OWNER_STATUS_CACHE if k[1] == int(chat_id) and k[2] == int(user_id)]:
+        _OWNER_STATUS_CACHE.pop(key, None)
+
+
 async def is_legitimate_owner(bot: Bot, user_id: int, group_id: int) -> bool:
     """
-    Regla ÚNICA de propiedad (paridad 1:1 con main.is_legitimate_chat_owner, que protege la Mini App):
-      1. Super-admin → sí.
-      2. Creador del chat según Telegram en vivo → sí.
-      3. Dueño registrado (user_groups / bot_clones / channel_owner_registry) que SIGUE siendo creador o
-         administrador → sí. Si perdió el rango o salió del chat, la consola deja de responderle.
-      4. Dueño registrado y Telegram no responde → sí (con aviso en el log): una caída de la Bot API no deja
-         fuera al dueño real, y nadie sin registro entra por esta vía.
+    Regla ÚNICA y estricta de propiedad (paridad 1:1 con main.is_legitimate_chat_owner):
+      1. Arquitecto Supremo (SUPER_ADMIN_IDS) → sí, en cualquier comunidad o canal.
+      2. Creador ('creator') del chat según Telegram en vivo → sí.
+      3. Cualquier otro rango confirmado por Telegram ('administrator', 'member', 'left'…) → NO, aunque figure
+         como dueño en user_groups / bot_clones / channel_owner_registry. Un administrador común, con todos o
+         algunos permisos, jamás accede a las consolas.
+      4. Telegram no responde → solo el dueño REGISTRADO cuyo último rango confirmado no contradiga ser el
+         creador conserva el acceso (con aviso en el log). Nadie sin registro entra por esta vía.
     """
+    if not user_id:
+        return False
     if is_super_admin(user_id):
         return True
     status = await _live_owner_status(bot, group_id, user_id)
     if status == "creator":
         return True
-    registered = await is_registered_owner_db(user_id, group_id) or await registry_has_owner(user_id, group_id)
-    if not registered:
+    if status:
+        if status == "administrator":
+            logging.warning(f"⛔ [Aduana] {user_id} es administrador (no creador) de {group_id}: consola denegada.")
         return False
-    if status in OWNER_LIVE_ROLES:
-        return True
-    if status == "":
+    # Telegram no confirmó el rango: fallback acotado al registro.
+    last_known = _OWNER_LAST_KNOWN.get((int(group_id), int(user_id)))
+    if last_known and last_known != "creator":
+        logging.warning(f"⛔ [Aduana] Telegram no respondió y el último rango conocido de {user_id} en {group_id} es '{last_known}': denegado.")
+        return False
+    registered = await is_registered_owner_db(user_id, group_id) or await registry_has_owner(user_id, group_id)
+    if registered:
         logging.warning(f"⚠️ [Aduana] Telegram no confirmó el rango de {user_id} en {group_id}; se mantiene el acceso del dueño registrado.")
         return True
-    logging.warning(f"⛔ [Aduana] {user_id} figura como dueño de {group_id} pero su estado actual es '{status}': acceso denegado.")
     return False
 
 
@@ -1991,20 +2122,108 @@ def _state_target_chat(value) -> int | None:
     return None
 
 
+# ==========================================
+# 👑 v13 · DELEGADOS DEL ARQUITECTO — MAPA BOTÓN → PERMISO
+# ==========================================
+# Un delegado (designado SOLO por el Arquitecto en la Matriz) opera exclusivamente los botones del módulo que
+# tiene activado. Todo botón que no figure aquí sigue siendo exclusivo del Dueño legítimo y del Arquitecto
+# (moderación ejecutiva, pasarela de planes, clon y centinela por teléfono, respaldos, pánico, etc.).
+DELEGATE_NAV_PREFIXES = ("gpanel_", "cpanel_", "langpanel_", "langcpanel_", "menu_eco_", "menu_ultra_")
+DELEGATE_CALLBACK_RULES = (
+    # 🤖 Aduana y Captcha
+    ("gset_captcha_", "can_manage_captcha"), ("togcap_", "can_manage_captcha"), ("togmode_", "can_manage_captcha"),
+    ("cap_set_", "can_manage_captcha"), ("capval_", "can_manage_captcha"),
+    # 🔒 Cerraduras de contenido
+    ("gset_locks_", "can_manage_locks"), ("toglock_", "can_manage_locks"),
+    # 🛡️ Anti-Spam y Anti-Flood
+    ("gset_antispam_", "can_manage_antispam"), ("astog_", "can_manage_antispam"), ("as_fwd_", "can_manage_antispam"),
+    ("as_togdel_", "can_manage_antispam"), ("gset_antiflood_", "can_manage_antispam"), ("afset_", "can_manage_antispam"),
+    ("afval_", "can_manage_antispam"), ("afact_", "can_manage_antispam"),
+    # 📢 Difusión de planes y anuncios (sin crear, pausar ni borrar planes: eso es del Dueño)
+    ("chplans_menu_", "can_manage_broadcast"), ("chplans_view_", "can_manage_broadcast"),
+    ("chplans_share_", "can_manage_broadcast"), ("chplans_postto_", "can_manage_broadcast"),
+    ("chplans_sched_", "can_manage_broadcast"), ("chplans_setsched_", "can_manage_broadcast"),
+    ("tips_menu_", "can_manage_broadcast"), ("tips_share_", "can_manage_broadcast"),
+    ("tips_postto_", "can_manage_broadcast"), ("tips_broadcast_", "can_manage_broadcast"),
+    ("gami_", "can_manage_broadcast"),
+    # 📊 Métricas y telemetría (solo lectura)
+    ("radar_", "can_view_analytics"), ("tips_telemetry_", "can_view_analytics"), ("rep_viewtop_", "can_view_analytics"),
+    # 🎙️ Radar de voz y Centinelas (sin conectar clones ni sesiones por teléfono)
+    ("sentinelcfg_", "can_manage_sentinel"), ("payload_", "can_manage_sentinel"), ("cmd_autolower_", "can_manage_sentinel"),
+    ("alset_", "can_manage_sentinel"), ("cmd_cams_", "can_manage_sentinel"), ("vcsched_", "can_manage_sentinel"),
+)
+
+
+def required_delegate_permission(callback_data: str):
+    """'any' para navegación, el permiso exacto para un módulo delegable, o None si el botón es solo del Dueño."""
+    raw = callback_data or ""
+    for prefix, perm in DELEGATE_CALLBACK_RULES:
+        if raw.startswith(prefix):
+            return perm
+    if raw.startswith(DELEGATE_NAV_PREFIXES):
+        return "any"
+    return None
+
+
+async def is_authorized_operator(bot: Bot, user_id: int, chat_id: int, perm: str = None) -> bool:
+    """
+    Dueño legítimo / Arquitecto → siempre. Delegado → solo si el Arquitecto le activó `perm` en esa comunidad
+    ('any' = al menos un permiso) y no salió ni fue expulsado del chat. perm=None → exclusivo del Dueño.
+    """
+    if await is_legitimate_owner(bot, user_id, chat_id):
+        return True
+    if not perm:
+        return False
+    try:
+        if not await has_delegate_permission(chat_id, user_id, perm):
+            return False
+    except Exception as ex:
+        logging.warning(f"⚠️ [Delegados] Consulta fallida ({chat_id}/{user_id}): {ex}")
+        return False
+    if await _live_owner_status(bot, chat_id, user_id) in ("left", "kicked"):
+        return False
+    return True
+
+
+async def is_authorized_for_callback(bot: Bot, user_id: int, chat_id: int, callback_data: str) -> bool:
+    return await is_authorized_operator(bot, user_id, chat_id, required_delegate_permission(callback_data))
+
+
+def _state_delegate_permission(state_dict: dict):
+    """Permiso delegado con el que puede responderse cada editor conversacional (None = solo el Dueño)."""
+    mapping = (
+        (CAPTCHA_STATES, "can_manage_captcha"),
+        (GAMI_STATES, "can_manage_broadcast"),
+        (SENTINEL_CFG_STATES, "can_manage_sentinel"),
+        (SENTINEL_PAYLOAD_TEXT_STATES, "can_manage_sentinel"),
+        (SENTINEL_PAYLOAD_MEDIA_STATES, "can_manage_sentinel"),
+        (SENTINEL_PAYLOAD_AUTODEL_STATES, "can_manage_sentinel"),
+        (VC_SCHED_STATES, "can_manage_sentinel"),
+    )
+    for store, perm in mapping:
+        if store is state_dict:
+            return perm
+    return None
+
+
 async def guard_pending_state_ownership(message: Message, bot: Bot, t: dict) -> bool:
     """
-    Re-verifica la propiedad ANTES de aplicar cualquier respuesta conversacional. Cada editor (captcha,
+    Re-verifica la autorización ANTES de aplicar cualquier respuesta conversacional. Cada editor (captcha,
     propinas, centinela, clones, moderación, planes…) guarda el group_id al abrirse; si entre la apertura y
-    la respuesta el usuario dejó de ser el dueño legítimo, la entrada se descarta y se liberan sus estados.
-    Devuelve True si puede continuar.
+    la respuesta el usuario dejó de ser el dueño legítimo (o perdió el permiso delegado de ese editor), la
+    entrada se descarta y se liberan sus estados. Devuelve True si puede continuar.
     """
     user_id = message.from_user.id
     key = (bot.id, user_id)
-    targets = {chat for state_dict in ALL_STATE_DICTS if key in state_dict
-               for chat in [_state_target_chat(state_dict.get(key))] if chat is not None}
-    for chat_id in targets:
-        if not await is_legitimate_owner(bot, user_id, chat_id):
-            logging.warning(f"⛔ [Aduana] Entrada conversacional de {user_id} descartada: ya no es dueño de {chat_id}.")
+    checks = []
+    for state_dict in ALL_STATE_DICTS:
+        if key in state_dict:
+            chat = _state_target_chat(state_dict.get(key))
+            if chat is not None:
+                checks.append((chat, _state_delegate_permission(state_dict)))
+    for chat_id, perm in checks:
+        if not await is_authorized_operator(bot, user_id, chat_id, perm):
+            logging.warning(f"⛔ [Aduana] Entrada conversacional de {user_id} descartada: no está autorizado en {chat_id}.")
             clear_user_states(bot.id, user_id)
             await message.answer(t["owner_only_alert"])
             return False
@@ -2012,21 +2231,23 @@ async def guard_pending_state_ownership(message: Message, bot: Bot, t: dict) -> 
 
 
 async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
+    """Dueño legítimo, Arquitecto o delegado con el permiso exacto que exige este botón (ver DELEGATE_CALLBACK_RULES)."""
     lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
     t = TEXTS[lang]
-    if await is_legitimate_owner(bot, callback.from_user.id, group_id):
+    if await is_authorized_for_callback(bot, callback.from_user.id, group_id, callback.data or ""):
         return True
-    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={callback.from_user.id} intentó operar group={group_id} sin ser propietario.")
+    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={callback.from_user.id} intentó operar group={group_id} sin autorización.")
     await callback.answer(t["owner_only_alert"], show_alert=True)
     return False
 
 
-async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int) -> bool:
+async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int, perm: str = None) -> bool:
+    """Igual que verify_admin_privileges para mensajes; perm=None → exclusivo del Dueño / Arquitecto."""
     lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
     t = TEXTS[lang]
-    if await is_legitimate_owner(bot, message.from_user.id, group_id):
+    if await is_authorized_operator(bot, message.from_user.id, group_id, perm):
         return True
-    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={message.from_user.id} intentó operar group={group_id} sin ser propietario.")
+    logging.warning(f"⛔ [Aduana] Acceso rechazado — user={message.from_user.id} intentó operar group={group_id} sin autorización.")
     await message.answer(t["owner_only_alert"])
     return False
 
@@ -2288,8 +2509,8 @@ def build_channel_request_keyboard(lang: str) -> ReplyKeyboardMarkup:
     )
 
 
-def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
-    """Teclado principal con bifurcación dual independiente para Grupos y Canales."""
+def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False, user_id: int = 0):
+    """Teclado principal con bifurcación dual independiente para Grupos y Canales (+ Matriz para Arquitectos)."""
     t = TEXTS.get(lang, TEXTS["es"])
     add_group_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
     add_channel_url = f"https://t.me/{bot_username}?startchannel=true&admin=post_messages+edit_messages+delete_messages+manage_video_chats+invite_users"
@@ -2314,6 +2535,10 @@ def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False):
         InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}"),
         InlineKeyboardButton(text=t["btn_info"], callback_data=f"menu_info_{lang}")
     ])
+    # 👑 Acceso directo a la Matriz del Arquitecto: el botón solo existe para los Arquitectos y, aun así, el
+    # router de la Matriz vuelve a verificar is_super_admin en cada evento.
+    if user_id and is_super_admin(user_id):
+        rows.insert(0, [InlineKeyboardButton(text=t["btn_architect"], callback_data=f"amx:lang:{lang}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -2352,7 +2577,7 @@ async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str 
     t = TEXTS.get(lang, TEXTS["es"])
     name = html.escape(user.full_name) if user else "Comandante"
     text = t["welcome"].format(name=name)
-    keyboard = get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot))
+    keyboard = get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot), user_id=getattr(user, "id", 0))
     # 🖼️ Prioridad: tarjeta gráfica (assets) -> video de bienvenida -> texto
     if await render_card(bot, chat_id, "welcome", lang, keyboard):
         return
@@ -2852,14 +3077,10 @@ async def validate_tip_target(bot: Bot, user_id: int, ref: str):
             if getattr(me, "can_post_messages", None) is False:
                 return None, "bot_cannot_post"
 
-        # 2. Nota: En canales, get_chat_member(chat.id, user_id) falla porque Telegram oculta los suscriptores.
-        # Si es un supergrupo/grupo sí validamos al usuario; si es canal, confiamos en la gestión privada del dueño.
-        if chat.type != "channel" and not is_super_admin(user_id):
-            try:
-                requester = await bot.get_chat_member(chat.id, user_id)
-                if requester.status not in ("administrator", "creator"):
-                    return None, "not_admin"
-            except Exception:
+        # 2. 👑 Regla de Oro: solo el CREADOR del destino (o un Arquitecto) puede vincularlo. En canales la Bot API
+        # sí expone al creador y a los administradores cuando el bot es admin; si Telegram no lo confirma, se rechaza.
+        if not is_super_admin(user_id):
+            if not await is_legitimate_owner(bot, user_id, chat.id):
                 return None, "not_admin"
 
         value = f"@{chat.username}" if getattr(chat, "username", None) else str(chat.id)
@@ -2882,8 +3103,8 @@ def tips_target_error_text(lang: str, err: str, **fmt) -> str:
                           "⚠️ The bot must be an <b>administrator</b> of the target channel to publish."),
         "bot_cannot_post": ("⚠️ El bot es admin, pero no tiene permiso para <b>publicar mensajes</b> en ese canal.",
                             "⚠️ The bot is an admin but lacks the <b>post messages</b> permission in that channel."),
-        "not_admin": ("⚠️ Solo un administrador del canal destino puede vincularlo.",
-                      "⚠️ Only an administrator of the target channel can link it."),
+        "not_admin": ("⚠️ Solo el <b>creador</b> del canal destino puede vincularlo.",
+                      "⚠️ Only the <b>creator</b> of the target channel can link it."),
         "duplicate": ("⚠️ Ese canal ya está vinculado.", "⚠️ That channel is already linked."),
         "limit": ("⚠️ Límite de canales destino alcanzado para tu nivel ({n}/{limit}).",
                   "⚠️ Target channel limit reached for your tier ({n}/{limit})."),
@@ -3456,7 +3677,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             except (ValueError, IndexError):
                 gami_chat_id = 0
             if gami_chat_id:
-                if not await verify_admin_privileges_msg(message, bot, gami_chat_id):
+                if not await verify_admin_privileges_msg(message, bot, gami_chat_id, perm="can_manage_broadcast"):
                     return
                 await send_gamification_panel(bot, message.from_user.id, gami_chat_id, lang)
                 return
@@ -3464,7 +3685,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         if command.args and command.args.startswith("gset_"):
             try:
                 group_id = int(command.args.split("_")[1])
-                if not await verify_admin_privileges_msg(message, bot, group_id):
+                if not await verify_admin_privileges_msg(message, bot, group_id, perm="any"):
                     return
                 chat_kind = await resolve_chat_kind(bot, group_id)
                 try:
@@ -4250,8 +4471,8 @@ async def _handle_gamification_input(message: Message, bot: Bot, lang: str) -> N
         fire_and_forget_auto_delete([message, resp], delay=30)
         return
 
-    # Defensa en profundidad: la propiedad y la licencia se verifican de nuevo al recibir el dato.
-    if not await is_legitimate_owner(bot, user_id, chat_id):
+    # Defensa en profundidad: la autorización y la licencia se verifican de nuevo al recibir el dato.
+    if not await is_authorized_operator(bot, user_id, chat_id, "can_manage_broadcast"):
         GAMI_STATES.pop((bot.id, user_id), None)
         await message.answer(TEXTS.get(lang, TEXTS["es"])["owner_only_alert"])
         return
@@ -4393,7 +4614,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
     if text_input in (TEXTS["es"]["btn_sync_cancel"], TEXTS["en"]["btn_sync_cancel"]):
         clear_user_states(bot.id, user_id)
         await _dismiss_reply_keyboard(message)
-        channels_now = await get_active_user_channels(bot, user_id)
+        channels_now = await get_active_user_channels(bot, user_id, include_delegated="any")
         await message.answer(
             t["chsettings_main"] if channels_now else t["chsettings_main_empty"],
             reply_markup=get_channels_keyboard(channels_now, lang), parse_mode="HTML"
@@ -5631,7 +5852,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     if action == "lang":
         lang = data[1]
         text = TEXTS.get(lang, TEXTS["es"])["welcome"].format(name=callback.from_user.full_name)
-        keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
+        keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot), user_id=callback.from_user.id)
         card_key = "welcome"
 
     elif action == "langpanel":
@@ -5694,17 +5915,17 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         target = data[1]
         if target == "main":
             text = t["welcome"].format(name=callback.from_user.full_name)
-            keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot))
+            keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot), user_id=callback.from_user.id)
             card_key = "welcome"
 
         elif target == "settings":
-            active_groups = await get_active_user_groups(bot, callback.from_user.id)
+            active_groups = await get_active_user_groups(bot, callback.from_user.id, include_delegated="any")
             keyboard = get_groups_keyboard(active_groups, lang)
             text = t["settings_main"]
             card_key = "settings"
 
         elif target == "chsettings":
-            active_channels = await get_active_user_channels(bot, callback.from_user.id)
+            active_channels = await get_active_user_channels(bot, callback.from_user.id, include_delegated="any")
             keyboard = get_channels_keyboard(active_channels, lang)
             text = t["chsettings_main"] if active_channels else t["chsettings_main_empty"]
             card_key = "settings_channels"
@@ -6000,8 +6221,8 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             return
 
         elif sub == "share":
-            groups = await get_active_user_groups(bot, callback.from_user.id)
-            channels = await get_active_user_channels(bot, callback.from_user.id)
+            groups = await get_active_user_groups(bot, callback.from_user.id, include_delegated="can_manage_broadcast")
+            channels = await get_active_user_channels(bot, callback.from_user.id, include_delegated="can_manage_broadcast")
 
             share_rows = []
             for g_id, g_name in groups:
@@ -7823,8 +8044,8 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
             return
 
-        groups = await get_active_user_groups(bot, callback.from_user.id)
-        channels = await get_active_user_channels(bot, callback.from_user.id)
+        groups = await get_active_user_groups(bot, callback.from_user.id, include_delegated="can_manage_broadcast")
+        channels = await get_active_user_channels(bot, callback.from_user.id, include_delegated="can_manage_broadcast")
 
         share_rows = []
         for g_id, g_name in groups:
