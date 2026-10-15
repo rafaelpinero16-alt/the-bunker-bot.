@@ -1533,6 +1533,15 @@ def _is_chat_admin_cached(chat_id: int, user_id: int) -> bool:
     return user_id in (cache.get("admins") or set())
 
 
+async def _record_guardian_block(chat_id: int, user_id: int) -> None:
+    """Métrica de bloqueos de la analítica en vivo (v9): purga del Guardián IA."""
+    try:
+        from database.database import record_security_event
+        await record_security_event(chat_id, user_id, "ai_guardian", "delete", is_bot=False)
+    except Exception as ex:
+        logger.debug(f"Aviso registrando bloqueo del Guardián IA ({chat_id}/{user_id}): {ex}")
+
+
 async def _run_guardian(client: Client, message, chat_id: int, user_id: int, from_user, text_content: str, ai_cfg: dict) -> bool:
     """Ejecuta el Guardián Anti-Toxicidad. Devuelve True si el mensaje fue purgado."""
     if not user_id or user_id in SERVICE_ACCOUNT_IDS or is_super_admin(user_id):
@@ -1573,7 +1582,15 @@ async def _run_guardian(client: Client, message, chat_id: int, user_id: int, fro
         f"• <b>Detección:</b> <code>{html.escape(str(threat.get('reason') or 'Infracción semántica'))}</code>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
-    _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20), name=f"guardian_notice:{chat_id}")
+    if deleted:
+        _spawn(_record_guardian_block(chat_id, user_id), name=f"guardian_metric:{chat_id}")
+    try:
+        import raid_shield as _raid_shield  # type: ignore[import-not-found]  # bajo escudo anti-raid el aviso público no se publica
+        notice_ok = _raid_shield.notice_allowed(chat_id)
+    except Exception:
+        notice_ok = True
+    if notice_ok:
+        _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20), name=f"guardian_notice:{chat_id}")
     logger.info(f"🛡️ [Guardián IA] Mensaje de {user_id} en {chat_id} {'purgado' if deleted else 'detectado'}: {threat.get('reason')}")
     return deleted
 

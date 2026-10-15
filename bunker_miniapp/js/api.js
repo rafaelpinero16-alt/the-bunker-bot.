@@ -368,9 +368,45 @@ export const api = {
             stars_price: planData?.stars_price,
             duration_days: planData?.duration_days,
             target_link: planData?.target_link ?? '',
-            promo_text: planData?.promo_text ?? ''
+            promo_text: planData?.promo_text ?? '',
+            broadcast_interval_hours: Number(planData?.broadcast_interval_hours) || 0,
+            lang: planData?.lang || state.currentLang || 'es'
         };
         return await this.post(`/channel/${channel}/plan/create`, body, { timeoutMs: 15000 });
+    },
+
+    /**
+     * POST /api/channel/{channel_id}/plan/{plan_id}/schedule → { broadcast_enabled, broadcast_interval_hours,
+     * broadcast_next_at, broadcast_last_at } (v9). intervalHours ∈ 0 | 6 | 12 | 24 | 48; 0 la desactiva.
+     */
+    async scheduleChannelPlan(channelId, planId, intervalHours, lang = state.currentLang) {
+        const channel = numericId(channelId), plan = numericId(planId);
+        if (!channel || !plan) return INVALID_ID_RESULT;
+        return await this.post(`/channel/${channel}/plan/${plan}/schedule`,
+            { interval_hours: Number(intervalHours) || 0, lang: lang || 'es' });
+    },
+
+    // --- v9 · Informe periódico del canal de registro ---
+
+    /** GET /api/chat/{chat_id}/log-report → { log_report: { enabled, interval_hours, metrics, next_at, … } } */
+    async fetchLogReport(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/log-report`, { timeoutMs: 12000 });
+    },
+
+    /** POST /api/chat/{chat_id}/log-report — { enabled, interval_hours: 24|72|168, metrics: [...], lang }. 422 "campo: motivo". */
+    async saveLogReport(chatId, config) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/log-report`, { log_report: config }, { timeoutMs: 15000 });
+    },
+
+    /** POST /api/chat/{chat_id}/log-report/send → { sent, message_id }. Enfriamiento de 60 s (429). */
+    async sendLogReportNow(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/log-report/send`, {}, { timeoutMs: 20000 });
     },
 
     // --- Difusión personalizada del Estudio de Canales (v8.2) ---
@@ -455,7 +491,8 @@ export const api = {
 
    Eventos del servidor: hello, pong, error, analytics_snapshot, initial_state,
    state_refresh, message, level_up, voice_presence, voice_call_started,
-   voice_call_ended, stars_payment, settings_updated, subscribed, server_shutdown.
+   voice_call_ended, stars_payment, settings_updated, security_block, raid_shield (v9),
+   subscribed, server_shutdown.
    Eventos locales: status, open, close, reconnect_scheduled, reconnected, gap, dead,
    auth_failed.
 
@@ -465,7 +502,7 @@ export const api = {
 
 const LIVE_EVENTS = new Set([
     'message', 'level_up', 'voice_call_started', 'voice_call_ended',
-    'voice_presence', 'stars_payment', 'settings_updated'
+    'voice_presence', 'stars_payment', 'settings_updated', 'security_block', 'raid_shield'
 ]);
 const SNAPSHOT_EVENTS = new Set(['analytics_snapshot', 'initial_state', 'state_refresh']);
 const AUTH_CLOSE_CODES = new Set([4401, 4403, 1008]);

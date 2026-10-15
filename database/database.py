@@ -477,9 +477,74 @@ def init_db():
         _ensure_columns(cursor, "channel_plans", [
             ("status", "TEXT DEFAULT 'active'"), ("promo_text", "TEXT"), ("media_id", "TEXT"), ("media_type", "TEXT"),
             ("target_link", "TEXT"), ("broadcast_chat_id", "INTEGER"), ("broadcast_interval_hours", "INTEGER"),
-            ("next_broadcast_at", "TIMESTAMP"), ("broadcast_enabled", "INTEGER DEFAULT 0")
+            ("next_broadcast_at", "TIMESTAMP"), ("broadcast_enabled", "INTEGER DEFAULT 0"),
+            # v9 · Programador recurrente: el intervalo se mide desde el último envío REAL.
+            ("last_broadcast_at", "TIMESTAMP"), ("broadcast_failures", "INTEGER DEFAULT 0"),
+            ("broadcast_lang", "TEXT DEFAULT 'es'"),
         ])
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_broadcast ON channel_plans (broadcast_enabled, next_broadcast_at)")
+
+        # v9 · Bloqueos del sistema de seguridad (Captcha, Anti-Flood, Anti-Spam, Guardián IA, Escudo Anti-Raid)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS security_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                user_id INTEGER,
+                is_bot INTEGER DEFAULT 0,
+                source TEXT NOT NULL,
+                action TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_security_events_group ON security_events (group_id, created_at)")
+
+        # v9 · Rendimiento de administradores (actividad diaria + acciones de moderación)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_activity_daily (
+                group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, day TEXT NOT NULL,
+                full_name TEXT, username TEXT,
+                messages INTEGER DEFAULT 0, replies INTEGER DEFAULT 0,
+                PRIMARY KEY (group_id, user_id, day)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_mod_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL, admin_id INTEGER NOT NULL, admin_name TEXT,
+                target_id INTEGER, action TEXT NOT NULL, created_at INTEGER NOT NULL
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_admin_mod_actions ON admin_mod_actions (group_id, created_at)")
+
+        # v9 · Informe periódico del canal de registro
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS log_report_config (
+                group_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                interval_hours INTEGER NOT NULL DEFAULT 24,
+                metrics TEXT NOT NULL DEFAULT '[]',
+                lang TEXT NOT NULL DEFAULT 'es',
+                anchor_at INTEGER,
+                last_sent_at INTEGER,
+                retry_at INTEGER,
+                failures INTEGER NOT NULL DEFAULT 0,
+                updated_by INTEGER,
+                updated_at INTEGER
+            )
+        """)
+
+        # v9 · Escudo Anti-Raid / Anti-Reportes (persistido: sobrevive a reinicios)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS raid_shield_state (
+                group_id INTEGER PRIMARY KEY,
+                active_until INTEGER NOT NULL DEFAULT 0,
+                level INTEGER NOT NULL DEFAULT 0,
+                reason TEXT,
+                joins_in_window INTEGER DEFAULT 0,
+                triggered_at INTEGER,
+                triggers_total INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         cursor.execute("CREATE TABLE IF NOT EXISTS channel_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL, user_id INTEGER NOT NULL, plan_id INTEGER, stars_paid INTEGER NOT NULL, invite_link TEXT, subscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, expires_at TIMESTAMP NOT NULL, status TEXT DEFAULT 'active', last_warned_at TIMESTAMP, FOREIGN KEY(plan_id) REFERENCES channel_plans(plan_id), UNIQUE(channel_id, user_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_subs_audit ON channel_subscriptions (status, expires_at)")
         cursor.execute("CREATE TABLE IF NOT EXISTS channel_owner_registry (user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL, title TEXT, updated_at INTEGER, PRIMARY KEY (user_id, channel_id))")
@@ -2446,7 +2511,8 @@ def get_channel_plan(plan_id: int) -> dict:
         cursor.execute("""
             SELECT plan_id, channel_id, plan_name, duration_days, stars_price, status,
                    promo_text, media_id, media_type, created_at, target_link,
-                   broadcast_chat_id, broadcast_interval_hours, next_broadcast_at, broadcast_enabled
+                   broadcast_chat_id, broadcast_interval_hours, next_broadcast_at, broadcast_enabled,
+                   last_broadcast_at, broadcast_failures, broadcast_lang
             FROM channel_plans WHERE plan_id = ?
         """, (plan_id,))
         row = cursor.fetchone()
@@ -2466,7 +2532,10 @@ def get_channel_plan(plan_id: int) -> dict:
                 "broadcast_chat_id": row[11],
                 "broadcast_interval_hours": row[12],
                 "next_broadcast_at": row[13],
-                "broadcast_enabled": row[14] or 0
+                "broadcast_enabled": row[14] or 0,
+                "last_broadcast_at": row[15],
+                "broadcast_failures": row[16] or 0,
+                "broadcast_lang": _clean_broadcast_lang(row[17]),
             }
         return None
 
@@ -2526,64 +2595,138 @@ def delete_channel_plan(plan_id: int):
         conn.commit()
 
 
+# ==========================================
+# ⏰ v9 · PROGRAMADOR RECURRENTE DE PLANES (6 / 12 / 24 / 48 h)
+# ==========================================
+# Contrato del programador:
+#   • last_broadcast_at = último envío REAL confirmado por Telegram (jamás se toca en un fallo).
+#   • next_broadcast_at = last_broadcast_at + intervalo. Un fallo transitorio (red, FloodWait, 5xx) solo
+#     programa un REINTENTO corto; cuando el envío por fin sale, el siguiente vuelve a medirse desde ese
+#     envío real. Así un corte de red nunca "reinicia" ni alarga el ciclo de 12 h.
+#   • Solo los errores permanentes (bot expulsado, sin permisos, chat borrado) cuentan hacia la
+#     desactivación automática, tras PLAN_BROADCAST_MAX_FAILURES intentos consecutivos.
+PLAN_BROADCAST_INTERVALS = (6, 12, 24, 48)
+PLAN_BROADCAST_MAX_FAILURES = 3
+PLAN_BROADCAST_RETRY_MINUTES = (5, 15, 30, 60)
+
+
+def _plan_retry_minutes(failures: int) -> int:
+    idx = max(0, min(int(failures or 0), len(PLAN_BROADCAST_RETRY_MINUTES) - 1))
+    return PLAN_BROADCAST_RETRY_MINUTES[idx]
+
+
+def _clean_broadcast_lang(lang) -> str:
+    return "en" if str(lang or "").lower().startswith("en") else "es"
+
+
 @db_async
-def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int) -> bool:
-    if not isinstance(interval_hours, int) or interval_hours <= 0:
+def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int, lang: str = None) -> bool:
+    """
+    Activa (o cambia) la difusión recurrente del plan. interval_hours ∈ PLAN_BROADCAST_INTERVALS; 0 la
+    desactiva conservando el historial. Si el plan ya se difundió alguna vez, el próximo envío se ancla a
+    ese envío real (cambiar 12 h → 24 h no publica de inmediato ni reinicia el reloj); si nunca se difundió,
+    el primer envío automático sale tras un intervalo completo ("Difundir" publica al instante).
+    """
+    try:
+        hours = int(interval_hours)
+    except (TypeError, ValueError):
         return False
-    with get_db_connection() as conn:
+    if hours == 0:
+        disable_channel_plan_broadcast.sync(plan_id)
+        return True
+    if hours not in PLAN_BROADCAST_INTERVALS:
+        return False
+    modifier = _sql_modifier(hours, "hours")
+    with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE channel_plans
             SET broadcast_chat_id = ?,
                 broadcast_interval_hours = ?,
                 broadcast_enabled = 1,
-                next_broadcast_at = datetime('now', ?)
+                broadcast_failures = 0,
+                broadcast_lang = COALESCE(?, broadcast_lang, 'es'),
+                next_broadcast_at = CASE
+                    WHEN last_broadcast_at IS NOT NULL AND datetime(last_broadcast_at, ?) > datetime('now')
+                        THEN datetime(last_broadcast_at, ?)
+                    WHEN last_broadcast_at IS NOT NULL THEN datetime('now', '+1 minutes')
+                    ELSE datetime('now', ?)
+                END
             WHERE plan_id = ?
-        """, (chat_id, interval_hours, _sql_modifier(interval_hours, "hours"), plan_id))
-        conn.commit()
+        """, (int(chat_id), hours, _clean_broadcast_lang(lang) if lang else None,
+              modifier, modifier, modifier, int(plan_id)))
         return cursor.rowcount > 0
 
 
 @db_async
 def disable_channel_plan_broadcast(plan_id: int):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (plan_id,))
-        conn.commit()
+    with _write_transaction() as conn:
+        conn.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (int(plan_id),))
 
 
 @db_async
 def mark_channel_plan_broadcasted(plan_id: int):
-    with get_db_connection() as conn:
+    """Envío REAL confirmado: ancla el reloj (last_broadcast_at = ahora) y programa el siguiente."""
+    with _write_transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT broadcast_interval_hours, status FROM channel_plans WHERE plan_id = ?", (plan_id,))
+        cursor.execute("SELECT broadcast_interval_hours, status, broadcast_enabled FROM channel_plans WHERE plan_id = ?", (int(plan_id),))
         row = cursor.fetchone()
-        if not row or not row[0] or row[1] != "active":
-            cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (plan_id,))
-            conn.commit()
+        if not row:
             return
-
         interval_hours = _as_int(row[0], 0)
-        if interval_hours <= 0:
-            cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0 WHERE plan_id = ?", (plan_id,))
-            conn.commit()
-            return
-        cursor.execute("""
-            UPDATE channel_plans
-            SET next_broadcast_at = datetime('now', ?)
-            WHERE plan_id = ?
-        """, (_sql_modifier(interval_hours, "hours"), plan_id))
-        conn.commit()
+        keep_schedule = bool(row[2]) and row[1] == "active" and interval_hours in PLAN_BROADCAST_INTERVALS
+        if keep_schedule:
+            cursor.execute("""
+                UPDATE channel_plans
+                SET last_broadcast_at = datetime('now'), broadcast_failures = 0,
+                    next_broadcast_at = datetime('now', ?)
+                WHERE plan_id = ?
+            """, (_sql_modifier(interval_hours, "hours"), int(plan_id)))
+        else:
+            cursor.execute("""
+                UPDATE channel_plans
+                SET last_broadcast_at = datetime('now'), broadcast_failures = 0,
+                    broadcast_enabled = CASE WHEN status = 'active' THEN broadcast_enabled ELSE 0 END
+                WHERE plan_id = ?
+            """, (int(plan_id),))
 
 
 @db_async
-def get_due_channel_plan_broadcasts() -> list:
+def register_channel_plan_broadcast_failure(plan_id: int, permanent: bool = False, retry_after_seconds: int = 0) -> bool:
+    """
+    Fallo de envío. NO toca last_broadcast_at: solo programa un reintento corto (backoff 5/15/30/60 min o
+    el retry_after de Telegram). Devuelve True si la difusión quedó desactivada (fallos permanentes
+    consecutivos ≥ PLAN_BROADCAST_MAX_FAILURES).
+    """
+    with _write_transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT broadcast_failures FROM channel_plans WHERE plan_id = ?", (int(plan_id),))
+        row = cursor.fetchone()
+        if not row:
+            return True
+        failures = _as_int(row[0], 0) + (1 if permanent else 0)
+        if permanent and failures >= PLAN_BROADCAST_MAX_FAILURES:
+            cursor.execute("UPDATE channel_plans SET broadcast_enabled = 0, broadcast_failures = ? WHERE plan_id = ?",
+                           (failures, int(plan_id)))
+            return True
+        wait_seconds = max(int(retry_after_seconds or 0) + 5, _plan_retry_minutes(failures) * 60)
+        cursor.execute("""
+            UPDATE channel_plans
+            SET broadcast_failures = ?, next_broadcast_at = datetime('now', ?)
+            WHERE plan_id = ?
+        """, (failures, _sql_modifier(wait_seconds, "seconds"), int(plan_id)))
+        return False
+
+
+@db_async
+def get_due_channel_plan_broadcasts(limit: int = 25) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT plan_id, channel_id, plan_name, duration_days, stars_price,
                    promo_text, media_id, media_type, target_link,
-                   broadcast_chat_id, broadcast_interval_hours, next_broadcast_at
+                   broadcast_chat_id, broadcast_interval_hours, next_broadcast_at,
+                   last_broadcast_at, broadcast_failures, broadcast_lang
             FROM channel_plans
             WHERE broadcast_enabled = 1
               AND status = 'active'
@@ -2591,13 +2734,16 @@ def get_due_channel_plan_broadcasts() -> list:
               AND next_broadcast_at IS NOT NULL
               AND next_broadcast_at <= datetime('now')
             ORDER BY next_broadcast_at ASC
-        """)
+            LIMIT ?
+        """, (max(1, int(limit)),))
         rows = cursor.fetchall()
         return [
             {
                 "plan_id": r[0], "channel_id": r[1], "plan_name": r[2], "duration_days": r[3], "stars_price": r[4],
                 "promo_text": r[5], "media_id": r[6], "media_type": r[7], "target_link": r[8],
-                "broadcast_chat_id": r[9], "broadcast_interval_hours": r[10], "next_broadcast_at": r[11]
+                "broadcast_chat_id": r[9], "broadcast_interval_hours": r[10], "next_broadcast_at": r[11],
+                "last_broadcast_at": r[12], "broadcast_failures": r[13] or 0,
+                "broadcast_lang": _clean_broadcast_lang(r[14]),
             }
             for r in rows
         ]
@@ -2749,6 +2895,18 @@ def record_chat_activity(group_id: int, user_id: int, full_name: str, username: 
                 total_messages = COALESCE(chat_monthly_metrics.total_messages, 0) + 1,
                 total_users = COALESCE(chat_monthly_metrics.total_users, 0) + ?
         """, (group_id, month_key, max(1, new_monthly_user), new_monthly_user))
+
+        # v9 · Actividad diaria de administradores (base del informe periódico del canal de registro)
+        if admin_flag:
+            cursor.execute("""
+                INSERT INTO admin_activity_daily (group_id, user_id, day, full_name, username, messages, replies)
+                VALUES (?, ?, date('now'), ?, ?, 1, ?)
+                ON CONFLICT(group_id, user_id, day) DO UPDATE SET
+                    full_name = excluded.full_name,
+                    username = excluded.username,
+                    messages = admin_activity_daily.messages + 1,
+                    replies = admin_activity_daily.replies + excluded.replies
+            """, (group_id, user_id, full_name, username or "", reply_inc))
         conn.commit()
 
 
@@ -2888,13 +3046,41 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
 # ==========================================
 # 📊 ANALÍTICA, DASHBOARDS Y TELEMETRÍA (FASTAPI)
 # ==========================================
+TIER_LABELS = {"pro": "PRO ⭐", "ultra_pro": "ULTRA PRO 💎", "free": "Free"}
+
+
+def normalize_tier(tier) -> str:
+    """'ULTRA_PRO' / 'ultrapro' / 'ultra' → 'ultra_pro'; 'pro' → 'pro'; lo demás → 'free'."""
+    value = str(tier or "free").strip().lower().replace("-", "_").replace(" ", "_")
+    if value in ("ultra_pro", "ultrapro", "ultra"):
+        return "ultra_pro"
+    return "pro" if value == "pro" else "free"
+
+
+def describe_license(tier, expires_at=None, source: str = "community") -> dict:
+    """Bloque `plan` del dashboard: misma forma para comunidad y operador (1:1 con la Mini App)."""
+    norm = normalize_tier(tier)
+    return {
+        "tier": norm,
+        "name": TIER_LABELS[norm],
+        "label": TIER_LABELS[norm],
+        "status": "active" if norm != "free" else "empty",
+        "expires_at": expires_at if norm != "free" else None,
+        "source": source if norm != "free" else None,
+    }
+
+
 @db_async
 def get_chat_dashboard_data(chat_id: int) -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT tier FROM approved_groups WHERE group_id = ?", (chat_id,))
-        row = cursor.fetchone()
-        tier = row[0] if row and row[0] else "free"
+        # Licencia VIGENTE (caducidad aplicada y comunidades de super-admins incluidas): antes se leía
+        # approved_groups.tier en bruto y el panel mostraba "Ultra_pro", licencias vencidas como activas
+        # o el plan vacío en comunidades blindadas cuyo dueño es un arquitecto.
+        tier = normalize_tier(get_group_tier.sync(chat_id))
+        cursor.execute("SELECT expires_at FROM approved_groups WHERE group_id = ?", (chat_id,))
+        exp_row = cursor.fetchone()
+        expires_at = exp_row[0] if exp_row else None
 
         cursor.execute("""
             SELECT log_channel_id, spam_detection_mode, timezone, chat_language,
@@ -2916,7 +3102,7 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
 
         return {
             "chat_id": str(chat_id),
-            "plan": {"name": tier.capitalize(), "status": "active" if tier != "free" else "empty"},
+            "plan": describe_license(tier, expires_at, "community"),
             "log_channel": {"enabled": log_id is not None, "channel_id": log_id},
             "modules": {"active": active_mods, "total": 91},
             "protection": {"enabled": True, "spam_mode": spam_mode, "timezone": tz, "language": lang},
@@ -4034,6 +4220,417 @@ def compose_gamification_card(cfg: dict) -> dict:
         "media_type": media_type,
     }
 
+
+# ==========================================
+# 🛡️ v9 · BLOQUEOS DEL SISTEMA DE SEGURIDAD (ANALÍTICA EN VIVO)
+# ==========================================
+SECURITY_SOURCES = ("captcha", "antiflood", "antispam", "ai_guardian", "raid_shield")
+SECURITY_BLOCK_ACTIONS = ("decline", "kick", "ban", "mute", "delete")
+SECURITY_EXPEL_ACTIONS = ("decline", "kick", "ban")
+SECURITY_PASS_ACTION = "verified"            # captcha superado: no es un bloqueo, alimenta la tasa de acierto
+SECURITY_RETENTION_DAYS = 90
+_SECURITY_PRUNE_EVERY = 500
+_security_insert_counter = 0
+
+
+def _now_ts() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+@db_async
+def record_security_event(group_id: int, user_id, source: str, action: str, is_bot: bool = False) -> bool:
+    """
+    Registra un bloqueo/expulsión automática. source ∈ SECURITY_SOURCES; action ∈ SECURITY_BLOCK_ACTIONS o
+    'verified'. Valores desconocidos se descartan (devuelve False) para que ningún llamador ensucie la métrica.
+    """
+    global _security_insert_counter
+    src = str(source or "").strip().lower()
+    act = str(action or "").strip().lower()
+    if src not in SECURITY_SOURCES or (act not in SECURITY_BLOCK_ACTIONS and act != SECURITY_PASS_ACTION):
+        return False
+    with _write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO security_events (group_id, user_id, is_bot, source, action, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (int(group_id), int(user_id) if user_id else None, 1 if is_bot else 0, src, act, _now_ts()),
+        )
+        _security_insert_counter += 1
+        if _security_insert_counter % _SECURITY_PRUNE_EVERY == 0:
+            conn.execute("DELETE FROM security_events WHERE created_at < ?",
+                         (_now_ts() - SECURITY_RETENTION_DAYS * 86400,))
+    return True
+
+
+def _security_summary_sync(conn, group_id: int, since_ts: int) -> dict:
+    cursor = conn.cursor()
+    placeholders = ",".join("?" for _ in SECURITY_BLOCK_ACTIONS)
+    by_source = {src: {"total": 0, "expelled": 0, "users": 0, "bots": 0} for src in SECURITY_SOURCES}
+    by_action = {act: 0 for act in SECURITY_BLOCK_ACTIONS}
+    total = expelled = users = bots = 0
+    cursor.execute(f"""
+        SELECT source, action, is_bot, COUNT(*) FROM security_events
+        WHERE group_id = ? AND created_at >= ? AND action IN ({placeholders})
+        GROUP BY source, action, is_bot
+    """, (int(group_id), int(since_ts), *SECURITY_BLOCK_ACTIONS))
+    for src, act, is_bot, count in cursor.fetchall():
+        count = int(count or 0)
+        bucket = by_source.setdefault(src, {"total": 0, "expelled": 0, "users": 0, "bots": 0})
+        bucket["total"] += count
+        by_action[act] = by_action.get(act, 0) + count
+        total += count
+        if act in SECURITY_EXPEL_ACTIONS:
+            bucket["expelled"] += count
+            expelled += count
+        if is_bot:
+            bucket["bots"] += count
+            bots += count
+        else:
+            bucket["users"] += count
+            users += count
+    cursor.execute(f"""
+        SELECT COUNT(DISTINCT user_id) FROM security_events
+        WHERE group_id = ? AND created_at >= ? AND action IN ({placeholders}) AND user_id IS NOT NULL
+    """, (int(group_id), int(since_ts), *SECURITY_BLOCK_ACTIONS))
+    unique_targets = int((cursor.fetchone() or [0])[0] or 0)
+    cursor.execute("""
+        SELECT action, COUNT(*) FROM security_events
+        WHERE group_id = ? AND created_at >= ? AND source = 'captcha' GROUP BY action
+    """, (int(group_id), int(since_ts)))
+    captcha_counts = {a: int(c or 0) for a, c in cursor.fetchall()}
+    verified = captcha_counts.get(SECURITY_PASS_ACTION, 0)
+    failed = sum(v for k, v in captcha_counts.items() if k != SECURITY_PASS_ACTION)
+    attempts = verified + failed
+    return {
+        "total": total, "expelled": expelled, "restricted": by_action.get("mute", 0),
+        "purged": by_action.get("delete", 0), "users": users, "bots": bots,
+        "unique_targets": unique_targets, "by_source": by_source, "by_action": by_action,
+        "captcha": {"verified": verified, "failed": failed,
+                    "pass_rate": round(verified * 100.0 / attempts, 1) if attempts else None},
+    }
+
+
+@db_async
+def get_security_block_stats(group_id: int, days: int = 30) -> dict:
+    """
+    Bloque `security` de la analítica en vivo: totales (hoy / 7 d / 30 d), usuarios vs bots, desglose por
+    módulo (captcha, antiflood, antispam, ai_guardian, raid_shield) y por acción, serie diaria de 30 días
+    y estado del Escudo Anti-Raid.
+    """
+    days = max(1, min(int(days or 30), SECURITY_RETENTION_DAYS))
+    now = _now_ts()
+    since = now - days * 86400
+    today_start = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    placeholders = ",".join("?" for _ in SECURITY_BLOCK_ACTIONS)
+    with get_db_connection() as conn:
+        summary = _security_summary_sync(conn, group_id, since)
+        cursor = conn.cursor()
+
+        def _count(from_ts: int) -> int:
+            cursor.execute(f"SELECT COUNT(*) FROM security_events WHERE group_id = ? AND created_at >= ? AND action IN ({placeholders})",
+                           (int(group_id), int(from_ts), *SECURITY_BLOCK_ACTIONS))
+            return int((cursor.fetchone() or [0])[0] or 0)
+
+        today = _count(today_start)
+        last_7d = _count(now - 7 * 86400)
+        cursor.execute(f"""
+            SELECT date(created_at, 'unixepoch') AS d, COUNT(*) FROM security_events
+            WHERE group_id = ? AND created_at >= ? AND action IN ({placeholders})
+            GROUP BY d
+        """, (int(group_id), int(since), *SECURITY_BLOCK_ACTIONS))
+        per_day = {d: int(c) for d, c in cursor.fetchall()}
+        shield = _raid_shield_state_sync(conn, group_id)
+    start_day = datetime.now(timezone.utc).date() - timedelta(days=days - 1)
+    labels = [(start_day + timedelta(days=i)).isoformat() for i in range(days)]
+    return {
+        "window_days": days,
+        **summary,
+        "today": today,
+        "last_7d": last_7d,
+        "last_30d": summary["total"],
+        "daily": {"labels": labels, "blocked": [per_day.get(d, 0) for d in labels]},
+        "shield": shield,
+    }
+
+
+# ==========================================
+# 👮 v9 · ACCIONES DE MODERACIÓN DE ADMINISTRADORES
+# ==========================================
+ADMIN_MOD_ACTIONS = ("ban", "kick", "mute", "unban", "unmute", "promote", "demote")
+
+
+@db_async
+def record_admin_mod_action(group_id: int, admin_id: int, admin_name: str, target_id, action: str) -> bool:
+    act = str(action or "").strip().lower()
+    if act not in ADMIN_MOD_ACTIONS or not admin_id:
+        return False
+    with _write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO admin_mod_actions (group_id, admin_id, admin_name, target_id, action, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (int(group_id), int(admin_id), (admin_name or "")[:64], int(target_id) if target_id else None, act, _now_ts()),
+        )
+        conn.execute("DELETE FROM admin_mod_actions WHERE group_id = ? AND created_at < ?",
+                     (int(group_id), _now_ts() - SECURITY_RETENTION_DAYS * 86400))
+    return True
+
+
+@db_async
+def get_admin_performance(group_id: int, since_ts: int) -> dict:
+    """Actividad y moderación de cada administrador desde since_ts (base del informe del canal de registro)."""
+    since_ts = int(since_ts)
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT user_id, MAX(full_name), MAX(username), SUM(messages), SUM(replies)
+            FROM admin_activity_daily
+            WHERE group_id = ? AND day >= date(?, 'unixepoch')
+            GROUP BY user_id
+        """, (int(group_id), since_ts))
+        admins: dict = {}
+        for uid, name, uname, msgs, reps in cursor.fetchall():
+            admins[int(uid)] = {"user_id": int(uid), "name": name or f"Admin {uid}", "username": uname or "",
+                                "messages": int(msgs or 0), "replies": int(reps or 0), "actions": {}, "actions_total": 0}
+        cursor.execute("""
+            SELECT admin_id, MAX(admin_name), action, COUNT(*) FROM admin_mod_actions
+            WHERE group_id = ? AND created_at >= ? GROUP BY admin_id, action
+        """, (int(group_id), since_ts))
+        for uid, name, act, count in cursor.fetchall():
+            entry = admins.setdefault(int(uid), {"user_id": int(uid), "name": name or f"Admin {uid}", "username": "",
+                                                  "messages": 0, "replies": 0, "actions": {}, "actions_total": 0})
+            entry["actions"][act] = int(count or 0)
+            entry["actions_total"] += int(count or 0)
+        cursor.execute("""
+            SELECT user_id, full_name, username FROM chat_user_activity WHERE group_id = ? AND is_admin = 1
+        """, (int(group_id),))
+        known = cursor.fetchall()
+        inactive = [{"user_id": int(uid), "name": name or f"Admin {uid}", "username": uname or ""}
+                    for uid, name, uname in known if int(uid) not in admins]
+        security = _security_summary_sync(conn, group_id, since_ts)
+        cursor.execute("SELECT COUNT(*) FROM security_events WHERE group_id = ? AND created_at >= ? AND source = 'raid_shield'",
+                       (int(group_id), since_ts))
+        raid_actions = int((cursor.fetchone() or [0])[0] or 0)
+        shield = _raid_shield_state_sync(conn, group_id)
+    ranking = sorted(admins.values(), key=lambda a: (a["actions_total"] * 3 + a["messages"] + a["replies"]), reverse=True)
+    return {"since": since_ts, "admins": ranking, "inactive": inactive, "security": security,
+            "raid": {"actions": raid_actions, **shield}}
+
+
+# ==========================================
+# 🧾 v9 · INFORME PERIÓDICO DEL CANAL DE REGISTRO
+# ==========================================
+LOG_REPORT_METRICS = (
+    "admin_messages", "admin_replies", "admin_mod_actions", "top_admin",
+    "inactive_admins", "security_blocks", "captcha_summary", "raid_shield",
+)
+LOG_REPORT_DEFAULT_METRICS = ("admin_messages", "admin_mod_actions", "top_admin", "security_blocks")
+LOG_REPORT_INTERVALS = (24, 72, 168)
+LOG_REPORT_MAX_FAILURES = 3
+LOG_REPORT_RETRY_MINUTES = (5, 15, 30, 60)
+
+
+def _log_report_row_to_dict(group_id: int, row) -> dict:
+    if not row:
+        return {"group_id": int(group_id), "enabled": False, "interval_hours": 24,
+                "metrics": list(LOG_REPORT_DEFAULT_METRICS), "lang": "es",
+                "last_sent_at": None, "next_at": None, "failures": 0}
+    enabled, interval, metrics_raw, lang, anchor, last_sent, retry_at, failures = row
+    try:
+        metrics = [m for m in json.loads(metrics_raw or "[]") if m in LOG_REPORT_METRICS]
+    except (TypeError, ValueError):
+        metrics = list(LOG_REPORT_DEFAULT_METRICS)
+    interval = int(interval or 24)
+    base = last_sent or anchor
+    next_at = None
+    if enabled and base:
+        next_at = int(base) + interval * 3600
+        if retry_at and int(retry_at) > next_at:
+            next_at = int(retry_at)
+    return {"group_id": int(group_id), "enabled": bool(enabled), "interval_hours": interval,
+            "metrics": metrics, "lang": _clean_broadcast_lang(lang),
+            "last_sent_at": int(last_sent) if last_sent else None, "next_at": next_at,
+            "failures": int(failures or 0)}
+
+
+def _read_log_report_row(conn, group_id: int):
+    return conn.execute(
+        "SELECT enabled, interval_hours, metrics, lang, anchor_at, last_sent_at, retry_at, failures "
+        "FROM log_report_config WHERE group_id = ?", (int(group_id),)).fetchone()
+
+
+@db_async
+def get_log_report_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cfg = _log_report_row_to_dict(group_id, _read_log_report_row(conn, group_id))
+        log_row = conn.execute("SELECT log_channel_id FROM group_settings WHERE group_id = ?", (int(group_id),)).fetchone()
+    cfg["log_channel_id"] = (log_row[0] if log_row and log_row[0] else None)
+    cfg["available_metrics"] = list(LOG_REPORT_METRICS)
+    cfg["available_intervals"] = list(LOG_REPORT_INTERVALS)
+    return cfg
+
+
+def validate_log_report_payload(payload) -> dict:
+    """Valida forma y rangos. Errores → ValueError('campo: motivo')."""
+    if not isinstance(payload, dict):
+        raise ValueError("log_report: se esperaba un objeto JSON.")
+    enabled = payload.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("enabled: debe ser true o false.")
+    try:
+        interval = int(payload.get("interval_hours", 24))
+    except (TypeError, ValueError):
+        interval = -1
+    if interval not in LOG_REPORT_INTERVALS:
+        raise ValueError(f"interval_hours: valores permitidos {', '.join(map(str, LOG_REPORT_INTERVALS))}.")
+    metrics = payload.get("metrics", list(LOG_REPORT_DEFAULT_METRICS))
+    if not isinstance(metrics, list) or any(not isinstance(m, str) for m in metrics):
+        raise ValueError("metrics: se esperaba una lista de métricas.")
+    unknown = [m for m in metrics if m not in LOG_REPORT_METRICS]
+    if unknown:
+        raise ValueError(f"metrics: métrica desconocida '{unknown[0]}'.")
+    metrics = [m for m in LOG_REPORT_METRICS if m in set(metrics)]   # orden canónico, sin duplicados
+    if enabled and not metrics:
+        raise ValueError("metrics: elige al menos una métrica para activar el informe.")
+    return {"enabled": enabled, "interval_hours": interval, "metrics": metrics,
+            "lang": _clean_broadcast_lang(payload.get("lang"))}
+
+
+@db_async
+def save_log_report_config(group_id: int, payload: dict, updated_by: int = None) -> dict:
+    """
+    Persiste la configuración (BEGIN IMMEDIATE). Activar por primera vez ancla el reloj en "ahora": el
+    primer informe sale tras un intervalo completo (para uno inmediato está "Enviar ahora"). Cambiar el
+    intervalo NO reinicia el reloj: el próximo envío se mide desde el último informe REAL.
+    """
+    data = validate_log_report_payload(payload)
+    now = _now_ts()
+    with _write_transaction() as conn:
+        prev = _read_log_report_row(conn, group_id)
+        was_enabled = bool(prev[0]) if prev else False
+        anchor = prev[4] if prev else None
+        if data["enabled"] and not was_enabled:
+            anchor = now
+        conn.execute("""
+            INSERT INTO log_report_config (group_id, enabled, interval_hours, metrics, lang, anchor_at,
+                                           failures, retry_at, updated_by, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET
+                enabled = excluded.enabled, interval_hours = excluded.interval_hours,
+                metrics = excluded.metrics, lang = excluded.lang, anchor_at = excluded.anchor_at,
+                failures = 0, retry_at = NULL, updated_by = excluded.updated_by, updated_at = excluded.updated_at
+        """, (int(group_id), 1 if data["enabled"] else 0, data["interval_hours"], json.dumps(data["metrics"]),
+              data["lang"], anchor, int(updated_by) if updated_by else None, now))
+    return get_log_report_config.sync(group_id)
+
+
+@db_async
+def get_due_log_reports(limit: int = 20) -> list:
+    """Informes vencidos con canal de registro configurado. Mide desde el último envío real (o el ancla)."""
+    now = _now_ts()
+    with get_db_connection() as conn:
+        rows = conn.execute("""
+            SELECT r.group_id, r.enabled, r.interval_hours, r.metrics, r.lang, r.anchor_at, r.last_sent_at,
+                   r.retry_at, r.failures, s.log_channel_id
+            FROM log_report_config r
+            JOIN group_settings s ON s.group_id = r.group_id
+            WHERE r.enabled = 1 AND s.log_channel_id IS NOT NULL AND s.log_channel_id != ''
+              AND COALESCE(r.last_sent_at, r.anchor_at, 0) + r.interval_hours * 3600 <= ?
+              AND (r.retry_at IS NULL OR r.retry_at <= ?)
+            ORDER BY COALESCE(r.last_sent_at, r.anchor_at, 0) ASC
+            LIMIT ?
+        """, (now, now, max(1, int(limit)))).fetchall()
+    result = []
+    for r in rows:
+        cfg = _log_report_row_to_dict(r[0], r[1:9])
+        cfg["log_channel_id"] = r[9]
+        result.append(cfg)
+    return result
+
+
+@db_async
+def mark_log_report_result(group_id: int, ok: bool, permanent: bool = False, retry_after_seconds: int = 0) -> bool:
+    """Éxito → last_sent_at = ahora. Fallo → reintento corto sin mover el reloj. True si quedó desactivado."""
+    now = _now_ts()
+    with _write_transaction() as conn:
+        row = conn.execute("SELECT failures FROM log_report_config WHERE group_id = ?", (int(group_id),)).fetchone()
+        if not row:
+            return True
+        if ok:
+            conn.execute("UPDATE log_report_config SET last_sent_at = ?, failures = 0, retry_at = NULL WHERE group_id = ?",
+                         (now, int(group_id)))
+            return False
+        failures = int(row[0] or 0) + (1 if permanent else 0)
+        if permanent and failures >= LOG_REPORT_MAX_FAILURES:
+            conn.execute("UPDATE log_report_config SET enabled = 0, failures = ?, retry_at = NULL WHERE group_id = ?",
+                         (failures, int(group_id)))
+            return True
+        idx = max(0, min(failures, len(LOG_REPORT_RETRY_MINUTES) - 1))
+        wait = max(int(retry_after_seconds or 0) + 5, LOG_REPORT_RETRY_MINUTES[idx] * 60)
+        conn.execute("UPDATE log_report_config SET failures = ?, retry_at = ? WHERE group_id = ?",
+                     (failures, now + wait, int(group_id)))
+        return False
+
+
+# ==========================================
+# 🚨 v9 · ESCUDO ANTI-RAID / ANTI-REPORTES (ESTADO PERSISTIDO)
+# ==========================================
+def _raid_shield_state_sync(conn, group_id: int) -> dict:
+    row = conn.execute(
+        "SELECT active_until, level, reason, joins_in_window, triggered_at, triggers_total FROM raid_shield_state WHERE group_id = ?",
+        (int(group_id),)).fetchone()
+    now = _now_ts()
+    if not row:
+        return {"active": False, "active_until": None, "level": 0, "reason": None,
+                "joins_in_window": 0, "triggered_at": None, "triggers_total": 0}
+    active_until = int(row[0] or 0)
+    active = active_until > now
+    return {"active": active, "active_until": active_until if active else None,
+            "level": int(row[1] or 0) if active else 0, "reason": row[2] if active else None,
+            "joins_in_window": int(row[3] or 0), "triggered_at": int(row[4]) if row[4] else None,
+            "triggers_total": int(row[5] or 0)}
+
+
+@db_async
+def get_raid_shield_state(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        return _raid_shield_state_sync(conn, group_id)
+
+
+@db_async
+def activate_raid_shield(group_id: int, duration_seconds: int, level: int, reason: str, joins_in_window: int = 0) -> dict:
+    """Activa o prolonga el escudo. Solo una activación nueva (no una prolongación) suma a triggers_total."""
+    now = _now_ts()
+    until = now + max(60, int(duration_seconds))
+    with _write_transaction() as conn:
+        prev = _raid_shield_state_sync(conn, group_id)
+        new_activation = not prev["active"]
+        conn.execute("""
+            INSERT INTO raid_shield_state (group_id, active_until, level, reason, joins_in_window, triggered_at, triggers_total)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
+            ON CONFLICT(group_id) DO UPDATE SET
+                active_until = MAX(raid_shield_state.active_until, excluded.active_until),
+                level = MAX(CASE WHEN raid_shield_state.active_until > ? THEN raid_shield_state.level ELSE 0 END, excluded.level),
+                reason = excluded.reason,
+                joins_in_window = excluded.joins_in_window,
+                triggered_at = CASE WHEN raid_shield_state.active_until > ? THEN raid_shield_state.triggered_at ELSE excluded.triggered_at END,
+                triggers_total = raid_shield_state.triggers_total + ?
+        """, (int(group_id), until, int(level), (reason or "")[:120], int(joins_in_window), now,
+              now, now, 1 if new_activation else 0))
+        state = _raid_shield_state_sync(conn, group_id)
+    state["new_activation"] = new_activation
+    return state
+
+
+@db_async
+def clear_raid_shield(group_id: int) -> None:
+    with _write_transaction() as conn:
+        conn.execute("UPDATE raid_shield_state SET active_until = 0, level = 0 WHERE group_id = ?", (int(group_id),))
+
+
+@db_async
+def get_active_raid_shields() -> dict:
+    """{group_id: active_until} de los escudos vigentes (lo usa la caché en memoria de raid_shield.py)."""
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT group_id, active_until FROM raid_shield_state WHERE active_until > ?",
+                            (_now_ts(),)).fetchall()
+    return {int(g): int(u) for g, u in rows}
 
 try:
     init_db()

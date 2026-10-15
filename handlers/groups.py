@@ -24,7 +24,7 @@ from typing import Optional
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, 
     CallbackQuery, ChatMemberUpdated, ChatJoinRequest, LabeledPrice, PreCheckoutQuery,
@@ -55,8 +55,11 @@ from database.database import (
     # 🎮 Anuncio recurrente de gamificación
     get_gamification_announcement,
     set_gamification_announcement_field,
-    schedule_gamification_announcement_now
+    schedule_gamification_announcement_now,
+    # 🛡️ v9: métricas de bloqueos y Escudo Anti-Raid
+    record_security_event,
 )
+import raid_shield
 import assistant as _assistant_module
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
 
@@ -117,6 +120,22 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+# ==========================================
+# 🛡️ v9 · MÉTRICA DE BLOQUEOS (no bloqueante)
+# ==========================================
+async def _safe_record_security(group_id: int, user_id: int, source: str, action: str, is_bot: bool = False) -> None:
+    try:
+        await record_security_event(group_id, user_id, source, action, is_bot=is_bot)
+    except Exception as e:
+        logger.debug(f"Aviso registrando evento de seguridad ({group_id}/{user_id}): {e}")
+    publish_radar_event(group_id, "security_block", {"u": user_id, "s": source, "a": action, "b": 1 if is_bot else 0})
+
+
+def track_security(group_id: int, user_id: int, source: str, action: str, is_bot: bool = False) -> None:
+    """Registra un bloqueo del sistema (Captcha, Anti-Flood, Anti-Spam, Guardián IA, Escudo) sin esperar."""
+    _spawn(_safe_record_security(group_id, user_id, source, action, is_bot))
 
 
 # ==========================================
@@ -398,7 +417,10 @@ async def _send_join_request_dm(bot: Bot, session_data: dict, text: str,
 
 async def _post_group_notice(bot: Bot, group_id: int, text: str,
                              reply_markup: Optional[InlineKeyboardMarkup] = None,
-                             ttl: int = CAPTCHA_GROUP_NOTICE_TTL) -> None:
+                             ttl: int = CAPTCHA_GROUP_NOTICE_TTL, essential: bool = False) -> None:
+    # Anti-reportes: presupuesto de avisos por minuto y silencio total de lo no esencial bajo escudo.
+    if not raid_shield.notice_allowed(group_id, essential=essential):
+        return
     try:
         notice = await bot.send_message(chat_id=group_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
         _spawn(auto_delete_msg(notice, ttl))
@@ -406,27 +428,36 @@ async def _post_group_notice(bot: Bot, group_id: int, text: str,
         logger.debug(f"Aviso publicando nota de aduana en {group_id}: {e}")
 
 
-async def _apply_captcha_sanction(bot: Bot, group_id: int, user_id: int, cfg: dict, is_join_req: bool) -> None:
+async def _apply_captcha_sanction(bot: Bot, group_id: int, user_id: int, cfg: dict, is_join_req: bool,
+                                  session_data: Optional[dict] = None) -> None:
     """Rechaza la solicitud (ingreso por solicitud) o sanciona al miembro (ingreso directo)."""
+    session_data = session_data or {}
+    source = session_data.get("source") or "captcha"
+    is_bot = bool(session_data.get("is_bot"))
+    # Captcha Pro estricto (cuenta nueva, bot o escudo activo): expulsión, nunca silencio.
+    action = session_data.get("action_override") or cfg.get("action")
     if is_join_req:
         # El usuario aún no es miembro: basta con rechazar; restringir o banear fallaría o
         # le impediría volver a solicitar acceso legítimamente.
         try:
             await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
+            track_security(group_id, user_id, source, "decline", is_bot)
         except Exception as e:
             logger.debug(f"Aviso rechazando solicitud de {user_id} en {group_id}: {e}")
         return
     try:
-        if cfg["action"] == "mute":
+        if action == "mute":
             await bot.restrict_chat_member(
                 chat_id=group_id,
                 user_id=user_id,
                 permissions=ChatPermissions(can_send_messages=False)
             )
+            track_security(group_id, user_id, source, "mute", is_bot)
         else:
             await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
             await bot.unban_chat_member(chat_id=group_id, user_id=user_id)
             await registry_forget(group_id, user_id)
+            track_security(group_id, user_id, source, "kick", is_bot)
     except Exception as e:
         logger.error(f"Error aplicando sanción de aduana a {user_id} en {group_id}: {e}")
 
@@ -484,11 +515,135 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
             reply_markup=_support_keyboard()
         )
 
-    await _apply_captcha_sanction(bot, group_id, user_id, cfg, is_join_req)
+    await _apply_captcha_sanction(bot, group_id, user_id, cfg, is_join_req, session_data)
+
+
+# ==========================================
+# 🚨 v9 · PUERTA ANTI-RAID (un único mensaje en lugar de N desafíos)
+# ==========================================
+_BOT_USERNAME_CACHE: dict = {}
+
+
+async def _bot_username(bot: Bot) -> str:
+    cached = _BOT_USERNAME_CACHE.get(bot.id)
+    if cached:
+        return cached
+    me = await bot.get_me()
+    _BOT_USERNAME_CACHE[bot.id] = me.username or ""
+    return _BOT_USERNAME_CACHE[bot.id]
+
+
+async def _ensure_raid_gate(bot: Bot, group_id: int) -> None:
+    """
+    Bajo escudo, los ingresos directos no reciben un desafío público cada uno: quedan restringidos en
+    silencio y se publica UNA sola puerta con enlace al bot. El usuario inicia el chat privado (no es un
+    DM no solicitado) y allí resuelve el Captcha Pro por código.
+    """
+    async with raid_shield.gate_lock(group_id):
+        if raid_shield.gate_message(group_id):
+            return
+        username = await _bot_username(bot)
+        if not username:
+            return
+        minutes = max(1, raid_shield.RAID_GATE_SECONDS // 60)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🛡️ Verificarme / Verify me", url=f"https://t.me/{username}?start=raidv_{group_id}")
+        ]])
+        try:
+            gate = await bot.send_message(
+                chat_id=group_id,
+                text=(
+                    "🚨 <b>Escudo Anti-Raid activo / Anti-Raid Shield active</b>\n\n"
+                    "Se detectó un pico anómalo de ingresos. Los nuevos miembros permanecen en modo lectura hasta "
+                    f"verificarse con el Captcha Pro (plazo: {minutes} min).\n"
+                    "🇺🇸 <i>An abnormal join spike was detected. New members stay read-only until they pass the "
+                    f"Captcha Pro (deadline: {minutes} min).</i>\n\n"
+                    "🛡️ <i>Cloud Media Management</i>"
+                ),
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
+            raid_shield.remember_gate_message(group_id, gate.message_id)
+            _spawn(auto_delete_msg(gate, max(60, raid_shield.shield_remaining(group_id))))
+        except Exception as e:
+            logger.warning(f"Aduana: no se pudo publicar la puerta anti-raid en {group_id}: {e}")
+
+
+async def _send_raid_shield_alert(bot: Bot, group_id: int, verdict: dict) -> None:
+    """Alerta UNA vez por activación al canal de registro (nunca por privado) y al radar de la Mini App."""
+    publish_radar_event(group_id, "raid_shield", {
+        "active": True, "level": verdict.get("level"), "joins": verdict.get("joins"),
+        "new": verdict.get("new_joins"), "reasons": verdict.get("reasons"),
+        "until": verdict.get("active_until"),
+    })
+    try:
+        log_id = await asyncio.to_thread(_db_module._get_setting, group_id, "log_channel_id", None)
+    except Exception:
+        log_id = None
+    if not log_id:
+        return
+    try:
+        title = (await bot.get_chat(group_id)).title or str(group_id)
+    except Exception:
+        title = str(group_id)
+    reasons_es = {"join_spike": "pico de ingresos", "new_accounts": "cuentas nuevas", "similar_names": "nombres clonados"}
+    reasons_en = {"join_spike": "join spike", "new_accounts": "new accounts", "similar_names": "cloned names"}
+    rs = verdict.get("reasons") or []
+    level = int(verdict.get("level") or 1)
+    minutes = max(1, raid_shield.shield_remaining(group_id) // 60)
+    text = (
+        f"🚨 <b>Escudo Anti-Raid activado — {html.escape(title)}</b>\n\n"
+        f"• <b>Nivel:</b> {'CRÍTICO 🔴' if level >= 2 else 'ELEVADO 🟠'}\n"
+        f"• <b>Señales:</b> {html.escape(', '.join(reasons_es.get(r, r) for r in rs) or '—')}\n"
+        f"• <b>Ingresos en {raid_shield.RAID_WINDOW_SECONDS}s:</b> {int(verdict.get('joins') or 0)} "
+        f"({int(verdict.get('new_joins') or 0)} cuentas nuevas)\n"
+        f"• <b>Duración:</b> {minutes} min (se prolonga si el ataque continúa)\n\n"
+        "Medidas: Captcha Pro obligatorio por código, avisos públicos silenciados y difusiones pausadas.\n\n"
+        f"🇺🇸 <i>Anti-Raid Shield engaged ({'CRITICAL' if level >= 2 else 'ELEVATED'}): "
+        f"{html.escape(', '.join(reasons_en.get(r, r) for r in rs) or '—')}. Mandatory code Captcha Pro, public notices "
+        "muted and broadcasts paused.</i>\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    )
+    try:
+        await bot.send_message(chat_id=int(log_id) if str(log_id).lstrip("-").isdigit() else log_id, text=text, parse_mode="HTML")
+    except Exception as e:
+        logger.debug(f"Aviso enviando alerta anti-raid al canal de registro de {group_id}: {e}")
+
+
+async def _register_join_and_alert(bot: Bot, group_id: int, user_id: int, full_name: str, is_bot: bool) -> dict:
+    try:
+        verdict = await raid_shield.register_join(group_id, user_id, full_name, is_bot=is_bot)
+    except Exception as e:
+        logger.error(f"[RaidShield] Error evaluando el ingreso de {user_id} en {group_id}: {e}")
+        return {"isolated": raid_shield.is_isolated(group_id), "triggered": False, "is_new": False}
+    if verdict.get("triggered"):
+        _spawn(_send_raid_shield_alert(bot, group_id, verdict))
+        _spawn(_quarantine_recent_joiners(bot, group_id, exclude_user_id=user_id))
+    return verdict
+
+
+async def _quarantine_recent_joiners(bot: Bot, group_id: int, exclude_user_id: int) -> None:
+    """
+    Cuarentena retroactiva: las cuentas nuevas que entraron en la MISMA ráfaga antes de cruzar el umbral
+    (p. ej. con la aduana apagada) pasan también por la puerta anti-raid. Las ya verificadas, las que tienen
+    un desafío abierto y los administradores quedan fuera.
+    """
+    now = time.time()
+    for uid, is_new in raid_shield.detector.window_members(group_id):
+        if not is_new or uid == exclude_user_id or (group_id, uid) in CAPTCHA_SESSIONS:
+            continue
+        if now - RECENTLY_VERIFIED.get((group_id, uid), 0) < 300:
+            continue
+        try:
+            await process_user_captcha(bot, group_id, uid, "", "", is_join_req=False, force=True)
+        except Exception as e:
+            logger.debug(f"[RaidShield] Cuarentena retroactiva de {uid} en {group_id}: {e}")
+        await asyncio.sleep(0.2)
 
 
 async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name: str, username: str,
-                               is_join_req: bool = False, user_chat_id: Optional[int] = None):
+                               is_join_req: bool = False, user_chat_id: Optional[int] = None,
+                               is_bot: bool = False, force: bool = False):
     """
     Aduana de seguridad con dos rutas estrictamente separadas:
 
@@ -498,8 +653,9 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
     • Ingreso directo (new_chat_members): CERO mensajes privados. Se restringe al miembro y el
       desafío se publica solo en el grupo, con auto-eliminación programada.
     """
-    cfg = await get_captcha_config(group_id)
-    if cfg["status"] != 1:
+    cfg = dict(await get_captcha_config(group_id))
+    # Con el Escudo Anti-Raid activo (force) la aduana se aplica aunque el administrador la tenga apagada.
+    if cfg["status"] != 1 and not force:
         return
 
     if is_super_admin(user_id) or await is_sentinel_account(group_id, user_id, username) or await is_whitelisted(user_id):
@@ -541,9 +697,18 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
     if is_join_req:
         time_limit = max(15, min(time_limit, JOIN_REQUEST_MAX_CAPTCHA_SECONDS))
 
+    # 🛡️ v9 · Captcha Pro estricto para cuentas nuevas, bots y comunidades bajo escudo.
+    overrides = raid_shield.captcha_overrides(group_id, user_id, is_bot=is_bot)
+    if overrides:
+        cfg["mode"] = overrides["mode"]
+        time_limit = max(15, min(time_limit, overrides["max_time"]))
+
     custom_intro = cfg["text"] if cfg["text"] else f"¡Hola, {mention}! Para proteger la comunidad, requerimos una breve verificación."
 
-    session_data = {"is_join_req": is_join_req}
+    session_data = {"is_join_req": is_join_req, "is_bot": bool(is_bot)}
+    if overrides:
+        session_data["action_override"] = overrides["action"]
+        session_data["source"] = "raid_shield" if overrides.get("isolated") else "captcha"
     if is_join_req:
         session_data["dm_chat_id"] = int(user_chat_id or user_id)
         session_data["dm_deadline"] = time.monotonic() + JOIN_REQUEST_DM_WINDOW_SECONDS - JOIN_REQUEST_DM_SAFETY_MARGIN
@@ -564,6 +729,15 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
         footer_en = "🇺🇸 <i>Hit the button below to verify your account and join the chat!</i>"
 
     CAPTCHA_SESSIONS[session_key] = session_data
+
+    if not is_join_req and overrides.get("isolated") and not is_bot:
+        # Ruta 3 — Ingreso directo bajo escudo: sin desafío público individual. El miembro ya quedó
+        # restringido; se verifica por la puerta anti-raid (chat privado iniciado por él mismo).
+        session_data["raid_gate"] = True
+        session_data["full_name"] = full_name or ""
+        await _ensure_raid_gate(bot, group_id)
+        session_data["task"] = _spawn(captcha_timeout_task(bot, group_id, user_id, raid_shield.RAID_GATE_SECONDS))
+        return
 
     if is_join_req:
         # Ruta 1 — Solicitud de unión: diálogo privado autorizado por Telegram.
@@ -616,10 +790,15 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
 async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     group_id = event.chat.id
     user_id = event.from_user.id
+    is_bot = bool(event.from_user.is_bot)
+
+    # 🚨 v9 · Detector de picos coordinados (las solicitudes también cuentan).
+    verdict = await _register_join_and_alert(bot, group_id, user_id, event.from_user.full_name or "", is_bot)
 
     if await check_global_cas_spam(user_id):
         try:
             await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
+            track_security(group_id, user_id, "antispam", "decline", is_bot)
             logger.warning(f"🚨 [Anti-Spam Global CAS] Solicitud de spammer global {user_id} rechazada en {group_id}.")
         except Exception:
             pass
@@ -633,8 +812,10 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
         return
 
     cfg = await get_captcha_config(group_id)
+    # Bajo escudo, las cuentas nuevas pasan por la aduana aunque esté desactivada.
+    forced = bool(verdict.get("isolated")) and bool(verdict.get("is_new"))
 
-    if cfg["status"] != 1:
+    if cfg["status"] != 1 and not forced:
         try: 
             await bot.approve_chat_join_request(chat_id=group_id, user_id=user_id)
         except Exception: 
@@ -644,7 +825,8 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     await process_user_captcha(
         bot, group_id, user_id, event.from_user.full_name, event.from_user.username or "",
         is_join_req=True,
-        user_chat_id=getattr(event, "user_chat_id", None) or user_id
+        user_chat_id=getattr(event, "user_chat_id", None) or user_id,
+        is_bot=is_bot, force=forced
     )
 
 
@@ -668,14 +850,32 @@ async def handle_new_members(message: Message, bot: Bot):
         for k in stale_keys:
             RECENTLY_VERIFIED.pop(k, None)
 
+    adder = message.from_user
     for new_user in message.new_chat_members:
         if new_user.id == bot_me.id:
             continue
+
+        # 🚨 v9 · Detector de picos coordinados (cuentas nuevas, bots y nombres clonados).
+        verdict = await _register_join_and_alert(bot, group_id, new_user.id, new_user.full_name or "", bool(new_user.is_bot))
+
+        if new_user.is_bot and verdict.get("isolated"):
+            # Bajo escudo, un bot añadido por alguien que no es administrador se retira al instante.
+            adder_is_admin = bool(adder) and (adder.id == new_user.id or is_super_admin(adder.id)
+                                              or await _is_group_admin(bot, group_id, adder.id))
+            if not adder_is_admin:
+                try:
+                    await bot.ban_chat_member(chat_id=group_id, user_id=new_user.id)
+                    track_security(group_id, new_user.id, "raid_shield", "ban", True)
+                    logger.warning(f"🚨 [RaidShield] Bot {new_user.id} añadido durante un raid en {group_id}: retirado.")
+                except Exception as e:
+                    logger.warning(f"[RaidShield] No se pudo retirar el bot {new_user.id} de {group_id}: {e}")
+                continue
 
         if not new_user.is_bot:
             if await check_global_cas_spam(new_user.id):
                 try:
                     await bot.ban_chat_member(chat_id=group_id, user_id=new_user.id)
+                    track_security(group_id, new_user.id, "antispam", "ban", False)
                     logger.warning(f"🚨 [Anti-Spam Global CAS] Miembro spammer global {new_user.id} expulsado en {group_id}.")
                 except Exception as e:
                     logger.error(f"Error expulsando spammer global {new_user.id}: {e}")
@@ -686,13 +886,15 @@ async def handle_new_members(message: Message, bot: Bot):
             if await enforce_userbot_flag(bot, group_id, new_user.id, new_user.username or "", source="ingreso"):
                 continue
 
-        if cfg["status"] != 1:
+        forced = bool(verdict.get("isolated")) and bool(verdict.get("is_new"))
+        if cfg["status"] != 1 and not forced:
             continue
 
         if (group_id, new_user.id) in CAPTCHA_SESSIONS or (now - RECENTLY_VERIFIED.get((group_id, new_user.id), 0) < 120):
             continue
 
-        await process_user_captcha(bot, group_id, new_user.id, new_user.full_name, new_user.username or "", is_join_req=False)
+        await process_user_captcha(bot, group_id, new_user.id, new_user.full_name, new_user.username or "",
+                                   is_join_req=False, is_bot=bool(new_user.is_bot), force=forced)
 
 
 @router.chat_member(F.chat.type.in_({"group", "supergroup"}))
@@ -785,6 +987,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
     if is_correct == 1:
         await callback.answer("✅ ¡Identidad verificada con éxito!", show_alert=False)
         RECENTLY_VERIFIED[(group_id, target_user_id)] = time.time()
+        track_security(group_id, target_user_id, "captcha", "verified", False)
 
         if is_join_req:
             try:
@@ -859,7 +1062,51 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
                 reply_markup=_support_keyboard()
             )
 
-        await _apply_captcha_sanction(bot, group_id, target_user_id, cfg, is_join_req)
+        await _apply_captcha_sanction(bot, group_id, target_user_id, cfg, is_join_req, session_data)
+
+
+@router.message(CommandStart(deep_link=True), F.chat.type == "private", F.text.regexp(r"^/start\s+raidv_-?\d+$"))
+async def raid_gate_start(message: Message, command: CommandObject, bot: Bot):
+    """
+    Puerta anti-raid: el miembro restringido abre el bot desde el enlace del grupo (chat iniciado por él) y
+    recibe aquí su Captcha Pro por código. Sin sesión pendiente no se revela nada.
+    """
+    try:
+        group_id = int(str(command.args or "").split("_", 1)[1])
+    except (IndexError, ValueError):
+        return
+    user_id = message.from_user.id
+    session_data = CAPTCHA_SESSIONS.get((group_id, user_id))
+    if not session_data or not session_data.get("raid_gate"):
+        await message.answer(
+            "ℹ️ No tienes ninguna verificación pendiente en esa comunidad.\n"
+            "🇺🇸 <i>You have no pending verification in that community.</i>\n\n🛡️ <i>Cloud Media Management</i>",
+            parse_mode="HTML"
+        )
+        return
+    previous_msg = session_data.get("msg_id")
+    if previous_msg:
+        try:
+            await bot.delete_message(chat_id=message.chat.id, message_id=previous_msg)
+        except Exception:
+            pass
+    correct_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+    session_data["code"] = correct_code
+    session_data["dm_chat_id"] = message.chat.id
+    try:
+        title = (await bot.get_chat(group_id)).title or "la comunidad"
+    except Exception:
+        title = "la comunidad"
+    sent = await message.answer(
+        f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
+        f"Comunidad: <b>{html.escape(title)}</b>\n"
+        f"Selecciona el botón que contiene exactamente este código:\n👉 <code>{correct_code}</code>\n\n"
+        f"🇺🇸 <i>Tap the button matching the code above to unlock your access.</i>\n\n"
+        f"🛡️ <i>Cloud Media Management</i>",
+        reply_markup=generate_captcha_keyboard(group_id, user_id, correct_code),
+        parse_mode="HTML"
+    )
+    session_data["msg_id"] = sent.message_id
 
 
 # ==========================================
@@ -1704,11 +1951,15 @@ async def enforce_userbot_flag(
     try:
         if USERBOT_ACTION == "ban":
             await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
+            track_security(group_id, user_id, "antispam", "ban", False)
         elif USERBOT_ACTION == "mute":
             await bot.restrict_chat_member(
                 chat_id=group_id, user_id=user_id,
                 permissions=ChatPermissions(can_send_messages=False)
             )
+            track_security(group_id, user_id, "antispam", "mute", False)
+        else:
+            track_security(group_id, user_id, "antispam", "delete", False)
         logger.warning(
             f"[UserbotHunter] Cuenta fichada {user_id} neutralizada en {group_id} "
             f"(acción: {USERBOT_ACTION}, origen: {source})."
@@ -1821,6 +2072,9 @@ async def _send_temp(
     media_id: Optional[str] = None,
     media_type: Optional[str] = None
 ) -> None:
+    # Anti-reportes: los avisos temporales no son esenciales (presupuesto por minuto; silencio bajo escudo).
+    if not raid_shield.notice_allowed(chat_id):
+        return
     try:
         sent = None
         if media_id and media_type:
@@ -1988,6 +2242,9 @@ async def enforce_warn_ladder(
         return {"status": "error", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
     await _reset_warnings_safe(chat_id, target_id)
+
+    if reason != "manual":     # las advertencias manuales son decisiones del administrador, no del sistema
+        track_security(chat_id, target_id, "antiflood" if reason == "flood" else "antispam", action, False)
 
     if action in ("kick", "ban"):
         await registry_forget(chat_id, target_id)
@@ -2449,6 +2706,7 @@ async def group_security_matrix(message: Message, bot: Bot):
     if is_threat_detected:
         try: 
             await message.delete()
+            track_security(group_id, user_id, "antispam", "delete", False)
         except Exception: 
             pass
 
@@ -2501,6 +2759,7 @@ async def group_security_matrix(message: Message, bot: Bot):
                     await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))
                     await bot.unban_chat_member(chat_id=group_id, user_id=user_id, only_if_banned=True)
                     await registry_forget(group_id, user_id)
+                    track_security(group_id, user_id, "antiflood", "kick", False)
                     await _send_temp(
                         bot, group_id,
                         f"👢 <b>Aviso de Expulsión / Kick Notice:</b>\n"
@@ -2511,6 +2770,7 @@ async def group_security_matrix(message: Message, bot: Bot):
                     )
                 elif af_action == "mute":
                     await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
+                    track_security(group_id, user_id, "antiflood", "mute", False)
                     await _send_temp(
                         bot, group_id,
                         f"🔇 <b>Aviso de Silencio / Mute Notice:</b>\n"
@@ -2523,6 +2783,7 @@ async def group_security_matrix(message: Message, bot: Bot):
                     await ban_user(user_id)
                     await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
                     await registry_forget(group_id, user_id)
+                    track_security(group_id, user_id, "antiflood", "ban", False)
                     await _send_temp(
                         bot, group_id,
                         f"🚫 <b>Bloqueo Definitivo / Ban Notice:</b>\n"

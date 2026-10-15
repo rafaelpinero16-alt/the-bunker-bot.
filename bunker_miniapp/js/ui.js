@@ -638,6 +638,155 @@ export const ui = {
         const stamp = data.generated_at_local ? `${data.generated_at_local}${data.timezone ? ` (${data.timezone})` : ''}` : '';
         this.setText('an-updated', stamp ? `${this.t('an_updated')}: ${stamp}` : '');
         this.renderVoiceCard();
+        this.renderSecurity(data.security);
+    },
+
+    // ======================================================================
+    // 🛡️ v9 · BLOQUEOS DEL SISTEMA DE SEGURIDAD
+    // ======================================================================
+    /** Fecha/hora local legible desde epoch (s), ISO o "YYYY-MM-DD HH:MM:SS" UTC de SQLite. '' si no hay. */
+    fmtLocalTime(value) {
+        if (value === null || value === undefined || value === '') return '';
+        let date;
+        if (typeof value === 'number' || /^\d+$/.test(String(value))) date = new Date(Number(value) * 1000);
+        else {
+            const text = String(value).trim().replace(' ', 'T');
+            date = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(text) ? text : `${text}Z`);
+        }
+        if (Number.isNaN(date.getTime())) return '';
+        try {
+            return date.toLocaleString(state.currentLang === 'en' ? 'en-US' : 'es-CO', { dateStyle: 'short', timeStyle: 'short' });
+        } catch (err) {
+            return date.toISOString().slice(0, 16).replace('T', ' ');
+        }
+    },
+
+    securitySourceLabel(source) {
+        return this.t(`an_sec_src_${source}`);
+    },
+
+    /** Tarjeta "Bloqueos del Sistema de Seguridad" (data.security de /community/{id}/analytics). */
+    renderSecurity(sec) {
+        const card = byId('an-security-card');
+        if (!card) return;
+        if (!sec || typeof sec !== 'object') {
+            card.classList.add('hidden');
+            return;
+        }
+        card.classList.remove('hidden');
+        this.setText('an-sec-total', this.fmtNum(sec.last_30d ?? sec.total ?? 0));
+        this.setText('an-sec-today', this.fmtNum(sec.today ?? 0));
+        this.setText('an-sec-7d', this.fmtNum(sec.last_7d ?? 0));
+        this.setText('an-sec-expelled', this.fmtNum(sec.expelled ?? 0));
+        this.setText('an-sec-split',
+            `${this.fmtNum(sec.users ?? 0)} ${this.t('an_sec_users')} · ${this.fmtNum(sec.bots ?? 0)} ${this.t('an_sec_bots')}` +
+            (sec.purged ? ` · ${this.fmtNum(sec.purged)} ${this.t('an_sec_purged')}` : ''));
+        const rate = sec.captcha?.pass_rate;
+        this.setText('an-sec-rate', rate === null || rate === undefined ? '' : `${this.t('an_sec_captcha_rate')}: ${rate}%`);
+
+        const shieldEl = byId('an-sec-shield');
+        if (shieldEl) {
+            const shield = sec.shield || {};
+            const active = Boolean(shield.active);
+            const minutes = Math.max(1, Math.ceil((Number(shield.remaining_seconds) || 0) / 60));
+            shieldEl.textContent = active ? `${this.tf('an_sec_shield_on', { m: minutes })} — ${this.t('an_sec_shield_hint')}` : this.t('an_sec_shield_off');
+            shieldEl.removeAttribute('data-i18n');   // texto dinámico: applyLanguage no debe pisarlo
+            shieldEl.className = active
+                ? 'rounded-xl border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-[10px] font-bold text-rose-300 animate-pulse'
+                : 'rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[10px] font-bold text-emerald-400';
+        }
+
+        const sourcesEl = byId('an-sec-sources');
+        if (sourcesEl) {
+            const sources = CONFIG.SECURITY?.SOURCES || Object.keys(sec.by_source || {});
+            const total = Math.max(1, Number(sec.total) || 0);
+            const rows = sources
+                .map(src => ({ src, b: (sec.by_source || {})[src] || { total: 0, expelled: 0 } }))
+                .filter(r => Number(r.b.total) > 0)
+                .sort((a, b) => b.b.total - a.b.total)
+                .map(({ src, b }) => {
+                    const pct = Math.round((Number(b.total) * 100) / total);
+                    return `
+                    <div class="space-y-0.5">
+                        <div class="flex items-center justify-between text-[10px] font-mono">
+                            <span class="text-neutral-200">${this.escapeHtml(this.securitySourceLabel(src))}</span>
+                            <span class="text-neutral-400">${this.escapeHtml(this.fmtNum(b.total))} · ${this.escapeHtml(this.fmtNum(b.expelled || 0))} ${this.escapeHtml(this.t('an_sec_expelled'))}</span>
+                        </div>
+                        <div class="h-1.5 rounded-full bg-black/50 overflow-hidden"><div class="h-full bg-rose-500/80" style="width:${pct}%"></div></div>
+                    </div>`;
+                });
+            sourcesEl.innerHTML = rows.length
+                ? rows.join('')
+                : `<p class="text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t('an_sec_empty'))}</p>`;
+        }
+        const spark = byId('an-sec-spark');
+        if (spark) spark.innerHTML = this.generateSparkline(sec.daily?.blocked, '#f43f5e') || this.sparkPlaceholder();
+    },
+
+    // ======================================================================
+    // 💳 v9 · PLAN TARIFARIO (licencia vigente de la comunidad o del operador)
+    // ======================================================================
+    renderTariffStatus(plan) {
+        const el = byId('chat-plan-status');
+        if (!el) return;
+        const active = plan?.status === 'active';
+        if (!active) {
+            el.textContent = this.t('tariff_empty');
+            el.className = 'text-xs font-bold text-rose-400 mt-1';
+            return;
+        }
+        const label = plan.label || plan.name || '';
+        const extras = [];
+        if (plan.source === 'operator') extras.push(this.t('tariff_operator'));
+        const exp = this.fmtLocalTime(plan.expires_at);
+        if (exp) extras.push(this.tf('tariff_expires', { date: exp }));
+        el.textContent = `${this.t('tariff_active')} · ${label}${extras.length ? ` (${extras.join(' · ')})` : ''}`;
+        el.className = 'text-xs font-bold text-emerald-400 mt-1';
+    },
+
+    // ======================================================================
+    // 🧾 v9 · INFORME PERIÓDICO DEL CANAL DE REGISTRO
+    // ======================================================================
+    renderLogReportForm(cfg) {
+        const conf = cfg || {};
+        const enabledEl = byId('log-report-enabled');
+        if (enabledEl) enabledEl.checked = Boolean(conf.enabled);
+        const intervalEl = byId('log-report-interval');
+        if (intervalEl) intervalEl.value = String(conf.interval_hours || (CONFIG.LOG_REPORT?.INTERVALS || [24])[0]);
+        const selected = new Set(Array.isArray(conf.metrics) && (conf.metrics.length || conf.enabled)
+            ? conf.metrics : (CONFIG.LOG_REPORT?.DEFAULT_METRICS || []));
+        document.querySelectorAll('#log-report-metrics input[type="checkbox"]').forEach(box => {
+            box.checked = selected.has(box.value);
+        });
+        this.setFieldError('log-report-metrics', '');
+        this.renderLogReportStatus(conf);
+    },
+
+    renderLogReportStatus(cfg) {
+        const conf = cfg || {};
+        const parts = [];
+        if (!conf.log_channel_id) parts.push(this.t('logr_need_channel'));
+        if (conf.enabled && conf.next_at) parts.push(this.tf('logr_next', { time: this.fmtLocalTime(conf.next_at) }));
+        parts.push(conf.last_sent_at ? this.tf('logr_last', { time: this.fmtLocalTime(conf.last_sent_at) }) : this.t('logr_never'));
+        this.setText('log-report-status', parts.join(' · '));
+    },
+
+    readLogReportForm() {
+        const metrics = [];
+        document.querySelectorAll('#log-report-metrics input[type="checkbox"]').forEach(box => {
+            if (box.checked) metrics.push(box.value);
+        });
+        return {
+            enabled: Boolean(byId('log-report-enabled')?.checked),
+            interval_hours: Number(byId('log-report-interval')?.value) || 24,
+            metrics,
+            lang: state.currentLang === 'en' ? 'en' : 'es'
+        };
+    },
+
+    setLogReportBusy(busy) {
+        ['log-report-save-btn', 'log-report-send-btn'].forEach(id => this.setButtonBusy(id, busy));
+        this.setText('log-report-save-label', this.t(busy ? 'logr_saving' : 'logr_save'));
     },
 
     renderMessagesToday(summary) {
@@ -819,6 +968,8 @@ export const ui = {
                 ${this.planActionButton({ action: 'delete', glyph: '🗑️', label: this.t('plans_btn_delete'), tip: this.t('plans_tip_delete'), tone: 'rose', onclick: `app.deletePlan(${id})`, disabled: busy, spinning: busyAction === 'delete' })}
             </div>`;
 
+        const scheduleRow = this.planScheduleRow(plan, busy, busyAction === 'schedule');
+
         return `
         <article id="plan-card-${id}" data-plan-id="${id}" data-status="${active ? 'active' : 'paused'}"${busy ? ' aria-busy="true"' : ''} class="glass-panel p-3.5 space-y-3 border-l-2 ${bar}">
             <div class="flex items-start justify-between gap-2">
@@ -832,9 +983,35 @@ export const ui = {
                 </div>
                 <span data-role="plan-status" class="shrink-0 px-2 py-1 rounded-lg border text-[10px] font-bold ${badge}">${this.escapeHtml(this.t(active ? 'plans_status_active' : 'plans_status_paused'))}</span>
             </div>
+            ${scheduleRow}
             ${ctx.link ? this.planLinkRow(plan, ctx.link) : ''}
             ${actions}
         </article>`;
+    },
+
+    /** v9 · Selector del programador recurrente (0/6/12/24/48 h) con próxima y última publicación. */
+    planScheduleRow(plan, busy = false, spinning = false) {
+        const id = plan.plan_id;
+        const current = plan.broadcast_enabled ? Number(plan.broadcast_interval_hours) || 0 : 0;
+        const intervals = CONFIG.PLAN_FORM?.BROADCAST_INTERVALS || [0, 6, 12, 24, 48];
+        const options = intervals.map(h => {
+            const label = h ? this.tf('plans_sched_every', { h }) : this.t('plans_sched_off');
+            return `<option value="${h}"${h === current ? ' selected' : ''}>${this.escapeHtml(label)}</option>`;
+        }).join('');
+        const info = [];
+        if (current && plan.broadcast_next_at) info.push(this.tf('plans_sched_next', { time: this.fmtLocalTime(plan.broadcast_next_at) }));
+        if (plan.broadcast_last_at) info.push(this.tf('plans_sched_last', { time: this.fmtLocalTime(plan.broadcast_last_at) }));
+        const disabled = busy || !plan.is_active;
+        return `
+        <div data-role="plan-schedule" class="flex items-center gap-2 rounded-xl bg-black/40 border ${current ? 'border-[#00f3ff]/40' : 'border-neutral-800'} px-2.5 py-2">
+            <span class="text-base leading-none">${spinning ? '<i class="fa-solid fa-spinner fa-spin text-sm"></i>' : '⏰'}</span>
+            <div class="flex-1 min-w-0">
+                <label for="plan-sched-${id}" class="block text-[9px] uppercase font-bold ${current ? 'text-[#00f3ff]' : 'text-neutral-500'} tracking-wide">${this.escapeHtml(this.t('plans_sched_label'))}</label>
+                ${info.length ? `<p class="text-[9px] text-neutral-500 font-mono truncate">${this.escapeHtml(info.join(' · '))}</p>` : ''}
+            </div>
+            <select id="plan-sched-${id}" data-action="schedule" onchange="app.setPlanSchedule(${id}, this.value)"${disabled ? ' disabled' : ''}
+                class="shrink-0 bg-black/80 border border-neutral-700 rounded-lg px-2 py-1.5 text-[10px] text-white focus:outline-none focus:border-[#00f3ff] disabled:opacity-50">${options}</select>
+        </div>`;
     },
 
     /** Resumen bajo el título: "N activos · M en total · K suscriptores activos". */
@@ -979,7 +1156,8 @@ export const ui = {
         stars_price:   'plan-form-price',
         duration_days: 'plan-form-days',
         target_link:   'plan-form-link',
-        promo_text:    'plan-form-promo'
+        promo_text:    'plan-form-promo',
+        broadcast_interval_hours: 'plan-form-interval'
     },
 
     readPlanForm() {
@@ -993,7 +1171,8 @@ export const ui = {
         const defaults = {
             plan_name: '', target_link: '', promo_text: '',
             stars_price: String(CONFIG.PLAN_FORM?.DEFAULT_PRICE ?? 150),
-            duration_days: String(CONFIG.PLAN_FORM?.DEFAULT_DAYS ?? 30)
+            duration_days: String(CONFIG.PLAN_FORM?.DEFAULT_DAYS ?? 30),
+            broadcast_interval_hours: String(CONFIG.PLAN_FORM?.DEFAULT_INTERVAL ?? 0)
         };
         Object.entries(this.PLAN_FORM_FIELDS).forEach(([key, id]) => {
             const el = byId(id);

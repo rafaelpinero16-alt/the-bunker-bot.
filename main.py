@@ -173,8 +173,24 @@ from database.database import (
     get_top_reputation,
     get_user_reputation,
     export_group_configuration,
-    import_group_configuration
+    import_group_configuration,
+    # v9 · Licencia vigente, bloqueos de seguridad, informe del canal de registro y escudo anti-raid
+    get_user_global_tier,
+    describe_license,
+    get_security_block_stats,
+    get_log_report_config,
+    save_log_report_config,
+    record_admin_mod_action,
 )
+try:
+    import raid_shield  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - el escudo es opcional en entornos minimalistas.
+    class _RaidShieldFallback:
+        @staticmethod
+        def status_payload(chat_id: int) -> dict:
+            return {}
+
+    raid_shield = _RaidShieldFallback()
 try:
     from database.analytics import (  # type: ignore[import-not-found]
         analytics_buffer,
@@ -886,6 +902,19 @@ async def api_subscribers(
         return {"subscribers": []}
 
 
+async def _resolve_dashboard_plan(user_id: int, community_plan: Any) -> dict:
+    plan = community_plan if isinstance(community_plan, dict) else describe_license("free")
+    if plan.get("status") == "active" and plan.get("tier") in ("pro", "ultra_pro"):
+        return plan
+    try:
+        operator_tier = await get_user_global_tier(user_id)
+    except Exception as ex:
+        logger.debug(f"Sin licencia global para {user_id}: {ex}")
+        operator_tier = "free"
+    operator_plan = describe_license(operator_tier, None, "operator")
+    return operator_plan if operator_plan["status"] == "active" else describe_license("free")
+
+
 @api_router.get("/chat/{chat_id}/dashboard")
 async def api_chat_dashboard(
     chat_id: str,
@@ -934,6 +963,12 @@ async def api_chat_dashboard(
                 data.setdefault("title", f"Chat {chat_id}")
         else:
             data.setdefault("title", f"Chat {chat_id}")
+
+        # v9 · Plan tarifario: el operador ya pasó assert_chat_ownership (creador/administrador verificado).
+        # Si la comunidad no tiene licencia propia se muestra la licencia VIGENTE del operador (PRO ⭐ /
+        # ULTRA PRO 💎, source="operator") en lugar de un plan vacío.
+        data["plan"] = await _resolve_dashboard_plan(user_id, data.get("plan"))
+        data["raid_shield"] = raid_shield.status_payload(numeric_id)
 
         # v8.2: difusión personalizada del Estudio (chat destino, intervalo, texto promocional).
         if load_broadcast_config is not None:
@@ -1271,7 +1306,7 @@ async def api_update_chat_settings(
             response_extra["log_channel_id"] = payload["log_channel_id"]
 
         # 5. Difusión personalizada del Estudio: se valida y guarda ANTES que el resto (si falla, nada cambia).
-        broadcast_keys = ("broadcast_target", "broadcast_interval", "promo_text")
+        broadcast_keys = ("broadcast_target", "broadcast_interval", "promo_text", "broadcast_lang")
         if any(k in payload for k in broadcast_keys):
             if save_broadcast_config is None:
                 raise HTTPException(status_code=503, detail="Difusión personalizada no disponible en este despliegue.")
@@ -1361,6 +1396,86 @@ async def api_update_chat_configuration(
     return {"status": "success", "chat_id": str(numeric_id), "configuration": configuration}
 
 
+# ==========================================
+# 🧾 v9 · INFORME PERIÓDICO DEL CANAL DE REGISTRO (RENDIMIENTO DE ADMINISTRADORES)
+# ==========================================
+LOG_REPORT_SEND_COOLDOWN_S = 60.0
+_LOG_REPORT_LAST_SEND: Dict[int, float] = {}
+
+
+@api_router.get("/chat/{chat_id}/log-report")
+async def api_get_log_report(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    await assert_chat_ownership(user_id, numeric_id)
+    return {"status": "success", "chat_id": str(numeric_id), "log_report": await get_log_report_config(numeric_id)}
+
+
+@api_router.post("/chat/{chat_id}/log-report")
+async def api_save_log_report(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{enabled, interval_hours: 24|72|168, metrics: [...], lang}. 422 'campo: motivo'. Exige canal de registro."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    await assert_chat_ownership(user_id, numeric_id)
+    body = payload.get("log_report", payload) if isinstance(payload, dict) else payload
+    if isinstance(body, dict) and body.get("enabled"):
+        current = await get_log_report_config(numeric_id)
+        if not current.get("log_channel_id"):
+            raise HTTPException(status_code=422, detail="log_channel_id: configura primero el canal de registro.")
+    try:
+        cfg = await save_log_report_config(numeric_id, body, updated_by=user_id)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+    _spawn(emit_radar_event(numeric_id, "settings_updated", {"source": "log_report", "log_report": cfg}))
+    return {"status": "success", "chat_id": str(numeric_id), "log_report": cfg}
+
+
+@api_router.post("/chat/{chat_id}/log-report/send")
+async def api_send_log_report(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id inválido.")
+    await assert_chat_ownership(user_id, numeric_id)
+    if master_bot_instance is None:
+        raise HTTPException(status_code=503, detail="El bot no está disponible en este momento.")
+    now = time.monotonic()
+    last = _LOG_REPORT_LAST_SEND.get(numeric_id)
+    if last is not None and now - last < LOG_REPORT_SEND_COOLDOWN_S:
+        raise HTTPException(status_code=429, detail=f"Espera {int(LOG_REPORT_SEND_COOLDOWN_S - (now - last)) + 1} s para enviar otro informe.")
+    _LOG_REPORT_LAST_SEND[numeric_id] = now
+    try:
+        result = await ecosystem.send_log_report_now(master_bot_instance, numeric_id)
+    except ValueError as err:
+        _LOG_REPORT_LAST_SEND.pop(numeric_id, None)
+        raise HTTPException(status_code=422, detail=str(err))
+    except Exception as ex:
+        _LOG_REPORT_LAST_SEND.pop(numeric_id, None)
+        logger.warning(f"⚠️ [Log Report] Envío manual fallido en {numeric_id}: {ex}")
+        raise HTTPException(status_code=502, detail="Telegram rechazó el informe. Verifica que el bot pueda publicar en el canal de registro.")
+    return {"status": "success", "chat_id": str(numeric_id), **result}
+
+
 @api_router.get("/affiliates/me")
 async def api_affiliates(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
@@ -1401,6 +1516,35 @@ def _cached_live_member_count(chat_id: int) -> Optional[int]:
         _LIVE_MEMBER_REFRESHING.add(chat_id)
         _spawn(_refresh_live_member_count(chat_id), name=f"live_members:{chat_id}")
     return entry[1] if entry else None
+
+
+SECURITY_STATS_TTL = 5.0
+_SECURITY_STATS_CACHE: Dict[int, tuple] = {}
+
+
+async def _security_stats(chat_id: int) -> Optional[dict]:
+    """Bloque `security` (bloqueos/expulsiones del sistema) con caché corta; nunca bloquea la analítica."""
+    entry = _SECURITY_STATS_CACHE.get(chat_id)
+    if entry and time.monotonic() - entry[0] < SECURITY_STATS_TTL:
+        return entry[1]
+    try:
+        stats = await asyncio.wait_for(get_security_block_stats(chat_id), timeout=2.0)
+    except Exception as ex:
+        logger.debug(f"Aviso calculando bloqueos de seguridad ({chat_id}): {ex}")
+        return entry[1] if entry else None
+    stats["shield"] = {**(stats.get("shield") or {}), **raid_shield.status_payload(chat_id)}
+    if len(_SECURITY_STATS_CACHE) > 2000:
+        _SECURITY_STATS_CACHE.clear()
+    _SECURITY_STATS_CACHE[chat_id] = (time.monotonic(), stats)
+    return stats
+
+
+async def _decorate_analytics_full(chat_id: int, data: dict) -> dict:
+    payload = _decorate_analytics(chat_id, data)
+    security = await _security_stats(chat_id)
+    if security is not None:
+        payload["security"] = security
+    return payload
 
 
 def _decorate_analytics(chat_id: int, data: dict) -> dict:
@@ -1448,7 +1592,7 @@ async def api_community_full_analytics(
         logger.error(f"❌ [API Analytics Error] {numeric_id}: {e}", exc_info=True)
         raise HTTPException(status_code=503, detail="Analítica temporalmente no disponible.")
 
-    payload = _decorate_analytics(numeric_id, data)
+    payload = await _decorate_analytics_full(numeric_id, data)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     return JSONResponse(
         content=payload,
@@ -1475,7 +1619,7 @@ WS_ALLOWED_ORIGINS = {
 }
 RADAR_EVENTS = {
     "message", "level_up", "voice_call_started", "voice_call_ended", "voice_presence",
-    "stars_payment", "settings_updated",
+    "stars_payment", "settings_updated", "security_block", "raid_shield",
 }
 
 # Códigos de cierre de aplicación (4000-4999) legibles por la Mini App.
@@ -1559,7 +1703,7 @@ async def _ws_send_snapshots(client, chat_id: int, include_legacy: bool = True, 
     async def _analytics():
         try:
             data = await asyncio.wait_for(get_community_full_analytics(chat_id), timeout=ANALYTICS_API_TIMEOUT)
-            return _decorate_analytics(chat_id, data)
+            return await _decorate_analytics_full(chat_id, data)
         except Exception as e:
             logger.debug(f"Aviso snapshot analítico WS ({chat_id}): {e}")
             return None
@@ -1733,11 +1877,12 @@ async def websocket_radar(
 # 1. Importa la función constructora del router de planes de canal
 # Si el módulo no existe en este despliegue, se omite de forma segura.
 try:
-    from channel_plans_api import (
-        build_channel_plans_router,
-        run_custom_broadcast_scheduler,
-        save_broadcast_config,
-    )
+    import importlib
+
+    _channel_plans_api = importlib.import_module("channel_plans_api")
+    build_channel_plans_router = _channel_plans_api.build_channel_plans_router
+    run_custom_broadcast_scheduler = _channel_plans_api.run_custom_broadcast_scheduler
+    save_broadcast_config = _channel_plans_api.save_broadcast_config
 except ImportError:
     build_channel_plans_router = None
     run_custom_broadcast_scheduler = None
@@ -1899,6 +2044,88 @@ async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot = None):
                             logger.info(f"👑 [Auto-Detección]: creador {adm.user.id} vinculado a {event.chat.id}.")
     except Exception as e:
         logger.error(f"❌ [Error en my_chat_member]: {e}", exc_info=True)
+
+
+class AdminActionTrackerMiddleware(BaseMiddleware):
+    """
+    v9 · Acciones de moderación de los administradores HUMANOS (ban, expulsión, silencio, ascensos…) a partir
+    de las actualizaciones chat_member, sin depender del comando o la app usados. Las acciones del propio bot
+    ya se registran como bloqueos del sistema (security_events). Una expulsión (ban + desbaneo inmediato) se
+    registra como 'kick' y no como ban + unban.
+    """
+    KICK_WINDOW_S = 6.0
+
+    def __init__(self):
+        super().__init__()
+        self._pending_bans: Dict[tuple, asyncio.Task] = {}
+
+    @staticmethod
+    def _status(member) -> str:
+        return str(getattr(getattr(member, "status", ""), "value", getattr(member, "status", "")) or "")
+
+    async def _delayed_ban(self, key: tuple, group_id: int, admin_id: int, admin_name: str, target_id: int) -> None:
+        try:
+            await asyncio.sleep(self.KICK_WINDOW_S)
+        except asyncio.CancelledError:
+            return
+        self._pending_bans.pop(key, None)
+        await self._record(group_id, admin_id, admin_name, target_id, "ban")
+
+    @staticmethod
+    async def _record(group_id: int, admin_id: int, admin_name: str, target_id: int, action: str) -> None:
+        try:
+            await record_admin_mod_action(group_id, admin_id, admin_name, target_id, action)
+        except Exception as ex:
+            logger.debug(f"Aviso registrando acción de moderación ({group_id}): {ex}")
+
+    def _classify(self, event: ChatMemberUpdated) -> Optional[str]:
+        old_s, new_s = self._status(event.old_chat_member), self._status(event.new_chat_member)
+        if new_s == "kicked":
+            return "ban"
+        if old_s == "kicked" and new_s in ("left", "member"):
+            return "unban"
+        if new_s == "restricted" and not getattr(event.new_chat_member, "can_send_messages", True):
+            return "mute" if old_s != "restricted" or getattr(event.old_chat_member, "can_send_messages", True) else None
+        if old_s == "restricted" and (new_s == "member" or (new_s == "restricted" and getattr(event.new_chat_member, "can_send_messages", False))):
+            return "unmute" if not getattr(event.old_chat_member, "can_send_messages", True) else None
+        if new_s == "administrator" and old_s in ("member", "restricted"):
+            return "promote"
+        if old_s == "administrator" and new_s in ("member", "restricted"):
+            return "demote"
+        return None
+
+    def _track(self, event: ChatMemberUpdated) -> None:
+        actor = event.from_user
+        target = getattr(event.new_chat_member, "user", None)
+        if not actor or actor.is_bot or not target or actor.id == target.id:
+            return
+        if event.chat.type not in ("group", "supergroup"):
+            return
+        action = self._classify(event)
+        if not action:
+            return
+        group_id, name = event.chat.id, (actor.full_name or "")[:64]
+        key = (group_id, target.id, actor.id)
+        if action == "ban":
+            previous = self._pending_bans.pop(key, None)
+            if previous:
+                previous.cancel()
+            self._pending_bans[key] = _spawn(self._delayed_ban(key, group_id, actor.id, name, target.id), name="admin_ban_window")
+            return
+        if action == "unban":
+            pending = self._pending_bans.pop(key, None)
+            if pending and not pending.done():
+                pending.cancel()
+                action = "kick"
+        _spawn(self._record(group_id, actor.id, name, target.id, action), name="admin_action")
+
+    async def __call__(self, handler, event, data: dict):
+        if isinstance(event, ChatMemberUpdated):
+            try:
+                self._track(event)
+            except Exception as ex:
+                logger.debug(f"Aviso clasificando chat_member: {ex}")
+        return await handler(event, data)
 
 
 class ChatAutoDetectMiddleware(BaseMiddleware):
@@ -2275,6 +2502,7 @@ async def main():
     dp.message.middleware(AntiSpamMiddleware())
     dp.message.outer_middleware.register(ActivityTrackerMiddleware())
     dp.my_chat_member.outer_middleware.register(ChatAutoDetectMiddleware())
+    dp.chat_member.outer_middleware.register(AdminActionTrackerMiddleware())
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
     # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)

@@ -98,6 +98,13 @@ export function validatePlanForm(raw) {
     if (promo.length > cfg.PROMO_MAX) errors.promo_text = { key: 'pf_err_promo', vars: { max: cfg.PROMO_MAX } };
     else values.promo_text = promo;
 
+    // v9 · Programador recurrente (0 = sin difusión). Campo opcional: un formulario antiguo sin él vale 0.
+    const intervals = cfg.BROADCAST_INTERVALS || [0, 6, 12, 24, 48];
+    const rawInterval = String(raw?.broadcast_interval_hours ?? '0').trim() || '0';
+    const interval = /^\d+$/.test(rawInterval) ? Number(rawInterval) : NaN;
+    if (!intervals.includes(interval)) errors.broadcast_interval_hours = { key: 'pf_err_interval' };
+    else values.broadcast_interval_hours = interval;
+
     return { valid: Object.keys(errors).length === 0, values, errors };
 }
 
@@ -157,6 +164,7 @@ export const app = {
     // v8.2: difusión en curso, modal del canal de registro e interruptor con petición en vuelo
     _broadcastBusy: false,
     _logChannel: null,
+    _logReport: null,           // v9: { chatId, epoch, busy, data } del informe periódico abierto en el modal
     _switchBusy: null,
     _consoleBusy: {},
     validateStudioForm,
@@ -696,6 +704,8 @@ export const app = {
         else if (!cc.data) ui.setConsoleState('loading');
         if (this._planForm.lastCreated) ui.renderPlanFormResult(this._planForm.lastCreated);
         ui.updatePlanPromoCounter();
+        if (state.data.currentChatDashboard) ui.renderTariffStatus(state.data.currentChatDashboard.plan);
+        if (this._logReport?.data) ui.renderLogReportStatus(this._logReport.data);
         ui.setBroadcastStatus(this._studio.broadcast || null);
         if (this._lastBroadcastPreview) ui.renderBroadcastPreview(this._lastBroadcastPreview);
 
@@ -862,6 +872,7 @@ export const app = {
         this._consoleBusy = {};
         this._broadcastBusy = false;
         this._logChannel = null;
+        this._logReport = null;
         this._lastBroadcastPreview = null;
         studio.broadcast = null;
         state.data = {
@@ -1381,6 +1392,44 @@ export const app = {
         ui.closePlanPreview();
     },
 
+    /**
+     * ⏰ v9 · Programa (6/12/24/48 h) o desactiva (0) la difusión recurrente del plan en el canal
+     * (POST .../schedule). El servidor ancla el reloj a la última publicación real.
+     */
+    async setPlanSchedule(planId, value) {
+        const plan = this.planById(planId);
+        if (!plan) return false;
+        const hours = Number(value);
+        const intervals = CONFIG.PLAN_FORM?.BROADCAST_INTERVALS || [0, 6, 12, 24, 48];
+        if (!intervals.includes(hours)) return false;
+        if (hours && !plan.is_active) {
+            tgApp.hapticNotification('warning');
+            this.planToast('warn', '⚠️', ui.t('plans_err_inactive'));
+            this.renderPlans();
+            return false;
+        }
+        tgApp.hapticSelection();
+        const out = await this.runPlanAction(planId, 'schedule', (channelId, id) => api.scheduleChannelPlan(channelId, id, hours, state.currentLang));
+        if (!out || !out.valid) return false;
+        if (out.res?.__error) {
+            this.renderPlans();   // el selector vuelve al valor real
+            return this.planFailed(out.res, out.channelId);
+        }
+        const live = this.planById(out.id);
+        if (live) {
+            Object.assign(live, {
+                broadcast_enabled: Boolean(out.res.broadcast_enabled),
+                broadcast_interval_hours: Number(out.res.broadcast_interval_hours) || 0,
+                broadcast_next_at: out.res.broadcast_next_at || null,
+                broadcast_last_at: out.res.broadcast_last_at || live.broadcast_last_at || null
+            });
+        }
+        this.renderPlans();
+        tgApp.hapticNotification('success');
+        this.planToast('success', hours ? '⏰' : '🚫', hours ? ui.tf('plans_toast_sched_on', { h: hours }) : ui.t('plans_toast_sched_off'));
+        return true;
+    },
+
     /** 🔄 Activa o pausa el plan (POST .../toggle). Un plan pausado deja de poder comprarse al instante. */
     async togglePlanStatus(planId) {
         const plan = this.planById(planId);
@@ -1770,21 +1819,25 @@ export const app = {
         ui.setPlanFormBusy(true);
         tgApp.hapticImpact('medium');
         try {
-            const res = await api.createChannelPlan(channelId, values);
+            const res = await api.createChannelPlan(channelId, { ...values, lang: state.currentLang });
             if (res?.__stale || epoch !== session.epoch || this._studio.channelId !== channelId) return null;
             if (res?.__error) {
-                const match = /^(plan_name|stars_price|duration_days|target_link|promo_text):\s*(.+)$/.exec(String(res.__error));
+                const match = /^(plan_name|stars_price|duration_days|target_link|promo_text|broadcast_interval_hours):\s*(.+)$/.exec(String(res.__error));
                 if (match && res.__status === 422) ui.setFieldError(ui.PLAN_FORM_FIELDS[match[1]], match[2]);
                 tgApp.hapticNotification('error');
                 this.planToast('error', '⚠️', ui.tf('pf_toast_error', { error: this.planErrorMessage(res) }));
                 return null;
             }
             const ready = Boolean(res.delivery?.ready);
-            tgApp.hapticNotification(ready ? 'success' : 'warning');
+            const scheduleFailed = values.broadcast_interval_hours > 0 && res.schedule_ok === false;
+            tgApp.hapticNotification(ready && !scheduleFailed ? 'success' : 'warning');
+            const bodyParts = [ui.t(ready ? 'pf_toast_created_body' : 'pf_toast_created_warn')];
+            if (scheduleFailed) bodyParts.push(ui.t('pf_toast_schedule_warn'));
+            else if (values.broadcast_interval_hours > 0) bodyParts.push(ui.tf('plans_toast_sched_on', { h: values.broadcast_interval_hours }));
             ui.showToast({
-                key: 'plan-action', force: true, icon: '💎', tone: ready ? 'success' : 'warn', ttl: 5200,
+                key: 'plan-action', force: true, icon: '💎', tone: ready && !scheduleFailed ? 'success' : 'warn', ttl: 5200,
                 title: ui.tf('pf_toast_created', { name: res.plan?.name || values.plan_name }),
-                body: ui.t(ready ? 'pf_toast_created_body' : 'pf_toast_created_warn')
+                body: bodyParts.join(' ')
             });
             ui.resetPlanForm();
             this._planForm.lastCreated = res;
@@ -2183,6 +2236,8 @@ export const app = {
         client.on('voice_call_started', (data) => { if (isCurrent()) this.onVoiceCall(true, data); });
         client.on('voice_call_ended', (data) => { if (isCurrent()) this.onVoiceCall(false, data); });
         client.on('stars_payment', (data) => { if (isCurrent()) this.onStarsPayment(data); });
+        client.on('security_block', (data) => { if (isCurrent()) this.onSecurityBlock(data); });
+        client.on('raid_shield', (data) => { if (isCurrent()) this.onRaidShield(data); });
         client.on('settings_updated', (data) => {
             if (!isCurrent()) return;
             this.scheduleDashboardReload(chatId);
@@ -2389,6 +2444,48 @@ export const app = {
         this.scheduleAnalyticsRefresh(2000);
     },
 
+    /** v9 · Bloqueo del sistema de seguridad en vivo: contador optimista + feed; el snapshot reconcilia. */
+    onSecurityBlock(d) {
+        if (!d || !d.s) return;
+        const action = d.a || 'kick';
+        const sec = state.liveAnalytics?.security;
+        if (sec && action !== 'verified') {
+            sec.total = (sec.total || 0) + 1;
+            sec.last_30d = (sec.last_30d || 0) + 1;
+            sec.last_7d = (sec.last_7d || 0) + 1;
+            sec.today = (sec.today || 0) + 1;
+            if (['decline', 'kick', 'ban'].includes(action)) sec.expelled = (sec.expelled || 0) + 1;
+            if (d.b) sec.bots = (sec.bots || 0) + 1; else sec.users = (sec.users || 0) + 1;
+            sec.by_source = sec.by_source || {};
+            const bucket = sec.by_source[d.s] || (sec.by_source[d.s] = { total: 0, expelled: 0 });
+            bucket.total = (bucket.total || 0) + 1;
+            if (['decline', 'kick', 'ban'].includes(action)) bucket.expelled = (bucket.expelled || 0) + 1;
+            ui.renderSecurity(sec);
+            this.flashThrottled('an-sec-total');
+        }
+        ui.pushFeedItem({ icon: action === 'verified' ? '✅' : '🛡️', key: 'feed_security',
+            vars: { source: ui.securitySourceLabel(d.s), action: ui.t(`act_${action}`) } });
+        this.scheduleAnalyticsRefresh(4000);
+    },
+
+    onRaidShield(d) {
+        if (!d) return;
+        const sec = state.liveAnalytics?.security;
+        if (sec) {
+            const remaining = d.until ? Math.max(0, Number(d.until) - Math.floor(Date.now() / 1000)) : 900;
+            sec.shield = { ...(sec.shield || {}), active: Boolean(d.active), level: d.level, remaining_seconds: remaining };
+            ui.renderSecurity(sec);
+        }
+        ui.showToast({
+            key: 'raid-shield', force: true, icon: '🚨', tone: 'error', ttl: 7000,
+            title: ui.t('toast_raid_title'),
+            body: ui.tf('toast_raid_body', { joins: Number(d.joins) || 0, fresh: Number(d.new) || 0 })
+        });
+        ui.pushFeedItem({ icon: '🚨', key: 'toast_raid_title', vars: {} });
+        tgApp.hapticNotification('warning');
+        this.scheduleAnalyticsRefresh(1500);
+    },
+
     // --- Preferencias y ciclo de vida de la pestaña ------------------------
     initLiveToastPreference() {
         let saved = null;
@@ -2451,15 +2548,9 @@ export const app = {
         // 1. Canal de Registro (Log Channel)
         ui.renderLogChannelStatus(data.log_channel);
 
-        // 2. Estado del Plan Tarifario
-        const planStatusEl = document.getElementById('chat-plan-status');
-        if (planStatusEl) {
-            const isActive = data.plan?.status === 'active';
-            planStatusEl.innerText = isActive
-                ? `${ui.t('tariff_active')} (${data.plan.name || ''})`
-                : ui.t('tariff_empty');
-            planStatusEl.className = isActive ? 'text-xs font-bold text-emerald-400 mt-1' : 'text-xs font-bold text-rose-400 mt-1';
-        }
+        // 2. Estado del Plan Tarifario: licencia VIGENTE de la comunidad o, si no tiene, la del operador
+        //    verificado (PRO ⭐ / ULTRA PRO 💎). El servidor ya resolvió caducidad y origen.
+        ui.renderTariffStatus(data.plan);
 
         // 3. Los interruptores los pinta la consola de programación (GET /configuration), que es la fuente
         //    de verdad; el resumen del dashboard solo se usa si la consola aún no cargó esta comunidad.
@@ -2489,11 +2580,94 @@ export const app = {
         this._logChannel = { chatId: String(chatId), epoch: session.epoch, busy: false };
         ui.openLogChannelView({ community: group ? group.title : String(chatId), current });
         tgApp.hapticImpact('light');
+        this.loadLogReport(String(chatId));
     },
 
     closeLogChannelModal() {
         this._logChannel = null;
+        this._logReport = null;
         ui.closeLogChannelView();
+    },
+
+    // ======================================================================
+    // 🧾 v9 · INFORME PERIÓDICO DE RENDIMIENTO DE ADMINISTRADORES
+    // ======================================================================
+    async loadLogReport(chatId) {
+        const ctx = { chatId: String(chatId), epoch: session.epoch, busy: false, data: null };
+        this._logReport = ctx;
+        ui.renderLogReportForm(null);
+        ui.setLogReportBusy(true);
+        const res = await api.fetchLogReport(chatId);
+        if (res?.__stale || this._logReport !== ctx || ctx.epoch !== session.epoch) return;
+        ui.setLogReportBusy(false);
+        if (res?.__error) {
+            ui.setText('log-report-status', ui.tf('logr_toast_error', { error: this.planErrorMessage(res) }));
+            return;
+        }
+        ctx.data = res.log_report || null;
+        ui.renderLogReportForm(ctx.data);
+    },
+
+    async saveLogReport() {
+        const ctx = this._logReport;
+        if (!ctx || ctx.busy) return false;
+        const values = ui.readLogReportForm();
+        if (values.enabled && values.metrics.length === 0) {
+            ui.setFieldError('log-report-metrics', ui.t('logr_err_metrics'));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        if (values.enabled && !ctx.data?.log_channel_id) {
+            ui.setFieldError('log-report-metrics', ui.t('logr_need_channel'));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        ui.setFieldError('log-report-metrics', '');
+        ctx.busy = true;
+        ui.setLogReportBusy(true);
+        const res = await api.saveLogReport(ctx.chatId, values);
+        ctx.busy = false;
+        if (res?.__stale || this._logReport !== ctx || ctx.epoch !== session.epoch) return false;
+        ui.setLogReportBusy(false);
+        if (res?.__error) {
+            const message = String(res.__error).replace(/^(metrics|interval_hours|enabled|log_channel_id):\s*/, '');
+            if (res.__status === 422) ui.setFieldError('log-report-metrics', message);
+            this.consoleToast('error', '⚠️', ui.tf('logr_toast_error', { error: message }));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        ctx.data = res.log_report || ctx.data;
+        ui.renderLogReportForm(ctx.data);
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', ctx.data?.enabled ? '🧾' : '🚫', ui.t(ctx.data?.enabled ? 'logr_toast_saved' : 'logr_toast_disabled'));
+        return true;
+    },
+
+    async sendLogReportNow() {
+        const ctx = this._logReport;
+        if (!ctx || ctx.busy) return false;
+        if (!ctx.data?.log_channel_id) {
+            ui.setFieldError('log-report-metrics', ui.t('logr_need_channel'));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        // Se guarda primero lo que muestra el formulario: el informe enviado es exactamente el configurado.
+        if (!await this.saveLogReport()) return false;
+        ctx.busy = true;
+        ui.setLogReportBusy(true);
+        const res = await api.sendLogReportNow(ctx.chatId);
+        ctx.busy = false;
+        if (res?.__stale || this._logReport !== ctx || ctx.epoch !== session.epoch) return false;
+        ui.setLogReportBusy(false);
+        if (res?.__error) {
+            this.consoleToast('error', '⚠️', ui.tf('logr_toast_error', { error: String(res.__error).replace(/^\w+:\s*/, '') }));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '📨', ui.t('logr_toast_sent'));
+        this.loadLogReport(ctx.chatId);
+        return true;
     },
 
     async saveLogChannel() {

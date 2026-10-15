@@ -7,6 +7,9 @@
    con acciones rápidas y consola de control de grupos operativa.
    v8.3: generador CRUD de planes de canal y consola de programación 1:1 (Aduana, Acústica,
    Propinas y Perímetro) sobre las mismas columnas que lee el bot.
+   v9: programador recurrente de planes (6/12/24/48 h), plan tarifario vigente del operador, informe
+   periódico de administradores en el canal de registro, bloqueos de seguridad en la analítica y
+   Escudo Anti-Raid / Anti-Reportes.
    ========================================================================== */
 
 export const CONFIG = {
@@ -70,7 +73,23 @@ export const CONFIG = {
         LINK_MAX: 256,
         PROMO_MAX: 1000,
         DEFAULT_PRICE: 150,
-        DEFAULT_DAYS: 30
+        DEFAULT_DAYS: 30,
+        // v9 · Difusión recurrente del plan — mismos valores que channel_plans_api.PLAN_SCHEDULE_INTERVALS
+        BROADCAST_INTERVALS: [0, 6, 12, 24, 48],
+        DEFAULT_INTERVAL: 0
+    },
+
+    // 🧾 v9 · Informe periódico del canal de registro — mismos valores que database.LOG_REPORT_*
+    LOG_REPORT: {
+        INTERVALS: [24, 72, 168],
+        METRICS: ['admin_messages', 'admin_replies', 'admin_mod_actions', 'top_admin',
+                  'inactive_admins', 'security_blocks', 'captcha_summary', 'raid_shield'],
+        DEFAULT_METRICS: ['admin_messages', 'admin_mod_actions', 'top_admin', 'security_blocks']
+    },
+
+    // 🛡️ v9 · Bloqueos del sistema de seguridad (database.SECURITY_SOURCES)
+    SECURITY: {
+        SOURCES: ['captcha', 'antiflood', 'antispam', 'ai_guardian', 'raid_shield']
     },
 
     // 🎛️ Consola de programación 1:1 (v8.3) — mismos rangos que database.validate_chat_configuration
@@ -570,7 +589,85 @@ export const translations = {
         cfg_err_presets: "Entre 1 y {max} montos enteros de 1 a 10000.",
         cfg_err_welcome_long: "Máximo {max} caracteres.",
         cfg_err_welcome_var: "Variable desconocida {{var}}. Usa {name}, {username} o {title}.",
-        cfg_actions_title: "Herramientas Tácticas"
+        cfg_actions_title: "Herramientas Tácticas",
+
+        // --- v9 · Programador recurrente de planes ---
+        pf_interval_label: "Difusión Automática en el Canal:",
+        pf_interval_0: "Sin difusión automática",
+        pf_interval_h: "Cada {h} horas",
+        pf_interval_hint: "El anuncio se publica con su botón de pago en Stars. El intervalo se mide desde la última publicación real: un fallo de red no reinicia el reloj.",
+        pf_err_interval: "Elige 6, 12, 24 o 48 horas (o sin difusión).",
+        pf_toast_schedule_warn: "Plan creado, pero no se pudo programar su difusión automática.",
+        plans_sched_label: "Difusión automática",
+        plans_sched_off: "Sin difusión",
+        plans_sched_every: "Cada {h} h",
+        plans_sched_next: "Próxima: {time}",
+        plans_sched_last: "Última: {time}",
+        plans_toast_sched_on: "Difusión cada {h} h programada ⏰",
+        plans_toast_sched_off: "Difusión automática desactivada",
+
+        // --- v9 · Plan tarifario ---
+        tariff_operator: "licencia del operador",
+        tariff_expires: "vence {date}",
+
+        // --- v9 · Bloqueos de seguridad ---
+        an_sec_title: "Bloqueos del Sistema de Seguridad",
+        an_sec_total: "Bloqueados (30 días)",
+        an_sec_today: "hoy",
+        an_sec_7d: "7 días",
+        an_sec_expelled: "expulsados",
+        an_sec_users: "usuarios",
+        an_sec_bots: "bots",
+        an_sec_purged: "mensajes purgados",
+        an_sec_captcha_rate: "Acierto del Captcha",
+        an_sec_empty: "Sin bloqueos registrados en los últimos 30 días.",
+        an_sec_src_captcha: "Captcha",
+        an_sec_src_antiflood: "Anti-Flood",
+        an_sec_src_antispam: "Anti-Spam",
+        an_sec_src_ai_guardian: "Guardián IA",
+        an_sec_src_raid_shield: "Escudo Anti-Raid",
+        an_sec_shield_on: "Escudo Anti-Raid ACTIVO · {m} min",
+        an_sec_shield_off: "Escudo Anti-Raid en vigilancia 🟢",
+        an_sec_shield_hint: "Pico de ingresos detectado: Captcha Pro obligatorio, avisos silenciados y difusiones en pausa.",
+        act_decline: "rechazo",
+        act_kick: "expulsión",
+        act_ban: "baneo",
+        act_mute: "silencio",
+        act_delete: "purga",
+        act_verified: "verificado",
+        feed_security: "{source} · {action}",
+        toast_raid_title: "🚨 Escudo Anti-Raid activado",
+        toast_raid_body: "{joins} ingresos ({fresh} cuentas nuevas) · Captcha Pro obligatorio",
+
+        // --- v9 · Informe periódico del canal de registro ---
+        logr_title: "Informe de Rendimiento de Admins",
+        logr_desc: "Publica en el canal de registro un resumen periódico con las métricas que elijas.",
+        logr_enabled: "Informe automático",
+        logr_interval_label: "Frecuencia:",
+        logr_interval_24: "Diario (cada 24 h)",
+        logr_interval_72: "Cada 3 días",
+        logr_interval_168: "Semanal",
+        logr_metrics_label: "Métricas del informe:",
+        logr_m_admin_messages: "Mensajes de administradores",
+        logr_m_admin_replies: "Respuestas a miembros",
+        logr_m_admin_mod_actions: "Acciones de moderación (ban, expulsión, silencio)",
+        logr_m_top_admin: "Administrador destacado",
+        logr_m_inactive_admins: "Administradores sin actividad",
+        logr_m_security_blocks: "Bloqueos automáticos del sistema",
+        logr_m_captcha_summary: "Resumen de la aduana Captcha Pro",
+        logr_m_raid_shield: "Intervenciones del Escudo Anti-Raid",
+        logr_save: "Guardar Informe",
+        logr_send: "Enviar Ahora",
+        logr_saving: "Guardando…",
+        logr_next: "Próximo informe: {time}",
+        logr_last: "Último informe: {time}",
+        logr_never: "Aún no se ha enviado ningún informe.",
+        logr_need_channel: "Configura y guarda primero el canal de registro.",
+        logr_err_metrics: "Elige al menos una métrica.",
+        logr_toast_saved: "Informe periódico guardado 🧾",
+        logr_toast_disabled: "Informe periódico desactivado",
+        logr_toast_sent: "Informe publicado en el canal de registro 📨",
+        logr_toast_error: "No se pudo completar: {error}"
     },
     en: {
         plans_title: "Community Memberships",
@@ -1031,6 +1128,84 @@ export const translations = {
         cfg_err_presets: "Between 1 and {max} whole amounts from 1 to 10000.",
         cfg_err_welcome_long: "Maximum {max} characters.",
         cfg_err_welcome_var: "Unknown variable {{var}}. Use {name}, {username} or {title}.",
-        cfg_actions_title: "Tactical Tools"
+        cfg_actions_title: "Tactical Tools",
+
+        // --- v9 · Recurring plan scheduler ---
+        pf_interval_label: "Automatic Channel Broadcast:",
+        pf_interval_0: "No automatic broadcast",
+        pf_interval_h: "Every {h} hours",
+        pf_interval_hint: "The announcement is posted with its Stars payment button. The interval is measured from the last real post: a network failure never resets the clock.",
+        pf_err_interval: "Choose 6, 12, 24 or 48 hours (or no broadcast).",
+        pf_toast_schedule_warn: "Plan created, but its automatic broadcast could not be scheduled.",
+        plans_sched_label: "Automatic broadcast",
+        plans_sched_off: "No broadcast",
+        plans_sched_every: "Every {h} h",
+        plans_sched_next: "Next: {time}",
+        plans_sched_last: "Last: {time}",
+        plans_toast_sched_on: "Broadcast every {h} h scheduled ⏰",
+        plans_toast_sched_off: "Automatic broadcast disabled",
+
+        // --- v9 · Tariff plan ---
+        tariff_operator: "operator license",
+        tariff_expires: "expires {date}",
+
+        // --- v9 · Security blocks ---
+        an_sec_title: "Security System Blocks",
+        an_sec_total: "Blocked (30 days)",
+        an_sec_today: "today",
+        an_sec_7d: "7 days",
+        an_sec_expelled: "expelled",
+        an_sec_users: "users",
+        an_sec_bots: "bots",
+        an_sec_purged: "messages purged",
+        an_sec_captcha_rate: "Captcha pass rate",
+        an_sec_empty: "No blocks recorded in the last 30 days.",
+        an_sec_src_captcha: "Captcha",
+        an_sec_src_antiflood: "Anti-Flood",
+        an_sec_src_antispam: "Anti-Spam",
+        an_sec_src_ai_guardian: "AI Guardian",
+        an_sec_src_raid_shield: "Anti-Raid Shield",
+        an_sec_shield_on: "Anti-Raid Shield ACTIVE · {m} min",
+        an_sec_shield_off: "Anti-Raid Shield on watch 🟢",
+        an_sec_shield_hint: "Join spike detected: mandatory Captcha Pro, notices muted and broadcasts paused.",
+        act_decline: "declined",
+        act_kick: "kick",
+        act_ban: "ban",
+        act_mute: "mute",
+        act_delete: "purge",
+        act_verified: "verified",
+        feed_security: "{source} · {action}",
+        toast_raid_title: "🚨 Anti-Raid Shield engaged",
+        toast_raid_body: "{joins} joins ({fresh} new accounts) · Mandatory Captcha Pro",
+
+        // --- v9 · Log channel periodic report ---
+        logr_title: "Admin Performance Report",
+        logr_desc: "Posts a periodic summary with the metrics you choose to the log channel.",
+        logr_enabled: "Automatic report",
+        logr_interval_label: "Frequency:",
+        logr_interval_24: "Daily (every 24 h)",
+        logr_interval_72: "Every 3 days",
+        logr_interval_168: "Weekly",
+        logr_metrics_label: "Report metrics:",
+        logr_m_admin_messages: "Administrator messages",
+        logr_m_admin_replies: "Replies to members",
+        logr_m_admin_mod_actions: "Moderation actions (ban, kick, mute)",
+        logr_m_top_admin: "Top administrator",
+        logr_m_inactive_admins: "Inactive administrators",
+        logr_m_security_blocks: "Automatic system blocks",
+        logr_m_captcha_summary: "Captcha Pro customs summary",
+        logr_m_raid_shield: "Anti-Raid Shield interventions",
+        logr_save: "Save Report",
+        logr_send: "Send Now",
+        logr_saving: "Saving…",
+        logr_next: "Next report: {time}",
+        logr_last: "Last report: {time}",
+        logr_never: "No report has been sent yet.",
+        logr_need_channel: "Configure and save the log channel first.",
+        logr_err_metrics: "Choose at least one metric.",
+        logr_toast_saved: "Periodic report saved 🧾",
+        logr_toast_disabled: "Periodic report disabled",
+        logr_toast_sent: "Report posted to the log channel 📨",
+        logr_toast_error: "Could not complete: {error}"
     }
 };

@@ -33,6 +33,11 @@ from database.database import (
     get_due_channel_plan_broadcasts,
     mark_channel_plan_broadcasted,
     disable_channel_plan_broadcast,
+    register_channel_plan_broadcast_failure,
+    get_due_log_reports,
+    mark_log_report_result,
+    get_log_report_config,
+    get_admin_performance,
     get_expiring_channel_subscriptions,
     get_expired_channel_subscriptions,
     mark_subscription_warned,
@@ -48,6 +53,16 @@ from database.database import (
     register_gamification_announcement_failure,
     compose_gamification_card
 )
+import raid_shield
+
+try:
+    from telegram_html import normalize_telegram_html, visible_length  # misma gramática que la vista previa
+except ImportError:  # pragma: no cover - despliegues mínimos
+    def normalize_telegram_html(text: str) -> str:
+        return html.escape(text or "")
+
+    def visible_length(text: str) -> int:
+        return len(re.sub(r"<[^>]+>", "", text or ""))
 
 logger = logging.getLogger("ecosystem_handler")
 router = Router()
@@ -596,6 +611,10 @@ async def start_meeting_announcement_worker(bot: Bot):
                 if ann_cfg.get("last_announced_date") == today_date_str:
                     continue
 
+                # 🛡️ Aislamiento anti-raid: nada de anuncios públicos mientras el escudo esté activo.
+                if raid_shield.is_isolated(group_id):
+                    continue
+
                 try:
                     start_h, start_m = (int(x) for x in str(start_time).strip().split(":")[:2])
                     start_total_minutes = start_h * 60 + start_m
@@ -939,6 +958,10 @@ async def _dispatch_gamification_announcements(bot: Bot) -> int:
     published = 0
     for index, cfg in enumerate(due):
         chat_id = cfg["chat_id"]
+        if raid_shield.is_isolated(chat_id):
+            # Aislamiento anti-raid: se aplaza sin contar como fallo.
+            await reschedule_gamification_announcement(chat_id, 15)
+            continue
         try:
             rank = _gami_tier_rank(await get_group_tier(chat_id))
         except Exception:
@@ -998,14 +1021,333 @@ async def _dispatch_gamification_announcements(bot: Bot) -> int:
 
 
 # ==========================================
-# 📡 BACKGROUND WORKER: DIFUSIÓN RECURRENTE DE PLANES
+# 📡 BACKGROUND WORKER: DIFUSIÓN RECURRENTE DE PLANES (v9 · intervalo estricto 6/12/24/48 h)
 # ==========================================
+PLAN_BROADCAST_SPACING_SECONDS = 1.0
+PLAN_ISOLATION_RETRY_SECONDS = 600
+PLAN_TEXTS = {
+    "es": {"duration": "Duración", "price": "Precio", "days": "días",
+           "buy": "⭐ Obtener Acceso ({stars} Stars)", "resource": "🔗 Ver Recurso / Canal VIP"},
+    "en": {"duration": "Duration", "price": "Price", "days": "days",
+           "buy": "⭐ Get Access ({stars} Stars)", "resource": "🔗 View VIP Resource"},
+}
+
+
+def compose_plan_announcement(plan: dict, lang: str = "es") -> str:
+    """Tarjeta comercial del plan (ES/EN). El HTML del operador se normaliza: Telegram no puede rechazarlo."""
+    t = PLAN_TEXTS["en" if lang == "en" else "es"]
+    promo = normalize_telegram_html(str(plan.get("promo_text") or "").strip())
+    body = (
+        f"💎 <b>{html.escape(str(plan.get('plan_name') or ''))}</b>\n\n"
+        f"⏳ <b>{t['duration']}:</b> {int(plan.get('duration_days') or 0)} {t['days']}\n"
+        f"⭐ <b>{t['price']}:</b> {int(plan.get('stars_price') or 0)} XTR"
+    )
+    if promo:
+        body += f"\n\n{promo}"
+    return body + "\n\n🛡️ <i>Cloud Media Management</i>"
+
+
+def build_plan_markup(plan: dict, bot_username: str, lang: str = "es") -> InlineKeyboardMarkup:
+    t = PLAN_TEXTS["en" if lang == "en" else "es"]
+    stars = int(plan.get("stars_price") or 0)
+    pay_link = f"https://t.me/{bot_username}?start=chanplan_{plan['plan_id']}_{plan['channel_id']}"
+    rows = [[InlineKeyboardButton(text=t["buy"].format(stars=stars), url=pay_link)]]
+    target_link = str(plan.get("target_link") or "").strip()
+    if target_link:
+        target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
+        rows.append([InlineKeyboardButton(text=t["resource"], url=target_url)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _plan_target_chat(raw_chat_id):
+    if isinstance(raw_chat_id, str) and raw_chat_id.lstrip("-").isdigit():
+        return int(raw_chat_id)
+    return raw_chat_id
+
+
+async def send_plan_announcement(bot: Bot, chat_id, plan: dict, bot_username: str, lang: str = "es") -> int:
+    """Publica la tarjeta (con multimedia si cabe en el caption). Devuelve el message_id del texto con botón."""
+    caption = compose_plan_announcement(plan, lang)
+    markup = build_plan_markup(plan, bot_username, lang)
+    media_id, media_type = plan.get("media_id"), plan.get("media_type")
+    if media_id and media_type in ("photo", "video", "animation"):
+        send_media = getattr(bot, f"send_{media_type}")
+        if visible_length(caption) <= 1024:
+            sent = await send_media(chat_id=chat_id, **{media_type: media_id}, caption=caption,
+                                    reply_markup=markup, parse_mode="HTML")
+            return sent.message_id
+        await send_media(chat_id=chat_id, **{media_type: media_id})
+    sent = await bot.send_message(chat_id=chat_id, text=caption[:4096], reply_markup=markup, parse_mode="HTML")
+    return sent.message_id
+
+
+def _is_permanent_send_error(err: Exception) -> bool:
+    if isinstance(err, TelegramForbiddenError):
+        return True
+    text = str(err).lower()
+    return any(marker in text for marker in _GAMI_PERMANENT_ERROR_MARKERS)
+
+
+async def _dispatch_due_plan_broadcasts(bot: Bot) -> int:
+    """
+    Publica los planes vencidos. El reloj de cada plan se mide desde su último envío REAL:
+      • éxito → mark_channel_plan_broadcasted (last_broadcast_at = ahora; siguiente = ahora + intervalo);
+      • FloodWait / red / 5xx → reintento corto, sin mover last_broadcast_at ni desactivar;
+      • error permanente (bot expulsado, sin permisos) → cuenta hacia la desactivación (3 seguidos).
+    """
+    due_plans = await get_due_channel_plan_broadcasts()
+    if not due_plans:
+        return 0
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username or "thebunkerapp_bot"
+    published = 0
+    for index, plan in enumerate(due_plans):
+        plan_id = plan["plan_id"]
+        target_chat = _plan_target_chat(plan["broadcast_chat_id"])
+        lang = plan.get("broadcast_lang") or "es"
+        if isinstance(target_chat, int) and raid_shield.is_isolated(target_chat):
+            await register_channel_plan_broadcast_failure(plan_id, permanent=False, retry_after_seconds=PLAN_ISOLATION_RETRY_SECONDS)
+            logger.info(f"🛡️ [Broadcast Worker] Plan {plan_id} aplazado: Escudo Anti-Raid activo en {target_chat}.")
+            continue
+        try:
+            message_id = await send_plan_announcement(bot, target_chat, plan, bot_username, lang)
+        except TelegramRetryAfter as rate_err:
+            wait_s = int(getattr(rate_err, "retry_after", 5) or 5)
+            await register_channel_plan_broadcast_failure(plan_id, permanent=False, retry_after_seconds=wait_s)
+            logger.warning(f"⏳ [Broadcast Worker] FloodWait {wait_s}s publicando el plan {plan_id}; reintento programado.")
+            await asyncio.sleep(min(wait_s + 1, 60))
+            continue
+        except (TelegramForbiddenError, TelegramBadRequest) as send_err:
+            permanent = _is_permanent_send_error(send_err)
+            disabled = await register_channel_plan_broadcast_failure(plan_id, permanent=permanent)
+            logger.warning(
+                f"⚠️ [Broadcast Worker] Plan {plan_id} no publicado en {target_chat}: {send_err}"
+                + (" — difusión desactivada tras fallos permanentes." if disabled else " — reintento programado.")
+            )
+            if disabled:
+                _notify_radar_ws(plan["channel_id"], "plan_broadcast_disabled", {"plan_id": plan_id, "reason": str(send_err)[:200]})
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as send_err:
+            # Errores de red / timeouts: el envío pudo no salir; se reintenta pronto sin tocar el reloj.
+            await register_channel_plan_broadcast_failure(plan_id, permanent=False)
+            logger.error(f"❌ [Broadcast Worker] Error transitorio publicando el plan {plan_id} en {target_chat}: {send_err}")
+            continue
+
+        await mark_channel_plan_broadcasted(plan_id)
+        published += 1
+        logger.info(f"✅ [Broadcast Worker] Plan {plan_id} difundido en {target_chat} (mensaje {message_id}); "
+                    f"próximo en {plan.get('broadcast_interval_hours')} h.")
+        _notify_radar_ws(plan["channel_id"], "plan_broadcasted", {"plan_id": plan_id, "message_id": message_id})
+        if index < len(due_plans) - 1:
+            await asyncio.sleep(PLAN_BROADCAST_SPACING_SECONDS)
+    return published
+
+
+# ==========================================
+# 🧾 v9 · INFORME PERIÓDICO DE RENDIMIENTO DE ADMINISTRADORES (CANAL DE REGISTRO)
+# ==========================================
+LOG_REPORT_TICK_SECONDS = 120
+LOG_REPORT_TEXTS = {
+    "es": {
+        "title": "🧾 <b>Rendimiento de Administradores — {title}</b>",
+        "period": "Periodo: últimas {hours} h",
+        "admin_messages": "💬 <b>Actividad en el chat</b>",
+        "admin_replies": "↩️ <b>Respuestas a miembros</b>",
+        "admin_mod_actions": "👮 <b>Acciones de moderación</b>",
+        "top_admin": "🏆 <b>Administrador destacado:</b> {name} ({score} pts)",
+        "inactive_admins": "💤 <b>Sin actividad en el periodo</b>",
+        "security_blocks": "🛡️ <b>Bloqueos automáticos del sistema</b>",
+        "captcha_summary": "🤖 <b>Aduana Captcha Pro</b>",
+        "raid_shield": "🚨 <b>Escudo Anti-Raid</b>",
+        "msgs": "{n} mensajes", "replies": "{n} respuestas", "none": "Sin registros.",
+        "total": "Total: {n}", "expelled": "expulsados", "bots": "bots", "users": "usuarios",
+        "verified": "verificados", "failed": "rechazados", "pass_rate": "tasa de acierto",
+        "shield_on": "ACTIVO ({m} min restantes)", "shield_off": "inactivo", "activations": "intervenciones del escudo: {n}",
+        "sources": {"captcha": "Captcha", "antiflood": "Anti-Flood", "antispam": "Anti-Spam", "ai_guardian": "Guardián IA", "raid_shield": "Escudo Anti-Raid"},
+        "actions": {"ban": "ban", "kick": "expulsión", "mute": "silencio", "unban": "desbaneo", "unmute": "reactivación", "promote": "ascenso", "demote": "degradación"},
+    },
+    "en": {
+        "title": "🧾 <b>Admin Performance — {title}</b>",
+        "period": "Period: last {hours} h",
+        "admin_messages": "💬 <b>Chat activity</b>",
+        "admin_replies": "↩️ <b>Replies to members</b>",
+        "admin_mod_actions": "👮 <b>Moderation actions</b>",
+        "top_admin": "🏆 <b>Top administrator:</b> {name} ({score} pts)",
+        "inactive_admins": "💤 <b>No activity this period</b>",
+        "security_blocks": "🛡️ <b>Automatic system blocks</b>",
+        "captcha_summary": "🤖 <b>Captcha Pro customs</b>",
+        "raid_shield": "🚨 <b>Anti-Raid Shield</b>",
+        "msgs": "{n} messages", "replies": "{n} replies", "none": "No records.",
+        "total": "Total: {n}", "expelled": "expelled", "bots": "bots", "users": "users",
+        "verified": "verified", "failed": "rejected", "pass_rate": "pass rate",
+        "shield_on": "ACTIVE ({m} min left)", "shield_off": "inactive", "activations": "shield interventions: {n}",
+        "sources": {"captcha": "Captcha", "antiflood": "Anti-Flood", "antispam": "Anti-Spam", "ai_guardian": "AI Guardian", "raid_shield": "Anti-Raid Shield"},
+        "actions": {"ban": "ban", "kick": "kick", "mute": "mute", "unban": "unban", "unmute": "unmute", "promote": "promote", "demote": "demote"},
+    },
+}
+LOG_REPORT_LIST_MAX = 10
+
+
+def compose_log_report(title: str, perf: dict, metrics: list, hours: int, lang: str = "es") -> str:
+    """Informe HTML (≤ 4096) con SOLO las métricas elegidas por el propietario, en su idioma."""
+    t = LOG_REPORT_TEXTS["en" if lang == "en" else "es"]
+    esc = html.escape
+    selected = set(metrics or [])
+    admins = perf.get("admins") or []
+    lines = [t["title"].format(title=esc(title or "")), f"<i>{t['period'].format(hours=int(hours))}</i>"]
+
+    def section(header: str, rows: list) -> None:
+        lines.append("")
+        lines.append(header)
+        lines.extend(rows or [f"<i>{t['none']}</i>"])
+
+    if "admin_messages" in selected:
+        rows = []
+        for a in sorted(admins, key=lambda x: x["messages"], reverse=True)[:LOG_REPORT_LIST_MAX]:
+            if not a["messages"] and not a["replies"]:
+                continue
+            extra = f" · {t['replies'].format(n=a['replies'])}" if "admin_replies" in selected else ""
+            rows.append(f"• {esc(a['name'])} — {t['msgs'].format(n=a['messages'])}{extra}")
+        section(t["admin_messages"], rows)
+    elif "admin_replies" in selected:
+        rows = [f"• {esc(a['name'])} — {t['replies'].format(n=a['replies'])}"
+                for a in sorted(admins, key=lambda x: x["replies"], reverse=True)[:LOG_REPORT_LIST_MAX] if a["replies"]]
+        section(t["admin_replies"], rows)
+
+    if "admin_mod_actions" in selected:
+        rows = []
+        acting = [a for a in admins if a["actions_total"]]
+        for a in sorted(acting, key=lambda x: x["actions_total"], reverse=True)[:LOG_REPORT_LIST_MAX]:
+            detail = " · ".join(f"{n} {t['actions'].get(k, k)}" for k, n in sorted(a["actions"].items(), key=lambda kv: -kv[1]))
+            rows.append(f"• {esc(a['name'])} — {detail}")
+        if acting:
+            rows.append(t["total"].format(n=sum(a["actions_total"] for a in acting)))
+        section(t["admin_mod_actions"], rows)
+
+    if "top_admin" in selected and admins:
+        best = admins[0]
+        score = best["actions_total"] * 3 + best["messages"] + best["replies"]
+        if score:
+            lines.append("")
+            lines.append(t["top_admin"].format(name=esc(best["name"]), score=score))
+
+    if "inactive_admins" in selected:
+        rows = [f"• {esc(a['name'])}" + (f" (@{esc(a['username'])})" if a.get("username") else "")
+                for a in (perf.get("inactive") or [])[:LOG_REPORT_LIST_MAX]]
+        section(t["inactive_admins"], rows)
+
+    sec = perf.get("security") or {}
+    if "security_blocks" in selected:
+        rows = []
+        if sec.get("total"):
+            rows.append(f"{t['total'].format(n=sec['total'])} · {sec.get('expelled', 0)} {t['expelled']} · "
+                        f"{sec.get('users', 0)} {t['users']} · {sec.get('bots', 0)} {t['bots']}")
+            for src, bucket in (sec.get("by_source") or {}).items():
+                if bucket.get("total"):
+                    rows.append(f"• {t['sources'].get(src, src)}: {bucket['total']} ({bucket.get('expelled', 0)} {t['expelled']})")
+        section(t["security_blocks"], rows)
+
+    if "captcha_summary" in selected:
+        cap = sec.get("captcha") or {}
+        rows = []
+        if cap.get("verified") or cap.get("failed"):
+            rate = cap.get("pass_rate")
+            rows.append(f"{cap.get('verified', 0)} {t['verified']} · {cap.get('failed', 0)} {t['failed']}"
+                        + (f" · {t['pass_rate']} {rate}%" if rate is not None else ""))
+        section(t["captcha_summary"], rows)
+
+    if "raid_shield" in selected:
+        raid = perf.get("raid") or {}
+        state = t["shield_on"].format(m=max(1, int(((raid.get("active_until") or 0) - time.time()) // 60))) if raid.get("active") else t["shield_off"]
+        section(t["raid_shield"], [f"• {state}", f"• {t['activations'].format(n=int(raid.get('actions') or 0))}"])
+
+    lines.append("")
+    lines.append("🛡️ <i>Cloud Media Management</i>")
+    text = "\n".join(lines)
+    if len(text) > 4096:
+        text = text[:4000].rsplit("\n", 1)[0] + "\n…\n\n🛡️ <i>Cloud Media Management</i>"
+    return text
+
+
+def _log_target(raw):
+    return int(raw) if isinstance(raw, (int, str)) and str(raw).lstrip("-").isdigit() else raw
+
+
+async def send_log_report(bot: Bot, group_id: int, cfg: dict) -> int:
+    """Compone y publica el informe en el canal de registro. Devuelve el message_id (lanza si falla)."""
+    hours = int(cfg.get("interval_hours") or 24)
+    since = int(time.time()) - hours * 3600
+    perf = await get_admin_performance(group_id, since)
+    try:
+        title = (await bot.get_chat(group_id)).title or str(group_id)
+    except Exception:
+        title = str(group_id)
+    text = compose_log_report(title, perf, cfg.get("metrics") or [], hours, cfg.get("lang") or "es")
+    sent = await bot.send_message(chat_id=_log_target(cfg.get("log_channel_id")), text=text, parse_mode="HTML",
+                                  disable_web_page_preview=True)
+    return sent.message_id
+
+
+async def send_log_report_now(bot: Bot, group_id: int) -> dict:
+    """"Enviar ahora" desde la Mini App: usa la configuración guardada y cuenta como envío real."""
+    cfg = await get_log_report_config(group_id)
+    if not cfg.get("log_channel_id"):
+        raise ValueError("log_channel_id: configura primero el canal de registro.")
+    if not cfg.get("metrics"):
+        raise ValueError("metrics: elige al menos una métrica.")
+    message_id = await send_log_report(bot, group_id, cfg)
+    if cfg.get("enabled"):
+        await mark_log_report_result(group_id, True)
+    return {"sent": True, "message_id": message_id}
+
+
+async def start_log_report_worker(bot: Bot):
+    """Publica los informes vencidos. Intervalo estricto desde el último envío real; fallos → reintento corto."""
+    logger.info("🧾 [Log Report Worker]: Informes periódicos de rendimiento de administradores iniciados.")
+    while True:
+        try:
+            for cfg in await get_due_log_reports():
+                group_id = int(cfg["group_id"])
+                try:
+                    await send_log_report(bot, group_id, cfg)
+                    await mark_log_report_result(group_id, True)
+                    logger.info(f"🧾 [Log Report] Informe de {group_id} publicado en {cfg.get('log_channel_id')}.")
+                except TelegramRetryAfter as rate_err:
+                    wait_s = int(getattr(rate_err, "retry_after", 5) or 5)
+                    await mark_log_report_result(group_id, False, permanent=False, retry_after_seconds=wait_s)
+                    await asyncio.sleep(min(wait_s + 1, 60))
+                except (TelegramForbiddenError, TelegramBadRequest) as send_err:
+                    disabled = await mark_log_report_result(group_id, False, permanent=_is_permanent_send_error(send_err))
+                    logger.warning(f"⚠️ [Log Report] Informe de {group_id} no publicado: {send_err}"
+                                   + (" — desactivado tras fallos permanentes." if disabled else " — reintento programado."))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as send_err:
+                    await mark_log_report_result(group_id, False, permanent=False)
+                    logger.error(f"❌ [Log Report] Error transitorio con {group_id}: {send_err}")
+                await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.error(f"❌ [Log Report Worker Error]: {ex}")
+        await asyncio.sleep(LOG_REPORT_TICK_SECONDS)
+
+
 async def start_channel_broadcast_worker(bot: Bot):
     """Worker perimetral en segundo plano para difusión recurrente de planes en canales."""
+    try:
+        restored = await raid_shield.load_active_shields()
+        if restored:
+            logger.warning(f"🚨 [RaidShield] {restored} escudo(s) anti-raid siguen activos tras el reinicio.")
+    except Exception as ex:
+        logger.warning(f"⚠️ [RaidShield] No se pudo rehidratar el estado: {ex}")
     child_workers = [
         _spawn(start_subscription_watchdog_worker(bot), name="subscription_watchdog"),
         _spawn(start_meeting_announcement_worker(bot), name="meeting_announcer"),
         _spawn(start_vip_badge_expiry_worker(bot), name="vip_badge_watchdog"),
+        _spawn(start_log_report_worker(bot), name="log_report_worker"),
     ]
     logger.info("📡 [Broadcast Worker]: Bucle de difusión recurrente de planes y anuncios de gamificación iniciado.")
     try:
@@ -1019,64 +1361,7 @@ async def start_channel_broadcast_worker(bot: Bot):
 async def _channel_broadcast_loop(bot: Bot):
     while True:
         try:
-            due_plans = await get_due_channel_plan_broadcasts()
-            if due_plans:
-                bot_info = await bot.get_me()
-                bot_username = bot_info.username or "thebunkerapp_bot"
-
-                for plan in due_plans:
-                    plan_id = plan["plan_id"]
-                    raw_chat_id = plan["broadcast_chat_id"]
-                    plan_name = plan["plan_name"]
-                    duration_days = plan["duration_days"]
-                    stars_price = plan["stars_price"]
-                    promo_text = plan["promo_text"] or ""
-                    media_id = plan["media_id"]
-                    media_type = plan["media_type"]
-                    target_link = plan["target_link"]
-                    channel_id = plan["channel_id"]
-
-                    target_chat = raw_chat_id
-                    if isinstance(raw_chat_id, str) and (raw_chat_id.startswith("-") or raw_chat_id.isdigit()):
-                        try:
-                            target_chat = int(raw_chat_id)
-                        except ValueError:
-                            pass
-
-                    pay_link = f"https://t.me/{bot_username}?start=chanplan_{plan_id}_{channel_id}"
-
-                    caption = promo_text.strip() if promo_text and promo_text.strip() else f"💎 <b>{html.escape(str(plan_name))}</b>\n\n⏳ {duration_days} días — ⭐ {stars_price} XTR\n\n🛡️ <i>Cloud Media Management</i>"
-
-                    kb_rows = [
-                        [InlineKeyboardButton(text=f"⭐ Adquirir por {stars_price} Stars", url=pay_link)]
-                    ]
-
-                    if target_link:
-                        target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
-                        kb_rows.append([InlineKeyboardButton(text="🔗 Ver Recurso / Canal VIP", url=target_url)])
-
-                    markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
-                    try:
-                        if media_id and media_type == "photo":
-                            await bot.send_photo(chat_id=target_chat, photo=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
-                        elif media_id and media_type == "video":
-                            await bot.send_video(chat_id=target_chat, video=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
-                        elif media_id and media_type == "animation":
-                            await bot.send_animation(chat_id=target_chat, animation=media_id, caption=caption, reply_markup=markup, parse_mode="HTML")
-                        else:
-                            await bot.send_message(chat_id=target_chat, text=caption, reply_markup=markup, parse_mode="HTML")
-
-                        await mark_channel_plan_broadcasted(plan_id)
-                        logger.info(f"✅ [Broadcast Worker] Plan {plan_id} difundido exitosamente en chat {target_chat}.")
-                    except (TelegramForbiddenError, TelegramBadRequest) as perm_err:
-                        logger.warning(f"⚠️️ [Broadcast Worker] Permiso denegado en chat {target_chat}. Difusión pausada para plan {plan_id}: {perm_err}")
-                        await disable_channel_plan_broadcast(plan_id)
-                    except TelegramRetryAfter as rate_err:
-                        await asyncio.sleep(rate_err.retry_after + 1)
-                    except Exception as send_err:
-                        logger.error(f"❌ [Broadcast Worker] Error publicando plan {plan_id} en chat {target_chat}: {send_err}")
-
+            await _dispatch_due_plan_broadcasts(bot)
         except asyncio.CancelledError:
             raise
         except Exception as ex:

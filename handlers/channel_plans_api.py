@@ -12,6 +12,19 @@ Expone a la Mini App las mismas acciones que el panel "💎 Planes de Membresía
     GET    /api/channel/{channel_id}/broadcast-config            (v8.2)
     POST   /api/channel/{channel_id}/custom-broadcast            (v8.2)
     POST   /api/channel/{channel_id}/plan/create                 (v8.3)
+    POST   /api/channel/{channel_id}/plan/{plan_id}/schedule     (v9)
+
+v9 · Programador recurrente y difusión estricta
+-----------------------------------------------
+• Cada plan puede difundirse solo cada 6, 12, 24 o 48 h (o nunca) en el propio canal, con su botón de pago en
+  Stars y en el idioma elegido (ES/EN). Se fija al crearlo (`broadcast_interval_hours`) o después con
+  `/schedule`. El intervalo se mide SIEMPRE desde el último envío real (channel_plans.last_broadcast_at).
+• Difusión personalizada del Estudio: un fallo de red ya no reinicia el reloj. Antes un fallo escribía
+  last_sent_at = ahora, de modo que un corte de red alargaba el ciclo de 12 h hasta 24 h. Ahora last_sent_at
+  solo cambia con un envío confirmado; los fallos programan un reintento corto (retry_at, 5→60 min) y solo los
+  errores permanentes de permisos cuentan hacia la desactivación automática.
+• Aislamiento anti-raid: con el Escudo Anti-Raid activo en el chat destino no se publica nada (se reintenta
+  más tarde sin contar como fallo).
 
 v8.3 · Creación de planes desde la Mini App
 -------------------------------------------
@@ -121,6 +134,7 @@ class PlanDeps:
     invalidate_plan_cache: Optional[Callable[[Optional[int]], Any]] = None
     db_connect: Optional[Callable[[], Any]] = None   # database.database.get_db_connection (v8.2)
     create_channel_plan: Optional[Callable[..., Awaitable[Any]]] = None   # database.create_channel_plan (v8.3)
+    set_plan_schedule: Optional[Callable[..., Awaitable[Any]]] = None     # database.set_channel_plan_broadcast_config (v9)
 
 
 def load_db_deps() -> PlanDeps:
@@ -143,6 +157,7 @@ def load_db_deps() -> PlanDeps:
         invalidate_plan_cache=invalidate,
         db_connect=getattr(db, "get_db_connection", None),
         create_channel_plan=getattr(db, "create_channel_plan", None),
+        set_plan_schedule=getattr(db, "set_channel_plan_broadcast_config", None),
     )
 
 
@@ -167,12 +182,39 @@ def _plan_from_row(row: Any) -> Dict[str, Any]:
     }
 
 
+PLAN_SCHEDULE_INTERVALS = (0, 6, 12, 24, 48)    # 0 = sin difusión automática
+
+
+def _iso_utc(value: Any) -> Optional[str]:
+    """'2026-10-15 12:00:00' (UTC de SQLite) → '2026-10-15T12:00:00Z' para que el navegador lo localice."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text.replace(" ", "T") + ("" if text.endswith("Z") else "Z")
+
+
+def serialize_schedule(plan: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        interval = int(plan.get("broadcast_interval_hours") or 0)
+    except (TypeError, ValueError):
+        interval = 0
+    enabled = bool(plan.get("broadcast_enabled")) and interval in PLAN_SCHEDULE_INTERVALS[1:]
+    return {
+        "broadcast_enabled": enabled,
+        "broadcast_interval_hours": interval if enabled else 0,
+        "broadcast_next_at": _iso_utc(plan.get("next_broadcast_at")) if enabled else None,
+        "broadcast_last_at": _iso_utc(plan.get("last_broadcast_at")),
+        "broadcast_lang": "en" if str(plan.get("broadcast_lang") or "").startswith("en") else "es",
+    }
+
+
 def serialize_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     """Representación pública de un plan. No expone media_id (identificador interno de Telegram)."""
     media_type = str(plan.get("media_type") or "")
     has_media = bool(plan.get("media_id")) and media_type in MEDIA_TYPES
     status = _norm_status(plan.get("status"))
     return {
+        **serialize_schedule(plan),
         "plan_id": int(plan["plan_id"]),
         "name": str(plan.get("plan_name") or ""),
         "duration_days": int(plan.get("duration_days") or 0),
@@ -361,7 +403,17 @@ def validate_plan_payload(payload: Any) -> Dict[str, Any]:
         "duration_days": days,
         "target_link": normalize_target_link(payload.get("target_link")),
         "promo_text": promo,
+        "broadcast_interval_hours": validate_schedule_interval(payload.get("broadcast_interval_hours", 0)),
+        "lang": _clean_lang(payload.get("lang")),
     }
+
+
+def validate_schedule_interval(value: Any) -> int:
+    """0 (sin difusión), 6, 12, 24 o 48 horas. Errores → PlanApiError 422."""
+    text = str(value if value is not None else 0).strip() or "0"
+    if isinstance(value, bool) or not text.isdigit() or int(text) not in PLAN_SCHEDULE_INTERVALS:
+        raise PlanApiError(422, "broadcast_interval_hours: valores permitidos 0 (desactivada), 6, 12, 24 o 48 horas.")
+    return int(text)
 
 
 async def _delivery_check(bot: Any, channel_id: int, plan_id: int) -> Dict[str, Any]:
@@ -410,6 +462,14 @@ async def create_plan(channel_id: int, payload: Any, deps: PlanDeps, bot: Any) -
     plan_id = int(plan_id)
     _invalidate(deps, plan_id)
 
+    schedule_ok = True
+    if data["broadcast_interval_hours"] and deps.set_plan_schedule is not None:
+        try:
+            schedule_ok = bool(await deps.set_plan_schedule(plan_id, int(channel_id), data["broadcast_interval_hours"], data["lang"]))
+        except Exception as ex:
+            schedule_ok = False
+            logger.warning("⚠️ [Planes] Plan %s creado, pero no se pudo programar su difusión: %s", plan_id, ex)
+
     plan = await deps.get_channel_plan(plan_id) or {
         "plan_id": plan_id, "plan_name": data["plan_name"], "duration_days": data["duration_days"],
         "stars_price": data["stars_price"], "status": "active", "promo_text": data["promo_text"],
@@ -422,7 +482,28 @@ async def create_plan(channel_id: int, payload: Any, deps: PlanDeps, bot: Any) -
     delivery = await _delivery_check(bot, int(channel_id), plan_id)
     logger.info("💎 [Planes] Canal %s: plan %s creado desde la Mini App (%s Stars / %s días).",
                 channel_id, plan_id, data["stars_price"], data["duration_days"])
-    return {"status": "success", "plan": serialize_plan(plan), "purchase_link": link, "delivery": delivery}
+    return {"status": "success", "plan": serialize_plan(plan), "purchase_link": link, "delivery": delivery,
+            "schedule_ok": schedule_ok}
+
+
+async def schedule_plan(channel_id: int, plan_id: int, payload: Any, deps: PlanDeps) -> Dict[str, Any]:
+    """
+    Programa (6/12/24/48 h) o desactiva (0) la difusión recurrente del plan en el propio canal. El
+    reloj se ancla al último envío real: cambiar el intervalo no publica de inmediato ni lo reinicia.
+    """
+    if deps.set_plan_schedule is None:
+        raise PlanApiError(503, "Este despliegue no permite programar difusiones de planes.")
+    body = payload if isinstance(payload, dict) else {}
+    interval = validate_schedule_interval(body.get("interval_hours", body.get("broadcast_interval_hours")))
+    plan = await _load_owned_plan(channel_id, plan_id, deps)
+    if interval and _norm_status(plan.get("status")) != "active":
+        raise PlanApiError(409, "Activa el plan antes de programar su difusión: un plan pausado no se puede comprar.")
+    ok = await deps.set_plan_schedule(int(plan_id), int(channel_id), interval, _clean_lang(body.get("lang")))
+    if not ok:
+        raise PlanApiError(422, "broadcast_interval_hours: no se pudo aplicar el intervalo.")
+    fresh = await deps.get_channel_plan(int(plan_id)) or plan
+    logger.info("⏰ [Planes] Canal %s: plan %s difusión %s.", channel_id, plan_id, f"cada {interval} h" if interval else "desactivada")
+    return {"status": "success", "plan_id": int(plan_id), **serialize_schedule(fresh)}
 
 
 # ==========================================
@@ -565,12 +646,23 @@ def _empty_broadcast_config(channel_id: int) -> Dict[str, Any]:
         "channel_id": int(channel_id), "target_chat_id": None, "broadcast_target": "",
         "broadcast_interval": DEFAULT_BROADCAST_INTERVAL, "promo_text": "", "enabled": False,
         "last_sent_at": None, "last_message_id": None, "failures": 0,
+        "anchor_at": None, "retry_at": None, "lang": "es", "next_at": None,
     }
 
 
+def _next_broadcast_at(cfg: Dict[str, Any]) -> Optional[int]:
+    """Próximo envío: max(último envío real, ancla) + intervalo; un reintento pendiente puede retrasarlo."""
+    if not cfg.get("enabled") or cfg.get("target_chat_id") is None:
+        return None
+    base = max(int(cfg.get("last_sent_at") or 0), int(cfg.get("anchor_at") or 0))
+    nxt = base + int(cfg.get("broadcast_interval") or DEFAULT_BROADCAST_INTERVAL) * 3600
+    retry = cfg.get("retry_at")
+    return max(nxt, int(retry)) if retry else nxt
+
+
 def _row_to_broadcast_config(row: Any) -> Dict[str, Any]:
-    seq = list(row)
-    return {
+    seq = list(row) + [None] * (12 - len(row))
+    cfg = {
         "channel_id": int(seq[0]),
         "target_chat_id": int(seq[1]) if seq[1] is not None else None,
         "broadcast_target": str(seq[2] or ""),
@@ -580,7 +672,19 @@ def _row_to_broadcast_config(row: Any) -> Dict[str, Any]:
         "last_sent_at": int(seq[6]) if seq[6] is not None else None,
         "last_message_id": int(seq[7]) if seq[7] is not None else None,
         "failures": int(seq[8] or 0),
+        "anchor_at": int(seq[9]) if seq[9] is not None else None,
+        "retry_at": int(seq[10]) if seq[10] is not None else None,
+        "lang": "en" if str(seq[11] or "").startswith("en") else "es",
     }
+    cfg["next_at"] = _next_broadcast_at(cfg)
+    return cfg
+
+
+# v9: last_sent_at = último envío REAL; anchor_at = cuándo se activó/cambió el destino (evita publicar al
+# guardar); retry_at = reintento corto tras un fallo (no mueve el reloj); lang = idioma del botón de compra.
+_BROADCAST_MIGRATIONS = (("anchor_at", "INTEGER"), ("retry_at", "INTEGER"), ("lang", "TEXT NOT NULL DEFAULT 'es'"))
+BROADCAST_RETRY_MINUTES = (5, 15, 30, 60)
+ISOLATION_RETRY_SECONDS = 600
 
 
 def _ensure_broadcast_schema(conn: Any) -> None:
@@ -588,12 +692,16 @@ def _ensure_broadcast_schema(conn: Any) -> None:
     if _BROADCAST_SCHEMA_READY:
         return
     conn.execute(_BROADCAST_SCHEMA)
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(channel_broadcast_config)")}
+    for name, ddl in _BROADCAST_MIGRATIONS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE channel_broadcast_config ADD COLUMN {name} {ddl}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_channel_broadcast_enabled ON channel_broadcast_config (enabled, last_sent_at)")
     _BROADCAST_SCHEMA_READY = True
 
 
 _BROADCAST_COLUMNS = ("channel_id, target_chat_id, target_label, interval_hours, promo_text, enabled, "
-                      "last_sent_at, last_message_id, failures")
+                      "last_sent_at, last_message_id, failures, anchor_at, retry_at, lang")
 
 
 def _sync_load_broadcast_config(connect: Callable[[], Any], channel_id: int) -> Dict[str, Any]:
@@ -605,11 +713,13 @@ def _sync_load_broadcast_config(connect: Callable[[], Any], channel_id: int) -> 
 
 
 def _sync_save_broadcast_config(connect: Callable[[], Any], channel_id: int, target_chat_id: Optional[int],
-                                target_label: str, interval_hours: int, promo_text: str, user_id: int) -> Dict[str, Any]:
+                                target_label: str, interval_hours: int, promo_text: str, user_id: int,
+                                lang: str = "es") -> Dict[str, Any]:
     """
-    Guarda la configuración en una transacción BEGIN IMMEDIATE. Si cambian destino, intervalo o texto,
-    el reloj del programador se reinicia (last_sent_at = ahora): guardar no publica nada por sí solo;
-    para publicar al instante está "Difundir ahora".
+    Guarda la configuración en una transacción BEGIN IMMEDIATE. Guardar no publica nada por sí solo:
+    al activar la difusión o cambiar el chat destino se fija un ancla (anchor_at = ahora) y el primer envío
+    sale tras un intervalo completo. Cambiar solo el intervalo o el texto NO reinicia el reloj: el próximo
+    envío se mide desde el último envío REAL (last_sent_at, que aquí nunca se escribe).
     """
     now = int(time.time())
     enabled = 1 if (target_chat_id is not None and promo_text.strip()) else 0
@@ -619,21 +729,21 @@ def _sync_save_broadcast_config(connect: Callable[[], Any], channel_id: int, tar
         try:
             _ensure_broadcast_schema(conn)
             prev = conn.execute(
-                "SELECT target_chat_id, interval_hours, promo_text, last_sent_at FROM channel_broadcast_config WHERE channel_id = ?",
+                "SELECT target_chat_id, enabled, anchor_at FROM channel_broadcast_config WHERE channel_id = ?",
                 (int(channel_id),)).fetchone()
-            changed = prev is None or (prev[0], int(prev[1] or 0), str(prev[2] or "")) != (target_chat_id, int(interval_hours), promo_text)
-            last_sent = now if changed else (prev[3] if prev else None)
+            re_anchor = prev is None or (enabled and not prev[1]) or prev[0] != target_chat_id
+            anchor = now if re_anchor else prev[2]
             conn.execute(
                 "INSERT INTO channel_broadcast_config (channel_id, target_chat_id, target_label, interval_hours, "
-                "promo_text, enabled, last_sent_at, failures, updated_by, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?) "
+                "promo_text, enabled, anchor_at, retry_at, lang, failures, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?) "
                 "ON CONFLICT(channel_id) DO UPDATE SET target_chat_id = excluded.target_chat_id, "
                 "target_label = excluded.target_label, interval_hours = excluded.interval_hours, "
-                "promo_text = excluded.promo_text, enabled = excluded.enabled, "
-                "last_sent_at = excluded.last_sent_at, failures = 0, updated_by = excluded.updated_by, "
+                "promo_text = excluded.promo_text, enabled = excluded.enabled, anchor_at = excluded.anchor_at, "
+                "retry_at = NULL, lang = excluded.lang, failures = 0, updated_by = excluded.updated_by, "
                 "updated_at = excluded.updated_at",
                 (int(channel_id), target_chat_id, target_label, int(interval_hours), promo_text, enabled,
-                 last_sent, int(user_id), now))
+                 anchor, _clean_lang(lang), int(user_id), now))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -642,19 +752,48 @@ def _sync_save_broadcast_config(connect: Callable[[], Any], channel_id: int, tar
 
 
 def _sync_mark_broadcast_result(connect: Callable[[], Any], channel_id: int, ok: bool,
-                                message_id: Optional[int], disable: bool = False) -> None:
+                                message_id: Optional[int], permanent: bool = False,
+                                retry_after_seconds: float = 0) -> bool:
+    """
+    Éxito → last_sent_at = ahora (único punto donde se escribe). Fallo → reintento corto (retry_at) SIN mover
+    el reloj; solo los fallos permanentes suman hacia la desactivación. Devuelve True si quedó desactivada.
+    """
+    now = int(time.time())
+    disabled = False
     with connect() as conn:
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
         try:
             _ensure_broadcast_schema(conn)
             if ok:
-                conn.execute("UPDATE channel_broadcast_config SET last_sent_at = ?, last_message_id = ?, failures = 0 "
-                             "WHERE channel_id = ?", (int(time.time()), message_id, int(channel_id)))
+                conn.execute("UPDATE channel_broadcast_config SET last_sent_at = ?, last_message_id = ?, failures = 0, "
+                             "retry_at = NULL WHERE channel_id = ?", (now, message_id, int(channel_id)))
             else:
-                conn.execute("UPDATE channel_broadcast_config SET failures = failures + 1, "
-                             "enabled = CASE WHEN ? THEN 0 ELSE enabled END, last_sent_at = ? WHERE channel_id = ?",
-                             (1 if disable else 0, int(time.time()), int(channel_id)))
+                row = conn.execute("SELECT failures FROM channel_broadcast_config WHERE channel_id = ?",
+                                   (int(channel_id),)).fetchone()
+                failures = int((row or [0])[0] or 0) + (1 if permanent else 0)
+                disabled = permanent and failures >= BROADCAST_MAX_FAILURES
+                idx = max(0, min(failures, len(BROADCAST_RETRY_MINUTES) - 1))
+                retry_at = now + max(int(retry_after_seconds or 0) + 5, BROADCAST_RETRY_MINUTES[idx] * 60)
+                conn.execute("UPDATE channel_broadcast_config SET failures = ?, retry_at = ?, "
+                             "enabled = CASE WHEN ? THEN 0 ELSE enabled END WHERE channel_id = ?",
+                             (failures, retry_at, 1 if disabled else 0, int(channel_id)))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return disabled
+
+
+def _sync_defer_broadcast(connect: Callable[[], Any], channel_id: int, seconds: int) -> None:
+    """Aplaza sin contar como fallo (p. ej. Escudo Anti-Raid activo en el destino)."""
+    with connect() as conn:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_broadcast_schema(conn)
+            conn.execute("UPDATE channel_broadcast_config SET retry_at = ? WHERE channel_id = ?",
+                         (int(time.time()) + int(seconds), int(channel_id)))
             conn.commit()
         except Exception:
             conn.rollback()
@@ -666,8 +805,10 @@ def _sync_due_broadcasts(connect: Callable[[], Any], now: int) -> List[Dict[str,
         _ensure_broadcast_schema(conn)
         rows = conn.execute(
             f"SELECT {_BROADCAST_COLUMNS} FROM channel_broadcast_config WHERE enabled = 1 "
-            "AND target_chat_id IS NOT NULL AND (last_sent_at IS NULL OR last_sent_at + interval_hours * 3600 <= ?) "
-            "ORDER BY last_sent_at LIMIT 20", (int(now),)).fetchall()
+            "AND target_chat_id IS NOT NULL "
+            "AND MAX(COALESCE(last_sent_at, 0), COALESCE(anchor_at, 0)) + interval_hours * 3600 <= ? "
+            "AND (retry_at IS NULL OR retry_at <= ?) "
+            "ORDER BY MAX(COALESCE(last_sent_at, 0), COALESCE(anchor_at, 0)) LIMIT 20", (int(now), int(now))).fetchall()
     return [_row_to_broadcast_config(r) for r in rows]
 
 
@@ -689,6 +830,8 @@ def public_broadcast_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "promo_text": cfg.get("promo_text") or "",
         "broadcast_enabled": bool(cfg.get("enabled")),
         "broadcast_last_sent_at": cfg.get("last_sent_at"),
+        "broadcast_next_at": cfg.get("next_at"),
+        "broadcast_lang": cfg.get("lang") or "es",
     }
 
 
@@ -772,7 +915,8 @@ async def save_broadcast_config(channel_id: int, user_id: int, payload: Dict[str
         resolved = await resolve_broadcast_target(bot, user_id, raw_target, channel_id, is_chat_admin)
         target_chat_id, label = resolved["target_chat_id"], raw_target
     cfg = await asyncio.to_thread(_sync_save_broadcast_config, _require_connect(deps), int(channel_id),
-                                  target_chat_id, label, interval, promo, int(user_id))
+                                  target_chat_id, label, interval, promo, int(user_id),
+                                  _clean_lang(payload.get("broadcast_lang")))
     return public_broadcast_config(cfg)
 
 
@@ -866,6 +1010,15 @@ class _suppress_log:
         return True
 
 
+def _is_isolated(chat_id: int) -> bool:
+    """Escudo Anti-Raid activo en el chat destino (sin dependencia dura: el módulo es opcional en pruebas)."""
+    try:
+        import raid_shield  # type: ignore[import-not-found]
+        return raid_shield.is_isolated(chat_id)
+    except Exception:
+        return False
+
+
 def _is_permission_error(ex: Exception) -> bool:
     text = f"{type(ex).__name__} {ex}".lower()
     return any(t in text for t in ("forbidden", "not enough rights", "chat not found", "have no rights",
@@ -889,20 +1042,26 @@ async def run_custom_broadcast_scheduler(get_bot: Callable[[], Any], get_deps: C
                 due = await asyncio.to_thread(_sync_due_broadcasts, deps.db_connect, int(time.time()))
                 for cfg in due:
                     channel_id = int(cfg["channel_id"])
+                    target = int(cfg["target_chat_id"])
+                    if _is_isolated(target):
+                        await asyncio.to_thread(_sync_defer_broadcast, deps.db_connect, channel_id, ISOLATION_RETRY_SECONDS)
+                        logger.info("🛡️ [Difusión] Canal=%s → %s aplazada: Escudo Anti-Raid activo en el destino.", channel_id, target)
+                        continue
                     try:
-                        message_id = await _send_custom_broadcast(bot, int(cfg["target_chat_id"]), channel_id,
-                                                                  cfg["promo_text"], deps, "es")
+                        message_id = await _send_custom_broadcast(bot, target, channel_id,
+                                                                  cfg["promo_text"], deps, cfg.get("lang") or "es")
                         await asyncio.to_thread(_sync_mark_broadcast_result, deps.db_connect, channel_id, True, message_id)
-                        logger.info("📡 [Difusión] Automática canal=%s → %s (mensaje %s).", channel_id, cfg["target_chat_id"], message_id)
+                        logger.info("📡 [Difusión] Automática canal=%s → %s (mensaje %s).", channel_id, target, message_id)
                     except Exception as ex:
-                        retry_after = getattr(ex, "retry_after", None)
-                        if retry_after:
-                            await asyncio.sleep(min(float(retry_after), 60.0))
-                            continue
-                        disable = _is_permission_error(ex) and int(cfg.get("failures") or 0) + 1 >= BROADCAST_MAX_FAILURES
-                        await asyncio.to_thread(_sync_mark_broadcast_result, deps.db_connect, channel_id, False, None, disable)
+                        retry_after = float(getattr(ex, "retry_after", 0) or 0)
+                        permanent = _is_permission_error(ex) and not retry_after
+                        disabled = await asyncio.to_thread(_sync_mark_broadcast_result, deps.db_connect, channel_id,
+                                                           False, None, permanent, retry_after)
                         logger.warning("⚠️ [Difusión] Automática fallida canal=%s: %s%s", channel_id, ex,
-                                       " (desactivada tras fallos repetidos)" if disable else "")
+                                       " (desactivada tras fallos permanentes repetidos)" if disabled
+                                       else " (reintento programado; el intervalo se mide desde el último envío real)")
+                        if retry_after:
+                            await asyncio.sleep(min(retry_after, 60.0))
                     await asyncio.sleep(1.0)
         except asyncio.CancelledError:
             raise
@@ -1023,6 +1182,19 @@ def build_channel_plans_router(
         async def run():
             cid = await authorize(channel_id, x_telegram_init_data, authorization)
             return await create_plan(cid, payload, deps(), get_bot())
+        return await guarded(run)
+
+    @router.post("/channel/{channel_id}/plan/{plan_id}/schedule")
+    async def api_schedule_plan(
+        channel_id: str,
+        plan_id: int,
+        payload: dict = Body(...),
+        x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+        authorization: str = Header(None),
+    ):
+        async def run():
+            cid = await authorize(channel_id, x_telegram_init_data, authorization)
+            return await schedule_plan(cid, plan_id, payload, deps())
         return await guarded(run)
 
     @router.get("/channel/{channel_id}/broadcast-config")

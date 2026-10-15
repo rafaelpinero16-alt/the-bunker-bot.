@@ -1973,7 +1973,8 @@ async def _finalize_and_preview_channel_plan(
             channel_id, name, days, price, promo_text, media_id, media_type, target_link
         )
         if recurrence_hours and recurrence_hours > 0:
-            await set_channel_plan_broadcast_config(plan_id, channel_id, recurrence_hours)
+            if not await set_channel_plan_broadcast_config(plan_id, channel_id, recurrence_hours, lang):
+                recurrence_hours = 0
     except Exception as ex:
         logging.error(f"❌ [Channel Plans] No se pudo crear el plan en {channel_id}: {ex}")
         await bot.send_message(chat_id, t["plan_create_error"], parse_mode="HTML")
@@ -1986,7 +1987,8 @@ async def _finalize_and_preview_channel_plan(
         f"⭐ {price} XTR\n\n{promo_text}"
     )
     if recurrence_hours and recurrence_hours > 0:
-        preview += f"\n\n⏰ <b>Recurrencia:</b> Cada {recurrence_hours}h"
+        preview += "\n\n" + tr(lang, f"⏰ <b>Difusión automática:</b> cada {recurrence_hours} h en el canal",
+                                 f"⏰ <b>Automatic broadcast:</b> every {recurrence_hours} h in the channel")
 
     # Filas de botones inline
     inline_rows = []
@@ -2365,6 +2367,35 @@ def _plan_step_keyboard(t: dict, channel_id: int, lang: str) -> InlineKeyboardMa
             callback_data=f"chplans_menu_{channel_id}_{lang}"
         )]
     ])
+
+
+PLAN_RECURRENCE_CHOICES = (6, 12, 24, 48)
+
+
+def _plan_recurrence_keyboard(t: dict, channel_id: int, lang: str, plan_id: int = None, current: int = None) -> InlineKeyboardMarkup:
+    """
+    Intervalos de difusión recurrente (6/12/24/48 h o desactivada). Sin plan_id → paso final del asistente
+    (chplans_recur_*); con plan_id → editor de un plan existente (chplans_setsched_*).
+    """
+    def cb(hours: int) -> str:
+        if plan_id is None:
+            return f"chplans_recur_{hours}_{channel_id}_{lang}"
+        return f"chplans_setsched_{plan_id}_{channel_id}_{hours}_{lang}"
+
+    def label(hours: int) -> str:
+        mark = "✅ " if current is not None and int(current) == hours else ""
+        if hours == 0:
+            return mark + tr(lang, "🚫 Sin difusión automática", "🚫 No automatic broadcast")
+        return mark + tr(lang, f"⏰ Cada {hours} h", f"⏰ Every {hours} h")
+
+    rows = [
+        [InlineKeyboardButton(text=label(6), callback_data=cb(6)), InlineKeyboardButton(text=label(12), callback_data=cb(12))],
+        [InlineKeyboardButton(text=label(24), callback_data=cb(24)), InlineKeyboardButton(text=label(48), callback_data=cb(48))],
+        [InlineKeyboardButton(text=label(0), callback_data=cb(0))],
+        [InlineKeyboardButton(text=t["btn_cancel_ret"] if plan_id is None else "🔙 " + tr(lang, "Volver a Planes", "Back to Plans"),
+                              callback_data=f"chplans_menu_{channel_id}_{lang}")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_group_panel_keyboard(group_id: int, lang: str):
@@ -3302,7 +3333,8 @@ async def _dismiss_reply_keyboard(message: Message) -> None:
         pass
 
 
-_PAYMENT_ROUTES_RE = re.compile(r"^/(start\s+(sub_|vipmic_|chanplan_|speaker_|tip_)|(pro|ultra)(@\w+)?(\s|$))")
+# raidv_: puerta del Escudo Anti-Raid (handlers/groups.py) — se cede igual que los enlaces de cobro.
+_PAYMENT_ROUTES_RE = re.compile(r"^/(start\s+(sub_|vipmic_|chanplan_|speaker_|tip_|raidv_)|(pro|ultra)(@\w+)?(\s|$))")
 
 
 def _not_payments_route(message: Message) -> bool:
@@ -5419,20 +5451,26 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
             prompt_recurrence = (
                 "⏰ <b>Difusión Recurrente Automática:</b>\n\n"
-                "Envía el intervalo en <b>horas</b> para republicar este anuncio automáticamente (ejemplo: <code>24</code> para cada día, o <code>0</code> para desactivar recurrencia):"
+                "Elige cada cuánto se publicará este anuncio en el canal con su botón de pago en Stars. "
+                "El intervalo se mide desde la última publicación real (también puedes escribir <code>6</code>, "
+                "<code>12</code>, <code>24</code>, <code>48</code> o <code>0</code>):"
             ) if lang == "es" else (
                 "⏰ <b>Automatic Recurring Broadcast:</b>\n\n"
-                "Send the interval in <b>hours</b> to automatically repost this announcement (e.g. <code>24</code> for daily, or <code>0</code> to disable):"
+                "Choose how often this announcement will be posted in the channel with its Stars payment button. "
+                "The interval is measured from the last real post (you can also type <code>6</code>, "
+                "<code>12</code>, <code>24</code>, <code>48</code> or <code>0</code>):"
             )
-            resp = await message.answer(prompt_recurrence + PERIMETER_SIGNATURE, reply_markup=plan_kb, parse_mode="HTML")
+            resp = await message.answer(prompt_recurrence + PERIMETER_SIGNATURE,
+                                        reply_markup=_plan_recurrence_keyboard(t, channel_id, lang), parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
         elif step == "recurrence":
-            if not text_input.isdigit():
+            if not text_input.isdigit() or int(text_input) not in (0,) + PLAN_RECURRENCE_CHOICES:
                 resp = await message.answer(
-                    tr(lang, "⚠️ Ingresa un número entero de horas válido (ej. 24 o 0).", "⚠️ Enter a valid integer hours value (e.g. 24 or 0).") + PERIMETER_SIGNATURE,
-                    reply_markup=plan_kb, parse_mode="HTML"
+                    tr(lang, "⚠️ Elige un intervalo válido: 6, 12, 24 o 48 horas (0 para desactivar).",
+                       "⚠️ Choose a valid interval: 6, 12, 24 or 48 hours (0 to disable).") + PERIMETER_SIGNATURE,
+                    reply_markup=_plan_recurrence_keyboard(t, channel_id, lang), parse_mode="HTML"
                 )
                 fire_and_forget_auto_delete([message, resp], delay=60)
                 return
@@ -7542,6 +7580,7 @@ async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
     if plans:
         for p in plans:
             p_id, p_name, p_days, p_stars, p_status = p[0], p[1], p[2], p[3], p[4]
+            p_interval = p[11] if len(p) > 11 and p[13] else 0
             is_active = (p_status == "active")
             st_icon = "🟢" if is_active else "🔴"
             st_text = tr(lang, "Activo", "Active") if is_active else tr(lang, "Pausado", "Paused")
@@ -7564,6 +7603,10 @@ async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
                     callback_data=f"chplans_share_{p_id}_{channel_id}_{lang}"
                 ),
                 InlineKeyboardButton(
+                    text=f"⏰ {p_interval}h" if p_interval else "⏰ Off",
+                    callback_data=f"chplans_sched_{p_id}_{channel_id}_{lang}"
+                ),
+                InlineKeyboardButton(
                     text="🗑️",
                     callback_data=f"chplans_del_{p_id}_{channel_id}_{lang}"
                 ),
@@ -7576,14 +7619,14 @@ async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
         f"• <b>Suscriptores Activos:</b> <code>{sub_count}</code>\n"
         f"• <b>Total de Planes:</b> <code>{len(plans)}</code>\n\n"
         f"<i>Toca el nombre del plan para ver su vista previa comercial, "
-        f"o usa los botones inferiores para activarlo/pausarlo, difundirlo o eliminarlo.</i>\n\n"
+        f"o usa los botones inferiores para activarlo/pausarlo, difundirlo, programar su difusión automática (⏰) o eliminarlo.</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     ) if lang == "es" else (
         f"💎 <b>Membership Management — {c_name}</b>\n\n"
         f"• <b>Active Subscribers:</b> <code>{sub_count}</code>\n"
         f"• <b>Total Plans:</b> <code>{len(plans)}</code>\n\n"
         f"<i>Tap the plan name to preview its commercial layout, "
-        f"or use the controls below to activate/pause, broadcast, or delete.</i>\n\n"
+        f"or use the controls below to activate/pause, broadcast, schedule automatic posts (⏰), or delete.</i>\n\n"
         f"🛡️ <i>Cloud Media Management</i>"
     )
 
@@ -7600,10 +7643,17 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     try:
         sub = data[1]
-        if sub in ("del", "toggle", "view", "share", "postto"):
+        recur_hours = None
+        if sub in ("del", "toggle", "view", "share", "postto", "sched", "setsched"):
             plan_id = int(data[2])
             channel_id = int(data[3])
             target_chat_id = int(data[4]) if sub == "postto" else None
+            if sub == "setsched":
+                recur_hours = int(data[4])
+        elif sub == "recur":
+            recur_hours = int(data[2])
+            channel_id = int(data[3])
+            plan_id = None
         else:
             channel_id = int(data[2])
             plan_id = None
@@ -7615,7 +7665,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     CHAT_KIND_CACHE[channel_id] = "c"
 
-    if sub not in ("skip", "view", "share", "postto"):
+    if sub not in ("skip", "view", "share", "postto", "recur", "sched", "setsched"):
         clear_user_states(bot.id, callback.from_user.id)
 
     # 1. Menú principal de planes
@@ -7856,6 +7906,82 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
             parse_mode="HTML"
         )
         fire_and_forget_auto_delete([resp], delay=60)
+        return
+
+    # 7b. Paso final del asistente: intervalo de difusión elegido con botones (6/12/24/48 h o sin difusión)
+    elif sub == "recur":
+        key = (bot.id, callback.from_user.id)
+        if key not in CHAN_PLAN_STATES:
+            await restore_plan_state(key)
+        st_data = CHAN_PLAN_STATES.get(key)
+        if (recur_hours not in (0,) + PLAN_RECURRENCE_CHOICES or not st_data
+                or st_data.get("channel_id") != channel_id or st_data.get("step") != "recurrence"
+                or any(st_data.get(k) in (None, "") for k in ("name", "days", "price", "promo", "link"))):
+            forget_plan_state(*key)
+            await callback.answer(tr(lang, "ℹ️ No hay una creación de plan en curso.", "ℹ️ No plan creation in progress."), show_alert=True)
+            return
+        await callback.answer()
+        forget_plan_state(*key)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+        await _finalize_and_preview_channel_plan(
+            bot=bot, chat_id=callback.from_user.id, channel_id=channel_id, lang=lang,
+            name=st_data["name"], days=st_data["days"], price=st_data["price"],
+            promo_text=st_data.get("promo", ""), media_id=st_data.get("media_id"),
+            media_type=st_data.get("media_type"), target_link=st_data.get("link"),
+            recurrence_hours=recur_hours
+        )
+        return
+
+    # 7c. Editor del programador recurrente de un plan existente
+    elif sub in ("sched", "setsched"):
+        plan = await get_channel_plan(plan_id)
+        if not plan or int(plan.get("channel_id") or 0) != channel_id:
+            await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
+            return
+        if sub == "setsched":
+            if recur_hours not in (0,) + PLAN_RECURRENCE_CHOICES:
+                await callback.answer()
+                return
+            if recur_hours and plan.get("status") != "active":
+                await callback.answer(tr(lang, "⚠️ Activa el plan antes de programar su difusión.",
+                                         "⚠️ Activate the plan before scheduling its broadcast."), show_alert=True)
+                return
+            ok = await set_channel_plan_broadcast_config(plan_id, channel_id, recur_hours, lang)
+            if not ok:
+                await callback.answer(tr(lang, "⚠️ No se pudo aplicar el intervalo.", "⚠️ Could not apply the interval."), show_alert=True)
+                return
+            await callback.answer(
+                tr(lang, f"⏰ Difusión cada {recur_hours} h activada.", f"⏰ Broadcast every {recur_hours} h enabled.")
+                if recur_hours else tr(lang, "🚫 Difusión automática desactivada.", "🚫 Automatic broadcast disabled.")
+            )
+            text, kb = await _render_plans_menu(bot, channel_id, lang)
+            await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
+            return
+
+        current = int(plan.get("broadcast_interval_hours") or 0) if plan.get("broadcast_enabled") else 0
+        last = plan.get("last_broadcast_at")
+        nxt = plan.get("next_broadcast_at") if current else None
+        status_line = (tr(lang, f"Programada cada <b>{current} h</b>.", f"Scheduled every <b>{current} h</b>.")
+                       if current else tr(lang, "Sin difusión automática.", "No automatic broadcast."))
+        sched_text = (
+            tr(lang, "⏰ <b>Difusión Automática — ", "⏰ <b>Automatic Broadcast — ") + f"{html.escape(plan['plan_name'])}</b>\n\n"
+            f"• {status_line}\n"
+            + (tr(lang, f"• Última publicación: <code>{last} UTC</code>\n", f"• Last post: <code>{last} UTC</code>\n") if last else "")
+            + (tr(lang, f"• Próxima publicación: <code>{nxt} UTC</code>\n", f"• Next post: <code>{nxt} UTC</code>\n") if nxt else "")
+            + "\n"
+            + tr(lang,
+                 "<i>El anuncio se publica en el canal con su botón de pago en Stars. El intervalo se mide desde la "
+                 "última publicación real: un fallo de red no reinicia el reloj.</i>",
+                 "<i>The announcement is posted in the channel with its Stars payment button. The interval is measured "
+                 "from the last real post: a network failure never resets the clock.</i>")
+            + PERIMETER_SIGNATURE
+        )
+        await safe_edit_text(callback, sched_text,
+                             reply_markup=_plan_recurrence_keyboard(t, channel_id, lang, plan_id=plan_id, current=current),
+                             parse_mode="HTML")
         return
 
     # 8. Eliminar plan

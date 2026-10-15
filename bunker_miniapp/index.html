@@ -374,6 +374,40 @@
                             </div>
                         </div>
 
+                        <!-- v9 · Bloqueos del sistema de seguridad (Captcha, Anti-Flood, Anti-Spam, Guardián IA, Escudo Anti-Raid) -->
+                        <div id="an-security-card" class="glass-panel p-4 border-t-2 border-t-rose-500 space-y-3">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-shield-halved text-rose-400"></i> <span data-i18n="an_sec_title">Bloqueos del Sistema de Seguridad</span>
+                                </h4>
+                                <span id="an-sec-rate" class="text-[9px] text-[#39ff88] font-mono text-right"></span>
+                            </div>
+                            <div id="an-sec-shield" class="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[10px] font-bold text-emerald-400" data-i18n="an_sec_shield_off">Escudo Anti-Raid en vigilancia 🟢</div>
+                            <div class="flex items-end justify-between gap-2">
+                                <div>
+                                    <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="an_sec_total">Bloqueados (30 días)</p>
+                                    <h3 id="an-sec-total" class="font-extrabold text-2xl text-rose-400 font-mono">0</h3>
+                                </div>
+                                <p id="an-sec-split" class="text-[10px] text-neutral-400 font-mono text-right"></p>
+                            </div>
+                            <div class="grid grid-cols-3 gap-2 text-center font-mono">
+                                <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                                    <span class="text-[9px] text-theme-muted uppercase" data-i18n="an_sec_today">hoy</span>
+                                    <p id="an-sec-today" class="text-xs font-bold text-rose-300 mt-0.5">0</p>
+                                </div>
+                                <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                                    <span class="text-[9px] text-theme-muted uppercase" data-i18n="an_sec_7d">7 días</span>
+                                    <p id="an-sec-7d" class="text-xs font-bold text-rose-300 mt-0.5">0</p>
+                                </div>
+                                <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
+                                    <span class="text-[9px] text-theme-muted uppercase" data-i18n="an_sec_expelled">expulsados</span>
+                                    <p id="an-sec-expelled" class="text-xs font-bold text-theme-main mt-0.5">0</p>
+                                </div>
+                            </div>
+                            <div id="an-sec-sources" class="space-y-1.5"></div>
+                            <div id="an-sec-spark" class="h-14 w-full"></div>
+                        </div>
+
                         <!-- Sparklines de actividad (30 días) -->
                         <div class="glass-panel p-4 space-y-2">
                             <div class="flex items-center justify-between">
@@ -523,6 +557,19 @@
                                     </div>
                                     <textarea id="plan-form-promo" rows="3" maxlength="1000" placeholder="Describe el beneficio." data-i18n-placeholder="pf_promo_placeholder" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white mt-1 focus:outline-none focus:border-[#ff00ff] resize-none"></textarea>
                                     <p id="plan-form-promo-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                </div>
+                                <!-- v9 · Programador recurrente del plan (mismos valores que channel_plans_api.PLAN_SCHEDULE_INTERVALS) -->
+                                <div>
+                                    <label for="plan-form-interval" class="text-[10px] text-theme-muted" data-i18n="pf_interval_label">Difusión Automática en el Canal:</label>
+                                    <select id="plan-form-interval" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-1 focus:outline-none focus:border-[#ff00ff]">
+                                        <option value="0" selected data-i18n="pf_interval_0">Sin difusión automática</option>
+                                        <option value="6" data-i18n="bc_interval_6">Cada 6 Horas</option>
+                                        <option value="12" data-i18n="bc_interval_12">Cada 12 Horas</option>
+                                        <option value="24" data-i18n="bc_interval_24">Cada 24 Horas (Diario)</option>
+                                        <option value="48" data-i18n="bc_interval_48">Cada 48 Horas</option>
+                                    </select>
+                                    <p id="plan-form-interval-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
+                                    <p class="text-[9px] text-neutral-500 leading-snug mt-1" data-i18n="pf_interval_hint">El anuncio se publica con su botón de pago en Stars. El intervalo se mide desde la última publicación real.</p>
                                 </div>
                                 <div class="grid grid-cols-4 gap-1.5 pt-1">
                                     <button type="submit" id="pf-create-btn" class="col-span-4 flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[#ff00ff] text-black font-extrabold uppercase text-[11px] transition active:scale-95 shadow-[0_0_15px_rgba(255,0,255,0.35)] disabled:opacity-50 disabled:cursor-wait">
@@ -1232,6 +1279,47 @@
                     <button type="button" onclick="app.closeLogChannelModal()" class="py-2.5 rounded-xl border border-neutral-600 text-neutral-300 text-xs font-bold uppercase transition active:scale-95 hover:bg-white/5" data-i18n="logm_cancel">Cancelar</button>
                     <button type="submit" id="log-channel-save-btn" class="py-2.5 rounded-xl bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 text-xs font-extrabold uppercase transition active:scale-95 hover:bg-[#00f3ff]/30 disabled:opacity-50 disabled:cursor-wait"><span id="log-channel-save-label" data-i18n="logm_save">Guardar</span></button>
                 </div>
+
+                <!-- v9 · Informe periódico de rendimiento de administradores -->
+                <section id="log-report-panel" class="border-t border-neutral-800 pt-3 space-y-2.5">
+                    <div class="flex items-start justify-between gap-3">
+                        <div class="min-w-0">
+                            <h3 class="text-xs font-extrabold text-white uppercase tracking-wider" data-i18n="logr_title">Informe de Rendimiento de Admins</h3>
+                            <p class="text-[10px] text-neutral-400 leading-snug mt-0.5" data-i18n="logr_desc">Publica en el canal de registro un resumen periódico con las métricas que elijas.</p>
+                        </div>
+                        <label class="shrink-0 flex items-center gap-1.5 text-[10px] text-neutral-300 font-bold cursor-pointer">
+                            <input type="checkbox" id="log-report-enabled" class="accent-[#00f3ff] w-4 h-4">
+                            <span data-i18n="logr_enabled">Informe automático</span>
+                        </label>
+                    </div>
+                    <div>
+                        <label for="log-report-interval" class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="logr_interval_label">Frecuencia:</label>
+                        <select id="log-report-interval" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white mt-1 focus:outline-none focus:border-[#00f3ff]">
+                            <option value="24" selected data-i18n="logr_interval_24">Diario (cada 24 h)</option>
+                            <option value="72" data-i18n="logr_interval_72">Cada 3 días</option>
+                            <option value="168" data-i18n="logr_interval_168">Semanal</option>
+                        </select>
+                    </div>
+                    <fieldset class="space-y-1.5">
+                        <legend class="text-[10px] text-theme-muted uppercase font-bold mb-1" data-i18n="logr_metrics_label">Métricas del informe:</legend>
+                        <div id="log-report-metrics" class="grid grid-cols-1 gap-1 text-[11px] text-neutral-200">
+                            <label class="flex items-center gap-2"><input type="checkbox" value="admin_messages" class="accent-[#00f3ff]"><span data-i18n="logr_m_admin_messages">Mensajes de administradores</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="admin_replies" class="accent-[#00f3ff]"><span data-i18n="logr_m_admin_replies">Respuestas a miembros</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="admin_mod_actions" class="accent-[#00f3ff]"><span data-i18n="logr_m_admin_mod_actions">Acciones de moderación</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="top_admin" class="accent-[#00f3ff]"><span data-i18n="logr_m_top_admin">Administrador destacado</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="inactive_admins" class="accent-[#00f3ff]"><span data-i18n="logr_m_inactive_admins">Administradores sin actividad</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="security_blocks" class="accent-[#00f3ff]"><span data-i18n="logr_m_security_blocks">Bloqueos automáticos del sistema</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="captcha_summary" class="accent-[#00f3ff]"><span data-i18n="logr_m_captcha_summary">Resumen de la aduana Captcha Pro</span></label>
+                            <label class="flex items-center gap-2"><input type="checkbox" value="raid_shield" class="accent-[#00f3ff]"><span data-i18n="logr_m_raid_shield">Intervenciones del Escudo Anti-Raid</span></label>
+                        </div>
+                        <p id="log-report-metrics-error" role="alert" class="hidden text-[10px] text-rose-400"></p>
+                    </fieldset>
+                    <p id="log-report-status" class="text-[9px] text-neutral-500 font-mono leading-snug"></p>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button type="button" id="log-report-send-btn" onclick="app.sendLogReportNow()" class="py-2.5 rounded-xl border border-[#ff00ff]/40 bg-[#ff00ff]/10 text-[#ff00ff] text-xs font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait" data-i18n="logr_send">Enviar Ahora</button>
+                        <button type="button" id="log-report-save-btn" onclick="app.saveLogReport()" class="py-2.5 rounded-xl bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 text-xs font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait"><span id="log-report-save-label" data-i18n="logr_save">Guardar Informe</span></button>
+                    </div>
+                </section>
             </form>
         </div>
 
