@@ -1320,6 +1320,116 @@ export const ui = {
         this.updateWelcomeCounter();
     },
 
+    // ======================================================================
+    // 🔒 v15 · MATRIZ DE BLOQUEO MULTIMEDIA (30 vectores · 3 páginas, estilo Group Help)
+    // ======================================================================
+    /** Tono de cada acción (botón activo de la fila). */
+    ML_ACTION_TONES: {
+        off:  'bg-neutral-700/60 border-neutral-400 text-white',
+        del:  'bg-amber-400/20 border-amber-400 text-amber-200',
+        warn: 'bg-amber-400/20 border-amber-400 text-amber-200',
+        kick: 'bg-orange-500/20 border-orange-400 text-orange-200',
+        mute: 'bg-violet-500/20 border-violet-400 text-violet-200',
+        ban:  'bg-rose-500/20 border-rose-500 text-rose-200'
+    },
+
+    mediaLockKeys(mediaLocks) {
+        const fromServer = Array.isArray(mediaLocks?.keys) && mediaLocks.keys.length ? mediaLocks.keys : null;
+        return fromServer || CONFIG.MEDIA_LOCKS?.KEYS || [];
+    },
+
+    mediaLockLabel(key) {
+        const icon = CONFIG.MEDIA_LOCKS?.ICONS?.[key] || '•';
+        return `${icon} ${this.t(`ml_${key}`)}`;
+    },
+
+    /** "❕ Warn + 🗑️" · "🗑️ Eliminación" · "☑️ Off" */
+    mediaLockRuleSummary(rule) {
+        const action = rule?.action || 'off';
+        const icon = CONFIG.MEDIA_LOCKS?.ACTION_ICONS?.[action] || '';
+        const name = this.t(`ml_action_${action}`);
+        return action === 'off' || action === 'del' ? `${icon} ${name}` : `${icon} ${name}${rule?.delete ? ' + 🗑️' : ''}`;
+    },
+
+    /**
+     * Pinta la matriz. mediaLocks = configuration.media_locks del servidor (o null). opts: page (1-3),
+     * busyKey (vector con petición en vuelo), disabled (consola no lista: nunca se edita sin datos del servidor).
+     */
+    renderMediaLocks(mediaLocks, { page = 1, busyKey = null, disabled = false } = {}) {
+        const host = byId('ml-rows');
+        if (!host) return;
+        const cfg = CONFIG.MEDIA_LOCKS || {};
+        const keys = this.mediaLockKeys(mediaLocks);
+        const size = cfg.PAGE_SIZE || 10;
+        const pages = Math.max(1, Math.ceil(keys.length / size));
+        const current = Math.min(Math.max(1, Number(page) || 1), pages);
+
+        // Pestañas de página
+        for (let n = 1; n <= 3; n += 1) {
+            const tab = byId(`ml-page-${n}`);
+            if (!tab) continue;
+            const on = n === current;
+            tab.setAttribute('aria-selected', on ? 'true' : 'false');
+            tab.disabled = Boolean(disabled) || n > pages;
+            tab.className = `ml-page-tab flex-1 py-1.5 rounded-lg border text-[10px] font-extrabold uppercase transition ${on
+                ? 'bg-[#00f3ff]/15 border-[#00f3ff] text-[#00f3ff]' : 'bg-black/40 border-neutral-800 text-neutral-400'} disabled:opacity-40`;
+        }
+
+        if (!mediaLocks || !mediaLocks.rules) {
+            host.innerHTML = `<p class="text-center text-[11px] text-neutral-500 font-mono py-3">${this.escapeHtml(this.t('ml_empty'))}</p>`;
+            this.renderLongVideoChoices(null, { disabled: true });
+            byId('ml-floor-note')?.classList.add('hidden');
+            return;
+        }
+
+        const floor = new Set(Array.isArray(mediaLocks.floor) ? mediaLocks.floor : []);
+        const icons = cfg.ACTION_ICONS || {};
+        const rows = keys.slice((current - 1) * size, current * size).map(key => {
+            const rule = mediaLocks.rules[key] || { action: 'off', delete: false };
+            const action = rule.action || 'off';
+            const busy = busyKey === key;
+            const deleteOn = action === 'del' || (action !== 'off' && Boolean(rule.delete));
+            const off = disabled || busy;
+            const btn = (act) => {
+                const active = act === action || (act === 'off' && action === 'del');
+                const tone = active ? (this.ML_ACTION_TONES[act] || this.ML_ACTION_TONES.off) : 'bg-black/40 border-neutral-800 text-neutral-400';
+                return `<button type="button" data-ml-key="${key}" data-ml-action="${act}" aria-pressed="${active}"${off ? ' disabled' : ''}
+                    onclick="app.setMediaLockAction('${key}','${act}')" title="${this.escapeHtml(this.t(`ml_action_${act}`))}"
+                    class="cfg-input h-8 rounded-lg border text-sm leading-none transition active:scale-95 disabled:opacity-50 ${tone}">${icons[act] || ''}</button>`;
+            };
+            const delTone = deleteOn ? this.ML_ACTION_TONES.del : 'bg-black/40 border-neutral-800 text-neutral-400';
+            return `
+            <div class="ml-row rounded-xl bg-black/40 border ${floor.has(key) ? 'border-rose-500/50' : 'border-neutral-800'} p-2 space-y-1.5${busy ? ' animate-pulse' : ''}" data-ml-row="${key}">
+                <div class="flex items-center justify-between gap-2 min-w-0">
+                    <span class="text-[11px] font-bold text-theme-main truncate">${this.escapeHtml(this.mediaLockLabel(key))}${floor.has(key) ? ' 🚨' : ''}</span>
+                    <span class="text-[9px] font-mono text-neutral-400 shrink-0">${this.escapeHtml(this.mediaLockRuleSummary(rule))}</span>
+                </div>
+                <div class="grid grid-cols-6 gap-1">
+                    ${(cfg.ACTION_BUTTONS || ['off', 'warn', 'kick', 'mute', 'ban']).map(btn).join('')}
+                    <button type="button" data-ml-key="${key}" data-ml-action="delete" aria-pressed="${deleteOn}"${off ? ' disabled' : ''}
+                        onclick="app.toggleMediaLockDelete('${key}')" title="${this.escapeHtml(this.t('ml_action_del'))}"
+                        class="cfg-input h-8 rounded-lg border text-sm leading-none transition active:scale-95 disabled:opacity-50 ${delTone}">${icons.del || '🗑️'}</button>
+                </div>
+            </div>`;
+        });
+        host.innerHTML = rows.join('');
+        byId('ml-floor-note')?.classList.toggle('hidden', floor.size === 0);
+        this.renderLongVideoChoices(mediaLocks.long_video_max_seconds, { disabled });
+    },
+
+    renderLongVideoChoices(seconds, { disabled = false } = {}) {
+        const host = byId('ml-long-video');
+        if (!host) return;
+        const choices = CONFIG.MEDIA_LOCKS?.LONG_VIDEO_CHOICES || [300, 600];
+        host.innerHTML = choices.map(value => {
+            const on = Number(seconds) === value;
+            return `<button type="button" aria-pressed="${on}"${disabled ? ' disabled' : ''} onclick="app.setLongVideoThreshold(${value})"
+                class="cfg-input flex-1 py-1.5 rounded-lg border text-[10px] font-extrabold transition active:scale-95 disabled:opacity-50 ${on
+                    ? 'bg-[#00f3ff]/15 border-[#00f3ff] text-[#00f3ff]' : 'bg-black/40 border-neutral-800 text-neutral-400'}">
+                ${on ? '✅ ' : ''}&gt; ${value / 60} ${this.escapeHtml(this.t('ml_minutes'))}</button>`;
+        }).join('');
+    },
+
     /** Valores crudos de los campos NO interruptor de un módulo. */
     readConfigSection(section) {
         const fields = this.CONFIG_LAYOUT[section] || {};

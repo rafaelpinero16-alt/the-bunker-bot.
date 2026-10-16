@@ -2398,18 +2398,36 @@ def revoke_bot_clone(user_id: int, group_id: int):
 
 @db_async
 def get_all_active_clones():
+    """
+    (user_id, group_id, bot_token, bot_username) de los clones activos. v16: el token se devuelve DESCIFRADO
+    (en la base está cifrado con Fernet, «gAAAAA…»); decrypt_secret deja intactos los registros antiguos en claro.
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, group_id, bot_token, bot_username FROM bot_clones WHERE status = 'active'")
-        return cursor.fetchall()
+        return [(row[0], row[1], decrypt_secret(row[2]) if row[2] else row[2], row[3]) for row in cursor.fetchall()]
 
 
 @db_async
 def get_all_active_clone_tokens() -> list:
+    """
+    Tokens de los clones activos LISTOS PARA USAR. v16: antes se devolvía el valor cifrado (gAAAAA…) y main.py
+    lo pasaba a Bot(token=…), que lo rechazaba: tras cada redeploy ningún clon volvía a arrancar. Se descifran y
+    se eliminan duplicados (dos filas cifradas del mismo token tienen textos distintos por el IV de Fernet).
+    """
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT bot_token FROM bot_clones WHERE status = 'active' AND bot_token IS NOT NULL AND bot_token != ''")
-        return [row[0] for row in cursor.fetchall() if row[0]]
+        cursor.execute("SELECT bot_token FROM bot_clones WHERE status = 'active' AND bot_token IS NOT NULL AND bot_token != ''")
+        rows = [row[0] for row in cursor.fetchall() if row[0]]
+    tokens, seen = [], set()
+    for stored in rows:
+        plain = (decrypt_secret(stored) or "").strip()
+        if plain and plain not in seen and not plain.startswith("gAAAAA"):
+            seen.add(plain)
+            tokens.append(plain)
+        elif plain.startswith("gAAAAA"):
+            logger.error("❌ [Clones] Un token de clon no se pudo descifrar (¿cambió ENCRYPTION_KEY?). Ese clon no arrancará.")
+    return tokens
 
 
 @db_async

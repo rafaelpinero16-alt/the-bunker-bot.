@@ -993,6 +993,41 @@
                                     </button>
                                 </div>
                             </details>
+
+                            <!-- 🔒 v15 · MATRIZ DE BLOQUEO MULTIMEDIA (30 vectores · 3 páginas, estilo Group Help).
+                                 Cada toque se guarda al instante (POST /configuration {media_locks}); ui.renderMediaLocks pinta las filas. -->
+                            <details id="cfg-section-media_locks" data-section="media_locks" class="cfg-section group bg-black/50 rounded-2xl border border-neutral-800 open:border-rose-500/40 transition">
+                                <summary class="list-none cursor-pointer select-none p-3.5 flex items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2.5 min-w-0">
+                                        <span class="w-8 h-8 shrink-0 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 flex items-center justify-center"><i class="fa-solid fa-lock"></i></span>
+                                        <div class="min-w-0">
+                                            <p class="text-xs font-extrabold text-theme-main uppercase tracking-wide" data-i18n="cfg_sec_media_locks">Bloqueo Multimedia</p>
+                                            <p class="text-[10px] text-theme-muted truncate" data-i18n="cfg_sec_media_locks_desc">30 vectores: multimedia, enlaces, reenvíos y evasión avanzada.</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2 shrink-0">
+                                        <span id="cfg-status-media_locks" class="text-[9px] font-mono text-neutral-500"></span>
+                                        <i class="fa-solid fa-chevron-down text-neutral-500 text-[10px] transition group-open:rotate-180"></i>
+                                    </div>
+                                </summary>
+                                <div class="px-3.5 pb-3.5 space-y-2.5 text-xs">
+                                    <p class="text-[10px] font-bold text-neutral-300 bg-black/40 border border-neutral-800 rounded-lg px-2.5 py-1.5 text-center" data-i18n="ml_legend">❕ Warn · ❗ Kick · 🔇 Silenciar · 🚫 Ban · 🗑️ Eliminación · ☑️ Off</p>
+                                    <div class="flex gap-1.5" role="tablist">
+                                        <button type="button" id="ml-page-1" role="tab" aria-selected="true" onclick="app.setMediaLocksPage(1)" class="ml-page-tab flex-1 py-1.5 rounded-lg border text-[10px] font-extrabold uppercase transition bg-[#00f3ff]/15 border-[#00f3ff] text-[#00f3ff]"><span data-i18n="ml_page_1">Multimedia</span></button>
+                                        <button type="button" id="ml-page-2" role="tab" aria-selected="false" onclick="app.setMediaLocksPage(2)" class="ml-page-tab flex-1 py-1.5 rounded-lg border text-[10px] font-extrabold uppercase transition bg-black/40 border-neutral-800 text-neutral-400"><span data-i18n="ml_page_2">Enlaces y reenvíos</span></button>
+                                        <button type="button" id="ml-page-3" role="tab" aria-selected="false" onclick="app.setMediaLocksPage(3)" class="ml-page-tab flex-1 py-1.5 rounded-lg border text-[10px] font-extrabold uppercase transition bg-black/40 border-neutral-800 text-neutral-400"><span data-i18n="ml_page_3">Evasión</span></button>
+                                    </div>
+                                    <p id="ml-floor-note" class="hidden text-[10px] font-bold text-rose-300 bg-rose-500/10 border border-rose-500/40 rounded-lg px-2.5 py-1.5" data-i18n="ml_floor_note">🚨 Pánico o modo nocturno activo: los vectores marcados aplican como mínimo Warn + 🗑️ hasta que se levante.</p>
+                                    <div id="ml-rows" class="space-y-1.5" aria-live="polite">
+                                        <p class="text-center text-[11px] text-neutral-500 font-mono py-3" data-i18n="ml_empty">Selecciona una comunidad para configurar sus bloqueos.</p>
+                                    </div>
+                                    <div class="space-y-1.5">
+                                        <p class="text-[10px] text-theme-muted" data-i18n="ml_long_video">🎬 Películas: más de</p>
+                                        <div id="ml-long-video" class="flex gap-1.5"></div>
+                                    </div>
+                                    <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="ml_delete_hint">🗑️ activa o quita el borrado del mensaje; sobre ☑️ Off equivale a «solo eliminar».</p>
+                                </div>
+                            </details>
                         </div>
 
                         <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->

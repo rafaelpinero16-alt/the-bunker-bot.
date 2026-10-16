@@ -179,6 +179,7 @@ export const app = {
     // v8.3: generador de planes y consola de programación por comunidad
     _planForm: { busy: false, lastCreated: null },
     _chatConfig: { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {}, seq: 0 },
+    _mediaLocks: { page: 1, busyKey: null },   // v15 · matriz de bloqueo multimedia (página visible y vector en vuelo)
     validatePlanForm,
     validateConfigSection,
 
@@ -470,7 +471,9 @@ export const app = {
         const epoch = session.epoch;
         if (!keepDirty || cc.chatId !== String(chatId)) {
             Object.assign(cc, { chatId: String(chatId), data: null, dirty: {}, saving: {}, switchBusy: {} });
+            this._mediaLocks.busyKey = null;
             ui.setConsoleState('loading');
+            this.renderMediaLocksPanel();
         }
         const res = await api.fetchChatConfiguration(chatId);
         if (res?.__stale || epoch !== session.epoch || seq !== cc.seq || cc.chatId !== String(chatId)) return;
@@ -483,6 +486,7 @@ export const app = {
         const skip = Object.keys(cc.dirty).filter(sec => cc.dirty[sec]);
         ui.renderChatConfiguration(cc.data, { skipSections: skip });
         this.syncLegacySwitchState();
+        this.renderMediaLocksPanel();
     },
 
     /** Mantiene state.securitySwitches (v8.2) coherente con la configuración real. */
@@ -566,6 +570,135 @@ export const app = {
             });
         }
         this.syncLegacySwitchState();
+        this.renderMediaLocksPanel();
+    },
+
+    // ======================================================================
+    // 🔒 v15 · MATRIZ DE BLOQUEO MULTIMEDIA (30 vectores · 3 páginas)
+    // Cada toque se guarda al instante (POST /configuration { media_locks }) con reversión si falla, igual
+    // que los interruptores. El servidor sincroniza la cerradura heredada (LinkLock) y emite settings_updated.
+    // ======================================================================
+    renderMediaLocksPanel() {
+        const cc = this._chatConfig;
+        const ml = this._mediaLocks;
+        ui.renderMediaLocks(cc.data?.media_locks || null, { page: ml.page, busyKey: ml.busyKey, disabled: !cc.data });
+    },
+
+    setMediaLocksPage(page) {
+        this._mediaLocks.page = Math.min(3, Math.max(1, Number(page) || 1));
+        tgApp.hapticSelection();
+        this.renderMediaLocksPanel();
+    },
+
+    /** Misma semántica que el panel del bot: elegir una acción conserva el borrado (o lo activa si venía de Off). */
+    nextMediaLockRule(current, action) {
+        const prev = current || { action: 'off', delete: false };
+        if (action === 'off') return { action: 'off', delete: false };
+        const keepDelete = prev.action === 'off' || prev.action === 'del' ? true : Boolean(prev.delete);
+        return { action, delete: keepDelete };
+    },
+
+    /** 🗑️: Off → solo eliminar · solo eliminar → Off · Warn/Kick/Mute/Ban → invierte el borrado. */
+    toggledMediaLockDelete(current) {
+        const prev = current || { action: 'off', delete: false };
+        if (prev.action === 'off') return { action: 'del', delete: true };
+        if (prev.action === 'del') return { action: 'off', delete: false };
+        return { action: prev.action, delete: !prev.delete };
+    },
+
+    async setMediaLockAction(key, action) {
+        const current = this._chatConfig.data?.media_locks?.rules?.[key];
+        const next = this.nextMediaLockRule(current, action);
+        if (current && current.action === next.action && Boolean(current.delete) === next.delete) return false;
+        return await this.commitMediaLockRule(key, next);
+    },
+
+    async toggleMediaLockDelete(key) {
+        const current = this._chatConfig.data?.media_locks?.rules?.[key];
+        return await this.commitMediaLockRule(key, this.toggledMediaLockDelete(current));
+    },
+
+    async commitMediaLockRule(key, rule) {
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
+        const cc = this._chatConfig;
+        const ml = this._mediaLocks;
+        const locks = cc.data?.media_locks;
+        if (!locks?.rules || cc.chatId !== String(chatId)) {
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '⏳', ui.t('cfg_loading'));
+            return false;
+        }
+        if (ml.busyKey) return false;
+
+        const previous = { ...(locks.rules[key] || { action: 'off', delete: false }) };
+        const epoch = session.epoch;
+        const name = ui.mediaLockLabel(key);
+        locks.rules[key] = { ...rule };          // optimista: la fila cambia al instante
+        ml.busyKey = key;
+        tgApp.hapticImpact('light');
+        this.renderMediaLocksPanel();
+
+        const res = await api.updateChatConfiguration(chatId, { media_locks: { rules: { [key]: rule } } });
+
+        ml.busyKey = null;
+        if (res?.__stale || epoch !== session.epoch || cc.chatId !== String(chatId)) return false;
+        if (res?.__error) {
+            if (cc.data?.media_locks?.rules) cc.data.media_locks.rules[key] = previous;
+            this.renderMediaLocksPanel();
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', ui.tf('ml_toast_error', { name, error: this.consoleErrorMessage(res) }));
+            return false;
+        }
+        this.applyServerConfiguration(res.configuration, { onlySwitches: true });
+        const saved = res.configuration?.media_locks?.rules?.[key] || rule;
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '🔒', ui.tf('ml_toast_saved', { name, rule: ui.mediaLockRuleSummary(saved) }));
+        return true;
+    },
+
+    async setLongVideoThreshold(seconds) {
+        const chatId = this.selectedGroupId();
+        if (!chatId) return this.consolePickFirst();
+        const cc = this._chatConfig;
+        const value = Number(seconds);
+        if (!cc.data?.media_locks || cc.chatId !== String(chatId) || this._mediaLocks.busyKey) return false;
+        if (!(CONFIG.MEDIA_LOCKS?.LONG_VIDEO_CHOICES || [300, 600]).includes(value)) return false;
+        if (Number(cc.data.media_locks.long_video_max_seconds) === value) return false;
+
+        const epoch = session.epoch;
+        this._mediaLocks.busyKey = 'long_video';
+        this.renderMediaLocksPanel();
+        const res = await api.updateChatConfiguration(chatId, { media_locks: { long_video_max_seconds: value } });
+        this._mediaLocks.busyKey = null;
+        if (res?.__stale || epoch !== session.epoch || cc.chatId !== String(chatId)) return false;
+        if (res?.__error) {
+            this.renderMediaLocksPanel();
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', ui.tf('ml_toast_error', { name: ui.t('ml_long_video'), error: this.consoleErrorMessage(res) }));
+            return false;
+        }
+        this.applyServerConfiguration(res.configuration, { onlySwitches: true });
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '🎬', ui.tf('ml_toast_long_video', { m: value / 60 }));
+        return true;
+    },
+
+    /** Cambios de la matriz entre dos árboles (para nombrarlos en el aviso de cambio remoto). */
+    mediaLockChanges(before, after) {
+        const prev = before?.rules || {};
+        const next = after?.rules || {};
+        const out = [];
+        Object.keys(next).forEach(key => {
+            const a = prev[key], b = next[key];
+            if (!a || a.action !== b.action || Boolean(a.delete) !== Boolean(b.delete)) {
+                out.push(`🔒 ${ui.mediaLockLabel(key)} → ${ui.mediaLockRuleSummary(b)}`);
+            }
+        });
+        if (before && after && Number(before.long_video_max_seconds) !== Number(after.long_video_max_seconds)) {
+            out.push(ui.tf('ml_toast_long_video', { m: Number(after.long_video_max_seconds) / 60 }));
+        }
+        return out;
     },
 
     /** 💾 Guardar módulo: valida en cliente, envía el lote del módulo y refleja lo que guardó el servidor. */
@@ -648,6 +781,7 @@ export const app = {
 
         if (data?.configuration && cc.data) {
             const before = JSON.stringify(cc.data);
+            const previousMediaLocks = cc.data.media_locks ? JSON.parse(JSON.stringify(cc.data.media_locks)) : null;
             const previousSwitches = this.configSwitchValues(cc.data);
             this.applyServerConfiguration(data.configuration);
             if (before !== JSON.stringify(cc.data)) {
@@ -658,6 +792,7 @@ export const app = {
                 Object.entries(currentSwitches).forEach(([field, on]) => {
                     if (previousSwitches[field] !== on) changes.push(`${on ? '🟢' : '🔴'} ${ui.t(`cfg_${field}`)}`);
                 });
+                changes.push(...this.mediaLockChanges(previousMediaLocks, cc.data.media_locks));
                 if (!changes.length) changes.push(trFallback('cfg_remote_values', 'Valores de configuración', 'Configuration values'));
             }
         } else {
@@ -959,6 +1094,7 @@ export const app = {
         state.securitySwitches = null;     // desconocido hasta leer el dashboard de una comunidad
         this._chatConfig.seq += 1;          // invalida cargas de configuración en vuelo
         Object.assign(this._chatConfig, { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {} });
+            this.renderMediaLocksPanel();
         this._planForm = { busy: false, lastCreated: null };
         state.switchesChatId = null;
         this._switchBusy = null;
@@ -2214,6 +2350,7 @@ export const app = {
             state.switchesChatId = null;
             this._chatConfig.seq += 1;
             Object.assign(this._chatConfig, { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {} });
+            this.renderMediaLocksPanel();
             ui.setConsoleState('idle');
         }
     },
@@ -2260,6 +2397,7 @@ export const app = {
         if (isChannel) {
             this._chatConfig.seq += 1;
             Object.assign(this._chatConfig, { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {} });
+            this.renderMediaLocksPanel();
             ui.setConsoleState('idle');
         }
         const hasLiveForChat = Boolean(
