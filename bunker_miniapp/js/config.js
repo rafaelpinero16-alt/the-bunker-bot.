@@ -10,6 +10,9 @@
    v9: programador recurrente de planes (6/12/24/48 h), plan tarifario vigente del operador, informe
    periódico de administradores en el canal de registro, bloqueos de seguridad en la analítica y
    Escudo Anti-Raid / Anti-Reportes.
+   v14: sincronización bidireccional bot ↔ Mini App. El evento 'settings_updated' del radar llega desde la
+   API (/settings, /configuration), la consola privada del bot, los comandos de grupo y el Protocolo de
+   Pánico con el árbol de configuración real y los interruptores del Centinela (CONFIG.SYNC).
    ========================================================================== */
 
 export const CONFIG = {
@@ -117,6 +120,17 @@ export const CONFIG = {
         LIST_TIMEOUT_MS: 12000,
         CONFIRM_TIMEOUT_MS: 6000,   // la confirmación inline (eliminar / difundir) se cancela sola
         TOAST_MS: 3200
+    },
+
+    // 🔄 v14 · Sincronización en vivo de ajustes (evento 'settings_updated' de /ws/radar/{chat_id}).
+    // Mismos valores que emiten main.py (emit_settings_updated), handlers/user_private.py y handlers/groups.py.
+    SYNC: {
+        BOT_SOURCES: ['bot_console', 'group_command', 'panic'],   // cambios hechos desde Telegram
+        DEVICE_SOURCES: ['settings', 'configuration'],             // cambios hechos desde otra Mini App
+        TOAST_MAX_CHANGES: 4,                                      // cambios nombrados en el aviso
+        // Interruptores del Centinela que llegan en data.sentinel (database.SENTINEL_FLAG_KEYS).
+        // vc_join_enabled y vc_enabled son el MISMO interruptor (aviso de entrada al VC).
+        SENTINEL_FLAGS: ['vc_join_enabled', 'micvip_enabled', 'reset_enabled', 'sched_enabled', 'vc_welcome_enabled']
     },
 
     // 📈 Analítica de comunidad
@@ -546,7 +560,17 @@ export const translations = {
         cfg_status_dirty: "Cambios sin guardar",
         cfg_status_invalid: "Revisa los campos marcados",
         cfg_status_error: "Error: {error}",
-        cfg_status_remote: "Actualizado desde otro dispositivo",
+        cfg_status_remote: "Actualizado en remoto (bot u otro dispositivo)",
+        // v14 · Sincronización en vivo bot ↔ Mini App
+        cfg_remote_bot: "Ajustes cambiados desde el bot",
+        cfg_remote_device: "Ajustes cambiados en otro dispositivo",
+        cfg_remote_panic: "🚨 Protocolo de Pánico aplicado",
+        cfg_remote_values: "Valores de configuración",
+        sentinel_flag_vc_join_enabled: "Aviso de entrada al VC",
+        sentinel_flag_micvip_enabled: "Aviso MicVIP",
+        sentinel_flag_reset_enabled: "Optimización (3.5 h)",
+        sentinel_flag_sched_enabled: "Apertura programada",
+        sentinel_flag_vc_welcome_enabled: "Bienvenida fijada del VC",
         cfg_toast_saved: "{section}: configuración guardada ✅",
         cfg_toast_error: "{section}: no se pudo guardar — {error}",
         cfg_toast_switch_on: "{name}: activado",
@@ -1085,7 +1109,17 @@ export const translations = {
         cfg_status_dirty: "Unsaved changes",
         cfg_status_invalid: "Check the highlighted fields",
         cfg_status_error: "Error: {error}",
-        cfg_status_remote: "Updated from another device",
+        cfg_status_remote: "Updated remotely (bot or another device)",
+        // v14 · Live bot ↔ Mini App sync
+        cfg_remote_bot: "Settings changed from the bot",
+        cfg_remote_device: "Settings changed on another device",
+        cfg_remote_panic: "🚨 Panic Protocol applied",
+        cfg_remote_values: "Configuration values",
+        sentinel_flag_vc_join_enabled: "VC join notice",
+        sentinel_flag_micvip_enabled: "MicVIP notice",
+        sentinel_flag_reset_enabled: "Optimization (3.5 h)",
+        sentinel_flag_sched_enabled: "Scheduled opening",
+        sentinel_flag_vc_welcome_enabled: "Pinned VC welcome",
         cfg_toast_saved: "{section}: configuration saved ✅",
         cfg_toast_error: "{section}: could not save — {error}",
         cfg_toast_switch_on: "{name}: enabled",

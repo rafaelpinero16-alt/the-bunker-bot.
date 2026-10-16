@@ -21,6 +21,27 @@ const CLONE_TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 const SWITCH_LABEL_KEYS = { captcha: 'captcha_pro', autolower: 'autolower_title', shield: 'shield_title', linklock: 'linklock_title' };
 const STUDIO_TME_RE = /^(?:t\.me|telegram\.me)\/\S+$/i;
 
+// v14 · Origen de los eventos 'settings_updated' del radar (main.py, user_private.py y groups.py).
+// Fuente de verdad: CONFIG.SYNC (config.js); los valores literales son solo el respaldo.
+const BOT_SETTING_SOURCES = new Set(CONFIG.SYNC?.BOT_SOURCES || ['bot_console', 'group_command', 'panic']);
+const DEVICE_SETTING_SOURCES = new Set(CONFIG.SYNC?.DEVICE_SOURCES || ['settings', 'configuration']);
+const SYNC_TOAST_MAX_CHANGES = CONFIG.SYNC?.TOAST_MAX_CHANGES || 4;
+// Interruptores del Centinela que el bot expone en el evento (data.sentinel). Textos: sentinel_flag_* de config.js.
+const SENTINEL_FLAG_LABELS = {
+    vc_join_enabled: ['Aviso de entrada al VC', 'VC join notice'],
+    micvip_enabled: ['Aviso MicVIP', 'MicVIP notice'],
+    reset_enabled: ['Optimización (3.5 h)', 'Optimization (3.5 h)'],
+    sched_enabled: ['Apertura programada', 'Scheduled opening'],
+    vc_welcome_enabled: ['Bienvenida fijada del VC', 'Pinned VC welcome']
+};
+
+/** Texto traducido con respaldo inline: si la clave aún no existe en config.js no se muestra la clave cruda. */
+function trFallback(key, es, en) {
+    const lang = state.currentLang === 'en' ? 'en' : 'es';
+    const value = translations?.[lang]?.[key] || translations?.es?.[key];
+    return value || (lang === 'en' ? en : es);
+}
+
 function isHttpUrl(value) {
     if (/\s/.test(value)) return false;
     try {
@@ -493,7 +514,7 @@ export const app = {
         const next = !previous;
         const epoch = session.epoch;
         const name = ui.t(`cfg_${field}`);
-        cc.switchBusy[field] = true;
+        cc.switchBusy[field] = { next };   // v14: se guarda el valor en vuelo para no pisarlo con eventos remotos
         ui.setConfigSwitch(field, next, { busy: true });
         tgApp.hapticImpact('light');
 
@@ -532,6 +553,17 @@ export const app = {
             const all = Object.keys(ui.CONFIG_LAYOUT);
             const skip = sections ? all.filter(sec => !sections.includes(sec)) : all.filter(sec => cc.dirty[sec]);
             ui.renderChatConfiguration(configuration, { skipSections: skip });
+            // v14 · Los interruptores se guardan al instante (nunca quedan "pendientes"): también se actualizan en
+            // los módulos omitidos por tener texto sin guardar. Un interruptor con su petición en vuelo conserva
+            // el valor que el operador acaba de elegir y su pulso de espera.
+            Object.entries(ui.CONFIG_LAYOUT).forEach(([section, fields]) => {
+                Object.entries(fields).forEach(([field, kind]) => {
+                    if (kind !== 'switch') return;
+                    const busy = cc.switchBusy[field];
+                    if (busy) ui.setConfigSwitch(field, Boolean(busy.next), { busy: true });
+                    else if (skip.includes(section) && !sections) ui.setConfigSwitch(field, Boolean(configuration[section]?.[field]));
+                });
+            });
         }
         this.syncLegacySwitchState();
     },
@@ -602,21 +634,82 @@ export const app = {
         tgApp.hapticSelection();
     },
 
-    /** Evento 'settings_updated' del radar: otro dispositivo (o el bot) cambió la configuración. */
+    /**
+     * Evento 'settings_updated' del radar: otro dispositivo (o el bot) cambió la configuración.
+     * v14: los interruptores se reflejan aunque el módulo tenga texto sin guardar, el eco de un guardado propio
+     * no genera avisos, y un cambio hecho desde el bot (consola privada, comandos de grupo o Protocolo de
+     * Pánico) se anuncia con un aviso que nombra lo que cambió, incluidos los interruptores del Centinela.
+     */
     onRemoteSettingsUpdated(chatId, data) {
         const cc = this._chatConfig;
         if (cc.chatId !== String(chatId)) return;
+        const source = String(data?.source || '');
+        const changes = [];
+
         if (data?.configuration && cc.data) {
             const before = JSON.stringify(cc.data);
+            const previousSwitches = this.configSwitchValues(cc.data);
             this.applyServerConfiguration(data.configuration);
             if (before !== JSON.stringify(cc.data)) {
                 Object.keys(ui.CONFIG_LAYOUT).forEach(sec => {
                     if (!cc.dirty[sec] && !cc.saving[sec]) ui.setConfigSectionStatus(sec, 'remote', ui.t('cfg_status_remote'));
                 });
+                const currentSwitches = this.configSwitchValues(cc.data);
+                Object.entries(currentSwitches).forEach(([field, on]) => {
+                    if (previousSwitches[field] !== on) changes.push(`${on ? '🟢' : '🔴'} ${ui.t(`cfg_${field}`)}`);
+                });
+                if (!changes.length) changes.push(trFallback('cfg_remote_values', 'Valores de configuración', 'Configuration values'));
             }
         } else {
             this.loadChatConfiguration(chatId, { keepDirty: true });
         }
+
+        changes.push(...this.applySentinelFlags(chatId, data?.sentinel));
+        if (!changes.length) return;   // eco de un guardado propio: nada que anunciar
+
+        const fromBot = BOT_SETTING_SOURCES.has(source);
+        if (!fromBot && !DEVICE_SETTING_SOURCES.has(source)) return;
+        const title = source === 'panic'
+            ? trFallback('cfg_remote_panic', '🚨 Protocolo de Pánico aplicado', '🚨 Panic Protocol applied')
+            : fromBot
+                ? trFallback('cfg_remote_bot', 'Ajustes cambiados desde el bot', 'Settings changed from the bot')
+                : trFallback('cfg_remote_device', 'Ajustes cambiados en otro dispositivo', 'Settings changed on another device');
+        ui.showToast({
+            key: 'remote-settings', force: true, icon: fromBot ? '🤖' : '🔄', tone: 'info',
+            ttl: CONFIG.CONSOLE?.TOAST_MS || 3600, title, body: changes.slice(0, SYNC_TOAST_MAX_CHANGES).join(' · ')
+        });
+        tgApp.hapticNotification('success');
+    },
+
+    /** Mapa campo → valor de los interruptores de la consola (para detectar qué cambió en remoto). */
+    configSwitchValues(configuration) {
+        const out = {};
+        Object.entries(ui.CONFIG_LAYOUT).forEach(([section, fields]) => {
+            Object.entries(fields).forEach(([field, kind]) => {
+                if (kind === 'switch') out[field] = Boolean(configuration?.[section]?.[field]);
+            });
+        });
+        return out;
+    },
+
+    /**
+     * v14 · Interruptores del Centinela (aviso de entrada al VC, MicVIP, optimización…). La Mini App aún no los
+     * edita, pero los conserva en this._sentinelFlags y devuelve los cambios respecto al último estado conocido.
+     */
+    applySentinelFlags(chatId, sentinel) {
+        if (!sentinel || typeof sentinel !== 'object') return [];
+        const previous = this._sentinelFlags && this._sentinelFlags.chatId === String(chatId) ? this._sentinelFlags : null;
+        const next = { chatId: String(chatId) };
+        const flags = CONFIG.SYNC?.SENTINEL_FLAGS || Object.keys(SENTINEL_FLAG_LABELS);
+        flags.filter(key => SENTINEL_FLAG_LABELS[key]).forEach(key => {
+            const raw = key === 'vc_join_enabled' ? (sentinel.vc_join_enabled ?? sentinel.vc_enabled) : sentinel[key];
+            if (raw !== undefined && raw !== null) next[key] = Number(raw) === 1;
+        });
+        this._sentinelFlags = next;
+        if (!previous) return [];
+        return Object.keys(SENTINEL_FLAG_LABELS)
+            .filter(key => key in next && key in previous && next[key] !== previous[key])
+            .map(key => `${next[key] ? '🟢' : '🔴'} ${trFallback(`sentinel_flag_${key}`, ...SENTINEL_FLAG_LABELS[key])}`);
     },
 
     // ---- Utilidades de la consola de grupos (v8.2) ----

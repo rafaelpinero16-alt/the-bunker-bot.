@@ -260,6 +260,21 @@ async def _deny_owner_only_message(message: Message) -> None:
         pass
 
 
+def _sync_miniapp(group_id: int, changed, source: str = "group_command") -> None:
+    """
+    🎙️ v14 · Sincronización bot → Mini App: tras un comando de grupo que cambia ajustes (escudo, antirruido,
+    atenuación, tarifa de oradores, Protocolo de Pánico) se emite 'settings_updated' a /ws/radar/{group_id} con
+    el estado real guardado. Reutiliza el emisor de la consola privada (misma forma que la API de main.py).
+    Import diferido: user_private importa este módulo.
+    """
+    try:
+        from .user_private import emit_settings_updated_bg
+    except Exception as ex:
+        logger.debug(f"[Radar] Emisor de ajustes no disponible: {ex}")
+        return
+    emit_settings_updated_bg(group_id, source, changed)
+
+
 async def _require_owner_message(bot: Bot, message: Message) -> bool:
     if await _message_author_is_owner(bot, message):
         return True
@@ -1564,6 +1579,8 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
     was_activated = await activate_panic(group_id, activated_by, snapshot_json)
     if not was_activated:
         return False
+    # El protocolo eleva captcha, cerraduras y anti-spam: la Mini App lo refleja al instante.
+    _sync_miniapp(group_id, ["panic", "captcha_enabled", "linklock_enabled", "antiflood_enabled"], source="panic")
 
     try:
         await bot.set_chat_permissions(chat_id=group_id, permissions=_lockdown_permissions())
@@ -1646,6 +1663,8 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
         return
 
     result = await deactivate_panic(group_id)
+    if result:
+        _sync_miniapp(group_id, ["panic", "captcha_enabled", "linklock_enabled", "antiflood_enabled"], source="panic")
     perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
     if perms_json:
         try:
@@ -1683,6 +1702,7 @@ async def lift_raid_lockdown(bot: Bot, group_id: int) -> bool:
     result = await deactivate_panic(group_id)
     if not result:
         return False
+    _sync_miniapp(group_id, ["panic", "captcha_enabled", "linklock_enabled", "antiflood_enabled"], source="panic")
 
     perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
     if perms_json:
@@ -1715,6 +1735,7 @@ async def screenshield_toggle(message: Message, bot: Bot):
     args = message.text.split()[1:]
     status = _parse_on_off(args)
     await set_screen_shield_status(group_id, status)
+    _sync_miniapp(group_id, ["shield_enabled"])
     await message.answer(
         f"🎥 Escudo Antinota (Screen-Sharing Shield): <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
         f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
@@ -1732,6 +1753,7 @@ async def duck_volume_command(message: Message, bot: Bot):
         return
     pct = max(1, min(100, int(args[0].strip())))
     await set_podcast_duck_volume(group_id, pct * 100)
+    _sync_miniapp(group_id, ["podcast_duck_volume"])
     await message.answer(f"🎚️ Volumen de atenuación del Modo Podcast ajustado a <b>{pct}%</b>.", parse_mode="HTML")
 
 
@@ -1743,6 +1765,7 @@ async def noiseshield_toggle(message: Message, bot: Bot):
     args = message.text.split()[1:]
     status = _parse_on_off(args)
     await set_noise_shield_status(group_id, status)
+    _sync_miniapp(group_id, ["noise_shield"])
     await message.answer(
         f"🔇 Escudo Antirruido: <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
         f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
@@ -1797,6 +1820,7 @@ async def speakers_command(message: Message, bot: Bot):
         if len(args) > 1 and args[1].strip().isdigit():
             new_price = int(args[1].strip())
             await set_speaker_price(group_id, new_price)
+            _sync_miniapp(group_id, ["speaker_price"])
             await message.answer(f"⭐ Tarifa de turno prioritario actualizada a <b>{new_price} Stars (XTR)</b>.", parse_mode="HTML")
         else:
             await message.answer("Uso: /speakers price <cantidad_de_stars>")
