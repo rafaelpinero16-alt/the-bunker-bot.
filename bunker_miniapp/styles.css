@@ -1,24 +1,47 @@
+/* ==========================================================================
+   THE BUNKER — COMMAND OS · styles.css (v8 · Elite OLED + Cyber Glow)
+   Tipografía Urbanist / Outfit (600–900), contraste OLED y acentos neón tácticos.
+   Solo presentación: no renombra ni sustituye ninguna clase, ID o atributo que use el JS.
+   ========================================================================== */
+
 :root {
-    --bg-deep: #030407;
-    --panel-bg: rgba(10, 12, 18, 0.75);
-    --panel-border: rgba(255, 255, 255, 0.08);
+    /* Superficies OLED */
+    --bg-deep: #000000;
+    --panel-bg: rgba(8, 10, 16, 0.78);
+    --panel-border: rgba(255, 255, 255, 0.085);
+    --panel-highlight: rgba(255, 255, 255, 0.07);
     --text-primary: #ffffff;
-    --text-secondary: #94a3b8;
-    --card-bg: rgba(0, 0, 0, 0.5);
+    --text-secondary: #9aa8bd;
+    --card-bg: rgba(0, 0, 0, 0.55);
     --card-hover: rgba(0, 243, 255, 0.08);
-    --grid-color: rgba(0, 243, 255, 0.03);
+    --grid-color: rgba(0, 243, 255, 0.035);
+
+    /* Acentos */
     --accent-cyan: #00f3ff;
     --accent-magenta: #ff00ff;
     --accent-blue: #2563eb;
+    --accent-live: #39ff88;
+    --accent-stars: #fcd34d;
     --badge-gold: #f59e0b;
     --badge-silver: #94a3b8;
     --badge-bronze: #d97706;
+
+    /* Resplandores (RGB para componer transparencias) */
+    --cyan-rgb: 0, 243, 255;
+    --magenta-rgb: 255, 0, 255;
+    --live-rgb: 57, 255, 136;
+    --stars-rgb: 252, 211, 77;
+
+    /* Tipografía */
+    --font-display: 'Urbanist', 'Outfit', sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
 [data-theme="light"] {
     --bg-deep: #f1f5f9;
     --panel-bg: rgba(255, 255, 255, 0.92);
     --panel-border: rgba(0, 0, 0, 0.1);
+    --panel-highlight: rgba(255, 255, 255, 0.6);
     --text-primary: #090d16;
     --text-secondary: #475569;
     --card-bg: rgba(241, 245, 249, 0.88);
@@ -27,17 +50,30 @@
     --accent-cyan: #00a8b3;
     --accent-magenta: #c026d3;
     --accent-blue: #1d4ed8;
+    --accent-live: #059669;
+    --accent-stars: #b45309;
     --badge-gold: #d97706;
     --badge-silver: #64748b;
     --badge-bronze: #b45309;
+    --cyan-rgb: 0, 168, 179;
+    --magenta-rgb: 192, 38, 211;
+    --live-rgb: 5, 150, 105;
+    --stars-rgb: 180, 83, 9;
 }
 
+/* ==========================================================================
+   BASE & TIPOGRAFÍA
+   ========================================================================== */
 html, body {
     background-color: var(--bg-deep);
     color: var(--text-primary);
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: 'Urbanist', 'Outfit', sans-serif;
+    font-weight: 600;
     overflow-x: hidden;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "kern" 1, "liga" 1;
     transition: background-color 0.3s ease, color 0.3s ease;
     transform: none;
     filter: none;
@@ -49,7 +85,46 @@ body {
     margin: 0 auto;
     min-height: 100vh;
     position: relative;
-    box-shadow: 0 0 50px rgba(0, 243, 255, 0.05);
+    box-shadow: 0 0 60px rgba(var(--cyan-rgb), 0.06);
+}
+
+/* Encabezados: peso 800 por defecto, interletrado compacto para impacto en móvil */
+h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+}
+
+/* Las clases font-extrabold / font-black de Tailwind usan la misma familia display */
+.font-extrabold, .font-black { font-family: var(--font-display); }
+.font-black { letter-spacing: -0.015em; }
+
+/* Encabezados de panel en mayúsculas (tracking-wider): más peso, sin perder el espaciado táctico */
+#app-shell h2.uppercase,
+#app-shell h3.uppercase.font-extrabold {
+    font-weight: 900;
+}
+
+/* Botones y etiquetas de acción: nunca por debajo de 800 */
+#app-shell button.font-bold,
+#login-gate button.font-bold,
+#session-expired button {
+    font-weight: 800;
+}
+
+#app-shell button.font-bold:not([class*="tracking-"]),
+#login-gate button.font-bold:not([class*="tracking-"]) {
+    letter-spacing: 0.02em;
+}
+
+#app-shell button.font-extrabold { font-weight: 900; }
+#app-shell button.font-extrabold:not([class*="tracking-"]) { letter-spacing: 0.03em; }
+
+/* Etiquetas uppercase diminutas: un poco más de aire para que sigan siendo legibles a 8–10 px */
+#app-shell .uppercase.font-semibold:not([class*="tracking-"]),
+#app-shell .uppercase.font-bold:not(button):not(h1):not(h2):not(h3):not([class*="tracking-"]) {
+    letter-spacing: 0.06em;
 }
 
 .text-theme-main { color: var(--text-primary); }
@@ -57,7 +132,8 @@ body {
 
 /* Adaptación universal de inputs, selectores y textareas al tema */
 input[type="text"], input[type="number"], select, textarea {
-    font-family: 'Plus Jakarta Sans', sans-serif;
+    font-family: var(--font-display);
+    font-weight: 700;
     background-color: var(--card-bg) !important;
     color: var(--text-primary) !important;
     border-color: var(--panel-border) !important;
@@ -65,13 +141,16 @@ input[type="text"], input[type="number"], select, textarea {
 }
 
 input:focus, select:focus, textarea:focus {
-    box-shadow: 0 0 15px rgba(0, 243, 255, 0.25);
+    box-shadow: 0 0 0 1px rgba(var(--cyan-rgb), 0.45), 0 0 18px rgba(var(--cyan-rgb), 0.28);
     border-color: var(--accent-cyan) !important;
 }
 
+::placeholder { font-weight: 600; opacity: 0.55; }
+
 select option {
-    background-color: #0a0c12;
+    background-color: #05070c;
     color: #00f3ff;
+    font-weight: 700;
 }
 
 [data-theme="light"] select option {
@@ -79,15 +158,178 @@ select option {
     color: #090d16;
 }
 
-/* Efecto Glassmorphism Refinado */
+/* Foco visible accesible (teclado / lectores), coherente con el acento cian */
+button:focus-visible,
+a:focus-visible,
+[role="switch"]:focus-visible,
+select:focus-visible {
+    outline: 2px solid var(--accent-cyan);
+    outline-offset: 2px;
+}
+
+/* ==========================================================================
+   UTILIDADES NEÓN TÁCTICAS (Cyber Glow & Accents)
+   ========================================================================== */
+.neon-glow-cyan {
+    box-shadow: 0 0 20px rgba(0, 243, 255, 0.35), inset 0 0 10px rgba(0, 243, 255, 0.15);
+    border-color: rgba(0, 243, 255, 0.6);
+}
+
+.neon-text-cyan {
+    text-shadow: 0 0 12px rgba(0, 243, 255, 0.6);
+}
+
+.neon-glow-magenta {
+    box-shadow: 0 0 20px rgba(255, 0, 255, 0.35), inset 0 0 10px rgba(255, 0, 255, 0.15);
+    border-color: rgba(255, 0, 255, 0.6);
+}
+
+.neon-text-magenta {
+    text-shadow: 0 0 12px rgba(255, 0, 255, 0.6);
+}
+
+/* Variantes de apoyo: estado en vivo (verde radar) y balances en Stars (ámbar) */
+.neon-text-live {
+    color: var(--accent-live);
+    text-shadow: 0 0 10px rgba(var(--live-rgb), 0.55);
+}
+
+.neon-text-stars {
+    text-shadow: 0 0 14px rgba(var(--stars-rgb), 0.45);
+}
+
+/* Insignia de rango (PRO ⭐ / ULTRA PRO 💎) */
+span.neon-badge,
+.neon-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35em;
+    padding: 0.2em 0.7em;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    font-family: var(--font-display);
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    line-height: 1.5;
+}
+
+.neon-badge.neon-text-cyan {
+    color: var(--accent-cyan);
+    background: rgba(var(--cyan-rgb), 0.08);
+    box-shadow: 0 0 14px rgba(var(--cyan-rgb), 0.3), inset 0 0 8px rgba(var(--cyan-rgb), 0.12);
+}
+
+.neon-badge.neon-text-magenta {
+    color: var(--accent-magenta);
+    background: rgba(var(--magenta-rgb), 0.08);
+    box-shadow: 0 0 14px rgba(var(--magenta-rgb), 0.3), inset 0 0 8px rgba(var(--magenta-rgb), 0.12);
+}
+
+/* Punto "en vivo" junto a los estados ONLINE */
+span.neon-live,
+.neon-live {
+    color: var(--accent-live);
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-shadow: 0 0 10px rgba(var(--live-rgb), 0.55);
+}
+
+/* En tema claro el neón se convierte en un acento nítido (sin halo que ensucie el blanco) */
+[data-theme="light"] .neon-glow-cyan {
+    box-shadow: 0 6px 18px rgba(var(--cyan-rgb), 0.18), inset 0 0 0 1px rgba(var(--cyan-rgb), 0.12);
+    border-color: rgba(var(--cyan-rgb), 0.55);
+}
+
+[data-theme="light"] .neon-glow-magenta {
+    box-shadow: 0 6px 18px rgba(var(--magenta-rgb), 0.18), inset 0 0 0 1px rgba(var(--magenta-rgb), 0.12);
+    border-color: rgba(var(--magenta-rgb), 0.55);
+}
+
+[data-theme="light"] .neon-text-cyan,
+[data-theme="light"] .neon-text-magenta,
+[data-theme="light"] .neon-text-live,
+[data-theme="light"] .neon-text-stars,
+[data-theme="light"] .neon-live {
+    text-shadow: none;
+}
+
+[data-theme="light"] .neon-badge.neon-text-cyan,
+[data-theme="light"] .neon-badge.neon-text-magenta {
+    box-shadow: none;
+}
+
+/* ==========================================================================
+   SUPERFICIES
+   ========================================================================== */
+
+/* Efecto Glassmorphism Refinado (OLED) */
 .glass-panel {
     background: var(--panel-bg);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
     border: 1px solid var(--panel-border);
     border-radius: 24px;
-    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    transition: background 0.3s ease, border-color 0.3s ease;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 var(--panel-highlight);
+    transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+[data-theme="light"] .glass-panel {
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08), inset 0 1px 0 var(--panel-highlight);
+}
+
+/* Paneles con barra superior de acento: la barra brilla en lugar de ser una línea plana */
+.glass-panel.border-t-\[\#00f3ff\] {
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 -6px 18px -10px rgba(var(--cyan-rgb), 0.55), inset 0 1px 0 var(--panel-highlight);
+}
+
+.glass-panel.border-t-\[\#ff00ff\] {
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), 0 -6px 18px -10px rgba(var(--magenta-rgb), 0.55), inset 0 1px 0 var(--panel-highlight);
+}
+
+/* Cuando además lleva el resplandor completo, el neón tiene prioridad */
+.glass-panel.neon-glow-cyan {
+    box-shadow: 0 0 20px rgba(0, 243, 255, 0.35), inset 0 0 10px rgba(0, 243, 255, 0.15), 0 18px 40px rgba(0, 0, 0, 0.45);
+    border-color: rgba(0, 243, 255, 0.6);
+}
+
+.glass-panel.neon-glow-magenta {
+    box-shadow: 0 0 20px rgba(255, 0, 255, 0.35), inset 0 0 10px rgba(255, 0, 255, 0.15), 0 18px 40px rgba(0, 0, 0, 0.45);
+    border-color: rgba(255, 0, 255, 0.6);
+}
+
+[data-theme="light"] .glass-panel.border-t-\[\#00f3ff\],
+[data-theme="light"] .glass-panel.border-t-\[\#ff00ff\],
+[data-theme="light"] .glass-panel.neon-glow-cyan,
+[data-theme="light"] .glass-panel.neon-glow-magenta {
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08), inset 0 1px 0 var(--panel-highlight);
+}
+
+/* Encabezados de sección con color de acento: resplandor neón legible */
+#app-shell h2.text-\[\#00f3ff\],
+#app-shell h3.text-\[\#00f3ff\],
+#app-shell h4.text-\[\#00f3ff\] {
+    text-shadow: 0 0 12px rgba(0, 243, 255, 0.5);
+}
+
+#app-shell h2.text-\[\#ff00ff\],
+#app-shell h3.text-\[\#ff00ff\],
+#app-shell h4.text-\[\#ff00ff\] {
+    text-shadow: 0 0 12px rgba(255, 0, 255, 0.5);
+}
+
+[data-theme="light"] #app-shell h2[class*="text-[#"],
+[data-theme="light"] #app-shell h3[class*="text-[#"],
+[data-theme="light"] #app-shell h4[class*="text-[#"] {
+    text-shadow: none;
+}
+
+/* Cabecera táctica: filo inferior cian */
+#app-shell header.glass-panel {
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.5), 0 8px 24px -14px rgba(var(--cyan-rgb), 0.55), inset 0 1px 0 var(--panel-highlight);
+}
+
+[data-theme="light"] #app-shell header.glass-panel {
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08), 0 6px 18px -12px rgba(var(--cyan-rgb), 0.45), inset 0 1px 0 var(--panel-highlight);
 }
 
 .drawer-content {
@@ -95,21 +337,224 @@ select option {
     border-right: 1px solid var(--panel-border);
 }
 
-/* Títulos Neón 3D */
+/* Títulos Neón 3D (planes PRO / ULTRA PRO) */
 .text-3d-cyan {
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(0, 243, 255, 0.4);
+    font-weight: 900;
+    letter-spacing: -0.01em;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(0, 243, 255, 0.45);
 }
 
 .text-3d-magenta {
-    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(255, 0, 255, 0.4);
+    font-weight: 900;
+    letter-spacing: -0.01em;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8), 0 0 15px rgba(255, 0, 255, 0.45);
 }
 
-/* Rejilla 3D con Perspectiva Tron */
+[data-theme="light"] .text-3d-cyan,
+[data-theme="light"] .text-3d-magenta {
+    text-shadow: none;
+}
+
+/* ==========================================================================
+   CIFRAS: KPI, CONTADORES Y BALANCES EN STARS
+   ========================================================================== */
+
+/* Los KPI usan font-mono en el HTML; se muestran en Urbanist con cifras tabulares (no saltan al actualizarse) */
+.glass-panel h3.font-mono,
+.glass-panel p.font-extrabold,
+#stat-subs-count,
+#stat-revenue-count,
+#profile-balance-stars {
+    font-family: var(--font-display);
+    font-weight: 900;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+}
+
+/* Cifras pequeñas de las rejillas de métricas */
+.glass-panel .font-mono p.font-bold,
+.glass-panel .font-mono .font-bold {
+    font-family: var(--font-display);
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Balances en Telegram Stars (XTR): ámbar con brillo suave */
+#stat-revenue-count,
+#an-kpi-stars-total,
+#profile-balance-stars {
+    text-shadow: 0 0 14px rgba(var(--stars-rgb), 0.4);
+}
+
+[data-theme="light"] #stat-revenue-count,
+[data-theme="light"] #an-kpi-stars-total,
+[data-theme="light"] #profile-balance-stars {
+    text-shadow: none;
+}
+
+/* Contador de suscriptores: el dato principal del panel */
+#stat-subs-count { font-size: 1.75rem; }
+
+/* ==========================================================================
+   ESTADOS EN VIVO
+   ========================================================================== */
+
+/* Píldora del radar WebSocket: el JS expone el estado en data-status */
+#ws-status-pill[data-status="live"] {
+    border-color: rgba(var(--live-rgb), 0.6);
+    box-shadow: 0 0 16px rgba(var(--live-rgb), 0.3), inset 0 0 8px rgba(var(--live-rgb), 0.12);
+}
+
+#ws-status-pill[data-status="live"]::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: var(--accent-live);
+    box-shadow: 0 0 8px rgba(var(--live-rgb), 0.9);
+    animation: neonPulse 1.6s ease-in-out infinite;
+}
+
+#ws-status-pill[data-status="connecting"],
+#ws-status-pill[data-status="reconnecting"] {
+    border-color: rgba(251, 191, 36, 0.5);
+    box-shadow: 0 0 12px rgba(251, 191, 36, 0.18);
+}
+
+#ws-status-pill[data-status="offline"],
+#ws-status-pill[data-status="denied"] {
+    border-color: rgba(244, 63, 94, 0.5);
+    box-shadow: 0 0 12px rgba(244, 63, 94, 0.18);
+}
+
+#ws-status-pill[data-status="live"] #ws-status-label { text-shadow: 0 0 10px rgba(var(--live-rgb), 0.55); }
+
+[data-theme="light"] #ws-status-pill[data-status] { box-shadow: none; }
+[data-theme="light"] #ws-status-pill[data-status="live"] #ws-status-label { text-shadow: none; }
+
+@keyframes neonPulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.45; transform: scale(0.8); }
+}
+
+/* Estados 🟢 del perímetro (texto en verde): brillo de señal activa */
+#app-shell strong.text-emerald-400,
+#app-shell span.text-emerald-400.font-mono {
+    text-shadow: 0 0 10px rgba(52, 211, 153, 0.45);
+}
+
+[data-theme="light"] #app-shell strong.text-emerald-400,
+[data-theme="light"] #app-shell span.text-emerald-400.font-mono {
+    text-shadow: none;
+}
+
+/* Licencia activa en las tarjetas de comunidad (render de ui.js) */
+[data-chat-id] span.text-emerald-400.font-mono.shrink-0 {
+    padding: 0.15em 0.6em;
+    border: 1px solid rgba(52, 211, 153, 0.45);
+    border-radius: 999px;
+    background: rgba(52, 211, 153, 0.08);
+    font-family: var(--font-display);
+    font-weight: 900;
+    letter-spacing: 0.06em;
+}
+
+/* Planes de membresía de canal (render de ui.js): la tarjeta activa recibe el halo cian */
+article[data-plan-id][data-status="active"] {
+    box-shadow: 0 0 18px rgba(var(--cyan-rgb), 0.16), 0 18px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 var(--panel-highlight);
+}
+
+article[data-plan-id][data-status="active"] [data-role="plan-status"] {
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    box-shadow: 0 0 12px rgba(52, 211, 153, 0.28);
+}
+
+[data-theme="light"] article[data-plan-id][data-status="active"],
+[data-theme="light"] article[data-plan-id][data-status="active"] [data-role="plan-status"] {
+    box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+}
+
+/* ==========================================================================
+   INTERRUPTORES DE ADUANA (role="switch" · aria-checked lo gestiona ui.js)
+   ========================================================================== */
+.cfg-switch {
+    transition: background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease;
+}
+
+.cfg-switch[aria-checked="true"] {
+    box-shadow: 0 0 20px rgba(0, 243, 255, 0.35), inset 0 0 10px rgba(0, 243, 255, 0.15);
+    border-color: rgba(0, 243, 255, 0.6);
+}
+
+.cfg-switch[aria-checked="true"] .cfg-switch-knob {
+    box-shadow: 0 0 10px rgba(0, 243, 255, 0.9), 0 0 2px rgba(255, 255, 255, 0.8);
+}
+
+.cfg-switch[aria-checked="false"] .cfg-switch-knob {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+[data-theme="light"] .cfg-switch[aria-checked="true"] {
+    box-shadow: 0 0 0 3px rgba(var(--cyan-rgb), 0.15);
+}
+
+[data-theme="light"] .cfg-switch[aria-checked="true"] .cfg-switch-knob {
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+/* Casillas nativas con el acento cian */
+input[type="checkbox"] { accent-color: var(--accent-cyan); }
+
+/* ==========================================================================
+   BOTONES DE ACCIÓN PRINCIPAL
+   ========================================================================== */
+
+/* Checkout con Telegram Stars (PRO / ULTRA PRO) */
+button[onclick^="app.pagarPlan"] {
+    font-family: var(--font-display);
+    font-weight: 900;
+    font-size: 0.95rem;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+}
+
+button[onclick="app.pagarPlan('pro')"] {
+    box-shadow: 0 0 22px rgba(var(--cyan-rgb), 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+button[onclick="app.pagarPlan('ultra')"] {
+    box-shadow: 0 0 22px rgba(var(--magenta-rgb), 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+[data-theme="light"] button[onclick^="app.pagarPlan"] {
+    box-shadow: 0 8px 18px rgba(37, 99, 235, 0.22);
+}
+
+/* Botones sólidos de acento (texto negro sobre cian o magenta) */
+#app-shell button.bg-\[\#00f3ff\].text-black,
+#app-shell button.bg-\[\#ff00ff\].text-black {
+    font-weight: 900;
+    letter-spacing: 0.05em;
+}
+
+#app-shell button.bg-\[\#00f3ff\].text-black { box-shadow: 0 0 18px rgba(0, 243, 255, 0.4); }
+#app-shell button.bg-\[\#ff00ff\].text-black { box-shadow: 0 0 18px rgba(255, 0, 255, 0.4); }
+
+[data-theme="light"] #app-shell button.bg-\[\#00f3ff\].text-black,
+[data-theme="light"] #app-shell button.bg-\[\#ff00ff\].text-black {
+    box-shadow: none;
+}
+
+/* ==========================================================================
+   FONDO: REJILLA TRON
+   ========================================================================== */
 .tron-grid {
     position: fixed;
     top: 0; left: 0; right: 0; margin: 0 auto;
     width: 100%; max-width: 480px; height: 100vh;
-    background-image: 
+    background-image:
         linear-gradient(var(--grid-color) 1px, transparent 1px),
         linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
     background-size: 35px 35px;
@@ -131,7 +576,9 @@ select option {
     z-index: -1;
 }
 
-/* Transiciones Suaves para Vistas */
+/* ==========================================================================
+   TRANSICIONES DE VISTAS Y DRAWER
+   ========================================================================== */
 .tab-view {
     animation: tabFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
@@ -156,6 +603,17 @@ select option {
     to { transform: translateX(0); }
 }
 
+/* Enlaces del drawer: barra de acento al pasar o pulsar */
+#cyber-drawer nav button {
+    position: relative;
+    letter-spacing: 0.04em;
+}
+
+#cyber-drawer nav button:hover,
+#cyber-drawer nav button:focus-visible {
+    box-shadow: inset 2px 0 0 var(--accent-cyan), 0 0 14px rgba(var(--cyan-rgb), 0.12);
+}
+
 /* ==========================================================================
    COMPONENTES EXCLUSIVOS CHATKEEPER DASHBOARD
    ========================================================================== */
@@ -168,17 +626,20 @@ select option {
 /* Medallas y Podio del Top 10 */
 .rank-badge-1 {
     color: var(--badge-gold);
-    text-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+    font-weight: 900;
+    text-shadow: 0 0 10px rgba(245, 158, 11, 0.55);
 }
 
 .rank-badge-2 {
     color: var(--badge-silver);
-    text-shadow: 0 0 8px rgba(148, 163, 184, 0.4);
+    font-weight: 900;
+    text-shadow: 0 0 8px rgba(148, 163, 184, 0.45);
 }
 
 .rank-badge-3 {
     color: var(--badge-bronze);
-    text-shadow: 0 0 8px rgba(217, 119, 6, 0.4);
+    font-weight: 900;
+    text-shadow: 0 0 8px rgba(217, 119, 6, 0.45);
 }
 
 /* Bloque Módulos Activos (Estilo Neón ChatKeeper) */
@@ -220,6 +681,12 @@ select option {
     isolation: isolate;
 }
 
+#lang-indicator {
+    font-family: var(--font-display);
+    letter-spacing: 0.08em;
+    text-shadow: 0 0 8px rgba(0, 243, 255, 0.6);
+}
+
 /* ==========================================================================
    LOGIN GATE — Acceso Dual (Telegram Widget / Login vía Bot)
    ========================================================================== */
@@ -228,7 +695,12 @@ select option {
 }
 
 #login-gate .glass-panel {
-    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.35), 0 0 30px rgba(0, 243, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.5), 0 0 34px rgba(0, 243, 255, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+#login-gate h1 {
+    font-weight: 900;
+    letter-spacing: 0.04em;
 }
 
 /* El widget oficial de Telegram inyecta un iframe; se centra y no debe
@@ -247,7 +719,26 @@ select option {
     animation: tabFadeIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* Scrollbar Minimalista */
+/* ==========================================================================
+   SCROLLBAR & SELECCIÓN
+   ========================================================================== */
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(0, 243, 255, 0.3); border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(0, 243, 255, 0.35); border-radius: 4px; }
+
+/* ==========================================================================
+   MOVIMIENTO REDUCIDO
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+    .tron-grid,
+    #ws-status-pill[data-status="live"]::before {
+        animation: none;
+    }
+    .tab-view,
+    #app-shell,
+    #login-gate,
+    #chatkeeper-suite-panel,
+    #cyber-drawer > div {
+        animation-duration: 0.01ms;
+    }
+}

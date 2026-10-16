@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- THE BUNKER — COMMAND OS v7.3 — Analítica en Vivo · Estudio de Canales reactivo + Planes de Membresía interactivos · Checkout solo Telegram Stars · Sesión estricta por initData -->
+<!-- THE BUNKER — COMMAND OS v7.3 · UI v8 Elite OLED (Urbanist + Cyber Glow) — Analítica en Vivo · Estudio de Canales reactivo + Planes de Membresía interactivos · Checkout solo Telegram Stars · Sesión estricta por initData -->
 <html lang="es" data-theme="dark">
 <head>
     <meta charset="UTF-8">
@@ -8,8 +8,22 @@
     <link rel="icon" type="image/jpeg" href="logo.jpg">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        /* Tipografía display de la Mini App: Urbanist (respaldo Outfit) para todas las utilidades font-sans */
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Urbanist', 'Outfit', 'ui-sans-serif', 'system-ui', 'sans-serif']
+                    }
+                }
+            }
+        };
+    </script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@600;700;800;900&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
 </head>
 <body class="min-h-screen flex flex-col justify-between p-4 max-w-md mx-auto selection:bg-[#00f3ff] selection:text-black relative pb-16">
@@ -38,7 +52,7 @@
                 <div class="flex-1 h-px bg-neutral-800"></div>
             </div>
 
-            <button onclick="app.loginViaBot()" class="w-full bg-black/60 border border-[#00f3ff] text-[#00f3ff] font-bold text-xs py-3 rounded-xl uppercase flex items-center justify-center gap-2 hover:bg-[#00f3ff]/10 active:scale-95 transition-all">
+            <button onclick="app.loginViaBot()" class="neon-glow-cyan w-full bg-black/60 border border-[#00f3ff] text-[#00f3ff] font-bold text-xs py-3 rounded-xl uppercase flex items-center justify-center gap-2 hover:bg-[#00f3ff]/10 active:scale-95 transition-all">
                 <i class="fa-brands fa-telegram text-base"></i> <span data-i18n="login_via_bot">Iniciar sesión vía Bot</span>
             </button>
 
@@ -62,7 +76,7 @@
                                 <div class="w-full h-full bg-black rounded-[6px] flex items-center justify-center font-black text-sm text-[#00f3ff]">B</div>
                             </div>
                             <div>
-                                <span class="font-extrabold text-sm text-theme-main tracking-wider uppercase font-sans">BUNKER OS</span>
+                                <span class="neon-text-cyan font-extrabold font-black text-sm text-theme-main tracking-wider uppercase font-sans">BUNKER OS</span>
                                 <p class="text-[8px] text-theme-muted tracking-widest uppercase">Command Suite</p>
                             </div>
                         </div>
@@ -218,7 +232,7 @@
                     <div class="glass-panel p-5 space-y-3">
                         <h3 class="text-xs font-extrabold text-[#00f3ff] uppercase tracking-wider flex items-center justify-between">
                             <span><i class="fa-solid fa-chart-pie mr-2"></i><span data-i18n="dash_telemetry">Telemetría del Búnker</span></span>
-                            <span class="text-[9px] text-emerald-400 font-semibold" data-i18n="online_tag">En Línea 🟢</span>
+                            <span class="neon-live text-[9px] text-emerald-400 font-semibold" data-i18n="online_tag">En Línea 🟢</span>
                         </h3>
                         <div class="grid grid-cols-3 gap-2 text-center pt-1 font-mono">
                             <div class="bg-black/50 p-2 rounded-xl border border-neutral-800">
@@ -1057,9 +1071,9 @@
                     </div>
 
                     <!-- PLAN PRO — 300 Stars (XTR) -->
-                    <div class="glass-panel p-5 border-t-2 border-t-[#00f3ff] shadow-[0_10px_30px_rgba(0,243,255,0.05)] relative overflow-hidden">
+                    <div class="glass-panel neon-glow-cyan p-5 border-t-2 border-t-[#00f3ff] shadow-[0_10px_30px_rgba(0,243,255,0.05)] relative overflow-hidden">
                         <div class="mb-4 text-center">
-                            <span class="text-[10px] text-[#00f3ff] font-bold tracking-wider" data-i18n="pro_badge">PLAN MENSUAL</span>
+                            <span class="neon-badge neon-text-cyan text-[10px] text-[#00f3ff] font-bold tracking-wider" data-i18n="pro_badge">PLAN MENSUAL</span>
                             <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-cyan" data-i18n="pro_title">Plan PRO</h3>
                             <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="pro_desc">Automatización total, moderación de voz y comandos ilimitados para tu comunidad.</p>
                         </div>
@@ -1072,9 +1086,9 @@
                     </div>
 
                     <!-- PLAN ULTRA PRO — 600 Stars (XTR) -->
-                    <div class="glass-panel p-5 border-t-2 border-t-[#ff00ff] shadow-[0_10px_30px_rgba(255,0,255,0.05)] relative overflow-hidden">
+                    <div class="glass-panel neon-glow-magenta p-5 border-t-2 border-t-[#ff00ff] shadow-[0_10px_30px_rgba(255,0,255,0.05)] relative overflow-hidden">
                         <div class="mb-4 text-center">
-                            <span class="text-[10px] text-[#ff00ff] font-bold tracking-wider" data-i18n="ultra_badge">ACCESO ILIMITADO</span>
+                            <span class="neon-badge neon-text-magenta text-[10px] text-[#ff00ff] font-bold tracking-wider" data-i18n="ultra_badge">ACCESO ILIMITADO</span>
                             <h3 class="font-extrabold text-theme-main text-xl uppercase mt-1 text-3d-magenta" data-i18n="ultra_title">ULTRA PRO</h3>
                             <p class="text-[11px] text-theme-muted mt-2 leading-tight px-2" data-i18n="ultra_desc">Radar avanzado anti-fantasmas, prioridad máxima en servidores y soporte directo.</p>
                         </div>
