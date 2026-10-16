@@ -2430,10 +2430,33 @@ def get_all_active_clone_tokens() -> list:
     return tokens
 
 
+def _decrypt_session_or_none(stored, context: str = ""):
+    """
+    v16 · Sesión MTProto descifrada, o None si sigue cifrada tras intentarlo (ENCRYPTION_KEY cambió entre
+    despliegues). Se registra un error explícito en lugar de entregar el texto cifrado como si fuera la sesión.
+    """
+    plain = decrypt_secret(stored)
+    if plain and str(plain).startswith("gAAAAA"):
+        logger.error(f"❌ [Vault] La sesión del Centinela ({context}) no se pudo descifrar: ¿cambió ENCRYPTION_KEY? "
+                     f"Vuelve a conectar el Centinela de esa comunidad.")
+        return None
+    return plain
+
+
+def _decrypt_api_hash(stored):
+    if not stored:
+        return stored
+    plain = decrypt_secret(stored)
+    return None if str(plain).startswith("gAAAAA") else plain
+
+
 @db_async
 def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: str = None, api_id: int = None, api_hash: str = None):
-    # Ciframos la cadena de sesión con AES-256 antes de guardarla en la base de datos
+    # Ciframos la cadena de sesión con AES-256 antes de guardarla en la base de datos.
+    # v16: también el api_hash (credencial MTProto de la aplicación); la lectura lo descifra de forma
+    # transparente y los registros antiguos en claro siguen funcionando (decrypt_secret los devuelve tal cual).
     encrypted_session = encrypt_secret(session_string)
+    api_hash = encrypt_secret(api_hash) if api_hash else api_hash
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -2469,8 +2492,10 @@ def get_owner_session(user_id: int, group_id: int = None):
         row = cursor.fetchone()
         if row:
             # Desciframos la sesión en memoria RAM antes de retornarla
-            decrypted_session = decrypt_secret(row[0])
-            return (decrypted_session, row[1], row[2])
+            decrypted_session = _decrypt_session_or_none(row[0], f"user={user_id} group={group_id}")
+            if decrypted_session is None:
+                return None
+            return (decrypted_session, row[1], _decrypt_api_hash(row[2]))
         return None
 
 
@@ -2486,8 +2511,10 @@ def get_session_by_group(group_id: int):
         row = cursor.fetchone()
         if row:
             # Desciframos la sesión (índice 1)
-            decrypted_session = decrypt_secret(row[1])
-            return (row[0], decrypted_session, row[2], row[3])
+            decrypted_session = _decrypt_session_or_none(row[1], f"group={group_id}")
+            if decrypted_session is None:
+                return None
+            return (row[0], decrypted_session, row[2], _decrypt_api_hash(row[3]))
         return None
 
 
@@ -2499,9 +2526,12 @@ def get_all_active_sessions():
         rows = cursor.fetchall()
         results = []
         for row in rows:
-            # Desciframos la sesión de cada fila (índice 2)
-            decrypted_session = decrypt_secret(row[2])
-            results.append((row[0], row[1], decrypted_session, row[3], row[4]))
+            # Desciframos la sesión de cada fila (índice 2). Una sesión que no se puede descifrar se omite:
+            # arrancar un Centinela con el texto cifrado solo produciría errores de autenticación en bucle.
+            decrypted_session = _decrypt_session_or_none(row[2], f"user={row[0]} group={row[1]}")
+            if decrypted_session is None:
+                continue
+            results.append((row[0], row[1], decrypted_session, row[3], _decrypt_api_hash(row[4])))
         return results
 
 

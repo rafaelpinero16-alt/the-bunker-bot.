@@ -3089,6 +3089,7 @@ export const app = {
     pagarPlan(plan) {
         if (!CONFIG.PRICES[plan]) return;
         state.selectedPlan = plan;
+        tgApp.hapticImpact('medium');   // confirmación táctil antes de pasar al checkout de Stars en el bot
 
         const targetChat = state.selectedChatId ? `_${state.selectedChatId}` : '';
         const param = plan === 'pro' ? `sub_pro${targetChat}` : `sub_ultra${targetChat}`;
@@ -3096,10 +3097,40 @@ export const app = {
         setTimeout(() => tgApp.closeApp(), 300);
     },
 
-    copyText(text) {
-        navigator.clipboard.writeText(text).then(() => {
-            alert(state.currentLang === 'es' ? "¡Copiado al portapapeles! 📋" : "Copied to clipboard! 📋");
+    /**
+     * Copia al portapapeles. v16: los WebViews de Telegram pueden bloquear window.alert y no siempre exponen
+     * navigator.clipboard (contexto no seguro / iOS antiguo): se usa un textarea temporal como respaldo y la
+     * confirmación es un aviso flotante + vibración, como el resto de la consola.
+     */
+    async copyText(text) {
+        const value = String(text ?? '');
+        let ok = false;
+        try {
+            if (navigator.clipboard && window.isSecureContext !== false) {
+                await navigator.clipboard.writeText(value);
+                ok = true;
+            }
+        } catch (err) { /* se intenta el respaldo */ }
+        if (!ok) {
+            try {
+                const area = document.createElement('textarea');
+                area.value = value;
+                area.setAttribute('readonly', '');
+                area.style.cssText = 'position:fixed;top:-1000px;opacity:0;';
+                document.body.appendChild(area);
+                area.select();
+                ok = document.execCommand('copy');
+                area.remove();
+            } catch (err) { ok = false; }
+        }
+        tgApp.hapticNotification(ok ? 'success' : 'error');
+        ui.showToast({
+            key: 'clipboard', force: true, icon: ok ? '📋' : '⚠️', tone: ok ? 'success' : 'error', ttl: 2500,
+            title: ok ? (state.currentLang === 'es' ? '¡Copiado al portapapeles!' : 'Copied to clipboard!')
+                      : (state.currentLang === 'es' ? 'No se pudo copiar. Mantén pulsado el enlace para copiarlo.' : 'Could not copy. Long-press the link to copy it.'),
+            body: ok ? '' : value
         });
+        return ok;
     }
 };
 

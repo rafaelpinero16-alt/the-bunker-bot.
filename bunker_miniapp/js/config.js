@@ -15,6 +15,8 @@
    Pánico con el árbol de configuración real y los interruptores del Centinela (CONFIG.SYNC).
    v15: matriz granular de bloqueo multimedia (30 vectores en 3 páginas, estilo Group Help) editable desde la
    consola de programación; mismo contrato que database.MEDIA_LOCK_KEYS / MEDIA_LOCK_ACTIONS (CONFIG.MEDIA_LOCKS).
+   v16: sincronización universal bot → Mini App (cualquier ajuste de la consola privada emite 'settings_updated'
+   con los campos exactos que cambiaron) y bóveda Fernet de tokens de clones y sesiones MTProto.
    ========================================================================== */
 
 export const CONFIG = {

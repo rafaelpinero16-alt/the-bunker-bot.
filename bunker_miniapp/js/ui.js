@@ -1959,4 +1959,4 @@ export const ui = {
             body: this.tf('toast_payment_body', { stars, name })
         });
     }
-};
+}; 

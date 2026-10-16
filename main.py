@@ -2331,6 +2331,111 @@ class OwnerCallbackGuardMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+# ==========================================
+# 🔄 v16 · SINCRONIZACIÓN UNIVERSAL BOT → MINI APP
+# ==========================================
+# La consola privada tiene decenas de ajustes (captcha, anti-flood, propinas, advertencias, MicVIP, modo nocturno…)
+# repartidos en muchos handlers. En lugar de emitir a mano en cada uno, este middleware toma el estado REAL de la
+# comunidad (get_settings_snapshot) antes y después de cada acción de consola y emite 'settings_updated' solo si
+# algo cambió, con la lista exacta de campos. Cubre también los ajustes futuros y nunca emite en falso.
+_SETTINGS_SYNC_CHAT_RE = re.compile(r"^-\d{5,20}$")
+# Prefijos que ya emiten por su cuenta (evita eventos duplicados).
+_SETTINGS_SELF_EMITTING = ("mlk_", "sentinelcfg_", "alset_", "toglock_")
+_SETTINGS_SYNC_MAX_CHATS = 2
+
+
+def _settings_flatten(value, prefix: str = "") -> dict:
+    """Árbol → {ruta.hoja: valor} (las listas se comparan enteras)."""
+    out = {}
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            out.update(_settings_flatten(inner, f"{prefix}{key}."))
+    else:
+        out[prefix.rstrip(".")] = value
+    return out
+
+
+async def _settings_state(chat_id: int) -> Optional[dict]:
+    try:
+        snapshot = await get_settings_snapshot(int(chat_id))
+    except Exception as ex:
+        logger.debug(f"[Sync] Estado no disponible para {chat_id}: {ex}")
+        return None
+    snapshot = dict(snapshot or {})
+    configuration = dict(snapshot.get("configuration") or {})
+    configuration.pop("meta", None)          # marcas de tiempo de auditoría: no son ajustes
+    snapshot["configuration"] = configuration
+    return _settings_flatten(snapshot)
+
+
+def _settings_changed_fields(before: dict, after: dict) -> list:
+    keys = set(before) | set(after)
+    changed = sorted(k for k in keys if before.get(k) != after.get(k))
+    # Nombre corto del campo (lo que ya entiende la Mini App): "configuration.aduana.captcha_enabled" → "captcha_enabled"
+    short = []
+    for key in changed:
+        parts = key.split(".")
+        if parts[0] == "configuration" and len(parts) >= 3:
+            short.append("media_locks" if parts[1] == "media_locks" else parts[2])
+        else:
+            short.append(parts[-1])
+    return sorted(set(short))
+
+
+class SettingsSyncMiddleware(BaseMiddleware):
+    """Callbacks y respuestas conversacionales de la consola PRIVADA: compara el estado antes/después y emite."""
+
+    @staticmethod
+    def _chat_ids_from_callback(event: CallbackQuery) -> list:
+        raw = getattr(event, "data", None) or ""
+        msg = getattr(event, "message", None)
+        chat = getattr(msg, "chat", None)
+        if not raw or raw.startswith(_SETTINGS_SELF_EMITTING) or getattr(chat, "type", None) != "private":
+            return []
+        found = []
+        for token in re.split(r"[_:]", raw):
+            if _SETTINGS_SYNC_CHAT_RE.match(token) and int(token) not in found:
+                found.append(int(token))
+        return found[:_SETTINGS_SYNC_MAX_CHATS]
+
+    @staticmethod
+    def _chat_ids_from_message(event: Message, bot) -> list:
+        if getattr(getattr(event, "chat", None), "type", None) != "private" or not event.from_user or bot is None:
+            return []
+        key = (bot.id, event.from_user.id)
+        found = []
+        for store in getattr(user_private, "ALL_STATE_DICTS", ()):   # se lee en cada llamada: el registro crece
+            if key in store:
+                chat_id = user_private._state_target_chat(store.get(key))
+                if chat_id is not None and chat_id not in found:
+                    found.append(chat_id)
+        return found[:_SETTINGS_SYNC_MAX_CHATS]
+
+    async def __call__(self, handler, event, data: dict):
+        if isinstance(event, CallbackQuery):
+            chat_ids = self._chat_ids_from_callback(event)
+        elif isinstance(event, Message):
+            chat_ids = self._chat_ids_from_message(event, data.get("bot"))
+        else:
+            chat_ids = []
+        if not chat_ids:
+            return await handler(event, data)
+
+        before = {cid: await _settings_state(cid) for cid in chat_ids}
+        try:
+            return await handler(event, data)
+        finally:
+            for cid in chat_ids:
+                if before.get(cid) is None:
+                    continue
+                after = await _settings_state(cid)
+                if after is None or after == before[cid]:
+                    continue
+                changed = _settings_changed_fields(before[cid], after)
+                logger.info(f"🔄 [Sync] Consola del bot cambió {cid}: {', '.join(changed)}")
+                _spawn(emit_settings_updated(cid, "bot_console", changed), name=f"settings_sync:{cid}")
+
+
 class ChatAutoDetectMiddleware(BaseMiddleware):
     """
     Registra el chat cuando el bot es añadido/promovido y DESPUÉS deja pasar el
@@ -2726,6 +2831,9 @@ async def main():
     dp.chat_member.outer_middleware.register(AdminActionTrackerMiddleware())
     # 👑 Regla de Oro: guardia de propiedad para botones de cobro de licencias (payments.py).
     dp.callback_query.outer_middleware.register(OwnerCallbackGuardMiddleware())
+    # 🔄 v16 · Toda acción de la consola privada que cambie ajustes reales se refleja al instante en la Mini App.
+    dp.callback_query.outer_middleware.register(SettingsSyncMiddleware())
+    dp.message.outer_middleware.register(SettingsSyncMiddleware())
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
     # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
