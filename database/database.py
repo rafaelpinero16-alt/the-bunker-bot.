@@ -1177,8 +1177,13 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
             """, (group_id,))
             row = cursor.fetchone()
             if row:
+                # v14 · Valor efectivo ÚNICO del aviso de entrada al VC: columna vc_join_enabled (row[6]).
+                # Se expone con las dos claves ("vc_enabled" heredada y "vc_join_enabled") para que ningún
+                # módulo lea un valor distinto según el nombre que use.
+                vc_join_effective = _as_flag(row[6], 1)
                 return {
-                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2], "vc_btn": row[3], "vc_btn_url": row[4], "vc_autodel": row[5] if row[5] is not None else 30, "vc_enabled": row[6] if row[6] is not None else 1,
+                    "vc_text": row[0], "vc_media_id": row[1], "vc_media_type": row[2], "vc_btn": row[3], "vc_btn_url": row[4], "vc_autodel": row[5] if row[5] is not None else 30,
+                    "vc_enabled": vc_join_effective, "vc_join_enabled": vc_join_effective,
                     "micvip_text": row[7], "micvip_media_id": row[8], "micvip_media_type": row[9], "micvip_btn": row[10], "micvip_btn_url": row[11], "micvip_autodel": row[12] if row[12] is not None else 30, "micvip_enabled": row[13] if row[13] is not None else 1,
                     "reset_text": row[14], "reset_media_id": row[15], "reset_media_type": row[16], "reset_btn": row[17], "reset_btn_url": row[18], "reset_autodel": row[19] if row[19] is not None else 20, "reset_enabled": row[20] if row[20] is not None else 1,
                     "sched_start_text": row[21], "sched_start_media_id": row[22], "sched_start_media_type": row[23], "sched_start_btn": row[24], "sched_start_btn_url": row[25], "sched_start_autodel": row[26] if row[26] is not None else 0, "sched_enabled": row[27] if row[27] is not None else 1,
@@ -1187,7 +1192,7 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
         except sqlite3.OperationalError:
             pass
         return {
-            "vc_text": None, "vc_media_id": None, "vc_media_type": None, "vc_btn": None, "vc_btn_url": None, "vc_autodel": 30, "vc_enabled": 1,
+            "vc_text": None, "vc_media_id": None, "vc_media_type": None, "vc_btn": None, "vc_btn_url": None, "vc_autodel": 30, "vc_enabled": 1, "vc_join_enabled": 1,
             "micvip_text": None, "micvip_media_id": None, "micvip_media_type": None, "micvip_btn": None, "micvip_btn_url": None, "micvip_autodel": 30, "micvip_enabled": 1,
             "reset_text": None, "reset_media_id": None, "reset_media_type": None, "reset_btn": None, "reset_btn_url": None, "reset_autodel": 20, "reset_enabled": 1,
             "sched_start_text": None, "sched_start_media_id": None, "sched_start_media_type": None, "sched_start_btn": None, "sched_start_btn_url": None, "sched_start_autodel": 0, "sched_enabled": 1,
@@ -1195,19 +1200,56 @@ def get_sentinel_service_messages_config(group_id: int) -> dict:
         }
 
 
+_SENTINEL_SERVICE_COLUMNS = (
+    "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type", "vc_join_btn_text", "vc_join_btn_url", "vc_join_autodel_seconds", "vc_join_enabled",
+    "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type", "mic_vip_btn_text", "mic_vip_btn_url", "mic_vip_autodel_seconds", "mic_vip_enabled",
+    "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_btn_url", "reset_notice_autodel_seconds", "reset_notice_enabled",
+    "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_btn_text", "vc_sched_start_btn_url", "vc_sched_start_autodel_seconds", "vc_sched_start_enabled",
+    "vc_welcome_custom_text", "vc_welcome_custom_media_id", "vc_welcome_custom_media_type", "vc_welcome_btn_text", "vc_welcome_btn_url", "vc_welcome_autodel_seconds", "vc_welcome_enabled",
+)
+# Interruptor del aviso de entrada al VC: las dos columnas se escriben SIEMPRE juntas (v14).
+_VC_JOIN_FLAG_ALIASES = ("vc_enabled", "vc_join_enabled")
+# Clave pública del getter → columna real de cada interruptor del Centinela.
+SENTINEL_SERVICE_FLAG_COLUMNS = {
+    "vc": "vc_join_enabled", "vc_enabled": "vc_join_enabled", "vc_join_enabled": "vc_join_enabled",
+    "micvip": "mic_vip_enabled", "micvip_enabled": "mic_vip_enabled", "mic_vip_enabled": "mic_vip_enabled",
+    "reset": "reset_notice_enabled", "reset_enabled": "reset_notice_enabled", "reset_notice_enabled": "reset_notice_enabled",
+    "sched": "vc_sched_start_enabled", "sched_enabled": "vc_sched_start_enabled", "vc_sched_enabled": "vc_sched_start_enabled",
+    "vc_sched_start_enabled": "vc_sched_start_enabled",
+    "vcwelcome": "vc_welcome_enabled", "vc_welcome_enabled": "vc_welcome_enabled",
+}
+
+
+def _as_flag(value, default: int = 1) -> int:
+    """Normaliza un interruptor guardado en SQLite (NULL → default, '0'/'1'/bool/int → 0 o 1)."""
+    if value is None or value == "":
+        return int(default)
+    try:
+        return 1 if int(value) else 0
+    except (TypeError, ValueError):
+        return 1 if str(value).strip().lower() in ("true", "on", "yes", "si", "sí") else 0
+
+
+def _write_vc_join_flag(conn, group_id: int, value) -> None:
+    """Escribe vc_join_enabled y vc_enabled en UNA sentencia (atómica dentro de la transacción del llamador)."""
+    flag = _as_flag(value, 1)
+    conn.execute("""
+        INSERT INTO group_settings (group_id, vc_join_enabled, vc_enabled) VALUES (?, ?, ?)
+        ON CONFLICT(group_id) DO UPDATE SET vc_join_enabled = excluded.vc_join_enabled, vc_enabled = excluded.vc_enabled
+    """, (group_id, flag, flag))
+
+
 @db_async
 def set_sentinel_service_message(group_id: int, field: str, value):
-    valid = [
-        "vc_join_custom_text", "vc_join_custom_media_id", "vc_join_custom_media_type", "vc_join_btn_text", "vc_join_btn_url", "vc_join_autodel_seconds", "vc_join_enabled",
-        "mic_vip_custom_text", "mic_vip_custom_media_id", "mic_vip_custom_media_type", "mic_vip_btn_text", "mic_vip_btn_url", "mic_vip_autodel_seconds", "mic_vip_enabled",
-        "reset_notice_custom_text", "reset_notice_custom_media_id", "reset_notice_custom_media_type", "reset_notice_btn_text", "reset_notice_btn_url", "reset_notice_autodel_seconds", "reset_notice_enabled",
-        "vc_sched_start_custom_text", "vc_sched_start_custom_media_id", "vc_sched_start_custom_media_type", "vc_sched_start_btn_text", "vc_sched_start_btn_url", "vc_sched_start_autodel_seconds", "vc_sched_start_enabled",
-        "vc_welcome_custom_text", "vc_welcome_custom_media_id", "vc_welcome_custom_media_type", "vc_welcome_btn_text", "vc_welcome_btn_url", "vc_welcome_autodel_seconds", "vc_welcome_enabled"
-    ]
     # Alias heredado: la clave pública del getter es "sched_enabled", la columna real es vc_sched_start_enabled.
     if field in ("vc_sched_enabled", "sched_enabled"):
         field = "vc_sched_start_enabled"
-    if field not in valid:
+    # v14 · Aviso de entrada al VC: "vc_enabled" y "vc_join_enabled" se actualizan juntos, de forma atómica.
+    if field in _VC_JOIN_FLAG_ALIASES:
+        with _write_transaction() as conn:
+            _write_vc_join_flag(conn, group_id, value)
+        return
+    if field not in _SENTINEL_SERVICE_COLUMNS:
         return
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1216,6 +1258,53 @@ def set_sentinel_service_message(group_id: int, field: str, value):
             ON CONFLICT(group_id) DO UPDATE SET {field} = excluded.{field}
         """, (group_id, value))
         conn.commit()
+
+
+@db_async
+def toggle_sentinel_service_flag(group_id: int, key: str):
+    """
+    v14 · Invierte un interruptor del Centinela de forma ATÓMICA (BEGIN IMMEDIATE: leer-invertir-escribir sin
+    carreras ante dobles toques o cambios simultáneos desde la Mini App). `key` acepta la clave corta del menú
+    ('vc', 'micvip', 'reset', 'sched', 'vcwelcome'), la del getter o la columna. Devuelve el nuevo valor (0/1) o
+    None si la clave no es un interruptor conocido. El aviso de entrada al VC escribe sus dos columnas.
+    """
+    column = SENTINEL_SERVICE_FLAG_COLUMNS.get(key)
+    if column is None:
+        return None
+    with _write_transaction() as conn:
+        row = conn.execute(f"SELECT {_ident(column)} FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        new_value = 0 if _as_flag(row[0] if row else None, 1) == 1 else 1
+        if column == "vc_join_enabled":
+            _write_vc_join_flag(conn, group_id, new_value)
+        else:
+            conn.execute(f"""
+                INSERT INTO group_settings (group_id, {_ident(column)}) VALUES (?, ?)
+                ON CONFLICT(group_id) DO UPDATE SET {_ident(column)} = excluded.{_ident(column)}
+            """, (group_id, new_value))
+    return new_value
+
+
+SENTINEL_FLAG_KEYS = ("vc_enabled", "vc_join_enabled", "micvip_enabled", "reset_enabled", "sched_enabled", "vc_welcome_enabled")
+
+
+@db_async
+def get_settings_snapshot(chat_id: int) -> dict:
+    """
+    v14 · Estado vigente para la telemetría 'settings_updated' de /ws/radar: árbol de configuración (misma forma
+    que GET /chat/{id}/configuration) + interruptores del Centinela. Lo usan por igual la API y el bot, para que
+    la Mini App reciba siempre la misma estructura venga de donde venga el cambio.
+    """
+    snapshot = {}
+    try:
+        snapshot["configuration"] = get_chat_full_configuration.sync(int(chat_id))
+    except Exception as ex:
+        logger.debug(f"[Radar] Configuración no disponible para {chat_id}: {ex}")
+    try:
+        svc = get_sentinel_service_messages_config.sync(int(chat_id))
+        snapshot["sentinel"] = {key: _as_flag(svc.get(key), 1) for key in SENTINEL_FLAG_KEYS}
+    except Exception as ex:
+        logger.debug(f"[Radar] Centinela no disponible para {chat_id}: {ex}")
+    return snapshot
 
 
 @db_async

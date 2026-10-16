@@ -183,6 +183,8 @@ from database.database import (
     record_admin_mod_action,
     # v13 · Matriz del Arquitecto: delegados con acceso de lectura a la analítica
     has_delegate_permission,
+    # v14 · Telemetría de ajustes en caliente hacia /ws/radar
+    get_settings_snapshot,
 )
 try:
     import raid_shield  # type: ignore[import-not-found]
@@ -326,6 +328,41 @@ async def emit_radar_event(chat_id: int, event_type: str, data: dict = None):
         publish_radar_event(int(chat_id), event_type, data or {})
     except Exception as ex:
         logger.debug("Aviso emitiendo evento WS (%s): %s", chat_id, ex)
+
+
+# v14 · Campos cuyo cambio debe llegar EN CALIENTE a la Mini App (switches acústicos y del Centinela).
+ACOUSTIC_SETTING_KEYS = frozenset({
+    "autolower", "autolower_enabled", "autolower_pct", "shield", "shield_enabled",
+    "micvip_price", "speaker_price",
+})
+async def build_settings_snapshot(chat_id: int) -> Dict[str, Any]:
+    """
+    Estado vigente para repintar la Mini App: árbol de configuración (misma forma que
+    GET /chat/{id}/configuration, la que consume ui.renderChatConfiguration) + interruptores del Centinela.
+    """
+    try:
+        return await get_settings_snapshot(int(chat_id))
+    except Exception as ex:
+        logger.debug("Aviso leyendo el estado para el radar (%s): %s", chat_id, ex)
+        return {}
+
+
+async def emit_settings_updated(chat_id: int, source: str, changed, extra: Dict[str, Any] = None) -> None:
+    """
+    v14 · Emite 'settings_updated' a /ws/radar/{chat_id} con el estado REAL ya guardado. `extra` conserva las
+    claves que ya enviaba cada emisor (compatibilidad con clientes que leen el payload plano).
+    """
+    try:
+        event: Dict[str, Any] = dict(extra or {})
+        event["source"] = source
+        event["changed"] = sorted({str(c) for c in (changed or [])})
+        event.update(await build_settings_snapshot(chat_id))
+        acoustic = sorted(set(event["changed"]) & ACOUSTIC_SETTING_KEYS)
+        if acoustic:
+            event["acoustic_changed"] = acoustic
+        await emit_radar_event(chat_id, "settings_updated", event)
+    except Exception as ex:
+        logger.debug("Aviso emitiendo settings_updated (%s): %s", chat_id, ex)
 
 
 # ==========================================
@@ -1435,8 +1472,11 @@ async def api_update_chat_settings(
         if payload:
             await update_chat_operational_settings(numeric_id, payload)
 
-        # Notificar en vivo a los WebSockets de la sala
-        _spawn(emit_radar_event(numeric_id, "settings_updated", payload))
+        # Notificar en vivo a los WebSockets de la sala: payload original (compatibilidad) + estado real
+        # guardado (árbol de configuración + Centinela) para repintar los switches sin recargar.
+        if payload or response_extra:
+            _spawn(emit_settings_updated(numeric_id, "settings", list(payload.keys()) + list(response_extra.keys()), payload),
+                   name=f"settings_updated:{numeric_id}")
 
         return {"status": "success", "chat_id": chat_id, "updated": payload, **response_extra}
     except HTTPException:
@@ -1504,8 +1544,9 @@ async def api_update_chat_configuration(
     changed = sorted({field
                       for key, value in body.items()
                       for field in (value.keys() if isinstance(value, dict) else [key])})
-    _spawn(emit_radar_event(numeric_id, "settings_updated", {"source": "configuration", "changed": changed,
-                                                             "configuration": configuration}))
+    # Árbol ya validado y guardado + interruptores del Centinela (la misma forma que /settings y el bot).
+    _spawn(emit_settings_updated(numeric_id, "configuration", changed, {"configuration": configuration}),
+           name=f"settings_updated:{numeric_id}")
     logger.info(f"🎛️ [Configuración] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(changed)}")
     return {"status": "success", "chat_id": str(numeric_id), "configuration": configuration}
 

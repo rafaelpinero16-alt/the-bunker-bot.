@@ -643,6 +643,15 @@ async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
     except Exception as e:
         logger.debug(f"No se pudo verificar permisos de videochat en {chat_id}: {e}")
         return cached[0] if cached else False
+    if not allowed:
+        # v14 · Sin este permiso el radar NO modera ni emite el aviso de AutoLower: se informa al operador.
+        # Solo en las verificaciones reales (caché de 5 min), así el log de Railway no se inunda.
+        account = getattr(getattr(client, "me", None), "id", None) or "desconocida"
+        logger.info(
+            f"🎙️ [Centinela] La cuenta Centinela ({account}) NO tiene el permiso 'Gestionar videochats' "
+            f"(can_manage_video_chats) en {chat_id} (estado: {status_val}). Concédeselo al usuario telefónico como "
+            f"administrador del grupo: sin él no se aplica AutoLower ni se envía el aviso de entrada al VC."
+        )
     _call_rights_cache[chat_id] = (allowed, now)
     return allowed
 
@@ -781,16 +790,40 @@ def _extract_urls_to_markup(text: str, custom_btn_text: str = None, custom_btn_u
 
 
 def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_btn_text: str = None, custom_btn_url: str = None):
-    # 🚫 Si el operador no ha configurado un botón personalizado, no se muestra NADA por defecto.
-    if not custom_btn_text and not custom_btn_url:
+    """
+    Botón de llamada a la acción de los avisos de voz. v14: si el operador no configuró texto ni URL propios se
+    construye SIEMPRE el botón por defecto (deep-link de MicVIP hacia el bot maestro), para que el aviso nunca
+    quede sin su botón interactivo. Solo devuelve None si no hay usuario del bot con el que formar el enlace.
+    """
+    btn_label = (custom_btn_text or "").strip() or ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
+    custom_url = (custom_btn_url or "").strip()
+    if custom_url:
+        pay_url = custom_url
+    elif bot_username:
+        pay_url = f"https://t.me/{str(bot_username).lstrip('@')}?start=vipmic_{chat_id}"
+    else:
+        logger.warning(f"⚠️ [Radar] Sin usuario del bot: el aviso de {chat_id} sale sin botón MicVIP.")
         return None
-
-    btn_label = custom_btn_text if custom_btn_text else ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
-    pay_url = custom_btn_url.strip() if custom_btn_url else f"https://t.me/{bot_username}?start=vipmic_{chat_id}"
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=btn_label, url=pay_url)]
     ])
+
+
+def _merge_markups(primary, extra):
+    """
+    v14 · Une el botón principal con los enlaces extraídos del texto del aviso (sin duplicar URLs). Antes, al
+    existir botón principal, los enlaces del texto se borraban del mensaje y no aparecían como botones.
+    """
+    rows, seen = [], set()
+    for markup in (primary, extra):
+        for row in (getattr(markup, "inline_keyboard", None) or []):
+            kept = [b for b in row if (getattr(b, "url", None) or getattr(b, "callback_data", None) or b.text) not in seen]
+            for b in kept:
+                seen.add(getattr(b, "url", None) or getattr(b, "callback_data", None) or b.text)
+            if kept:
+                rows.append(kept)
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 async def _resolve_reset_text(chat_id: int):
@@ -839,59 +872,134 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None, 
         return None
 
 
+VC_NOTICE_BATCH_WINDOW_SECONDS = 2.5   # se agrupan las entradas casi simultáneas en un solo aviso
+VC_NOTICE_MIN_GAP_SECONDS = 3.0        # separación mínima entre avisos del mismo grupo (anti-flood)
+VC_NOTICE_MAX_MENTIONS = 15            # tope de menciones por aviso (el resto se resume)
+_vc_notice_pending: dict = {}          # chat_id -> [menciones en espera]
+_vc_notice_flush_tasks: dict = {}      # chat_id -> tarea que enviará el lote
+
+
+def _vc_join_notice_enabled(svc_cfg: dict) -> bool:
+    """Paridad de flags: si "vc_enabled" o "vc_join_enabled" vale 0 explícito, el aviso está apagado."""
+    for key in ("vc_enabled", "vc_join_enabled"):
+        value = svc_cfg.get(key, 1)
+        if value is None:
+            continue
+        try:
+            if int(value) == 0:
+                return False
+        except (TypeError, ValueError):
+            continue
+    return True
+
+
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
+    """
+    Encola la mención del miembro al que el radar acaba de aplicar AutoLower. v14: antes, un bloqueo de 3 s
+    descartaba a todo el que entraba justo después de otro (y ya quedaba marcado como avisado: nunca recibía su
+    aviso). Ahora las entradas casi simultáneas se agrupan en un único mensaje, sin perder a nadie y sin flood.
+    """
     if not _global_bot:
         return
     svc_cfg = await get_sentinel_service_messages_config(chat_id)
     # 🚫 Si el módulo de entrada a VC está desactivado, no se envía absolutamente nada.
-    if svc_cfg.get("vc_enabled", 1) == 0:
+    if not _vc_join_notice_enabled(svc_cfg):
         return
-    ...
 
-    now = time.time()
-    if now - _vc_notice_locks.get(chat_id, 0) < 3:
-        return
-    _vc_notice_locks[chat_id] = now
+    pending = _vc_notice_pending.setdefault(chat_id, [])
+    if user_name not in pending:
+        pending.append(user_name)
+    task = _vc_notice_flush_tasks.get(chat_id)
+    if task is None or task.done():
+        _vc_notice_flush_tasks[chat_id] = _spawn(_flush_member_vc_notice(chat_id, lang), name=f"vc_notice:{chat_id}")
 
+
+async def _flush_member_vc_notice(chat_id: int, lang: str = "es"):
     try:
-        last_id = _last_vc_notice.get(chat_id)
-        if last_id:
-            try:
-                await _global_bot.delete_message(chat_id=chat_id, message_id=last_id)
-            except Exception:
-                pass
-
-        bot_username = await _get_bot_username()
-        price = await get_mic_vip_price(chat_id) or 50
-
-        custom_text = svc_cfg.get("vc_text")
-        custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
-        custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
-        autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
-
-        if custom_text:
-            text = custom_text.replace("{user_name}", user_name).replace("{mention}", user_name)
-        else:
-            text = (
-                f"⚜️ <b>The Bunker O.S.</b>\n\n"
-                f"🔇 {user_name}, <i>el búnker ha establecido por defecto tu volumen al 2%.</i>\n\n"
-                f"¿Quieres desbloquear el 100% de tu micrófono? Presiona el botón inferior.\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            )
-
-        markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price, custom_btn, custom_url)
-        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
-        final_markup = markup if markup else extracted_markup
-
-        sent = await _dispatch_radar_notice(
-            chat_id=chat_id, text=cleaned_text, media_id=svc_cfg.get("vc_media_id"),
-            media_type=svc_cfg.get("vc_media_type"), auto_delete_after=autodel_time if autodel_time > 0 else None,
-            reply_markup=final_markup
-        )
-        if sent:
-            _last_vc_notice[chat_id] = sent.message_id
+        await asyncio.sleep(VC_NOTICE_BATCH_WINDOW_SECONDS)
+        wait_gap = VC_NOTICE_MIN_GAP_SECONDS - (time.time() - _vc_notice_locks.get(chat_id, 0))
+        if wait_gap > 0:
+            await asyncio.sleep(wait_gap)
+        mentions = _vc_notice_pending.pop(chat_id, [])
+        if not mentions:
+            return
+        # Se relee la configuración: el operador pudo apagar el aviso durante la ventana de agrupación.
+        svc_cfg = await get_sentinel_service_messages_config(chat_id)
+        if not _vc_join_notice_enabled(svc_cfg):
+            return
+        _vc_notice_locks[chat_id] = time.time()
+        await _send_member_vc_notice(chat_id, mentions, svc_cfg, lang)
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"Aviso notificación de entrada a VC en {chat_id}: {e}")
+    finally:
+        if _vc_notice_flush_tasks.get(chat_id) is asyncio.current_task():
+            _vc_notice_flush_tasks.pop(chat_id, None)
+        # Si llegaron menciones mientras se enviaba, se programa el siguiente lote.
+        if _vc_notice_pending.get(chat_id) and chat_id not in _vc_notice_flush_tasks:
+            _vc_notice_flush_tasks[chat_id] = _spawn(_flush_member_vc_notice(chat_id, lang), name=f"vc_notice:{chat_id}")
+
+
+async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, lang: str = "es"):
+    last_id = _last_vc_notice.get(chat_id)
+    if last_id:
+        try:
+            await _global_bot.delete_message(chat_id=chat_id, message_id=last_id)
+        except Exception:
+            pass
+
+    bot_username = await _get_bot_username()
+    price = await get_mic_vip_price(chat_id) or 50
+    try:
+        pct = max(1, min(10, int(await get_autolower_pct(chat_id) or 2)))
+    except Exception:
+        pct = 2
+
+    shown = mentions[:VC_NOTICE_MAX_MENTIONS]
+    extra = len(mentions) - len(shown)
+    user_name = ", ".join(shown)
+    if extra > 0:
+        user_name += f" {'y' if lang == 'es' else 'and'} {extra} {'más' if lang == 'es' else 'more'}"
+    plural = len(mentions) > 1
+
+    custom_text = svc_cfg.get("vc_text")
+    custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
+    custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
+    autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
+
+    if custom_text:
+        text = (custom_text.replace("{user_name}", user_name).replace("{mention}", user_name)
+                .replace("{pct}", str(pct)).replace("{price}", str(price)))
+    elif lang == "es":
+        text = (
+            f"⚜️ <b>The Bunker O.S.</b>\n\n"
+            f"🔇 {user_name}, <i>el búnker ha establecido por defecto {'su' if plural else 'tu'} volumen al {pct}%.</i>\n\n"
+            f"¿{'Quieren' if plural else 'Quieres'} desbloquear el 100% de {'su' if plural else 'tu'} micrófono? Presiona el botón inferior.\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+    else:
+        text = (
+            f"⚜️ <b>The Bunker O.S.</b>\n\n"
+            f"🔇 {user_name}, <i>the bunker has set your volume to {pct}% by default.</i>\n\n"
+            f"Want to unlock 100% of your microphone? Tap the button below.\n\n"
+            f"🛡️ <i>Cloud Media Management</i>"
+        )
+
+    markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price, custom_btn, custom_url)
+    cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
+    final_markup = _merge_markups(markup, extracted_markup)
+
+    sent = await _dispatch_radar_notice(
+        chat_id=chat_id, text=cleaned_text, media_id=svc_cfg.get("vc_media_id"),
+        media_type=svc_cfg.get("vc_media_type"), auto_delete_after=autodel_time if autodel_time > 0 else None,
+        reply_markup=final_markup
+    )
+    if sent:
+        _last_vc_notice[chat_id] = sent.message_id
+        logger.info(f"🎙️ [Radar] Aviso de AutoLower enviado en {chat_id} ({len(mentions)} miembro(s), {pct}%).")
+    else:
+        logger.warning(f"⚠️ [Radar] No se pudo publicar el aviso de AutoLower en {chat_id}: revisa que el bot pueda escribir en el grupo.")
 
 
 async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
@@ -914,7 +1022,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         text = custom_text if (tier in ("pro", "ultra_pro") and custom_text) else VC_START_TEXTS.get(lang, VC_START_TEXTS["es"])
 
         cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
-        final_markup = markup if markup else extracted_markup
+        final_markup = _merge_markups(markup, extracted_markup)
 
         sent = await _dispatch_radar_notice(
             chat_id=chat_id, text=cleaned_text,
@@ -1940,7 +2048,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                         custom_btn_url=btn_url
                                     )
                                 cleaned_text, extracted_markup = _extract_urls_to_markup(text, btn_text, btn_url)
-                                final_reset_markup = reset_markup if reset_markup else extracted_markup
+                                final_reset_markup = _merge_markups(reset_markup, extracted_markup)
 
                                 await _dispatch_radar_notice(
                                     chat_id=chat_id,
@@ -2172,8 +2280,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             or abs(vol - target_autolower_volume) > AUTOLOWER_TOLERANCE
                         )
 
+                    user_obj = users_map.get(u_id)
                     if action_needed:
-                        user_obj = users_map.get(u_id)
                         try:
                             p_peer = InputPeerUser(user_id=u_id, access_hash=user_obj.access_hash) if (user_obj and getattr(user_obj, "access_hash", None)) else await client.resolve_peer(u_id)
                             if desired_muted:
@@ -2201,22 +2309,26 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 break
                             continue
 
-                        if u_id not in alerted_users and not night_active and (noise_spike or not desired_muted):
-                            alerted_users.add(u_id)
-                            first_name = html.escape(user_obj.first_name) if (user_obj and getattr(user_obj, "first_name", None)) else f"Usuario {u_id}"
-                            user_mention = f'<a href="tg://user?id={u_id}">{first_name}</a>'
-                            if _global_bot:
-                                try:
-                                    if noise_spike:
-                                        _spawn(_dispatch_radar_notice(
-                                            chat_id=chat_id,
-                                            text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_mention),
-                                            auto_delete_after=30
-                                        ))
-                                    else:
-                                        _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
-                                except Exception:
-                                    pass
+                    # v14 · El aviso de entrada se emite cuando el miembro QUEDA bajo AutoLower, tanto si el radar
+                    # acaba de bajarle el volumen como si ya lo tenía en el objetivo (p. ej. reentró en la misma
+                    # llamada). Antes solo salía tras una RPC en ese ciclo: quien entraba ya atenuado nunca lo veía.
+                    # Si la RPC falló, el bucle ya hizo `continue`/`break` arriba y no se avisa (no sería cierto).
+                    if u_id not in alerted_users and not night_active and (noise_spike or not desired_muted):
+                        alerted_users.add(u_id)
+                        first_name = html.escape(user_obj.first_name) if (user_obj and getattr(user_obj, "first_name", None)) else f"Usuario {u_id}"
+                        user_mention = f'<a href="tg://user?id={u_id}">{first_name}</a>'
+                        if _global_bot:
+                            try:
+                                if noise_spike:
+                                    _spawn(_dispatch_radar_notice(
+                                        chat_id=chat_id,
+                                        text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_mention),
+                                        auto_delete_after=30
+                                    ))
+                                else:
+                                    _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
+                            except Exception:
+                                pass
 
                 alerted_users.intersection_update(active_users)
 

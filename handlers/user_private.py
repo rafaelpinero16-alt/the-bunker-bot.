@@ -38,6 +38,15 @@ from database.database import (
     has_delegate_permission, get_delegated_chats,   # 👑 v13 · Matriz del Arquitecto (delegados)
 )
 from database.database import (
+    toggle_sentinel_service_flag, get_settings_snapshot,   # 🎙️ v14 · Centinela atómico + telemetría en caliente
+)
+
+try:
+    from radar_bus import publish_radar_event  # type: ignore[import-not-found]
+except ImportError:  # radar_bus es opcional: sin él no hay oyentes de la Mini App
+    def publish_radar_event(*args, **kwargs):
+        return None
+from database.database import (
     get_or_create_user, get_user_groups, get_user_channels,
     get_group_tier, get_user_global_tier,
     get_antispam_filter, set_antispam_filter,
@@ -621,6 +630,36 @@ def register_external_state_store(store: dict) -> None:
     global ALL_STATE_DICTS
     if not any(existing is store for existing in ALL_STATE_DICTS):
         ALL_STATE_DICTS = ALL_STATE_DICTS + (store,)
+
+
+_SETTINGS_EMIT_TASKS: set = set()
+
+
+async def _emit_settings_updated(chat_id: int, source: str, changed) -> None:
+    """
+    🎙️ v14 · Sincronización bot → Mini App: tras un cambio hecho en la consola privada (AutoLower, Centinela…)
+    se emite 'settings_updated' a /ws/radar/{chat_id} con el estado REAL guardado, en la misma forma que los
+    endpoints /settings y /configuration de main.py, para que la Mini App repinte sus switches sin recargar.
+    """
+    try:
+        event = {"source": source, "changed": sorted({str(c) for c in (changed or [])})}
+        event.update(await get_settings_snapshot(int(chat_id)))
+        acoustic = sorted(set(event["changed"]) & {"autolower", "autolower_enabled", "autolower_pct"})
+        if acoustic:
+            event["acoustic_changed"] = acoustic
+        publish_radar_event(int(chat_id), "settings_updated", event)
+    except Exception as ex:
+        logging.debug(f"[Radar] No se pudo emitir settings_updated para {chat_id}: {ex}")
+
+
+def emit_settings_updated_bg(chat_id: int, source: str, changed) -> None:
+    """Versión en segundo plano (referencia fuerte: la tarea no la recoge el GC antes de terminar)."""
+    try:
+        task = asyncio.create_task(_emit_settings_updated(chat_id, source, changed))
+    except RuntimeError:
+        return
+    _SETTINGS_EMIT_TASKS.add(task)
+    task.add_done_callback(_SETTINGS_EMIT_TASKS.discard)
 
 
 # ⏳ Caducidad de asistentes multi-paso (segundos) y enfriamiento del mensaje de "sin acción pendiente".
@@ -6567,6 +6606,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             await callback.answer(tr(lang, "🔒 Requiere ULTRA PRO.", "🔒 Requires ULTRA PRO."), show_alert=True)
             return
         await set_autolower_status(group_id, new_st)
+        emit_settings_updated_bg(group_id, "bot_console", ["autolower_enabled"])
         await callback.answer(t["al_updated_1"] if new_st == 1 else t["al_updated_0"])
         curr_al = await get_autolower_status(group_id)
         status_str = tr(lang, "🟢 ACTIVADO (2% para no autorizados)", "🟢 ACTIVE (2% for unauthorized)") if curr_al == 1 else tr(lang, "🔴 DESACTIVADO (Micrófonos Libres)", "🔴 DISABLED (Open Mics)")
@@ -7706,7 +7746,6 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
 
     # 2. Interruptor ON / OFF dinámico (Verde 🟢 <-> Rojo 🔴)
     elif sub == "toggle":
-        cfg = await get_sentinel_service_messages_config(group_id)
         prefix_sw = {
             "vc": ("vc_join_enabled", "vc_enabled"),
             "micvip": ("mic_vip_enabled", "micvip_enabled"),
@@ -7714,11 +7753,16 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
             "sched": ("vc_sched_start_enabled", "sched_enabled"),
             "vcwelcome": ("vc_welcome_enabled", "vc_welcome_enabled")
         }
-        col_db, key_cfg = prefix_sw.get(target_msg, ("vc_join_enabled", "vc_enabled"))
-        current_st = int(cfg.get(key_cfg, 1) or 0)
-        new_st = 0 if current_st == 1 else 1
-
-        await set_sentinel_service_message(group_id, col_db, new_st)
+        if target_msg not in prefix_sw:
+            return
+        col_db, key_cfg = prefix_sw[target_msg]
+        # v14 · Leer-invertir-escribir en UNA transacción (BEGIN IMMEDIATE): un doble toque o un cambio simultáneo
+        # desde la Mini App ya no deja el interruptor en un estado inesperado. El aviso de entrada al VC escribe
+        # vc_join_enabled y vc_enabled a la vez, así ningún módulo queda desincronizado.
+        new_st = await toggle_sentinel_service_flag(group_id, target_msg)
+        if new_st is None:
+            return
+        emit_settings_updated_bg(group_id, "bot_console", [key_cfg] + (["vc_join_enabled"] if target_msg == "vc" else []))
 
         msg_alert = (
             tr(lang, f"🟢 {target_msg.upper()}: Servicio activado.", f"🟢 {target_msg.upper()}: Service enabled.")
@@ -7750,7 +7794,8 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
 
         default_secs = 20 if target_msg == "reset" else (30 if target_msg in ("vc", "micvip") else 0)
         await set_sentinel_service_message(group_id, f"{p}_autodel_seconds", default_secs)
-        await set_sentinel_service_message(group_id, f"{p}_enabled", 1)
+        await set_sentinel_service_message(group_id, f"{p}_enabled", 1)   # vc_join_enabled → escribe también vc_enabled
+        emit_settings_updated_bg(group_id, "bot_console", [f"{p}_enabled"])
 
         await callback.answer(tr(lang, f"🗑️ Módulo {target_msg.upper()} restablecido por defecto.", f"🗑️ Module {target_msg.upper()} restored to default."), show_alert=True)
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
