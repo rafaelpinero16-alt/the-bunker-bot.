@@ -138,6 +138,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message,
 from assistant import (
     close_all_sentinels,
     execute_ghost_purge,
+    register_clone_bot_resolver,
     register_or_update_sentinel,
     start_voice_radar
 )
@@ -185,6 +186,8 @@ from database.database import (
     has_delegate_permission,
     # v14 · Telemetría de ajustes en caliente hacia /ws/radar
     get_settings_snapshot,
+    # v15 · Respaldo del Centinela: bot clon activo de la comunidad
+    get_active_clone_tokens_for_group,
 )
 try:
     import raid_shield  # type: ignore[import-not-found]
@@ -239,6 +242,7 @@ from handlers import (
     architect_matrix,
     ecosystem,
     groups,
+    media_locks,
     moderation,
     payments,
     user_private,
@@ -2428,6 +2432,24 @@ async def _clone_worker(clone_bot: Bot, token: str):
             await clone_bot.session.close()
 
 
+async def _clone_bot_for_chat(chat_id: int):
+    """
+    v15 · Bot clon EN EJECUCIÓN de la comunidad (o None). Se busca tanto por el valor guardado como por el token
+    descifrado, porque active_clone_tasks se indexa con el token con el que arrancó cada clon.
+    """
+    try:
+        tokens = await get_active_clone_tokens_for_group(int(chat_id))
+    except Exception as ex:
+        logger.debug(f"[Clones] No se pudieron leer los clones de {chat_id}: {ex}")
+        return None
+    for stored, plain in tokens:
+        for key in (plain, stored):
+            entry = active_clone_tasks.get((key or "").strip())
+            if entry and entry.get("bot") is not None:
+                return entry["bot"]
+    return None
+
+
 async def start_clone_polling_task(token: str):
     token = (token or "").strip()
     if not token or token in active_clone_tasks:
@@ -2713,6 +2735,8 @@ async def main():
     dp.include_router(architect_matrix.router)
     # 1b. community_metrics: /metrics · /stats (grupos) y /metrics (privado) con Dashboard en Vivo
     dp.include_router(community_metrics.router)
+    # 1c. media_locks: panel paginado de la matriz multimedia (callbacks mlk_, verificados como el resto de la consola)
+    dp.include_router(media_locks.router)
     # 2. user_private: consolas privadas, Sentinel Settings, sincronización y creador de planes
     dp.include_router(user_private.router)
     # 3. moderation y admin_group: comandos ejecutivos y /reload antes de procesar el chat general
@@ -2725,6 +2749,9 @@ async def main():
     dp.include_router(groups.router)
     # 6. fallback_router: salvaguarda de callbacks huérfanos
     dp.include_router(fallback_router)
+
+    # v15 · El Centinela publica con el bot clon de la comunidad si el maestro no puede hacerlo.
+    register_clone_bot_resolver(_clone_bot_for_chat)
 
     # Inicialización del Radar Acústico MTProto y Centinelas dedicados
     try:

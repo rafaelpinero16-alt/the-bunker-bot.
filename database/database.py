@@ -321,6 +321,9 @@ def init_db():
             ("lock_stickers", "INTEGER DEFAULT 0"),
             ("lock_links", "INTEGER DEFAULT 0"),
             ("lock_commands", "INTEGER DEFAULT 0"),
+            # v15 · Matriz granular de bloqueo multimedia (30 vectores) estilo Group Help / ChatKeeper
+            ("media_locks_config", "TEXT DEFAULT '{}'"),
+            ("long_video_max_seconds", "INTEGER DEFAULT 300"),
             ("mic_vip_price", "INTEGER DEFAULT 50"),
             ("mic_vip_custom_price", "INTEGER DEFAULT 50"),
             ("mic_vip_custom_tag", "TEXT DEFAULT '⚜️MIC🎙️VIP⚜️'"),
@@ -863,13 +866,15 @@ def get_lock_status(group_id: int, lock_name: str) -> int:
 def set_lock_status(group_id: int, lock_name: str, status: int):
     valid_locks = ["lock_media", "lock_stickers", "lock_links", "lock_commands"]
     if lock_name not in valid_locks: return
-    with get_db_connection() as conn:
+    with _write_transaction() as conn:
         cursor = conn.cursor()
+        # v15 · Decisión del dueño (botones heredados): la matriz granular se alinea en la misma transacción.
+        if lock_name in LEGACY_LOCK_GROUPS:
+            _push_legacy_lock_to_matrix(conn, group_id, lock_name, status)
         cursor.execute(f"""
             INSERT INTO group_settings (group_id, {lock_name}) VALUES (?, ?)
             ON CONFLICT(group_id) DO UPDATE SET {lock_name} = excluded.{lock_name}
         """, (group_id, status))
-        conn.commit()
 
 
 @db_async
@@ -1282,6 +1287,316 @@ def toggle_sentinel_service_flag(group_id: int, key: str):
                 ON CONFLICT(group_id) DO UPDATE SET {_ident(column)} = excluded.{_ident(column)}
             """, (group_id, new_value))
     return new_value
+
+
+# ==========================================================================================
+# 🔒 v15 · MATRIZ GRANULAR DE BLOQUEO MULTIMEDIA (estilo Group Help / ChatKeeper)
+# ==========================================================================================
+# Fuente de verdad: group_settings.media_locks_config (JSON {vector: {"action": ..., "delete": bool}}).
+# Compatibilidad con las cerraduras heredadas (lock_media / lock_stickers / lock_links):
+#   • INTENCIÓN del dueño: la matriz y las columnas heredadas se sincronizan en ambos sentidos (panel antiguo,
+#     interruptor de enlaces de la Mini App ↔ matriz).
+#   • PISO MÍNIMO: el Protocolo de Pánico y el modo nocturno suben esas columnas de forma TEMPORAL y luego las
+#     restauran desde su instantánea. Mientras duran, cada vector de ese grupo exige al menos Warn + borrado,
+#     sin tocar la matriz; al restaurarse, la configuración fina del dueño sigue intacta.
+MEDIA_LOCK_KEYS = (
+    # Página 1 · Multimedia y archivos
+    "photo", "video", "long_video", "animation", "sticker", "voice", "audio", "video_note", "document", "media_group",
+    # Página 2 · Enlaces, reenvíos, citas, botones inline y ediciones
+    "masked_links", "tg_links", "forward_any", "forward_story", "external_reply", "inline_buttons", "edited_msg",
+    "poll", "contact", "long_text",
+    # Página 3 · Evasión avanzada
+    "caps", "location", "game", "invoice", "spoiler_text", "spoiler_media", "giveaway", "via_bot", "bot_added",
+    "rich_message",
+)
+MEDIA_LOCK_ACTIONS = ("off", "del", "warn", "kick", "mute", "ban")
+MEDIA_LOCK_SEVERITY = {"off": 0, "del": 1, "warn": 2, "mute": 3, "kick": 4, "ban": 5}
+LEGACY_LOCK_GROUPS = {
+    "lock_media": ("photo", "video", "long_video", "animation", "voice", "audio", "video_note", "document", "media_group"),
+    "lock_stickers": ("sticker",),
+    "lock_links": ("masked_links", "tg_links"),
+}
+LEGACY_LOCK_RULE = {"action": "warn", "delete": True}   # lo que hacía una cerradura heredada: borrar + escalera
+LONG_VIDEO_RANGE = (300, 600)
+DEFAULT_LONG_VIDEO_SECONDS = 300
+_OFF_RULE = {"action": "off", "delete": False}
+
+
+def _normalize_media_rule(raw):
+    """{"action", "delete"} normalizado o None. 'off' nunca borra; 'del' siempre borra. Acepta "warn" plano."""
+    if isinstance(raw, str):
+        raw = {"action": raw}
+    if not isinstance(raw, dict):
+        return None
+    action = str(raw.get("action", "off") or "off").strip().lower()
+    if action not in MEDIA_LOCK_ACTIONS:
+        return None
+    if action == "off":
+        return dict(_OFF_RULE)
+    if action == "del":
+        return {"action": "del", "delete": True}
+    delete = raw.get("delete", True)
+    return {"action": action, "delete": bool(_as_flag(delete, 1)) if not isinstance(delete, bool) else delete}
+
+
+def _parse_media_locks_json(raw) -> dict:
+    try:
+        data = json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw if isinstance(raw, dict) else {})
+    except (TypeError, ValueError):
+        logger.warning("⚠️ [MediaLocks] media_locks_config corrupto; se ignora y se usan los valores heredados.")
+        data = {}
+    out = {}
+    for key, value in (data or {}).items():
+        if key in MEDIA_LOCK_KEYS:
+            rule = _normalize_media_rule(value)
+            if rule is not None:
+                out[key] = rule
+    return out
+
+
+def _legacy_intent_sync(conn, group_id: int, current: dict, panic: bool, night: bool) -> dict:
+    """
+    Valor de las cerraduras heredadas que DECIDIÓ el dueño. Con pánico o modo nocturno activos, la columna
+    está elevada temporalmente: la intención real está en la instantánea más antigua (la que se restaurará).
+    """
+    if not (panic or night):
+        return dict(current)
+    candidates = []
+    for table, active in (("panic_snapshots", panic), ("night_snapshots", night)):
+        if not active:
+            continue
+        try:
+            row = conn.execute(f"SELECT lock_media, lock_stickers, lock_links, activated_at FROM {table} WHERE group_id = ?",
+                               (group_id,)).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row:
+            candidates.append((str(row[3] or ""), {"lock_media": _as_flag(row[0], 0), "lock_stickers": _as_flag(row[1], 0),
+                                                   "lock_links": _as_flag(row[2], 0)}))
+    if not candidates:
+        return dict(current)
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0][1]
+
+
+def _media_locks_state_sync(conn, group_id: int) -> dict:
+    """Estado completo de la matriz en UNA lectura (más el snapshot solo si hay pánico / modo nocturno)."""
+    row = conn.execute("""
+        SELECT media_locks_config, long_video_max_seconds, lock_media, lock_stickers, lock_links,
+               COALESCE(panic_active, 0), COALESCE(night_mode_status, 0)
+        FROM group_settings WHERE group_id = ?
+    """, (int(group_id),)).fetchone()
+    explicit = _parse_media_locks_json(row[0] if row else None)
+    seconds = _as_int(row[1] if row else None, DEFAULT_LONG_VIDEO_SECONDS) if row else DEFAULT_LONG_VIDEO_SECONDS
+    seconds = max(LONG_VIDEO_RANGE[0], min(LONG_VIDEO_RANGE[1], seconds))
+    current = {"lock_media": _as_flag(row[2], 0) if row else 0, "lock_stickers": _as_flag(row[3], 0) if row else 0,
+               "lock_links": _as_flag(row[4], 0) if row else 0}
+    panic, night = bool(row and row[5]), bool(row and row[6])
+    intent = _legacy_intent_sync(conn, int(group_id), current, panic, night)
+
+    rules, floor = {}, set()
+    for key in MEDIA_LOCK_KEYS:
+        rules[key] = dict(explicit[key]) if key in explicit else dict(_OFF_RULE)
+    for column, keys in LEGACY_LOCK_GROUPS.items():
+        for key in keys:
+            if key not in explicit and intent[column] == 1:
+                rules[key] = dict(LEGACY_LOCK_RULE)
+            # Piso temporal: solo cuando un protocolo (pánico / nocturno) elevó la columna. En operación normal
+            # la columna refleja la matriz y el dueño puede dejar vectores sueltos en Off sin que se le impongan.
+            if current[column] == 1 and (intent[column] == 0 or panic or night):
+                floor.add(key)
+    return {"rules": rules, "explicit": set(explicit), "long_video_max_seconds": seconds, "floor": floor,
+            "panic": panic, "night": night, "legacy_current": current, "legacy_intent": intent}
+
+
+def effective_media_lock_rule(state: dict, key: str) -> dict:
+    """Regla que se APLICA: la del dueño, elevada a Warn + borrado si un piso temporal (pánico/nocturno) lo exige."""
+    rule = dict(state["rules"].get(key) or _OFF_RULE)
+    if key in state.get("floor", ()) and MEDIA_LOCK_SEVERITY[rule["action"]] < MEDIA_LOCK_SEVERITY["warn"]:
+        return dict(LEGACY_LOCK_RULE)
+    if key in state.get("floor", ()):
+        rule["delete"] = True
+    return rule
+
+
+def _write_media_rules_json(conn, group_id: int, rules: dict) -> None:
+    payload = json.dumps({k: rules[k] for k in MEDIA_LOCK_KEYS if k in rules}, separators=(",", ":"), ensure_ascii=False)
+    conn.execute("""
+        INSERT INTO group_settings (group_id, media_locks_config) VALUES (?, ?)
+        ON CONFLICT(group_id) DO UPDATE SET media_locks_config = excluded.media_locks_config
+    """, (int(group_id), payload))
+
+
+def _write_legacy_intent(conn, group_id: int, state: dict, rules: dict) -> None:
+    """
+    Recalcula las cerraduras heredadas a partir de la matriz (1 si algún vector del grupo no está en Off) y las
+    escribe donde corresponde: en group_settings si no hay protocolo temporal activo, o en la instantánea que se
+    restaurará si lo hay (así el piso temporal no se pierde y la intención del dueño sobrevive a la restauración).
+    """
+    intent = {col: (1 if any(rules[k]["action"] != "off" for k in keys) else 0) for col, keys in LEGACY_LOCK_GROUPS.items()}
+    if state["panic"] or state["night"]:
+        for table, active in (("panic_snapshots", state["panic"]), ("night_snapshots", state["night"])):
+            if active:
+                with contextlib.suppress(sqlite3.OperationalError):
+                    conn.execute(f"UPDATE {table} SET lock_media = ?, lock_stickers = ?, lock_links = ? WHERE group_id = ?",
+                                 (intent["lock_media"], intent["lock_stickers"], intent["lock_links"], int(group_id)))
+        return
+    conn.execute("UPDATE group_settings SET lock_media = ?, lock_stickers = ?, lock_links = ? WHERE group_id = ?",
+                 (intent["lock_media"], intent["lock_stickers"], intent["lock_links"], int(group_id)))
+
+
+def _apply_media_rules_sync(conn, group_id: int, updates: dict) -> dict:
+    """Materializa la matriz completa, aplica `updates` {vector: regla} y sincroniza las columnas heredadas."""
+    conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+    state = _media_locks_state_sync(conn, group_id)
+    rules = {k: dict(v) for k, v in state["rules"].items()}
+    for key, rule in updates.items():
+        rules[key] = dict(rule)
+    _write_media_rules_json(conn, group_id, rules)
+    _write_legacy_intent(conn, group_id, state, rules)
+    return _media_locks_state_sync(conn, group_id)
+
+
+def _push_legacy_lock_to_matrix(conn, group_id: int, column: str, value) -> None:
+    """
+    Cerradura heredada escrita por decisión del dueño (panel antiguo del bot o interruptor de la Mini App):
+    1 → los vectores de su grupo en Off pasan a Warn + borrado (los que ya tenían regla propia la conservan);
+    0 → todos los vectores de su grupo pasan a Off. El llamador escribe la columna en la misma transacción.
+    """
+    keys = LEGACY_LOCK_GROUPS.get(column)
+    if not keys:
+        return
+    conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+    state = _media_locks_state_sync(conn, group_id)
+    rules = {k: dict(v) for k, v in state["rules"].items()}
+    on = _as_flag(value, 0) == 1
+    for key in keys:
+        if on and rules[key]["action"] == "off":
+            rules[key] = dict(LEGACY_LOCK_RULE)
+        elif not on:
+            rules[key] = dict(_OFF_RULE)
+    _write_media_rules_json(conn, group_id, rules)
+
+
+@db_async
+def get_media_locks_config(group_id: int) -> dict:
+    """
+    Estado de la matriz: {"rules": {vector: {"action","delete"}}, "long_video_max_seconds", "floor": set,
+    "panic", "night", ...}. Usar effective_media_lock_rule(state, vector) para la regla que se aplica.
+    """
+    with get_db_connection() as conn:
+        try:
+            return _media_locks_state_sync(conn, int(group_id))
+        except sqlite3.OperationalError as ex:
+            logger.warning(f"⚠️ [MediaLocks] Esquema incompleto en {group_id}: {ex}")
+            return {"rules": {k: dict(_OFF_RULE) for k in MEDIA_LOCK_KEYS}, "explicit": set(),
+                    "long_video_max_seconds": DEFAULT_LONG_VIDEO_SECONDS, "floor": set(), "panic": False, "night": False,
+                    "legacy_current": {}, "legacy_intent": {}}
+
+
+@db_async
+def set_media_lock_rule(group_id: int, lock_key: str, action: str, delete_flag=None) -> dict:
+    """
+    Fija la regla de UN vector (BEGIN IMMEDIATE). delete_flag=None conserva el borrado actual (o lo activa si el
+    vector venía de Off). Devuelve el estado resultante de la matriz.
+    """
+    if lock_key not in MEDIA_LOCK_KEYS:
+        raise ValueError(f"Vector de bloqueo desconocido: {lock_key!r}")
+    action = str(action or "").strip().lower()
+    if action not in MEDIA_LOCK_ACTIONS:
+        raise ValueError(f"Acción no permitida: {action!r}")
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+        previous = _media_locks_state_sync(conn, group_id)["rules"][lock_key]
+        if delete_flag is None:
+            delete_flag = previous["delete"] if previous["action"] not in ("off", "del") else True
+        rule = _normalize_media_rule({"action": action, "delete": bool(delete_flag)})
+        return _apply_media_rules_sync(conn, group_id, {lock_key: rule})
+
+
+@db_async
+def toggle_media_lock_delete(group_id: int, lock_key: str) -> dict:
+    """
+    Botón 🗑️ de la matriz (atómico): en Off → pasa a 'del' (solo eliminar); en 'del' → vuelve a Off; en
+    Warn/Kick/Mute/Ban → invierte el borrado del mensaje infractor.
+    """
+    if lock_key not in MEDIA_LOCK_KEYS:
+        raise ValueError(f"Vector de bloqueo desconocido: {lock_key!r}")
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+        current = _media_locks_state_sync(conn, group_id)["rules"][lock_key]
+        if current["action"] == "off":
+            rule = {"action": "del", "delete": True}
+        elif current["action"] == "del":
+            rule = dict(_OFF_RULE)
+        else:
+            rule = {"action": current["action"], "delete": not current["delete"]}
+        return _apply_media_rules_sync(conn, group_id, {lock_key: rule})
+
+
+@db_async
+def set_long_video_max_seconds(group_id: int, seconds: int) -> int:
+    value = max(LONG_VIDEO_RANGE[0], min(LONG_VIDEO_RANGE[1], _as_int(seconds, DEFAULT_LONG_VIDEO_SECONDS)))
+    with _write_transaction() as conn:
+        conn.execute("""
+            INSERT INTO group_settings (group_id, long_video_max_seconds) VALUES (?, ?)
+            ON CONFLICT(group_id) DO UPDATE SET long_video_max_seconds = excluded.long_video_max_seconds
+        """, (int(group_id), value))
+    return value
+
+
+def validate_media_locks_payload(payload) -> tuple:
+    """
+    Sección "media_locks" de POST /configuration: {"rules": {vector: {"action","delete"} | "warn"},
+    "long_video_max_seconds": 300..600} (también acepta los vectores en plano). → (reglas, segundos|None).
+    """
+    if not isinstance(payload, dict):
+        raise ChatConfigError({"media_locks": "se esperaba un objeto JSON."})
+    rules_in = payload.get("rules") if isinstance(payload.get("rules"), dict) else {
+        k: v for k, v in payload.items() if k in MEDIA_LOCK_KEYS}
+    errors, rules = {}, {}
+    for key, value in (rules_in or {}).items():
+        if key not in MEDIA_LOCK_KEYS:
+            errors[f"media_locks.{key}"] = "vector desconocido."
+            continue
+        rule = _normalize_media_rule(value)
+        if rule is None:
+            errors[f"media_locks.{key}"] = f"acción no permitida (usa {', '.join(MEDIA_LOCK_ACTIONS)})."
+            continue
+        rules[key] = rule
+    seconds = None
+    if "long_video_max_seconds" in payload:
+        try:
+            seconds = _coerce_int_range(payload["long_video_max_seconds"], *LONG_VIDEO_RANGE, " s")
+        except ValueError as exc:
+            errors["media_locks.long_video_max_seconds"] = str(exc)
+    unknown = [k for k in payload if k not in ("rules", "long_video_max_seconds") and k not in MEDIA_LOCK_KEYS]
+    for key in unknown:
+        errors[f"media_locks.{key}"] = "campo desconocido."
+    if errors:
+        raise ChatConfigError(errors)
+    if not rules and seconds is None:
+        raise ChatConfigError({"media_locks": "no hay ninguna regla que guardar."})
+    return rules, seconds
+
+
+@db_async
+def get_active_clone_tokens_for_group(group_id: int) -> list:
+    """
+    v15 · Tokens del bot clon activo de la comunidad como [(valor_guardado, token_descifrado)]. El Centinela los
+    usa para publicar con el clon si el bot maestro no puede (main.py localiza la instancia en ejecución).
+    """
+    with get_db_connection() as conn:
+        rows = conn.execute("SELECT bot_token FROM bot_clones WHERE group_id = ? AND status = 'active' "
+                            "AND bot_token IS NOT NULL AND bot_token != ''", (int(group_id),)).fetchall()
+    out = []
+    for (stored,) in rows:
+        try:
+            out.append((stored, decrypt_secret(stored)))
+        except Exception as ex:
+            logger.debug(f"[Clones] Token no descifrable para {group_id}: {ex}")
+            out.append((stored, stored))
+    return out
 
 
 SENTINEL_FLAG_KEYS = ("vc_enabled", "vc_join_enabled", "micvip_enabled", "reset_enabled", "sched_enabled", "vc_welcome_enabled")
@@ -3336,6 +3651,9 @@ def update_chat_operational_settings(chat_id: int, settings: dict):
             INSERT INTO group_settings (group_id) VALUES (?)
             ON CONFLICT(group_id) DO NOTHING
         """, (chat_id,))
+        if "linklock" in settings:
+            # v15 · El interruptor de enlaces de la Mini App gobierna también los vectores de enlaces de la matriz.
+            _push_legacy_lock_to_matrix(conn, chat_id, "lock_links", 1 if settings["linklock"] else 0)
 
         if updates:
             params.append(chat_id)
@@ -3653,6 +3971,19 @@ def _read_chat_configuration(conn, chat_id: int) -> dict:
         ).fetchone()
         if custom and custom[0] is not None and int(custom[0]) > 0:
             tree["acoustic"]["micvip_price"] = int(custom[0])
+    # v15 · Matriz multimedia (30 vectores) para la Mini App. ui.renderChatConfiguration ignora secciones que
+    # no estén en su CONFIG_LAYOUT, así que añadirla no altera la consola actual.
+    try:
+        media_state = _media_locks_state_sync(conn, int(chat_id))
+        tree["media_locks"] = {
+            "rules": media_state["rules"],
+            "long_video_max_seconds": media_state["long_video_max_seconds"],
+            "floor": sorted(media_state["floor"]),
+            "keys": list(MEDIA_LOCK_KEYS),
+            "actions": list(MEDIA_LOCK_ACTIONS),
+        }
+    except sqlite3.OperationalError:
+        pass
     tree["meta"] = {
         "chat_id": str(chat_id),
         "updated_at": row[len(columns)] if row else None,
@@ -3689,7 +4020,14 @@ def update_chat_full_configuration(chat_id: int, config_dict: dict, updated_by: 
     árbol resultante. El precio de MicVIP se escribe también en mic_vip_custom_price, igual que
     set_mic_vip_price, para que el bot cobre exactamente lo configurado.
     """
-    clean = validate_chat_configuration(config_dict)
+    # v15 · La matriz multimedia viaja en su propia sección y se valida aparte (estructura de reglas por vector).
+    config_dict = dict(config_dict) if isinstance(config_dict, dict) else config_dict
+    media_payload = config_dict.pop("media_locks", None) if isinstance(config_dict, dict) else None
+    media_rules, media_seconds = validate_media_locks_payload(media_payload) if media_payload is not None else ({}, None)
+    if media_payload is not None and not config_dict:
+        clean = {}
+    else:
+        clean = validate_chat_configuration(config_dict)
     assignments, params = [], []
     for field, value in clean.items():
         column = _ident(CHAT_CONFIG_FIELDS[field][1])
@@ -3705,7 +4043,13 @@ def update_chat_full_configuration(chat_id: int, config_dict: dict, updated_by: 
 
     with _write_transaction() as conn:
         conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(chat_id),))
+        if "linklock_enabled" in clean:
+            _push_legacy_lock_to_matrix(conn, int(chat_id), "lock_links", 1 if clean["linklock_enabled"] else 0)
         conn.execute(f"UPDATE group_settings SET {', '.join(assignments)} WHERE group_id = ?", (*params, int(chat_id)))
+        if media_rules:
+            _apply_media_rules_sync(conn, int(chat_id), media_rules)
+        if media_seconds is not None:
+            conn.execute("UPDATE group_settings SET long_video_max_seconds = ? WHERE group_id = ?", (media_seconds, int(chat_id)))
         return _read_chat_configuration(conn, chat_id)
 
 

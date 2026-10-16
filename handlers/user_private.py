@@ -2173,7 +2173,7 @@ DELEGATE_CALLBACK_RULES = (
     ("gset_captcha_", "can_manage_captcha"), ("togcap_", "can_manage_captcha"), ("togmode_", "can_manage_captcha"),
     ("cap_set_", "can_manage_captcha"), ("capval_", "can_manage_captcha"),
     # 🔒 Cerraduras de contenido
-    ("gset_locks_", "can_manage_locks"), ("toglock_", "can_manage_locks"),
+    ("gset_locks_", "can_manage_locks"), ("toglock_", "can_manage_locks"), ("mlk_", "can_manage_locks"),
     # 🛡️ Anti-Spam y Anti-Flood
     ("gset_antispam_", "can_manage_antispam"), ("astog_", "can_manage_antispam"), ("as_fwd_", "can_manage_antispam"),
     ("as_togdel_", "can_manage_antispam"), ("gset_antiflood_", "can_manage_antispam"), ("afset_", "can_manage_antispam"),
@@ -6779,17 +6779,10 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
                 parse_mode="HTML"
             )
         elif module == "locks":
-            media_lbl = "Bloqueado 🟢" if lang == "es" else "Locked 🟢"
-            media_free = "Permitido 🔴" if lang == "es" else "Allowed 🔴"
-            media = media_lbl if await get_lock_status(group_id, "lock_media") == 1 else media_free
-            stickers = media_lbl if await get_lock_status(group_id, "lock_stickers") == 1 else media_free
-            links = media_lbl if await get_lock_status(group_id, "lock_links") == 1 else media_free
-            commands = media_lbl if await get_lock_status(group_id, "lock_commands") == 1 else media_free
-            await safe_edit_text(callback,
-                t["locks_main_title"].format(media=media, stickers=stickers, links=links, commands=commands),
-                reply_markup=await get_locks_keyboard(group_id, lang),
-                parse_mode="HTML"
-            )
+            # 🔒 v15 · Matriz granular de 30 vectores en 3 páginas (estilo Group Help), en handlers/media_locks.py.
+            # get_locks_keyboard (4 cerraduras binarias) se conserva por compatibilidad, pero ya no es la entrada.
+            from .media_locks import open_media_locks_panel
+            await open_media_locks_panel(callback, bot, group_id, lang, page=1)
         elif module == "warns":
             cfg = await get_warns_config(group_id)
             await safe_edit_text(callback,
@@ -6903,23 +6896,18 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
             pass
 
     elif action == "toglock":
+        # Botones heredados (mensajes antiguos del chat): siguen funcionando. set_lock_status alinea la matriz
+        # granular en la misma transacción y la vista desemboca en el panel nuevo de 3 páginas.
         lock_type = data[1]
         lock_key = f"lock_{lock_type}"
+        if lock_key not in ("lock_media", "lock_stickers", "lock_links", "lock_commands"):
+            return
         current = await get_lock_status(group_id, lock_key)
         await set_lock_status(group_id, lock_key, 0 if current == 1 else 1)
-        media_lbl = "Bloqueado 🟢" if lang == "es" else "Locked 🟢"
-        media_free = "Permitido 🔴" if lang == "es" else "Allowed 🔴"
-        media = media_lbl if await get_lock_status(group_id, "lock_media") == 1 else media_free
-        stickers = media_lbl if await get_lock_status(group_id, "lock_stickers") == 1 else media_free
-        links = media_lbl if await get_lock_status(group_id, "lock_links") == 1 else media_free
-        commands = media_lbl if await get_lock_status(group_id, "lock_commands") == 1 else media_free
-
+        emit_settings_updated_bg(group_id, "bot_console", ["media_locks", lock_key] + (["linklock_enabled"] if lock_key == "lock_links" else []))
         try:
-            await safe_edit_text(callback,
-                t["locks_main_title"].format(media=media, stickers=stickers, links=links, commands=commands),
-                reply_markup=await get_locks_keyboard(group_id, lang),
-                parse_mode="HTML"
-            )
+            from .media_locks import open_media_locks_panel
+            await open_media_locks_panel(callback, bot, group_id, lang, page=1)
         except TelegramBadRequest:
             pass
 

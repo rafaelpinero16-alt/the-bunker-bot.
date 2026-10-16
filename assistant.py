@@ -838,38 +838,104 @@ async def _resolve_reset_text(chat_id: int):
     return text, media_id, media_type, btn_text, btn_url, autodel
 
 
-async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None, media_type: str = None, auto_delete_after: int = None, reply_markup: InlineKeyboardMarkup = None):
-    if not _global_bot:
+# ==========================================
+# 📣 v15 · DESPACHO RESILIENTE DE AVISOS DEL CENTINELA
+# ==========================================
+# main.py registra aquí cómo localizar el bot clon activo de una comunidad (assistant no puede importar main).
+_clone_bot_resolver = None
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def register_clone_bot_resolver(resolver) -> None:
+    """resolver(chat_id) -> Bot | None (async). Lo registra main.py al arrancar."""
+    global _clone_bot_resolver
+    _clone_bot_resolver = resolver
+
+
+async def _resolve_clone_bot(chat_id: int):
+    if _clone_bot_resolver is None:
         return None
+    try:
+        return await _clone_bot_resolver(chat_id)
+    except Exception as e:
+        logger.debug(f"[Radar] No se pudo resolver el bot clon de {chat_id}: {e}")
+        return None
+
+
+def _html_to_plain(text: str) -> str:
+    return html.unescape(_HTML_TAG_RE.sub("", text or ""))
+
+
+async def _send_text_notice(bot, chat_id: int, text: str, reply_markup):
+    """Texto con HTML; si Telegram rechaza el marcado (HTML mal formado en un texto personalizado), en plano."""
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text[:4000], reply_markup=reply_markup, parse_mode="HTML")
+    except Exception as e:
+        if "parse" not in str(e).lower() and "entit" not in str(e).lower():
+            raise
+        logger.warning(f"⚠️ [Radar] HTML no válido en el aviso de {chat_id}; se reenvía como texto plano: {e}")
+        return await bot.send_message(chat_id=chat_id, text=_html_to_plain(text)[:4000], reply_markup=reply_markup)
+
+
+async def _send_notice_with(bot, chat_id: int, text: str, media_id: str = None, media_type: str = None,
+                            reply_markup: InlineKeyboardMarkup = None, allow_media: bool = True):
+    """
+    Publica el aviso con un bot concreto. Si el envío multimedia falla (file_id expirado o de otro bot, medio
+    restringido en el grupo…), NO se aborta: se registra y se envía de inmediato como texto con su botón.
+    """
+    if allow_media and media_id and media_type in ("photo", "video", "animation"):
+        safe_caption = text[:1020] + "..." if len(text) > 1024 else text
+        try:
+            if media_type == "photo":
+                return await bot.send_photo(chat_id=chat_id, photo=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
+            if media_type == "video":
+                return await bot.send_video(chat_id=chat_id, video=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
+            return await bot.send_animation(chat_id=chat_id, animation=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
+        except Exception as media_err:
+            logger.warning(f"⚠️ [Radar] Envío multimedia ({media_type}) fallido en {chat_id}: {media_err}. "
+                           f"Respaldo inmediato: aviso en texto con su botón.")
+    return await _send_text_notice(bot, chat_id, text, reply_markup)
+
+
+async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None, media_type: str = None, auto_delete_after: int = None, reply_markup: InlineKeyboardMarkup = None):
+    """
+    Publica un aviso del radar en la comunidad. Cadena de resiliencia (v15):
+      1. Bot maestro con multimedia → si el medio falla, el mismo bot lo envía como texto con su botón.
+      2. Si el bot maestro no puede publicar (sin permisos, expulsado, error de API) → logger.error con traza y,
+         si la comunidad tiene un bot clon activo, el clon publica el aviso en texto (los file_id del maestro no
+         son válidos para otro bot).
+    Devuelve el mensaje enviado o None.
+    """
     if not _is_group_chat_id(chat_id):
         # Los avisos del radar son comunicaciones de comunidad: jamás se envían a un chat privado.
         logger.warning(f"🔒 [Radar] Aviso bloqueado: destino {chat_id} no es un grupo.")
         return None
-    try:
-        sent = None
-        safe_caption = text[:1020] + "..." if len(text) > 1024 else text
 
-        if media_id and media_type == "photo":
-            sent = await _global_bot.send_photo(chat_id=chat_id, photo=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
-        elif media_id and media_type == "video":
-            sent = await _global_bot.send_video(chat_id=chat_id, video=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
-        elif media_id and media_type == "animation":
-            sent = await _global_bot.send_animation(chat_id=chat_id, animation=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
-        else:
-            sent = await _global_bot.send_message(chat_id=chat_id, text=text[:4000], reply_markup=reply_markup, parse_mode="HTML")
+    sent = None
+    if _global_bot:
+        try:
+            sent = await _send_notice_with(_global_bot, chat_id, text, media_id, media_type, reply_markup)
+        except Exception as e:
+            logger.error(f"❌ [Radar] El bot maestro no pudo publicar el aviso en {chat_id}: {e}", exc_info=True)
 
-        if sent and auto_delete_after and auto_delete_after > 0:
-            async def _auto_delete_notice(msg, delay: int):
-                await asyncio.sleep(delay)
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-            _spawn(_auto_delete_notice(sent, auto_delete_after))
-        return sent
-    except Exception as e:
-        logger.warning(f"Aviso despachando radar notice en {chat_id}: {e}")
-        return None
+    if sent is None:
+        clone_bot = await _resolve_clone_bot(chat_id)
+        if clone_bot is not None and clone_bot is not _global_bot:
+            try:
+                sent = await _send_notice_with(clone_bot, chat_id, text, reply_markup=reply_markup, allow_media=False)
+                logger.info(f"🧬 [Radar] Aviso publicado en {chat_id} con el bot clon de la comunidad.")
+            except Exception as e:
+                logger.error(f"❌ [Radar] El bot clon tampoco pudo publicar en {chat_id}: {e}", exc_info=True)
+
+    if sent and auto_delete_after and auto_delete_after > 0:
+        async def _auto_delete_notice(msg, delay: int):
+            await asyncio.sleep(delay)
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+        _spawn(_auto_delete_notice(sent, auto_delete_after))
+    return sent
 
 
 VC_NOTICE_BATCH_WINDOW_SECONDS = 2.5   # se agrupan las entradas casi simultáneas en un solo aviso

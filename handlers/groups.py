@@ -61,6 +61,7 @@ from database.database import (
 )
 import raid_shield
 import assistant as _assistant_module
+from . import media_locks   # 🔒 v15 · Matriz granular de bloqueo multimedia (30 vectores)
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
 
 try:
@@ -994,6 +995,11 @@ async def handle_new_members(message: Message, bot: Bot):
                 except Exception as e:
                     logger.warning(f"[RaidShield] No se pudo retirar el bot {new_user.id} de {group_id}: {e}")
                 continue
+
+        # 🛸 v15 · Vector 29 (bot_added): bot invitado por un miembro sin privilegios → el bot se retira al
+        # instante y quien lo invitó recibe la sanción configurada en la matriz multimedia.
+        if new_user.is_bot and await media_locks.handle_bot_added(bot, message, adder, new_user):
+            continue
 
         if not new_user.is_bot:
             if await check_global_cas_spam(new_user.id):
@@ -2182,6 +2188,8 @@ _SANCTION_TEXT = {
 }
 
 WARN_ACTIONS = ("mute", "kick", "ban")
+# v15 · Motivos legibles de los 30 vectores de la matriz multimedia para la escalera de advertencias.
+_REASON_TEXT.update(media_locks.REASON_TEXTS)
 
 
 def _sync_get_warn_template(chat_id: int) -> dict:
@@ -2804,19 +2812,16 @@ async def group_security_matrix(message: Message, bot: Bot):
             has_link_entity = True
             lower_text += " " + ent.url.lower()
 
-    # 2. Cerraduras de Contenido
-    if await get_lock_status(group_id, "lock_media") == 1 and (
-        message.photo or message.video or message.document or 
-        message.audio or message.voice or message.video_note or message.animation
+    # 2. 🔒 v15 · Matriz granular de bloqueo multimedia (30 vectores, acción propia por vector).
+    #    Sustituye a las 4 cerraduras binarias: lock_media / lock_stickers / lock_links siguen gobernando sus
+    #    vectores (intención del dueño ↔ matriz) y, durante el Pánico o el modo nocturno, actúan como piso
+    #    mínimo Warn + borrado. Se aplica IGUAL a los mensajes nuevos y a los EDITADOS: una edición que
+    #    inyecta enlaces, spoilers, botones, formato abusivo o palabras de la lista negra se sanciona con la
+    #    regla del vector 17 (edited_msg) además de la regla propia de cada vector.
+    if await media_locks.inspect_and_enforce(
+        bot, message, is_edit=is_edit, blacklist=(await get_blacklist()) if is_edit else None
     ):
-        is_threat_detected = True
-    elif await get_lock_status(group_id, "lock_stickers") == 1 and message.sticker:
-        is_threat_detected = True
-    elif await get_lock_status(group_id, "lock_links") == 1 and (
-        has_link_entity or "http://" in lower_text or "https://" in lower_text or 
-        "www." in lower_text or "t.me/" in lower_text or "telegram.me/" in lower_text
-    ):
-        is_threat_detected = True
+        return
 
     # 3. Lista Negra (Blacklist Alfanumérica)
     if not is_threat_detected:
@@ -2861,6 +2866,9 @@ async def group_security_matrix(message: Message, bot: Bot):
         )
         return
 
+    # Las ediciones YA pasaron por la matriz multimedia, la lista negra y el anti-spam. Aquí se detienen a
+    # propósito: una edición no es un mensaje nuevo, así que no cuenta para el anti-flood (evita falsos
+    # positivos al corregir un texto) ni suma XP (evita farmear reputación editando).
     if is_edit:
         return
 
