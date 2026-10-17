@@ -3512,83 +3512,266 @@ async def disengage_podcast_ducking(group_id: int):
     logger.info(f"🎙️ [Modo Podcast] Ducking desactivado y persistido en el grupo {group_id}")
 
 
-async def execute_ghost_purge(chat_id: int, action: str = "ban") -> dict:
-    sentinel_data = active_sentinels.get(chat_id)
-    client: Client = sentinel_data["client"] if sentinel_data else assistant_app
+# ==========================================
+# 💀 v20 · GHOST PURGE v2 — cuentas fantasma, estafas, falsas, userbots e inalcanzables
+# ==========================================
+GHOST_PURGE_MAX_SCAN = max(500, _env_int("GHOST_PURGE_MAX_SCAN", 20000))
+GHOST_PURGE_SCAN_BUDGET_S = _env_float("GHOST_PURGE_SCAN_BUDGET_S", 600.0)
+GHOST_PURGE_ACTION_GAP_S = 0.15          # pausa entre expulsiones (Bot API ≈ 30 req/s; margen amplio)
+GHOST_PURGE_LIVE_EVENTS_MAX = 50         # eventos 'security_block' en vivo por purga (el resto llega por analítica)
+TELEGRAM_MEMBER_LIST_CAP = 10000         # Telegram no expone más miembros por esta vía en supergrupos grandes
+_ghost_purge_running: set = set()        # una purga por comunidad a la vez (se libera siempre en finally)
 
-    found = 0
-    purged = 0
 
-    if client and client.is_connected:
-        try:
-            async for member in client.get_chat_members(chat_id):
-                user = member.user
-                if user and getattr(user, "is_deleted", False):
-                    found += 1
-                    for _attempt in range(2):
-                        try:
-                            await asyncio.wait_for(client.ban_chat_member(chat_id, user.id), timeout=MTPROTO_RPC_TIMEOUT)
-                            if action != "ban":
-                                await asyncio.wait_for(client.unban_chat_member(chat_id, user.id), timeout=MTPROTO_RPC_TIMEOUT)
-                            purged += 1
-                            break
-                        except FloodWait as fw:
-                            await asyncio.sleep(int(getattr(fw, "value", 5) or 5) + 1)
-                        except Exception as p_err:
-                            logger.warning(f"Aviso purgando usuario {user.id} en {chat_id}: {p_err}")
-                            break
-                    await asyncio.sleep(0.2)
+def is_ghost_purge_running(chat_id: int) -> bool:
+    return int(chat_id) in _ghost_purge_running
 
-            await update_ghost_purge_scan_time(chat_id)
-            if _global_bot and purged > 0:
-                alert_text = GHOST_PURGE_ALERT_TEXT.format(
-                    found=found,
-                    purged=purged,
-                    action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
-                )
-                _spawn(_dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60))
 
-            return {"status": "success", "found": found, "purged": purged, "action": action}
-        except Exception as e:
-            logger.warning(f"Aviso en Ghost Purge MTProto para {chat_id}, activando fallback: {e}")
+def _purge_ops():
+    try:
+        import perimeter_ops  # type: ignore[import-not-found]
+        return perimeter_ops
+    except Exception as ex:  # pragma: no cover - degradación: solo cuentas eliminadas
+        logger.warning(f"⚠️ [Ghost Purge] perimeter_ops no disponible ({ex}); se purgan solo cuentas eliminadas.")
+        return None
 
+
+def _member_is_admin(member) -> bool:
+    status = str(getattr(getattr(member, "status", None), "name", getattr(member, "status", "")) or "").upper()
+    return status in ("OWNER", "CREATOR", "ADMINISTRATOR")
+
+
+async def _purge_one(chat_id: int, user_id: int, action: str, client) -> bool:
+    """Expulsa a un miembro. Bot API primero (no expone la cuenta MTProto); MTProto con Token-Bucket como respaldo."""
     if _global_bot:
-        try:
-            await update_ghost_purge_scan_time(chat_id)
-
-            def _load_tracked():
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,))
-                    return cursor.fetchall()
-
-            # Lectura SQLite en hilo: no bloquea el event loop compartido con Aiogram/FastAPI.
-            tracked = await asyncio.to_thread(_load_tracked)
-
-            for (uid,) in tracked:
-                try:
-                    chat_member = await _global_bot.get_chat_member(chat_id, uid)
-                    user = chat_member.user
-                    if getattr(user, "is_deleted", False) or (user.first_name and "Deleted Account" in user.first_name):
-                        found += 1
-                        if chat_member.status not in ("creator", "administrator"):
-                            await _global_bot.ban_chat_member(chat_id, uid)
-                            if action != "ban":
-                                await _global_bot.unban_chat_member(chat_id, uid)
-                            purged += 1
-                            await asyncio.sleep(0.1)
-                except Exception:
+        for attempt in range(2):
+            try:
+                await asyncio.wait_for(_global_bot.ban_chat_member(chat_id=chat_id, user_id=user_id), timeout=MTPROTO_RPC_TIMEOUT)
+                if action == "kick":
+                    await asyncio.wait_for(_global_bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True),
+                                           timeout=MTPROTO_RPC_TIMEOUT)
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                retry_after = getattr(e, "retry_after", None)
+                if retry_after and attempt == 0 and int(retry_after) <= MTPROTO_FLOOD_MAX_INLINE_WAIT:
+                    await asyncio.sleep(int(retry_after) + 1)
                     continue
+                logger.debug(f"[Ghost Purge] Bot API no pudo expulsar {user_id} en {chat_id}: {e}")
+                break
+    if client is not None and getattr(client, "is_connected", False):
+        try:
+            await _bucket_for(client).acquire(max_wait=MTPROTO_FLOOD_MAX_INLINE_WAIT)
+            await asyncio.wait_for(client.ban_chat_member(chat_id, user_id), timeout=MTPROTO_RPC_TIMEOUT)
+            if action == "kick":
+                await _bucket_for(client).acquire(max_wait=MTPROTO_FLOOD_MAX_INLINE_WAIT)
+                await asyncio.wait_for(client.unban_chat_member(chat_id, user_id), timeout=MTPROTO_RPC_TIMEOUT)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except FloodWait as fw:
+            _bucket_for(client).penalize(int(getattr(fw, "value", 5) or 5))
+        except Exception as e:
+            logger.debug(f"[Ghost Purge] MTProto no pudo expulsar {user_id} en {chat_id}: {e}")
+    return False
 
-            if purged > 0:
-                alert_text = GHOST_PURGE_ALERT_TEXT.format(
-                    found=found,
-                    purged=purged,
-                    action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡"
-                )
-                _spawn(_dispatch_radar_notice(chat_id=chat_id, text=alert_text, auto_delete_after=60))
-            return {"status": "success", "found": found, "purged": purged, "action": action, "fallback": True}
-        except Exception as fb_err:
-            logger.error(f"❌ Falló fallback de Ghost Purge en {chat_id}: {fb_err}")
 
-    return {"status": "error", "found": found, "purged": purged, "action": action, "message": "Sin cliente MTProto ni bot disponible."}
+async def _ghost_log_channel_post(chat_id: int, text: str) -> None:
+    """Copia del informe en el canal de registro de la comunidad (si existe y el bot puede publicar)."""
+    if not _global_bot:
+        return
+
+    def _read():
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT log_channel_id FROM group_settings WHERE group_id = ?", (int(chat_id),)).fetchone()
+            return row[0] if row and row[0] else None
+    try:
+        log_id = await asyncio.to_thread(_read)
+        if not log_id:
+            return
+        target = int(log_id) if str(log_id).lstrip("-").isdigit() else log_id
+        await asyncio.wait_for(
+            _global_bot.send_message(chat_id=target, text=f"{text}\n\n<code>{int(chat_id)}</code>", parse_mode="HTML"),
+            timeout=MTPROTO_RPC_TIMEOUT,
+        )
+    except Exception as e:
+        logger.debug(f"[Ghost Purge] No se pudo publicar el informe en el canal de registro de {chat_id}: {e}")
+
+
+async def _collect_ghost_candidates(chat_id: int, client, criteria, flagged: set, protected: set, ops) -> dict:
+    """Recorre los miembros (MTProto o, sin él, los usuarios registrados por la Bot API) y clasifica amenazas."""
+    candidates: list = []
+    scanned = 0
+    truncated = False
+    via = "none"
+
+    def _classify(user):
+        if ops is not None:
+            return ops.classify_ghost(user, criteria=criteria, flagged_ids=flagged)
+        return "deleted" if getattr(user, "is_deleted", False) else None
+
+    if client is not None and getattr(client, "is_connected", False):
+        async def _scan_mtproto():
+            nonlocal scanned, truncated
+            await _bucket_for(client).acquire(max_wait=MTPROTO_FLOOD_MAX_INLINE_WAIT)
+            async for member in client.get_chat_members(chat_id):
+                scanned += 1
+                user = getattr(member, "user", None)
+                if user is not None and int(user.id) not in protected and not _member_is_admin(member) \
+                        and not getattr(user, "is_self", False):
+                    reason = _classify(user)
+                    if reason:
+                        candidates.append((int(user.id), reason))
+                if scanned >= GHOST_PURGE_MAX_SCAN:
+                    truncated = True
+                    break
+                if scanned % 200 == 0:
+                    await asyncio.sleep(0)   # cede el event loop en comunidades grandes
+        try:
+            await asyncio.wait_for(_scan_mtproto(), timeout=GHOST_PURGE_SCAN_BUDGET_S)
+            via = "mtproto"
+        except FloodWait as fw:
+            _bucket_for(client).penalize(int(getattr(fw, "value", 5) or 5))
+            via, truncated = "mtproto", True
+        except asyncio.TimeoutError:
+            via, truncated = "mtproto", True
+        except FATAL_SESSION_ERRORS:
+            raise
+        except Exception as e:
+            logger.warning(f"⚠️ [Ghost Purge] Lectura MTProto fallida en {chat_id}; respaldo Bot API: {e}")
+            candidates.clear()
+            scanned = 0
+        if scanned >= TELEGRAM_MEMBER_LIST_CAP:
+            truncated = True
+
+    if via == "none" and _global_bot:
+        via = "bot_api"
+
+        def _load_tracked():
+            with get_db_connection() as conn:
+                return [r[0] for r in conn.execute("SELECT user_id FROM chat_user_activity WHERE group_id = ?", (chat_id,)).fetchall()]
+        tracked = set(await asyncio.to_thread(_load_tracked)) | set(flagged)
+        for uid in tracked:
+            if uid in protected:
+                continue
+            scanned += 1
+            try:
+                chat_member = await asyncio.wait_for(_global_bot.get_chat_member(chat_id, uid), timeout=MTPROTO_RPC_TIMEOUT)
+            except Exception:
+                continue
+            status = str(getattr(chat_member.status, "value", chat_member.status) or "").lower()
+            if status in ("creator", "administrator", "left", "kicked"):
+                continue
+            reason = _classify(chat_member.user)
+            if reason:
+                candidates.append((int(uid), reason))
+            await asyncio.sleep(0.05)
+            if scanned >= GHOST_PURGE_MAX_SCAN:
+                truncated = True
+                break
+    return {"candidates": candidates, "scanned": scanned, "truncated": truncated, "via": via}
+
+
+async def execute_ghost_purge(chat_id: int, action: str = None, criteria=None, origin: str = "manual",
+                              lang: str = "es", notify: bool = True) -> dict:
+    """
+    Ghost Purge v2 (estilo «Remove Deleted Accounts» / Shieldy). Firma retrocompatible: execute_ghost_purge(chat_id,
+    action="ban") sigue funcionando. Si `action` / `criteria` son None se usa la directiva guardada de la comunidad.
+      • Detecta: cuentas eliminadas, estafa / falsas (marcas oficiales de Telegram), userbots marcados por el radar
+        y, opcionalmente, cuentas inalcanzables (estado «visto hace mucho tiempo» o bloqueo al Centinela).
+      • Nunca toca: administradores, Arquitectos, cuentas de servicio, lista blanca global ni bots.
+      • Cada expulsión se registra en security_events (source='ghost_purge') y se emite al radar en vivo.
+    Una sola purga por comunidad a la vez.
+    """
+    cid = int(chat_id)
+    if cid in _ghost_purge_running:
+        return {"status": "busy", "found": 0, "purged": 0, "action": action, "message": "purge_in_progress"}
+    _ghost_purge_running.add(cid)
+    try:
+        return await _run_ghost_purge(cid, action, criteria, origin, lang, notify)
+    finally:
+        _ghost_purge_running.discard(cid)
+
+
+async def _run_ghost_purge(chat_id: int, action, criteria, origin: str, lang: str, notify: bool) -> dict:
+    ops = _purge_ops()
+    if ops is not None and (action is None or criteria is None):
+        try:
+            saved = await ops.get_purge_settings(chat_id)
+        except Exception as e:
+            logger.debug(f"[Ghost Purge] Configuración no disponible para {chat_id}: {e}")
+            saved = {"action": "ban", "criteria": list(getattr(ops, "DEFAULT_PURGE_CRITERIA", ("deleted",)))}
+        action = saved["action"] if action is None else action
+        criteria = saved["criteria"] if criteria is None else criteria
+    action = ops.normalize_purge_action(action) if ops else ("kick" if str(action).lower() == "kick" else "ban")
+    criteria = tuple(ops.parse_purge_criteria(criteria)) if ops else ("deleted",)
+    report = {"status": "success", "found": 0, "purged": 0, "failed": 0, "scanned": 0, "action": action,
+              "criteria": list(criteria), "by_reason": {}, "origin": origin, "truncated": False}
+    if not criteria:
+        report.update(status="error", message="no_criteria")
+        return report
+
+    sentinel_data = active_sentinels.get(chat_id)
+    client = sentinel_data["client"] if sentinel_data else assistant_app
+    if not (client and getattr(client, "is_connected", False)) and not _global_bot:
+        report.update(status="error", message="Sin cliente MTProto ni bot disponible.")
+        return report
+
+    flagged: set = set()
+    if "flagged" in criteria:
+        try:
+            from database.database import get_flagged_userbot_ids
+            flagged = set(await get_flagged_userbot_ids(chat_id))
+        except Exception as e:
+            logger.debug(f"[Ghost Purge] Userbots marcados no disponibles en {chat_id}: {e}")
+
+    protected = set(SUPER_ADMIN_IDS) | set(SERVICE_ACCOUNT_IDS) | set((admin_caches.get(chat_id) or {}).get("admins") or ())
+    for own in (getattr(getattr(client, "me", None), "id", None), getattr(_global_bot, "id", None), get_assistant_bot_id()):
+        if own:
+            protected.add(int(own))
+
+    try:
+        scan = await _collect_ghost_candidates(chat_id, client, criteria, flagged, protected, ops)
+    except FATAL_SESSION_ERRORS as e:
+        logger.error(f"🔒 [Ghost Purge] Sesión MTProto inválida en {chat_id}: {e}")
+        report.update(status="error", message="invalid_session")
+        return report
+    report.update(scanned=scan["scanned"], truncated=scan["truncated"], via=scan["via"])
+
+    live_events = 0
+    for uid, reason in scan["candidates"]:
+        try:
+            if await is_whitelisted(uid):
+                continue
+        except Exception:
+            pass
+        report["found"] += 1
+        report["by_reason"][reason] = report["by_reason"].get(reason, 0) + 1
+        if await _purge_one(chat_id, uid, action, client):
+            report["purged"] += 1
+            try:
+                from database.database import record_security_event
+                await record_security_event(chat_id, uid, "ghost_purge", action, is_bot=False)
+            except Exception as e:
+                logger.debug(f"[Ghost Purge] Evento de seguridad no registrado ({chat_id}/{uid}): {e}")
+            if live_events < GHOST_PURGE_LIVE_EVENTS_MAX:
+                live_events += 1
+                publish_radar_event(chat_id, "security_block", {"s": "ghost_purge", "a": action, "b": False})
+        else:
+            report["failed"] += 1
+        await asyncio.sleep(GHOST_PURGE_ACTION_GAP_S)
+
+    try:
+        await update_ghost_purge_scan_time(chat_id)
+    except Exception:
+        pass
+    logger.info(f"💀 [Ghost Purge] {chat_id} ({origin}, {report['via']}): {report['scanned']} analizados, "
+                f"{report['found']} detectados, {report['purged']} purgados, {report['failed']} fallidos.")
+    if notify and report["found"] > 0:
+        text = ops.build_purge_report_text(report, lang) if ops else GHOST_PURGE_ALERT_TEXT.format(
+            found=report["found"], purged=report["purged"],
+            action="Baneo Permanente 🔴" if action == "ban" else "Expulsión Suave 🟡")
+        _spawn(_dispatch_radar_notice(chat_id=chat_id, text=text, auto_delete_after=60), name=f"ghost_notice:{chat_id}")
+        _spawn(_ghost_log_channel_post(chat_id, text), name=f"ghost_log:{chat_id}")
+    return report

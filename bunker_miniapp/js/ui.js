@@ -1391,7 +1391,8 @@ export const ui = {
         if (sentinel.active) {
             this.setAssetPill('assets-sentinel-status', 'ok', `🟢 ${this.t('assets_active')}`);
             this.setAssetDetail('assets-sentinel-detail', this.t(sentinel.mode === 'own' ? 'assets_sentinel_own' : 'assets_sentinel_master'));
-        } else if (sentinel.registered) {
+        } else if (sentinel.linked ?? sentinel.registered) {
+            // v20 · `linked` (servidor v19+) cubre al Centinela Maestro, que protege sin sesión propia.
             this.setAssetPill('assets-sentinel-status', 'warn', `🟡 ${this.t('assets_inactive')}`);
             this.setAssetDetail('assets-sentinel-detail', this.t('assets_sentinel_down'));
         } else {
@@ -1406,6 +1407,184 @@ export const ui = {
         const time = at && !Number.isNaN(at.getTime())
             ? at.toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false }) : '';
         this.setText('assets-checked-at', time ? this.tf('assets_checked', { time }) : '');
+    },
+
+    // ======================================================================
+    // 🛰️ v20 · ESTADO DEL PERÍMETRO · CENTINELA IA · GHOST PURGE v2 · SOPORTE IA
+    // ======================================================================
+    PERIMETER_TONES: {
+        on:      { icon: '🟢', cls: 'border-emerald-500/40 bg-emerald-500/5 text-emerald-300' },
+        alert:   { icon: '🟠', cls: 'border-orange-400/50 bg-orange-500/10 text-orange-300 animate-pulse' },
+        standby: { icon: '🟡', cls: 'border-amber-400/40 bg-amber-400/5 text-amber-200' },
+        locked:  { icon: '🔒', cls: 'border-neutral-700 bg-black/40 text-neutral-400' },
+        fault:   { icon: '🔴', cls: 'border-rose-500/50 bg-rose-500/10 text-rose-300' },
+        off:     { icon: '⚪', cls: 'border-neutral-800 bg-black/40 text-neutral-500' }
+    },
+
+    localTime(iso) {
+        const at = iso ? new Date(iso) : null;
+        return at && !Number.isNaN(at.getTime())
+            ? at.toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false }) : '';
+    },
+
+    /** Rejilla 🟢/🟡/🔴 del perímetro. perimeter = respuesta del servidor o null (opts: loading, idle, error). */
+    renderPerimeterStatus(perimeter, { loading = false, idle = false, error = '' } = {}) {
+        const icon = byId('perimeter-refresh-icon');
+        if (icon) icon.className = `fa-solid fa-rotate text-[10px]${loading ? ' fa-spin' : ''}`;
+        const btn = byId('perimeter-refresh-btn');
+        if (btn) btn.disabled = Boolean(loading || idle);
+        const grid = byId('perimeter-grid');
+        if (!grid) return;
+        if (idle) {
+            grid.innerHTML = `<p class="col-span-2 text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t('perim_pick'))}</p>`;
+            this.setText('perimeter-summary', '—');
+            this.setText('perimeter-checked-at', '');
+            return;
+        }
+        if (!perimeter) {
+            if (error) this.setText('perimeter-checked-at', this.tf('perim_error', { error }));
+            return;
+        }
+        const order = CONFIG.PERIMETER?.ORDER || [];
+        const items = [...(perimeter.items || [])].sort((a, b) => {
+            const ia = order.indexOf(a.key), ib = order.indexOf(b.key);
+            return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+        });
+        grid.innerHTML = items.map(item => {
+            const tone = this.PERIMETER_TONES[item.state] || this.PERIMETER_TONES.off;
+            let detail = item.detail ? this.t(`perim_detail_${item.detail}`) : this.t(`perim_state_${item.state}`);
+            if (item.key === 'autolower' && item.enabled && !item.detail) detail = `${detail} · ${item.pct ?? 2}%`;
+            if (item.key === 'night_mode' && item.enabled && item.window) detail = `${detail} · ${item.window}`;
+            return `
+                <div class="rounded-xl border px-2.5 py-2 ${tone.cls}" data-perimeter-key="${this.escapeHtml(item.key)}" data-state="${this.escapeHtml(item.state)}">
+                    <p class="text-[10px] font-extrabold uppercase tracking-wide truncate">${tone.icon} ${this.escapeHtml(this.t(`perim_${item.key}`))}</p>
+                    <p class="text-[9px] font-mono opacity-80 truncate" title="${this.escapeHtml(detail)}">${this.escapeHtml(detail)}</p>
+                </div>`;
+        }).join('');
+        const s = perimeter.summary || {};
+        this.setText('perimeter-summary', this.tf('perim_summary', { n: s.effective ?? 0, t: s.total ?? items.length }));
+        const time = this.localTime(perimeter.checked_at);
+        this.setText('perimeter-checked-at', time ? this.tf('perim_checked', { time }) : '');
+    },
+
+    setAiSwitch(field, on, disabled) {
+        const btn = byId(`ai-${field}`);
+        if (!btn) return;
+        btn.setAttribute('aria-checked', on ? 'true' : 'false');
+        btn.disabled = Boolean(disabled);
+        btn.classList.toggle('bg-[#a78bfa]/30', Boolean(on));
+        btn.classList.toggle('border-[#a78bfa]', Boolean(on));
+        btn.classList.toggle('bg-neutral-800', !on);
+        btn.classList.toggle('border-neutral-600', !on);
+        const knob = btn.querySelector('.ai-switch-knob');
+        if (knob) {
+            knob.classList.toggle('left-0.5', !on);
+            knob.classList.toggle('left-6', Boolean(on));
+            knob.classList.toggle('bg-[#a78bfa]', Boolean(on));
+            knob.classList.toggle('bg-neutral-400', !on);
+        }
+    },
+
+    setChipGroup(selector, attr, value, disabled) {
+        document.querySelectorAll(selector).forEach(el => {
+            const active = el.getAttribute(attr) === value;
+            el.disabled = Boolean(disabled);
+            el.setAttribute('aria-checked', active ? 'true' : 'false');
+            el.classList.toggle('bg-[#a78bfa]/20', active);
+            el.classList.toggle('border-[#a78bfa]', active);
+            el.classList.toggle('text-[#a78bfa]', active);
+            el.classList.toggle('bg-black/40', !active);
+            el.classList.toggle('border-neutral-800', !active);
+            el.classList.toggle('text-neutral-400', !active);
+        });
+    },
+
+    /** Tarjeta del Centinela IA. cfg = ai_sentinel del servidor (o null). keepPrompt: no pisar lo que se escribe. */
+    renderAiSentinel(cfg, { licensed = true, busy = false, idle = false, keepPrompt = false } = {}) {
+        const disabled = Boolean(idle || busy || !cfg || !licensed);
+        byId('ai-sentinel-lock')?.classList.toggle('hidden', idle || licensed || !cfg);
+        this.setAiSwitch('guardian_status', cfg?.guardian_status === 1, disabled);
+        this.setAiSwitch('copilot_status', cfg?.copilot_status === 1, disabled);
+        this.setChipGroup('[data-ai-mode]', 'data-ai-mode', cfg?.response_mode || '', disabled);
+        this.setChipGroup('[data-ai-tone]', 'data-ai-tone', cfg?.personality_tone || '', disabled);
+        const chance = Number(cfg?.response_chance ?? 15);
+        const range = byId('ai-chance');
+        if (range && document.activeElement !== range) range.value = String(chance);
+        if (range) range.disabled = disabled;
+        this.setText('ai-chance-value', `${chance}%`);
+        byId('ai-chance-row')?.classList.toggle('opacity-50', cfg?.response_mode !== 'chance');
+        const prompt = byId('ai-custom_prompt');
+        if (prompt) {
+            if (!keepPrompt && document.activeElement !== prompt) prompt.value = cfg?.custom_prompt || '';
+            prompt.disabled = disabled;
+            this.setText('ai-prompt-counter', `${prompt.value.length}/${CONFIG.AI_SENTINEL?.PROMPT_MAX || 1000}`);
+        }
+        const save = byId('ai-save-prompt');
+        if (save) save.disabled = disabled;
+        const active = (cfg?.guardian_status === 1 ? 1 : 0) + (cfg?.copilot_status === 1 ? 1 : 0);
+        this.setText('ai-sentinel-state', idle || !cfg ? '—'
+            : (!licensed ? this.t('ai_state_locked') : (active ? this.tf('ai_state_on', { n: active }) : this.t('ai_state_off'))));
+    },
+
+    /** Panel Ghost Purge v2 (criterios + directiva). settings = ghost_purge del servidor (o null). */
+    renderGhostPurge(settings, { idle = false, busy = false } = {}) {
+        const box = byId('gp-criteria');
+        const criteria = CONFIG.GHOST_PURGE?.CRITERIA || [];
+        const active = new Set(settings?.criteria || []);
+        const disabled = Boolean(idle || busy || !settings);
+        if (box) {
+            box.innerHTML = criteria.map(c => {
+                const on = active.has(c);
+                return `
+                <button type="button" data-gp-criterion="${this.escapeHtml(c)}" role="checkbox" aria-checked="${on}" ${disabled ? 'disabled' : ''}
+                        onclick="app.toggleGhostCriterion('${this.escapeHtml(c)}')"
+                        class="w-full text-left px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition disabled:opacity-50 ${on
+                            ? 'bg-rose-500/15 border-rose-500/50 text-rose-200' : 'bg-black/40 border-neutral-800 text-neutral-400'}">
+                    ${on ? '✅' : '⬜'} ${this.escapeHtml(this.t(`gp_crit_${c}`))}
+                </button>`;
+            }).join('');
+        }
+        document.querySelectorAll('[data-gp-action]').forEach(el => {
+            const on = settings && el.getAttribute('data-gp-action') === settings.action;
+            el.disabled = disabled;
+            el.classList.toggle('bg-rose-500/15', Boolean(on));
+            el.classList.toggle('border-rose-500/50', Boolean(on));
+            el.classList.toggle('text-rose-200', Boolean(on));
+            el.classList.toggle('bg-black/40', !on);
+            el.classList.toggle('border-neutral-800', !on);
+            el.classList.toggle('text-neutral-400', !on);
+        });
+        const run = byId('btn-ghost-purge');
+        if (run) run.disabled = Boolean(idle || settings?.running);
+        const last = settings?.last_scan ? String(settings.last_scan).replace('T', ' ').slice(0, 16) : '';
+        this.setText('gp-last-scan', last ? this.tf('gp_last_scan', { time: last }) : '');
+    },
+
+    /** Burbuja del chat de soporte. El texto SIEMPRE va escapado: la IA nunca inyecta HTML en la Mini App. */
+    appendSupportMessage(role, text, { pending = false } = {}) {
+        const log = byId('sai-log');
+        if (!log) return null;
+        const el = document.createElement('div');
+        const mine = role === 'user';
+        el.className = `max-w-[85%] rounded-2xl px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words ${mine
+            ? 'ml-auto bg-[#a78bfa]/20 border border-[#a78bfa]/40 text-white'
+            : 'mr-auto bg-black/50 border border-neutral-800 text-neutral-200'}${pending ? ' animate-pulse' : ''}`;
+        el.textContent = String(text || '');
+        log.appendChild(el);
+        const max = CONFIG.SUPPORT_AI?.LOG_MAX || 40;
+        while (log.children.length > max) log.removeChild(log.firstChild);
+        log.scrollTop = log.scrollHeight;
+        return el;
+    },
+
+    clearSupportLog() {
+        const log = byId('sai-log');
+        if (log) log.innerHTML = '';
+    },
+
+    setSupportBusy(busy) {
+        const btn = byId('sai-send');
+        if (btn) btn.disabled = Boolean(busy);
     },
 
     // ======================================================================

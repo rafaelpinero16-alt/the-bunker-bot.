@@ -97,6 +97,7 @@ from assistant import (
     engage_screen_shield, disengage_screen_shield,
     engage_podcast_ducking, disengage_podcast_ducking
 )
+import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purga v2, canal de registro, IA, soporte IA)
 from .groups import (
     execute_raid_lockdown, lift_raid_lockdown,
     clear_speaker_queue, get_speaker_queue
@@ -607,6 +608,8 @@ MIC_VIP_TEXT_STATES = {}
 BACKUP_IMPORT_STATES = {}
 REP_MULTIPLIER_STATES = {}
 GAMI_STATES = {}          # 🎮 Edición del anuncio recurrente de gamificación
+LOG_CHANNEL_STATES = {}   # 🧾 v20 · Vinculación del canal de registro desde el bot
+SUPPORT_AI_STATES = {}    # 🤖 v20 · Conversación con el Asistente de Soporte IA
 
 # 🧯 Registro central de TODOS los estados conversacionales: permite liberarlos en bloque (navegación, /start,
 # /cancel) y garantiza que ningún menú privado quede bloqueado por una conversación huérfana.
@@ -617,7 +620,8 @@ ALL_STATE_DICTS = (
     TIPS_MEDIA_STATES, TIPS_THANKS_STATES,
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
-    SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES
+    SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES,
+    LOG_CHANNEL_STATES, SUPPORT_AI_STATES
 )
 
 
@@ -2641,6 +2645,8 @@ def get_info_keyboard(lang: str):
 def get_support_keyboard(lang: str):
     t = TEXTS.get(lang, TEXTS["es"])
     return InlineKeyboardMarkup(inline_keyboard=[
+        # 🤖 v20 · Arquitecto de Soporte con IA (Mistral, Capa 0 PII)
+        [InlineKeyboardButton(text="🤖 " + ("Asistente de Soporte IA" if lang == "es" else "AI Support Assistant"), callback_data=f"supai_start_{lang}")],
         [InlineKeyboardButton(text=t["btn_contact_support"], url="https://t.me/m/RGx4ohGTMTk5")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
     ])
@@ -2748,6 +2754,11 @@ def get_group_panel_keyboard(group_id: int, lang: str):
         [InlineKeyboardButton(text=t["btn_captcha"], callback_data=f"gset_captcha_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_locks"], callback_data=f"gset_locks_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_warns"], callback_data=f"gset_warns_{group_id}_{lang}"), InlineKeyboardButton(text=t["btn_delmsgs"], callback_data=f"gset_delmsgs_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_clone"], callback_data=f"gset_clone_{group_id}_{lang}")],
+        # 🛰️ v20 · Estado real del perímetro y canal de registro con validación en vivo (paridad con la Mini App)
+        [
+            InlineKeyboardButton(text="🛰️ " + ("Perímetro" if lang == "es" else "Perimeter"), callback_data=f"perim_view_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🧾 " + ("Canal de Registro" if lang == "es" else "Log Channel"), callback_data=f"logch_menu_{group_id}_{lang}"),
+        ],
         [InlineKeyboardButton(text=t["btn_ultra_tools"], callback_data=f"menu_ultra_{group_id}_{lang}")],
         [
             InlineKeyboardButton(text=f"🌐 {'English' if lang == 'es' else 'Español'}", callback_data=f"langpanel_{group_id}_{toggle_lang}"),
@@ -2775,6 +2786,7 @@ def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
         [InlineKeyboardButton(text="🎙️ " + ("Modo Podcast" if lang == "es" else "Podcast Mode"), callback_data=f"podcast_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🌟 " + ("Gestión de Speakers" if lang == "es" else "Speakers Management"), callback_data=f"speakers_menu_{group_id}_{lang}")],
         [InlineKeyboardButton(text="💎 " + ("Payload Multimedia" if lang == "es" else "Multimedia Payload"), callback_data=f"payload_menu_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="💀 " + ("Ghost Purge (Cuentas Fantasma)" if lang == "es" else "Ghost Purge (Ghost Accounts)"), callback_data=f"gpurge_menu_{group_id}_{lang}")],
         [back_btn]
     ])
 
@@ -3829,6 +3841,27 @@ async def cmd_cancel(message: Message, bot: Bot):
     ])
     await message.answer(f"✅ {t['op_canceled']}{PERIMETER_SIGNATURE}", reply_markup=kb, parse_mode="HTML")
 
+@router.message(Command("supportkb"), F.chat.type == "private")
+async def cmd_support_directives(message: Message, command: CommandObject):
+    """
+    👑 v20 · Directivas del Asistente de Soporte IA (solo Arquitectos).
+    /supportkb → muestra · /supportkb <texto> → reemplaza · /supportkb off → borra.
+    """
+    if not is_super_admin(message.from_user.id):
+        return
+    arg = (command.args or "").strip()
+    if not arg:
+        current = await perimeter_ops.get_support_directives(force=True)
+        body = html.escape(current) if current else "<i>(sin directivas: se usa solo la base de conocimientos)</i>"
+        await message.answer(f"🤖 <b>Directivas del Soporte IA</b>\n\n{body[:3500]}{PERIMETER_SIGNATURE}", parse_mode="HTML")
+        return
+    saved = await perimeter_ops.set_support_directives("" if arg.lower() == "off" else arg, updated_by=message.from_user.id)
+    await message.answer(
+        ("✅ Directivas actualizadas" if saved else "🧹 Directivas borradas") + f" ({len(saved)} caracteres).{PERIMETER_SIGNATURE}",
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data == "noop")
 async def cb_noop(callback: CallbackQuery):
     return
@@ -4703,11 +4736,22 @@ async def handle_private_inputs(message: Message, bot: Bot):
         ])
         if text_input:
             await set_ai_sentinel_config(group_id, "ai_custom_prompt", text_input[:1000])
+            _ai_settings_changed(group_id, ["ai_custom_prompt"])
             resp = await message.answer(t["ai_prompt_saved"], reply_markup=back_kb, parse_mode="HTML")
         else:
             empty_prompt_msg = "⚠️ El prompt no puede estar vacío." if lang == "es" else "⚠️ Prompt cannot be empty."
             resp = await message.answer(empty_prompt_msg + "\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+
+    # 🧾 v20 · CANAL DE REGISTRO: @alias, ID numérico o un mensaje reenviado desde el canal
+    if (bot.id, user_id) in LOG_CHANNEL_STATES:
+        await _handle_log_channel_input(message, bot, LOG_CHANNEL_STATES.pop((bot.id, user_id)), text_input)
+        return
+
+    # 🤖 v20 · ASISTENTE DE SOPORTE IA (conversación multi-turno hasta «Salir»)
+    if (bot.id, user_id) in SUPPORT_AI_STATES:
+        await _handle_support_ai_input(message, bot, SUPPORT_AI_STATES[(bot.id, user_id)], text_input)
         return
 
     # ⚙️ CONFIGURACIÓN SIMÉTRICA DEL CENTINELA (SENTINEL SETTINGS)
@@ -7196,6 +7240,10 @@ def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: 
         [InlineKeyboardButton(text=t["btn_ai_copilot"].format(copilot_st=copilot_st), callback_data=f"ai_toggle_copilot_{1 if ai_cfg.get('copilot_status') != 1 else 0}_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"🎭 {tone_str}", callback_data=f"ai_cycletone_{group_id}_{lang}")],
         [InlineKeyboardButton(text=f"⚙️ {mode_str}", callback_data=f"ai_cyclemode_{group_id}_{lang}")],
+        # 🎲 v20 · Probabilidad del modo «chance» configurable (antes fija en 15 %)
+        [InlineKeyboardButton(text=("🎲 Probabilidad: " if lang == "es" else "🎲 Chance: ") + f"{ai_cfg.get('response_chance', 15)}%"
+                                   + ("" if ai_cfg.get("response_mode") == "chance" else (" (modo chance)" if lang == "es" else " (chance mode)")),
+                              callback_data=f"ai_cyclechance_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_ai_prompt"], callback_data=f"ai_prompt_{group_id}_{lang}")],
         [back_btn]
     ])
@@ -7253,7 +7301,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
     keyboard = None
 
     if module == "ai":
-        if sub in ("menu", "prompt", "cycletone", "cyclemode"):
+        if sub in ("menu", "prompt", "cycletone", "cyclemode", "cyclechance"):
             group_id = int(data[2])
         elif sub == "toggle":
             sub_target = data[2]
@@ -7281,6 +7329,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             elif sub == "toggle":
                 db_field = "ai_guardian_status" if sub_target == "guardian" else "ai_copilot_status"
                 await set_ai_sentinel_config(group_id, db_field, new_status)
+                _ai_settings_changed(group_id, [db_field])
                 await callback.answer(tr(lang, "⚙️ Ajustes de IA actualizados", "⚙️ AI settings updated"))
                 ai_cfg = await get_ai_sentinel_config(group_id)
                 g_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["guardian_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
@@ -7293,6 +7342,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 tone_cycle = {"guardian": "copilot", "copilot": "pr", "pr": "guardian"}
                 next_tone = tone_cycle.get(ai_cfg.get("personality_tone"), "guardian")
                 await set_ai_sentinel_config(group_id, "ai_personality_tone", next_tone)
+                _ai_settings_changed(group_id, ["ai_personality_tone"])
                 await callback.answer(f"Personalidad: {next_tone.upper()}")
                 ai_cfg["personality_tone"] = next_tone
                 keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
@@ -7306,8 +7356,23 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
                 mode_cycle = {"mention_only": "chance", "chance": "always", "always": "mention_only"}
                 next_mode = mode_cycle.get(ai_cfg.get("response_mode"), "mention_only")
                 await set_ai_sentinel_config(group_id, "ai_response_mode", next_mode)
+                _ai_settings_changed(group_id, ["ai_response_mode"])
                 await callback.answer(f"Modo: {next_mode.upper()}")
                 ai_cfg["response_mode"] = next_mode
+                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=keyboard)
+                except Exception:
+                    pass
+                return
+            elif sub == "cyclechance":
+                # 🎲 v20 · 5 → 15 → 30 → 50 → 5 % (la Mini App admite cualquier valor 1–100)
+                ai_cfg = await get_ai_sentinel_config(group_id)
+                next_chance = perimeter_ops.next_chance_step(ai_cfg.get("response_chance", 15))
+                await set_ai_sentinel_config(group_id, "ai_response_chance", next_chance)
+                _ai_settings_changed(group_id, ["ai_response_chance"])
+                await callback.answer(tr(lang, f"Probabilidad: {next_chance}%", f"Chance: {next_chance}%"))
+                ai_cfg["response_chance"] = next_chance
                 keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
                 try:
                     await callback.message.edit_reply_markup(reply_markup=keyboard)
@@ -8374,3 +8439,306 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
     """
     from .payments import send_tip_thanks as _payments_send_tip_thanks
     return await _payments_send_tip_thanks(bot, user_id, stars, group_id, lang, full_name=full_name)
+
+# ==========================================================================
+# 🛰️ v20 · PARIDAD BOT ↔ MINI APP: PERÍMETRO, CANAL DE REGISTRO, GHOST PURGE v2 Y SOPORTE IA
+# ==========================================================================
+# Toda la lógica vive en perimeter_ops (la misma que usa main.py): aquí solo hay menús y conversación.
+def _ai_settings_changed(group_id: int, fields) -> None:
+    """Tras guardar ajustes de IA: el Centinela los aplica en el siguiente mensaje y la Mini App se repinta."""
+    perimeter_ops.invalidate_ai_runtime(group_id)
+    emit_settings_updated_bg(group_id, "bot_console", list(fields or []))
+
+
+def _master_bot_or(bot: Bot) -> Bot:
+    """Bot que publica auditorías e informes (el maestro), aunque el operador escriba desde un bot clon."""
+    try:
+        import assistant as _assistant_mod
+        return getattr(_assistant_mod, "_global_bot", None) or bot
+    except Exception:
+        return bot
+
+
+async def _safe_edit(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup) -> None:
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "not modified" in str(e).lower():
+            return
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def _perimeter_status_for(bot: Bot, group_id: int) -> dict:
+    sentinel = {}
+    try:
+        import assistant as _assistant_mod
+        snapshot = getattr(_assistant_mod, "get_sentinel_runtime_snapshot", None)
+        sentinel = snapshot(group_id) if callable(snapshot) else {}
+    except Exception:
+        sentinel = {}
+    try:
+        import raid_shield as _raid  # type: ignore[import-not-found]
+        raid = _raid.status_payload(group_id) or {}
+    except Exception:
+        raid = {}
+    try:
+        from database.database import get_log_report_config
+        log_id = ((await get_log_report_config(int(group_id))) or {}).get("log_channel_id")
+    except Exception:
+        log_id = None
+    log_health = (await perimeter_ops.check_log_channel_health(_master_bot_or(bot), log_id)) if log_id \
+        else {"ok": False, "reason": "not_configured"}
+    status = await perimeter_ops.build_perimeter_status(group_id, sentinel=sentinel, raid=raid, log_health=log_health)
+    status["log_channel_id"] = log_id
+    return status
+
+
+def _gpurge_keyboard(group_id: int, lang: str, settings: dict, running: bool) -> InlineKeyboardMarkup:
+    labels = perimeter_ops.PURGE_REASON_LABELS["en" if lang == "en" else "es"]
+    active = set(settings.get("criteria") or [])
+    rows = [[InlineKeyboardButton(text=f"{'✅' if c in active else '⬜'} {labels[c]}", callback_data=f"gpurge_tog_{c}_{group_id}_{lang}")]
+            for c in perimeter_ops.PURGE_CRITERIA]
+    is_ban = settings.get("action") == "ban"
+    rows.append([
+        InlineKeyboardButton(text=("🔴 Ban permanente" if lang == "es" else "🔴 Permanent ban") + (" ✓" if is_ban else ""),
+                             callback_data=f"gpurge_act_ban_{group_id}_{lang}"),
+        InlineKeyboardButton(text=("🟡 Expulsión suave" if lang == "es" else "🟡 Soft kick") + ("" if is_ban else " ✓"),
+                             callback_data=f"gpurge_act_kick_{group_id}_{lang}"),
+    ])
+    rows.append([InlineKeyboardButton(
+        text=("⏳ Purga en curso…" if lang == "es" else "⏳ Purge running…") if running else ("💀 Ejecutar purga ahora" if lang == "es" else "💀 Run purge now"),
+        callback_data="noop" if running else f"gpurge_run_{group_id}_{lang}")])
+    rows.append([InlineKeyboardButton(text="⬅️ " + ("Herramientas Ultra" if lang == "es" else "Ultra Tools"), callback_data=f"menu_ultra_{group_id}_{lang}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _gpurge_text(lang: str, settings: dict, running: bool) -> str:
+    if lang == "es":
+        head = ("💀 <b>Ghost Purge — Radar Anti-Fantasmas</b>\n\n"
+                "Marca qué amenazas detectar y la directiva a aplicar. Nunca se tocan administradores, Arquitectos, "
+                "bots ni cuentas en lista blanca. Cada expulsión queda en el registro de seguridad.\n\n"
+                "👻 <i>«Inalcanzables» incluye cuentas que bloquearon al Centinela o llevan más de un mes sin conexión: "
+                "puede afectar a miembros legítimos.</i>")
+        last = f"\n\n🕒 Última purga: <code>{settings.get('last_scan') or '—'}</code>"
+    else:
+        head = ("💀 <b>Ghost Purge — Anti-Ghost Radar</b>\n\n"
+                "Choose which threats to detect and the directive to apply. Admins, Architects, bots and whitelisted "
+                "accounts are never touched. Every removal is logged as a security event.\n\n"
+                "👻 <i>«Unreachable» includes accounts that blocked the Sentinel or were last seen over a month ago: "
+                "it can affect legitimate members.</i>")
+        last = f"\n\n🕒 Last purge: <code>{settings.get('last_scan') or '—'}</code>"
+    return head + last + ("\n⏳ " + ("Purga en curso." if lang == "es" else "Purge running.") if running else "") + PERIMETER_SIGNATURE
+
+
+async def _logch_view(bot: Bot, group_id: int, lang: str) -> tuple:
+    status = await _perimeter_status_for(bot, group_id)
+    log_id = status.get("log_channel_id")
+    item = next((i for i in status["items"] if i["key"] == "log_channel"), {})
+    state_txt = {
+        "on": "🟢 " + ("Activo: el bot publica correctamente" if lang == "es" else "Active: the bot can post"),
+        "fault": "🔴 " + ("Configurado, pero el bot NO puede publicar" if lang == "es" else "Configured, but the bot can NOT post"),
+        "off": "⚪ " + ("Sin configurar" if lang == "es" else "Not configured"),
+    }.get(item.get("state"), "⚪ —")
+    master = f"@{MASTER_BOT_USERNAME}" if MASTER_BOT_USERNAME else ("el bot" if lang == "es" else "the bot")
+    if lang == "es":
+        text = (f"🧾 <b>Canal de Registro</b>\n\n• Canal: <code>{log_id or '—'}</code>\n• Estado: {state_txt}\n\n"
+                f"Requisitos: {master} debe ser <b>administrador con permiso de publicar</b> y tú debes ser el "
+                f"<b>creador</b> del canal. Se verifica en vivo antes de guardar.")
+    else:
+        text = (f"🧾 <b>Log Channel</b>\n\n• Channel: <code>{log_id or '—'}</code>\n• Status: {state_txt}\n\n"
+                f"Requirements: {master} must be an <b>admin allowed to post</b> and you must be the channel "
+                f"<b>creator</b>. Checked live before saving.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ " + ("Vincular / cambiar" if lang == "es" else "Link / change"), callback_data=f"logch_set_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="🔄 " + ("Verificar ahora" if lang == "es" else "Check now"), callback_data=f"logch_check_{group_id}_{lang}"),
+         InlineKeyboardButton(text="🚫 " + ("Desactivar" if lang == "es" else "Disable"), callback_data=f"logch_off_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="⬅️ " + ("Panel del grupo" if lang == "es" else "Group panel"), callback_data=f"gpanel_{group_id}_{lang}")],
+    ])
+    return text + PERIMETER_SIGNATURE, kb
+
+
+async def _save_log_channel(bot: Bot, group_id: int, value: str, user_id: int) -> None:
+    from database.database import update_chat_operational_settings
+    await update_chat_operational_settings(int(group_id), {"log_channel_id": value})
+    if value:
+        perimeter_ops.forget_log_channel_health(value)
+    emit_settings_updated_bg(group_id, "bot_console", ["log_channel_id"])
+    logging.info(f"🧾 [Canal de Registro] {user_id} fijó {value or '(desactivado)'} en {group_id} desde el bot.")
+
+
+async def _handle_log_channel_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
+    group_id, lang = int(st["group_id"]), st.get("lang", "es")
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ " + ("Reintentar" if lang == "es" else "Try again"), callback_data=f"logch_set_{group_id}_{lang}")],
+        [InlineKeyboardButton(text="⬅️ " + ("Canal de Registro" if lang == "es" else "Log Channel"), callback_data=f"logch_menu_{group_id}_{lang}")],
+    ])
+    if time.time() - st.get("ts", 0) > STATE_TTL_SECONDS:
+        await message.answer(("⌛ La edición caducó; vuelve a abrir el menú." if lang == "es" else "⌛ This edit expired; reopen the menu.") + PERIMETER_SIGNATURE,
+                             reply_markup=back_kb, parse_mode="HTML")
+        return
+    raw = text_input
+    forwarded = getattr(message, "forward_from_chat", None) or getattr(getattr(message, "forward_origin", None), "chat", None)
+    if forwarded is not None and getattr(forwarded, "id", None):
+        raw = str(forwarded.id)
+    try:
+        value = await perimeter_ops.resolve_log_channel(_master_bot_or(bot), message.from_user.id, group_id, raw)
+    except perimeter_ops.LogChannelError as err:
+        resp = await message.answer(f"❌ <b>{'No se guardó' if lang == 'es' else 'Not saved'}:</b> {html.escape(err.message)}{PERIMETER_SIGNATURE}",
+                                    reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=90)
+        return
+    await _save_log_channel(bot, group_id, value, message.from_user.id)
+    text, kb = await _logch_view(bot, group_id, lang)
+    resp = await message.answer(("✅ <b>Canal de registro verificado y guardado.</b>\n\n" if lang == "es" else
+                                 "✅ <b>Log channel verified and saved.</b>\n\n") + text, reply_markup=kb, parse_mode="HTML")
+    fire_and_forget_auto_delete([message], delay=30)
+
+
+def _support_kb(lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧹 " + ("Nueva conversación" if lang == "es" else "New conversation"), callback_data=f"supai_reset_{lang}"),
+         InlineKeyboardButton(text="🚪 " + ("Salir" if lang == "es" else "Exit"), callback_data=f"supai_exit_{lang}")],
+    ])
+
+
+async def _handle_support_ai_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
+    lang = st.get("lang", "es")
+    st["ts"] = time.time()
+    if not text_input:
+        await message.answer("✍️ " + ("Escribe tu pregunta en texto." if lang == "es" else "Type your question as text."), reply_markup=_support_kb(lang))
+        return
+    try:
+        await bot.send_chat_action(message.chat.id, "typing")
+    except Exception:
+        pass
+    try:
+        result = await perimeter_ops.support_ai_reply(message.from_user.id, text_input, lang)
+    except perimeter_ops.SupportRateLimited as rl:
+        await message.answer(("⏳ Espera " if lang == "es" else "⏳ Wait ") + f"{rl.retry_after} s.", reply_markup=_support_kb(lang))
+        return
+    # Texto de la IA en plano: caracteres sueltos (<, *, _) nunca rompen el envío.
+    await message.answer(f"🤖 {result['reply']}", reply_markup=_support_kb(lang), parse_mode=None)
+
+
+@router.callback_query(
+    F.data.startswith("perim_") | F.data.startswith("logch_") | F.data.startswith("gpurge_") | F.data.startswith("supai_")
+)
+async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
+    data = (callback.data or "").split("_")
+    module, sub = data[0], data[1] if len(data) > 1 else ""
+    lang = data[-1] if data[-1] in ("es", "en") else "es"
+    uid = callback.from_user.id
+
+    # 🤖 Soporte IA: personal, sin comunidad asociada.
+    if module == "supai":
+        if sub == "start":
+            clear_user_states(bot.id, uid)
+            SUPPORT_AI_STATES[(bot.id, uid)] = {"lang": lang, "ts": time.time()}
+            intro = ("🤖 <b>Arquitecto de Soporte IA</b>\n\nPregúntame por planes, comandos, el Centinela, el Bot Clon o la "
+                     "configuración de tu comunidad. Nunca me envíes tokens, sesiones ni códigos de acceso."
+                     if lang == "es" else
+                     "🤖 <b>AI Support Architect</b>\n\nAsk me about plans, commands, the Sentinel, the clone bot or your "
+                     "community setup. Never send me tokens, sessions or login codes.")
+            await callback.message.answer(intro + PERIMETER_SIGNATURE, reply_markup=_support_kb(lang), parse_mode="HTML")
+        elif sub == "reset":
+            await perimeter_ops.support_ai_reset(uid)
+            SUPPORT_AI_STATES[(bot.id, uid)] = {"lang": lang, "ts": time.time()}
+            await callback.answer("🧹 " + ("Conversación reiniciada" if lang == "es" else "Conversation reset"))
+            return
+        elif sub == "exit":
+            SUPPORT_AI_STATES.pop((bot.id, uid), None)
+            t = TEXTS.get(lang, TEXTS["es"])
+            await _safe_edit(callback, t["support_main"], get_support_keyboard(lang))
+        await callback.answer()
+        return
+
+    try:
+        if module == "gpurge" and sub in ("act", "tog"):
+            target, group_id = data[2], int(data[3])
+        else:
+            target, group_id = None, int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    clear_user_states(bot.id, uid)
+
+    if module == "perim":
+        status = await _perimeter_status_for(bot, group_id)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 " + ("Actualizar" if lang == "es" else "Refresh"), callback_data=f"perim_view_{group_id}_{lang}")],
+            [InlineKeyboardButton(text="⬅️ " + ("Panel del grupo" if lang == "es" else "Group panel"), callback_data=f"gpanel_{group_id}_{lang}")],
+        ])
+        await _safe_edit(callback, perimeter_ops.render_perimeter_text(status, lang) + PERIMETER_SIGNATURE, kb)
+        await callback.answer()
+        return
+
+    if module == "logch":
+        if sub == "set":
+            LOG_CHANNEL_STATES[(bot.id, uid)] = {"group_id": group_id, "lang": lang, "ts": time.time()}
+            prompt = ("🧾 Envía el <b>@alias</b> o el <b>ID numérico</b> (-100…) del canal de registro, o <b>reenvía</b> aquí "
+                      "cualquier mensaje de ese canal." if lang == "es" else
+                      "🧾 Send the log channel <b>@alias</b> or <b>numeric ID</b> (-100…), or <b>forward</b> any message from it.")
+            t = TEXTS.get(lang, TEXTS["es"])
+            msg = await callback.message.answer(prompt + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"logch_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([msg], delay=120)
+            await callback.answer()
+            return
+        if sub == "off":
+            await _save_log_channel(bot, group_id, "", uid)
+            await callback.answer("🚫 " + ("Canal de registro desactivado" if lang == "es" else "Log channel disabled"))
+        elif sub == "check":
+            current = (await _perimeter_status_for(bot, group_id)).get("log_channel_id")
+            if current:
+                perimeter_ops.forget_log_channel_health(current)
+            await callback.answer("🔄 " + ("Verificado" if lang == "es" else "Checked"))
+        else:
+            await callback.answer()
+        text, kb = await _logch_view(bot, group_id, lang)
+        await _safe_edit(callback, text, kb)
+        return
+
+    # 💀 Ghost Purge v2
+    import assistant as _assistant_mod
+    running = bool(getattr(_assistant_mod, "is_ghost_purge_running", lambda _c: False)(group_id))
+    settings = await perimeter_ops.get_purge_settings(group_id)
+    if sub == "act" and target in perimeter_ops.PURGE_ACTIONS:
+        settings = await perimeter_ops.save_purge_settings(group_id, action=target)
+        await callback.answer("✅")
+    elif sub == "tog" and target in perimeter_ops.PURGE_CRITERIA:
+        new_criteria = perimeter_ops.toggle_purge_criterion(settings["criteria"], target)
+        if not new_criteria:
+            await callback.answer("⚠️ " + ("Debe quedar al menos un criterio activo." if lang == "es" else "Keep at least one criterion."), show_alert=True)
+            return
+        settings = await perimeter_ops.save_purge_settings(group_id, criteria=new_criteria)
+        await callback.answer("✅")
+    elif sub == "run":
+        if running:
+            await callback.answer("⏳ " + ("Ya hay una purga en curso." if lang == "es" else "A purge is already running."), show_alert=True)
+            return
+        confirm = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💀 " + ("Confirmar purga" if lang == "es" else "Confirm purge"), callback_data=f"gpurge_go_{group_id}_{lang}")],
+            [InlineKeyboardButton(text="✖️ " + ("Cancelar" if lang == "es" else "Cancel"), callback_data=f"gpurge_menu_{group_id}_{lang}")],
+        ])
+        labels = perimeter_ops.PURGE_REASON_LABELS["en" if lang == "en" else "es"]
+        crit = "\n".join(f"• {labels[c]}" for c in settings["criteria"])
+        directive = ("🔴 Ban permanente" if settings["action"] == "ban" else "🟡 Expulsión suave") if lang == "es" else \
+                    ("🔴 Permanent ban" if settings["action"] == "ban" else "🟡 Soft kick")
+        await _safe_edit(callback, (f"⚠️ <b>{'¿Ejecutar la Ghost Purge?' if lang == 'es' else 'Run the Ghost Purge?'}</b>\n\n{crit}\n\n"
+                                    f"{'Directiva' if lang == 'es' else 'Directive'}: <b>{directive}</b>{PERIMETER_SIGNATURE}"), confirm)
+        await callback.answer()
+        return
+    elif sub == "go":
+        if running:
+            await callback.answer("⏳", show_alert=False)
+        else:
+            task = asyncio.create_task(_assistant_mod.execute_ghost_purge(group_id, origin="bot", lang=lang), name=f"ghost_purge_bot:{group_id}")
+            _SETTINGS_EMIT_TASKS.add(task)   # referencia fuerte hasta que termine
+            task.add_done_callback(_SETTINGS_EMIT_TASKS.discard)
+            running = True
+            await callback.answer("💀 " + ("Purga iniciada en segundo plano. El informe llegará al grupo." if lang == "es"
+                                           else "Purge started in background. The report will be posted in the group."), show_alert=True)
+    else:
+        await callback.answer()
+    await _safe_edit(callback, _gpurge_text(lang, settings, running), _gpurge_keyboard(group_id, lang, settings, running))

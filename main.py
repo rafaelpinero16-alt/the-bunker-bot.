@@ -137,6 +137,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message, Update
 
 import assistant as _assistant_runtime   # v17 · lectura del estado EN VIVO de los Centinelas (active_sentinels)
+import perimeter_ops                      # v20 · purga v2, canal de registro, IA, estado del perímetro y soporte IA
 from assistant import (
     close_all_sentinels,
     execute_ghost_purge,
@@ -1108,6 +1109,11 @@ async def api_chat_dashboard(
         data["raid_shield"] = raid_shield.status_payload(numeric_id)
         # v17 · Supervisión del Bot Clon y del Centinela (estado en vivo; jamás credenciales).
         data.update(await build_assets_status(numeric_id))
+        # v20 · Estado REAL del perímetro en la primera vista (sin bloquear el dashboard si algo tarda).
+        try:
+            data["perimeter"] = await asyncio.wait_for(build_perimeter_payload(numeric_id), timeout=8)
+        except Exception as ex:
+            logger.debug(f"[Perímetro] Estado no disponible para {numeric_id}: {ex}")
 
         # v8.2: difusión personalizada del Estudio (chat destino, intervalo, texto promocional).
         if load_broadcast_config is not None:
@@ -1141,6 +1147,206 @@ async def api_chat_assets_status(
     payload = {"status": "success", "chat_id": str(numeric_id), **(await build_assets_status(numeric_id))}
     # v19 · Estado en vivo: el WebView de Telegram (iOS/Android) y los proxies no deben cachear esta respuesta.
     return JSONResponse(content=payload, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
+
+
+# ==========================================================================
+# 🛰️ v20 · PERÍMETRO OPERATIVO, CENTINELA IA, GHOST PURGE v2 Y SOPORTE IA
+# ==========================================================================
+_NO_STORE = {"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"}
+
+
+def _assistant_runtime_is_purging(chat_id: int) -> bool:
+    fn = getattr(_assistant_runtime, "is_ghost_purge_running", None)
+    return bool(fn(int(chat_id))) if callable(fn) else False
+
+
+def _parse_chat_id(chat_id: str) -> int:
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+
+
+async def _read_log_channel_id(chat_id: int):
+    def _sync():
+        with get_db_connection() as conn:
+            row = conn.execute("SELECT log_channel_id FROM group_settings WHERE group_id = ?", (int(chat_id),)).fetchone()
+            return row[0] if row and row[0] else None
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception:
+        return None
+
+
+async def build_perimeter_payload(chat_id: int) -> dict:
+    """Estado real del perímetro: configuración + capacidad efectiva (Centinela, licencia, IA, canal de registro)."""
+    cid = int(chat_id)
+    log_id = await _read_log_channel_id(cid)
+    log_health = (await perimeter_ops.check_log_channel_health(master_bot_instance, log_id)) if log_id \
+        else {"ok": False, "reason": "not_configured"}
+    try:
+        raid = raid_shield.status_payload(cid) or {}
+    except Exception:
+        raid = {}
+    return await perimeter_ops.build_perimeter_status(
+        cid, sentinel=_sentinel_runtime(cid), raid=raid, log_health=log_health,
+    )
+
+
+async def _require_ultra_for_ai(user_id: int, chat_id: int) -> None:
+    if is_super_admin(user_id):
+        return
+    try:
+        tier = await get_group_tier(int(chat_id))
+    except Exception:
+        tier = "free"
+    if not perimeter_ops._is_ultra(tier):
+        raise HTTPException(status_code=402, detail="El Centinela de IA requiere licencia ULTRA PRO.")
+
+
+@api_router.get("/chat/{chat_id}/perimeter-status")
+async def api_chat_perimeter_status(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🟢 / 🟡 / 🔴 en vivo de captcha, AutoLower, escudos, Guardián y Copiloto IA, modo nocturno y canal de registro."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    payload = {"status": "success", "perimeter": await build_perimeter_payload(numeric_id)}
+    return JSONResponse(content=payload, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/ai-sentinel")
+async def api_get_ai_sentinel(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    try:
+        tier = await get_group_tier(numeric_id)
+    except Exception:
+        tier = "free"
+    from database.database import get_ai_sentinel_config
+    cfg = perimeter_ops.public_ai_sentinel_config(await get_ai_sentinel_config(numeric_id))
+    licensed = is_super_admin(user_id) or perimeter_ops._is_ultra(tier)
+    return JSONResponse(content={"status": "success", "ai_sentinel": cfg, "licensed": licensed}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/ai-sentinel")
+async def api_update_ai_sentinel(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{ai_sentinel: {guardian_status, copilot_status, response_mode, response_chance, personality_tone, custom_prompt}}"""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    await _require_ultra_for_ai(user_id, numeric_id)
+    patch = (payload or {}).get("ai_sentinel")
+    try:
+        cfg = await perimeter_ops.apply_ai_sentinel_patch(numeric_id, patch)
+    except perimeter_ops.AISettingsError as err:
+        raise HTTPException(status_code=422, detail=f"{err.field}: {err.message}")
+    _spawn(emit_settings_updated(numeric_id, "settings", [f"ai_{k}" for k in patch]), name=f"ai_sync:{numeric_id}")
+    return {"status": "success", "ai_sentinel": cfg}
+
+
+@api_router.get("/chat/{chat_id}/ghost-purge")
+async def api_get_ghost_purge(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    settings = await perimeter_ops.get_purge_settings(numeric_id)
+    settings["running"] = _assistant_runtime_is_purging(numeric_id)
+    return JSONResponse(content={"status": "success", "ghost_purge": settings}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/ghost-purge")
+async def api_update_ghost_purge(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{ghost_purge: {action: 'ban'|'kick', criteria: ['deleted','scam','fake','flagged','unreachable']}}"""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    body = (payload or {}).get("ghost_purge") or {}
+    action, criteria = body.get("action"), body.get("criteria")
+    if action is not None and str(action).strip().lower() not in perimeter_ops._PURGE_ACTION_ALIASES:
+        raise HTTPException(status_code=422, detail="action: usa 'ban' o 'kick'.")
+    if criteria is not None:
+        if not isinstance(criteria, list) or any(str(c) not in perimeter_ops.PURGE_CRITERIA for c in criteria):
+            raise HTTPException(status_code=422, detail=f"criteria: valores válidos {', '.join(perimeter_ops.PURGE_CRITERIA)}.")
+        if not criteria:
+            raise HTTPException(status_code=422, detail="criteria: activa al menos un criterio.")
+    settings = await perimeter_ops.save_purge_settings(numeric_id, action=action, criteria=criteria)
+    settings["running"] = _assistant_runtime_is_purging(numeric_id)
+    return {"status": "success", "ghost_purge": settings}
+
+
+@api_router.post("/support/ask")
+async def api_support_ask(
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """Asistente de Soporte IA (Arquitecto de Soporte). {message, lang} → {reply, fallback}."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    message = str((payload or {}).get("message") or "")
+    lang = "en" if str((payload or {}).get("lang") or "es").lower() == "en" else "es"
+    try:
+        result = await perimeter_ops.support_ai_reply(user_id, message, lang)
+    except perimeter_ops.SupportRateLimited as rl:
+        return JSONResponse(status_code=429, content={"detail": f"Espera {rl.retry_after} s antes de enviar otra consulta."},
+                            headers={"Retry-After": str(rl.retry_after)})
+    return {"status": "success", **result}
+
+
+@api_router.post("/support/reset")
+async def api_support_reset(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    await perimeter_ops.support_ai_reset(user_id)
+    return {"status": "success"}
+
+
+@api_router.get("/support/directives")
+async def api_get_support_directives(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    if not is_super_admin(user_id):
+        raise HTTPException(status_code=403, detail="Solo el Arquitecto puede ver las directivas del soporte IA.")
+    return {"status": "success", "directives": await perimeter_ops.get_support_directives(force=True)}
+
+
+@api_router.post("/support/directives")
+async def api_set_support_directives(
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    if not is_super_admin(user_id):
+        raise HTTPException(status_code=403, detail="Solo el Arquitecto puede editar las directivas del soporte IA.")
+    saved = await perimeter_ops.set_support_directives((payload or {}).get("directives", ""), updated_by=user_id)
+    return {"status": "success", "directives": saved}
 
 
 @api_router.get("/chat/{chat_id}/stats")
@@ -1372,36 +1578,18 @@ async def _validate_log_channel(user_id: int, chat_id: int, raw: Any) -> str:
         canal de registro y el bot debe poder publicar en él (si no, los logs se perderían en silencio).
     Devuelve el ID numérico como texto.
     """
-    value = str(raw or "").strip()
-    if not value:
-        return ""
-    if not (_LOG_CHANNEL_ALIAS_RE.match(value) or _LOG_CHANNEL_ID_RE.match(value)):
-        raise HTTPException(status_code=422, detail="log_channel_id: usa un @alias público o el ID numérico (-100…) del canal.")
-    if master_bot_instance is None:
-        raise HTTPException(status_code=503, detail="log_channel_id: el bot no está disponible para verificar el canal.")
-    lookup: Any = int(value) if value.lstrip("-").isdigit() else value
+    # v20 · Misma validación EN VIVO que la consola del bot (perimeter_ops.resolve_log_channel): mensajes y
+    # códigos HTTP idénticos a v19, más el rechazo explícito de chats privados como destino.
     try:
-        target = await asyncio.wait_for(master_bot_instance.get_chat(lookup), timeout=6)
-    except Exception:
-        raise HTTPException(status_code=422, detail="log_channel_id: no se encontró el canal. Añade el bot como administrador y revisa el ID/@alias.")
-    target_id = int(target.id)
-    if target_id == int(chat_id):
-        raise HTTPException(status_code=422, detail="log_channel_id: el canal de registro debe ser distinto de la comunidad auditada.")
-    if not await _is_live_chat_creator(user_id, target_id, fresh=True):
-        raise HTTPException(status_code=403, detail="log_channel_id: debes ser el creador del canal de registro.")
-    try:
-        me = await master_bot_instance.get_me()
-        member = await asyncio.wait_for(master_bot_instance.get_chat_member(target_id, me.id), timeout=6)
-        status = str(getattr(member.status, "value", member.status) or "")
-        kind = _norm_chat_type(target.type, "supergroup")
-        can_post = status == "creator" or (
-            status == "administrator" and (kind != "channel" or bool(getattr(member, "can_post_messages", False)))
-        ) or (kind != "channel" and status == "member")
-    except Exception:
-        can_post = False
-    if not can_post:
-        raise HTTPException(status_code=422, detail="log_channel_id: el bot debe ser administrador con permiso para publicar en el canal de registro.")
-    return str(target_id)
+        value = await perimeter_ops.resolve_log_channel(
+            master_bot_instance, user_id, chat_id, raw,
+            is_creator=lambda uid, cid: _is_live_chat_creator(uid, cid, fresh=True),
+        )
+    except perimeter_ops.LogChannelError as err:
+        raise HTTPException(status_code=err.status, detail=f"log_channel_id: {err.message}")
+    if value:
+        perimeter_ops.forget_log_channel_health(value)
+    return value
 
 
 @api_router.post("/chat/{chat_id}/settings")
@@ -1476,7 +1664,18 @@ async def api_update_chat_settings(
 
         # 3. Ghost Purge
         elif action == "run_ghost_purge":
-            _spawn(execute_ghost_purge(numeric_id, action="ban"), name=f"ghost_purge:{numeric_id}")
+            # v20 · Directiva guardada de la comunidad (ban / expulsión suave + criterios), salvo que la petición la
+            # fije. Antes siempre era "ban" y solo detectaba cuentas eliminadas.
+            if _assistant_runtime_is_purging(numeric_id):
+                raise HTTPException(status_code=409, detail="Ya hay una Ghost Purge en curso en esta comunidad.")
+            purge_action = payload.get("purge_action")
+            purge_criteria = payload.get("criteria")
+            _spawn(execute_ghost_purge(
+                numeric_id,
+                action=perimeter_ops.normalize_purge_action(purge_action) if purge_action else None,
+                criteria=perimeter_ops.parse_purge_criteria(purge_criteria) if purge_criteria is not None else None,
+                origin="miniapp", lang="en" if str(payload.get("lang", "es")).lower() == "en" else "es",
+            ), name=f"ghost_purge:{numeric_id}")
             return {
                 "status": "success",
                 "action": "run_ghost_purge",

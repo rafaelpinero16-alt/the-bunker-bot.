@@ -311,6 +311,54 @@ export const api = {
             { timeoutMs: CONFIG.ASSETS?.REFRESH_TIMEOUT_MS || 10000, noStore: true, ...opts });
     },
 
+    // --- v20 · Perímetro, Centinela IA, Ghost Purge v2 y Soporte IA ---
+
+    /** GET /api/chat/{id}/perimeter-status → { perimeter: { items[], summary, sentinel, ai, checked_at } } */
+    async fetchPerimeterStatus(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/perimeter-status?_=${Date.now()}`,
+            { timeoutMs: CONFIG.PERIMETER?.TIMEOUT_MS || 10000, noStore: true });
+    },
+
+    /** GET /api/chat/{id}/ai-sentinel → { ai_sentinel: {...}, licensed } */
+    async fetchAiSentinel(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/ai-sentinel?_=${Date.now()}`, { timeoutMs: CONFIG.AI_SENTINEL?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/ai-sentinel — cambio parcial. 402 sin ULTRA PRO, 422 "campo: motivo". */
+    async updateAiSentinel(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/ai-sentinel`, { ai_sentinel: patch }, { timeoutMs: CONFIG.AI_SENTINEL?.TIMEOUT_MS || 12000 });
+    },
+
+    /** GET /api/chat/{id}/ghost-purge → { ghost_purge: { action, criteria[], last_scan, running } } */
+    async fetchGhostPurge(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/ghost-purge?_=${Date.now()}`, { timeoutMs: CONFIG.GHOST_PURGE?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/ghost-purge — { action?: 'ban'|'kick', criteria?: [...] } */
+    async updateGhostPurge(chatId, settings) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/ghost-purge`, { ghost_purge: settings }, { timeoutMs: CONFIG.GHOST_PURGE?.TIMEOUT_MS || 12000 });
+    },
+
+    /** POST /api/support/ask → { reply, fallback }. 429 con espera si se envía demasiado. */
+    async supportAsk(message, lang = state.currentLang) {
+        return await this.post('/support/ask', { message: String(message || ''), lang: lang || 'es' },
+            { timeoutMs: CONFIG.SUPPORT_AI?.TIMEOUT_MS || 30000 });
+    },
+
+    async supportReset() {
+        return await this.post('/support/reset', {});
+    },
+
     // --- Analítica Unificada de Comunidad (Fase 5) ---
 
     /**
@@ -490,9 +538,13 @@ export const api = {
         return CREDENTIALS_BOT_ONLY;
     },
 
-    async triggerGhostPurge(chatId) {
+    /** v20 · Sin opciones usa la directiva guardada de la comunidad; opts.purge_action / opts.criteria la fijan. */
+    async triggerGhostPurge(chatId, opts = {}) {
         return await this.updateChatSettings(chatId, {
-            action: 'run_ghost_purge'
+            action: 'run_ghost_purge',
+            lang: state.currentLang || 'es',
+            ...(opts.purge_action ? { purge_action: opts.purge_action } : {}),
+            ...(Array.isArray(opts.criteria) ? { criteria: opts.criteria } : {})
         });
     },
 

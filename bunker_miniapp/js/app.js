@@ -180,6 +180,11 @@ export const app = {
     _chatConfig: { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {}, seq: 0 },
     _mediaLocks: { page: 1, busyKey: null },   // v15 · matriz de bloqueo multimedia (página visible y vector en vuelo)
     _assets: { chatId: null, data: null, loading: false, timer: null, wsAt: 0, reqSeq: 0 },   // v17/v18/v19 · supervisión Clon / Centinela
+    // v20 · Perímetro, Centinela IA, Ghost Purge v2 y Soporte IA (cada respuesta se ata a su comunidad y secuencia)
+    _perimeter: { chatId: null, data: null, loading: false, seq: 0, timer: null },
+    _ai: { chatId: null, data: null, licensed: false, busy: false, seq: 0 },
+    _ghost: { chatId: null, data: null, busy: false, seq: 0 },
+    _support: { busy: false, greeted: false },
     validatePlanForm,
     validateConfigSection,
 
@@ -1081,6 +1086,9 @@ export const app = {
      */
     resetSessionState() {
         this.stopAssetsSupervision();
+        this.stopPerimeterConsole();
+        this._support = { busy: false, greeted: false };
+        ui.clearSupportLog();
         session.invalidate();
         this.disconnectLiveRadar();
 
@@ -2415,6 +2423,7 @@ export const app = {
             this.connectLiveRadar(chatId);
         }
         this.startAssetsSupervision(chatId, { channel: isChannel });
+        this.startPerimeterConsole(chatId, { channel: isChannel });   // v20
 
         // Desde el botón del bot el operador espera ver la analítica ya: se muestra el cargador al instante.
         if (opts.tab === 'analytics') this.switchTab('analytics');
@@ -2477,12 +2486,14 @@ export const app = {
             if (!isCurrent()) return;
             this.scheduleDashboardReload(chatId);
             this.onRemoteSettingsUpdated(chatId, data);
+            this.onPerimeterSignal(chatId, data);   // v20 · IA, purga y perímetro siguen a la consola del bot
         });
         client.on('assets_status', (data, envelope) => {
             if (!isCurrent()) return;
             // Evento fuera de LIVE_EVENTS en api.js: se registra su seq para no provocar falsos huecos ('gap').
             if (envelope && typeof client._trackSeq === 'function') client._trackSeq(envelope);
             this.onRemoteAssetsStatus(chatId, data);
+            this.schedulePerimeterRefresh(chatId);  // v20 · AutoLower / Antinota dependen del Centinela
         });
         client.on('gap', () => { if (isCurrent()) this.scheduleAnalyticsRefresh(500); });
         client.on('auth_failed', ({ code }) => { if (isCurrent()) this.onRadarAuthFailed(code); });
@@ -2790,6 +2801,8 @@ export const app = {
 
         // 0. v17 · Supervisión del Bot Clon y del Centinela (estado en vivo calculado por el servidor)
         if (data.assets && String(this._assets.chatId) === String(chatId)) this.applyAssetsStatus(chatId, data.assets);
+        // v20 · Estado REAL del perímetro en la primera vista (viene en el mismo dashboard).
+        if (data.perimeter) this.applyPerimeter(chatId, data.perimeter);
 
         // 1. Canal de Registro (Log Channel)
         ui.renderLogChannelStatus(data.log_channel);
@@ -3150,17 +3163,302 @@ export const app = {
         const chatId = this.selectedGroupId();
         if (!chatId) return this.consolePickFirst();
         tgApp.hapticNotification('warning');
-        if (!await this.confirmAction(ui.t('gc_purge_confirm'))) return false;
+        // v20 · La confirmación muestra la directiva guardada (criterios + ban / expulsión suave).
+        const g = String(this._ghost.chatId) === String(chatId) ? this._ghost.data : null;
+        const detail = g ? ui.tf('gp_confirm_detail', {
+            criteria: (g.criteria || []).map(c => ui.t(`gp_crit_${c}`)).join(', '),
+            action: ui.t(`gp_action_${g.action}`)
+        }) : '';
+        if (!await this.confirmAction(detail ? `${ui.t('gc_purge_confirm')}\n\n${detail}` : ui.t('gc_purge_confirm'))) return false;
         tgApp.hapticImpact('heavy');
-        const res = await this.runConsoleAction('btn-ghost-purge', chatId, id => api.updateChatSettings(id, { action: 'run_ghost_purge' }));
+        const res = await this.runConsoleAction('btn-ghost-purge', chatId, id => api.triggerGhostPurge(id));
         if (!res) return false;
         if (res.__error || res.status !== 'success') {
             tgApp.hapticNotification('error');
-            this.consoleToast('error', '❌', ui.tf('gc_purge_toast_error', { error: this.consoleErrorMessage(res) }));
+            const message = res.__status === 409 ? ui.t('gp_running') : this.consoleErrorMessage(res);
+            this.consoleToast('error', '❌', ui.tf('gc_purge_toast_error', { error: message }));
             return false;
         }
         tgApp.hapticNotification('success');
         this.consoleToast('success', '⚡', ui.t('gc_purge_toast_ok'));
+        if (this._ghost.data && String(this._ghost.chatId) === String(chatId)) {
+            ui.renderGhostPurge({ ...this._ghost.data, running: true });
+            setTimeout(() => { if (String(this._ghost.chatId) === String(chatId)) this.loadGhostPurge(chatId); }, 15000);
+        }
+        return true;
+    },
+
+    // ======================================================================
+    // 🛰️ v20 · PERÍMETRO EN VIVO · CENTINELA IA · GHOST PURGE v2 · SOPORTE IA
+    // ======================================================================
+    startPerimeterConsole(chatId, { channel = false } = {}) {
+        this.stopPerimeterConsole();
+        if (channel || !chatId) return;
+        const id = String(chatId);
+        this._perimeter.chatId = id;
+        this._ai.chatId = id;
+        this._ghost.chatId = id;
+        ui.renderPerimeterStatus(null, { loading: true });
+        this.loadPerimeter(id);
+        this.loadAiSentinel(id);
+        this.loadGhostPurge(id);
+    },
+
+    stopPerimeterConsole() {
+        clearTimeout(this._perimeter.timer);
+        // Las secuencias SUBEN: cualquier respuesta en vuelo de la comunidad anterior se descarta.
+        this._perimeter = { chatId: null, data: null, loading: false, seq: this._perimeter.seq + 1, timer: null };
+        this._ai = { chatId: null, data: null, licensed: false, busy: false, seq: this._ai.seq + 1 };
+        this._ghost = { chatId: null, data: null, busy: false, seq: this._ghost.seq + 1 };
+        ui.renderPerimeterStatus(null, { idle: true });
+        ui.renderAiSentinel(null, { idle: true });
+        ui.renderGhostPurge(null, { idle: true });
+    },
+
+    applyPerimeter(chatId, perimeter) {
+        const p = this._perimeter;
+        if (!perimeter || String(p.chatId) !== String(chatId)) return;
+        // Las fuentes (REST, dashboard, botón) llegan en cualquier orden: un estado más antiguo no pisa al nuevo.
+        const t = Date.parse(perimeter.checked_at || ''), prevT = Date.parse(p.data?.checked_at || '');
+        if (Number.isFinite(t) && Number.isFinite(prevT) && t < prevT) return;
+        p.data = perimeter;
+        ui.renderPerimeterStatus(perimeter, { loading: p.loading });
+    },
+
+    async loadPerimeter(chatId, { manual = false } = {}) {
+        const p = this._perimeter;
+        if (!chatId || String(p.chatId) !== String(chatId)) return false;
+        const seq = ++p.seq;
+        const epoch = session.epoch;
+        p.loading = true;
+        ui.renderPerimeterStatus(p.data, { loading: true });
+        const res = await api.fetchPerimeterStatus(chatId);
+        if (seq !== p.seq || epoch !== session.epoch || res?.__stale) return false;
+        p.loading = false;
+        if (res?.__error) {
+            ui.renderPerimeterStatus(p.data, { loading: false, error: this.consoleErrorMessage(res) });
+            if (manual) tgApp.hapticNotification('error');
+            return false;
+        }
+        this.applyPerimeter(chatId, res.perimeter);
+        if (manual) tgApp.hapticNotification('success');
+        return true;
+    },
+
+    refreshPerimeter() {
+        const chatId = this._perimeter.chatId;
+        if (!chatId) return this.consolePickFirst();
+        tgApp.hapticImpact('light');
+        return this.loadPerimeter(chatId, { manual: true });
+    },
+
+    /** Agrupa ráfagas de 'assets_status' / 'settings_updated' en un solo refresco. */
+    schedulePerimeterRefresh(chatId) {
+        if (String(this._perimeter.chatId) !== String(chatId)) return;
+        clearTimeout(this._perimeter.timer);
+        this._perimeter.timer = setTimeout(() => this.loadPerimeter(chatId), CONFIG.PERIMETER?.REFRESH_DEBOUNCE_MS || 1500);
+    },
+
+    onPerimeterSignal(chatId, data) {
+        const changed = Array.isArray(data?.changed) ? data.changed.map(String) : [];
+        if (changed.some(f => f.startsWith('ai_'))) this.loadAiSentinel(chatId);
+        if (changed.some(f => f.startsWith('purge_'))) this.loadGhostPurge(chatId);
+        this.schedulePerimeterRefresh(chatId);
+    },
+
+    // --- 🤖 Centinela IA ---
+    async loadAiSentinel(chatId) {
+        const a = this._ai;
+        if (!chatId || String(a.chatId) !== String(chatId) || a.busy) return false;
+        const seq = ++a.seq;
+        const epoch = session.epoch;
+        const res = await api.fetchAiSentinel(chatId);
+        if (seq !== a.seq || epoch !== session.epoch || res?.__stale || res?.__error) return false;
+        a.data = res.ai_sentinel;
+        a.licensed = Boolean(res.licensed);
+        ui.renderAiSentinel(a.data, { licensed: a.licensed });
+        return true;
+    },
+
+    async saveAiSentinel(patch) {
+        const a = this._ai;
+        const chatId = a.chatId;
+        if (!chatId) return this.consolePickFirst();
+        if (!a.data || a.busy) return false;
+        if (!a.licensed) {
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '🔒', ui.t('ai_locked'));
+            return false;
+        }
+        const seq = ++a.seq;
+        const epoch = session.epoch;
+        const previous = a.data;
+        a.busy = true;
+        // Optimista: el cambio se ve al instante y se revierte si el servidor lo rechaza.
+        a.data = { ...previous, ...patch };
+        ui.renderAiSentinel(a.data, { licensed: true, busy: true, keepPrompt: 'custom_prompt' in patch });
+        const res = await api.updateAiSentinel(chatId, patch);
+        a.busy = false;
+        if (seq !== a.seq || epoch !== session.epoch || res?.__stale || String(a.chatId) !== String(chatId)) return false;
+        if (res?.__error) {
+            a.data = previous;
+            ui.renderAiSentinel(previous, { licensed: res.__status !== 402 });
+            if (res.__status === 402) a.licensed = false;
+            const message = String(res.__error).replace(/^[a-z_]+:\s*/, '');
+            if ('custom_prompt' in patch) ui.setFieldError('ai-custom_prompt', message);
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', ui.tf('ai_toast_error', { error: message }));
+            return false;
+        }
+        a.data = res.ai_sentinel;
+        ui.setFieldError('ai-custom_prompt', '');
+        ui.renderAiSentinel(a.data, { licensed: true });
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '🤖', ui.t('ai_toast_saved'));
+        this.schedulePerimeterRefresh(chatId);
+        return true;
+    },
+
+    toggleAiSentinel(field) {
+        const cur = this._ai.data;
+        if (!cur) return false;
+        tgApp.hapticImpact('light');
+        return this.saveAiSentinel({ [field]: cur[field] === 1 ? 0 : 1 });
+    },
+
+    setAiSentinel(key, value) {
+        const cur = this._ai.data;
+        if (!cur || cur[key] === value) return false;
+        tgApp.hapticSelection?.();
+        return this.saveAiSentinel({ [key]: value });
+    },
+
+    previewAiChance(value) {
+        const el = document.getElementById('ai-chance-value');
+        if (el) el.textContent = `${Number(value) || 1}%`;
+    },
+
+    onAiPromptInput() {
+        const el = document.getElementById('ai-custom_prompt');
+        const counter = document.getElementById('ai-prompt-counter');
+        if (el && counter) counter.textContent = `${el.value.length}/${CONFIG.AI_SENTINEL?.PROMPT_MAX || 1000}`;
+    },
+
+    saveAiPrompt() {
+        const el = document.getElementById('ai-custom_prompt');
+        if (!el) return false;
+        return this.saveAiSentinel({ custom_prompt: el.value.trim() });
+    },
+
+    // --- 💀 Ghost Purge v2 ---
+    async loadGhostPurge(chatId) {
+        const g = this._ghost;
+        if (!chatId || String(g.chatId) !== String(chatId) || g.busy) return false;
+        const seq = ++g.seq;
+        const epoch = session.epoch;
+        const res = await api.fetchGhostPurge(chatId);
+        if (seq !== g.seq || epoch !== session.epoch || res?.__stale || res?.__error) return false;
+        g.data = res.ghost_purge;
+        ui.renderGhostPurge(g.data);
+        return true;
+    },
+
+    async saveGhostPurge(patch) {
+        const g = this._ghost;
+        const chatId = g.chatId;
+        if (!chatId) return this.consolePickFirst();
+        if (!g.data || g.busy) return false;
+        const seq = ++g.seq;
+        const epoch = session.epoch;
+        const previous = g.data;
+        g.busy = true;
+        g.data = { ...previous, ...patch };
+        ui.renderGhostPurge(g.data, { busy: true });
+        const res = await api.updateGhostPurge(chatId, patch);
+        g.busy = false;
+        if (seq !== g.seq || epoch !== session.epoch || res?.__stale || String(g.chatId) !== String(chatId)) return false;
+        if (res?.__error) {
+            g.data = previous;
+            ui.renderGhostPurge(previous);
+            tgApp.hapticNotification('error');
+            this.consoleToast('error', '⚠️', this.consoleErrorMessage(res));
+            return false;
+        }
+        g.data = res.ghost_purge;
+        ui.renderGhostPurge(g.data);
+        tgApp.hapticNotification('success');
+        this.consoleToast('success', '💀', ui.t('gp_saved'));
+        return true;
+    },
+
+    toggleGhostCriterion(criterion) {
+        const cur = this._ghost.data;
+        if (!cur) return false;
+        const set = new Set(cur.criteria || []);
+        if (set.has(criterion)) set.delete(criterion); else set.add(criterion);
+        if (!set.size) {
+            tgApp.hapticNotification('warning');
+            this.consoleToast('warn', '⚠️', ui.t('gp_min_one'));
+            return false;
+        }
+        const order = CONFIG.GHOST_PURGE?.CRITERIA || [];
+        return this.saveGhostPurge({ criteria: order.filter(c => set.has(c)) });
+    },
+
+    setGhostPurgeAction(action) {
+        const cur = this._ghost.data;
+        if (!cur || cur.action === action) return false;
+        tgApp.hapticImpact('light');
+        return this.saveGhostPurge({ action });
+    },
+
+    // --- 🤖 Soporte IA ---
+    openSupportAi() {
+        this.closeHelpModal();
+        document.getElementById('modal-support-ai')?.classList.remove('hidden');
+        if (!this._support.greeted) {
+            ui.appendSupportMessage('assistant', ui.t('sai_welcome'));
+            this._support.greeted = true;
+        }
+        setTimeout(() => document.getElementById('sai-input')?.focus(), 50);
+    },
+
+    closeSupportAi() {
+        document.getElementById('modal-support-ai')?.classList.add('hidden');
+    },
+
+    async sendSupportAi() {
+        const s = this._support;
+        const input = document.getElementById('sai-input');
+        const text = String(input?.value || '').trim().slice(0, CONFIG.SUPPORT_AI?.MAX_INPUT || 1500);
+        if (!text || s.busy) return false;
+        const epoch = session.epoch;
+        s.busy = true;
+        ui.setSupportBusy(true);
+        if (input) input.value = '';
+        ui.appendSupportMessage('user', text);
+        const pending = ui.appendSupportMessage('assistant', ui.t('sai_thinking'), { pending: true });
+        const res = await api.supportAsk(text);
+        s.busy = false;
+        ui.setSupportBusy(false);
+        if (epoch !== session.epoch || res?.__stale) { pending?.remove(); return false; }
+        pending?.remove();
+        if (res?.__error) {
+            ui.appendSupportMessage('assistant', res.__status === 429 ? ui.t('sai_rate')
+                : ui.tf('sai_error', { error: this.consoleErrorMessage(res) }));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        ui.appendSupportMessage('assistant', res.reply || '');
+        tgApp.hapticImpact('light');
+        return true;
+    },
+
+    async resetSupportAi() {
+        if (this._support.busy) return false;
+        await api.supportReset();
+        ui.clearSupportLog();
+        ui.appendSupportMessage('assistant', ui.t('sai_reset_done'));
         return true;
     },
 

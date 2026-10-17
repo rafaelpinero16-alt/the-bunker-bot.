@@ -759,6 +759,26 @@
                             </select>
                         </div>
 
+                        <!-- 🛰️ v20 · ESTADO REAL DEL PERÍMETRO (configuración + capacidad efectiva). ui.renderPerimeterStatus;
+                             se actualiza con el dashboard, con 'settings_updated' y con 'assets_status' del radar. -->
+                        <div id="perimeter-panel" class="bg-black/50 rounded-2xl border border-neutral-800 p-3.5 space-y-2.5" aria-live="polite">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-[#34d399] uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-satellite"></i> <span data-i18n="perim_title">Estado del Perímetro</span>
+                                </h4>
+                                <div class="flex items-center gap-2">
+                                    <span id="perimeter-summary" class="text-[10px] font-mono font-bold text-neutral-400">—</span>
+                                    <button type="button" id="perimeter-refresh-btn" onclick="app.refreshPerimeter()" title="Refresh" class="w-8 h-8 rounded-lg bg-black/60 border border-neutral-700 text-[#34d399] flex items-center justify-center active:scale-95 transition disabled:opacity-50">
+                                        <i id="perimeter-refresh-icon" class="fa-solid fa-rotate text-[10px]"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div id="perimeter-grid" class="grid grid-cols-2 gap-1.5">
+                                <p class="col-span-2 text-center text-[11px] text-neutral-500 font-mono py-2" data-i18n="perim_pick">Selecciona una comunidad para ver su perímetro.</p>
+                            </div>
+                            <p id="perimeter-checked-at" class="text-[9px] text-neutral-500 font-mono"></p>
+                        </div>
+
                         <!-- v8.3 · CONSOLA DE PROGRAMACIÓN 1:1 (mismas columnas que lee el bot) -->
                         <div id="cfg-console" class="space-y-2.5 pt-2">
                             <div class="flex items-center justify-between gap-2">
@@ -1077,10 +1097,69 @@
                                 </div>
                             </div>
 
-                            <!-- Botón Táctico Ghost Purge -->
-                            <button type="button" id="btn-ghost-purge" onclick="app.runGhostPurge()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-wait">
-                                <i class="fa-solid fa-skull-crossbones"></i> <span data-i18n="gc_btn_purge">Ejecutar Ghost Purge (Cuentas Fantasma)</span>
-                            </button>
+                            <!-- 🤖 v20 · CENTINELA IA (ULTRA PRO): mismos campos que la consola del bot (ai_menu_). -->
+                            <details id="ai-sentinel-panel" class="group bg-black/50 rounded-2xl border border-neutral-800 open:border-[#a78bfa]/40 transition">
+                                <summary class="cursor-pointer list-none p-3.5 flex items-center justify-between gap-2">
+                                    <span class="text-xs font-bold text-[#a78bfa] uppercase tracking-wider flex items-center gap-1.5"><i class="fa-solid fa-brain"></i> <span data-i18n="ai_title">Centinela de IA</span></span>
+                                    <span id="ai-sentinel-state" class="text-[9px] font-mono text-neutral-500">—</span>
+                                </summary>
+                                <div class="px-3.5 pb-3.5 space-y-3">
+                                    <p id="ai-sentinel-lock" class="hidden text-[10px] font-bold text-amber-300 bg-amber-400/10 border border-amber-400/40 rounded-lg px-2.5 py-1.5" data-i18n="ai_locked">🔒 Requiere licencia ULTRA PRO en esta comunidad.</p>
+                                    <div class="flex items-center justify-between gap-3">
+                                        <div><p class="text-[11px] font-bold text-white" data-i18n="ai_guardian">🛡️ Guardián anti-toxicidad</p><p class="text-[9px] text-neutral-500" data-i18n="ai_guardian_desc">Purga amenazas, acoso, estafas y datos personales ajenos.</p></div>
+                                        <button type="button" id="ai-guardian_status" role="switch" aria-checked="false" onclick="app.toggleAiSentinel('guardian_status')" class="ai-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50"><span class="ai-switch-knob absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-neutral-400 transition-all"></span></button>
+                                    </div>
+                                    <div class="flex items-center justify-between gap-3">
+                                        <div><p class="text-[11px] font-bold text-white" data-i18n="ai_copilot">📝 Copiloto conversacional</p><p class="text-[9px] text-neutral-500" data-i18n="ai_copilot_desc">Responde en el grupo según el modo elegido.</p></div>
+                                        <button type="button" id="ai-copilot_status" role="switch" aria-checked="false" onclick="app.toggleAiSentinel('copilot_status')" class="ai-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50"><span class="ai-switch-knob absolute top-0.5 left-0.5 w-[18px] h-[18px] rounded-full bg-neutral-400 transition-all"></span></button>
+                                    </div>
+                                    <div class="space-y-1">
+                                        <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="ai_mode">Modo de respuesta</p>
+                                        <div id="ai-mode-group" class="grid grid-cols-3 gap-1.5" role="radiogroup">
+                                            <button type="button" data-ai-mode="mention_only" onclick="app.setAiSentinel('response_mode','mention_only')" class="ai-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="ai_mode_mention_only">🎯 Mención</span></button>
+                                            <button type="button" data-ai-mode="chance" onclick="app.setAiSentinel('response_mode','chance')" class="ai-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="ai_mode_chance">🎲 Probabilidad</span></button>
+                                            <button type="button" data-ai-mode="always" onclick="app.setAiSentinel('response_mode','always')" class="ai-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="ai_mode_always">⚡ Siempre</span></button>
+                                        </div>
+                                    </div>
+                                    <div id="ai-chance-row" class="space-y-1">
+                                        <div class="flex items-center justify-between"><p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="ai_chance">Probabilidad de respuesta</p><span id="ai-chance-value" class="text-[10px] font-mono font-bold text-[#a78bfa]">15%</span></div>
+                                        <input type="range" id="ai-chance" min="1" max="100" step="1" value="15" oninput="app.previewAiChance(this.value)" onchange="app.setAiSentinel('response_chance', Number(this.value))" class="w-full accent-[#a78bfa]">
+                                    </div>
+                                    <div class="space-y-1">
+                                        <p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="ai_tone">Personalidad</p>
+                                        <div id="ai-tone-group" class="grid grid-cols-3 gap-1.5" role="radiogroup">
+                                            <button type="button" data-ai-tone="guardian" onclick="app.setAiSentinel('personality_tone','guardian')" class="ai-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="ai_tone_guardian">🛡️ Guardián</span></button>
+                                            <button type="button" data-ai-tone="copilot" onclick="app.setAiSentinel('personality_tone','copilot')" class="ai-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="ai_tone_copilot">📝 Copiloto</span></button>
+                                            <button type="button" data-ai-tone="pr" onclick="app.setAiSentinel('personality_tone','pr')" class="ai-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="ai_tone_pr">🤝 Anfitrión</span></button>
+                                        </div>
+                                    </div>
+                                    <div class="space-y-1">
+                                        <div class="flex items-center justify-between"><p class="text-[10px] text-theme-muted uppercase font-semibold" data-i18n="ai_prompt">Directivas personalizadas</p><span id="ai-prompt-counter" class="text-[9px] text-neutral-500 font-mono">0/1000</span></div>
+                                        <textarea id="ai-custom_prompt" rows="3" maxlength="1000" oninput="app.onAiPromptInput()" data-i18n-placeholder="ai_prompt_placeholder" placeholder="Ej.: responde siempre en español y recuerda las reglas del grupo." class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-white text-xs focus:outline-none focus:border-[#a78bfa] resize-none"></textarea>
+                                        <p id="ai-custom_prompt-error" class="hidden text-[10px] text-rose-400"></p>
+                                        <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="ai_pii_note">🧼 Capa 0: enlaces, correos, teléfonos y @usuarios se anonimizan antes de llegar a la IA.</p>
+                                        <button type="button" id="ai-save-prompt" onclick="app.saveAiPrompt()" class="w-full py-2 rounded-xl bg-[#a78bfa]/15 text-[#a78bfa] border border-[#a78bfa]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50"><i class="fa-solid fa-floppy-disk mr-1"></i> <span data-i18n="cfg_save">Guardar</span></button>
+                                    </div>
+                                </div>
+                            </details>
+
+                            <!-- 💀 v20 · GHOST PURGE v2: criterios + directiva (los mismos que el menú 💀 del bot). -->
+                            <div id="ghost-purge-panel" class="bg-black/50 rounded-2xl border border-neutral-800 p-3.5 space-y-2.5">
+                                <div class="flex items-center justify-between gap-2">
+                                    <h5 class="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1.5"><i class="fa-solid fa-ghost"></i> <span data-i18n="gp_title">Radar Anti-Fantasmas</span></h5>
+                                    <span id="gp-last-scan" class="text-[9px] font-mono text-neutral-500"></span>
+                                </div>
+                                <div id="gp-criteria" class="grid grid-cols-1 gap-1.5"></div>
+                                <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="gp_unreachable_note">👻 «Inalcanzables» incluye cuentas que bloquearon al Centinela o llevan más de un mes sin conexión: puede afectar a miembros legítimos.</p>
+                                <div class="grid grid-cols-2 gap-1.5" role="radiogroup">
+                                    <button type="button" data-gp-action="ban" onclick="app.setGhostPurgeAction('ban')" class="gp-action py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="gp_action_ban">🔴 Ban permanente</span></button>
+                                    <button type="button" data-gp-action="kick" onclick="app.setGhostPurgeAction('kick')" class="gp-action py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="gp_action_kick">🟡 Expulsión suave</span></button>
+                                </div>
+                                <!-- Botón Táctico Ghost Purge (id y onclick conservados por compatibilidad) -->
+                                <button type="button" id="btn-ghost-purge" onclick="app.runGhostPurge()" class="w-full bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-wait">
+                                    <i class="fa-solid fa-skull-crossbones"></i> <span data-i18n="gc_btn_purge">Ejecutar Ghost Purge (Cuentas Fantasma)</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -1220,6 +1299,10 @@
             <div class="glass-panel border-t-2 border-t-[#00f3ff] rounded-3xl p-6 w-full max-w-sm text-white relative space-y-4">
                 <button onclick="app.closeHelpModal()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
                 <div class="space-y-2 pt-2">
+                    <!-- 🤖 v20 · Arquitecto de Soporte IA (Mistral · Capa 0 PII) -->
+                    <button onclick="app.openSupportAi()" class="w-full text-left flex items-center gap-3 p-3 rounded-xl bg-[#a78bfa]/10 hover:bg-[#a78bfa]/20 border border-[#a78bfa]/40 text-[#a78bfa] font-bold text-xs transition">
+                        <i class="fa-solid fa-robot text-base w-5 text-center"></i> <span data-i18n="sai_open">Asistente de Soporte IA</span>
+                    </button>
                     <a href="https://t.me/TheBunkerSupportChat" target="_blank" class="flex items-center gap-3 p-3 rounded-xl bg-black/40 hover:bg-[#00f3ff]/10 border border-neutral-800 text-[#00f3ff] font-bold text-xs transition">
                         <i class="fa-solid fa-headset text-base w-5 text-center"></i> <span data-i18n="help_support_chat">Technical support chat</span>
                     </a>
@@ -1265,6 +1348,25 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+
+        <!-- 🤖 v20 · MODAL: ASISTENTE DE SOPORTE IA (las respuestas se pintan como texto, nunca como HTML) -->
+        <div id="modal-support-ai" class="hidden fixed inset-0 z-[225] bg-black/90 backdrop-blur-md flex justify-center items-center p-4">
+            <div class="glass-panel border-t-2 border-t-[#a78bfa] rounded-3xl p-5 w-full max-w-md text-white relative flex flex-col gap-3 h-[80vh]">
+                <button onclick="app.closeSupportAi()" class="absolute top-4 right-4 text-neutral-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+                <div class="pr-8">
+                    <h2 class="text-sm font-extrabold text-[#a78bfa] uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-robot"></i> <span data-i18n="sai_title">Arquitecto de Soporte IA</span></h2>
+                    <p class="text-[10px] text-neutral-500 mt-1 leading-snug" data-i18n="sai_hint">Pregunta por planes, comandos, el Centinela o la configuración. Nunca envíes tokens, sesiones ni códigos.</p>
+                </div>
+                <div id="sai-log" class="flex-1 overflow-y-auto space-y-2 pr-1" aria-live="polite"></div>
+                <form onsubmit="event.preventDefault(); app.sendSupportAi();" class="flex gap-2">
+                    <textarea id="sai-input" rows="2" maxlength="1500" data-i18n-placeholder="sai_placeholder" placeholder="Escribe tu pregunta…" class="flex-1 bg-black/80 border border-neutral-700 rounded-xl p-2 text-white text-xs focus:outline-none focus:border-[#a78bfa] resize-none"></textarea>
+                    <div class="flex flex-col gap-1.5">
+                        <button type="submit" id="sai-send" class="w-10 flex-1 rounded-xl bg-[#a78bfa] text-black font-extrabold active:scale-95 transition disabled:opacity-50"><i class="fa-solid fa-paper-plane"></i></button>
+                        <button type="button" onclick="app.resetSupportAi()" title="Reset" class="w-10 h-8 rounded-xl bg-neutral-800 text-neutral-300 active:scale-95 transition"><i class="fa-solid fa-broom text-xs"></i></button>
+                    </div>
+                </form>
             </div>
         </div>
 

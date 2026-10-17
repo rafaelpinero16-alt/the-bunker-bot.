@@ -361,6 +361,8 @@ def init_db():
             ("purge_schedule_status", "INTEGER DEFAULT 0"),
             ("purge_schedule_time", "TEXT DEFAULT '03:00'"),
             ("purge_schedule_days", "TEXT DEFAULT '1,2,3,4,5,6,7'"),
+            # v20 · Criterios de la Ghost Purge (CSV de perimeter_ops.PURGE_CRITERIA). Columna nueva y aditiva.
+            ("purge_criteria", "TEXT DEFAULT 'deleted,scam,fake,flagged'"),
             ("ai_guardian_status", "INTEGER DEFAULT 0"),
             ("ai_copilot_status", "INTEGER DEFAULT 0"),
             ("ai_custom_prompt", "TEXT"),
@@ -559,6 +561,8 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_reputation_xp ON chat_user_reputation (group_id, xp DESC)")
         cursor.execute("CREATE TABLE IF NOT EXISTS chat_hourly_activity (group_id INTEGER, day_of_week INTEGER, hour_of_day INTEGER, message_count INTEGER DEFAULT 0, PRIMARY KEY (group_id, day_of_week, hour_of_day))")
         cursor.execute("CREATE TABLE IF NOT EXISTS ai_chat_context (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        # v20 · Ajustes globales clave-valor (directivas del Asistente de Soporte IA). Tabla nueva, aditiva.
+        cursor.execute("CREATE TABLE IF NOT EXISTS bunker_kv (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER, updated_by INTEGER)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_context_chat ON ai_chat_context (chat_id, created_at)")
 
         # v13 · The Bunker Architect Command Matrix (delegados, licencias concedidas, premios y auditoría)
@@ -1831,7 +1835,9 @@ def get_ghost_purge_config(group_id: int) -> dict:
                     "schedule_time": row[3] if row[3] is not None else "03:00",
                     "purge_schedule_time": row[3] if row[3] is not None else "03:00",
                     "schedule_days": row[4] if row[4] is not None else "1,2,3,4,5,6,7",
-                    "purge_schedule_days": row[4] if row[4] is not None else "1,2,3,4,5,6,7"
+                    "purge_schedule_days": row[4] if row[4] is not None else "1,2,3,4,5,6,7",
+                    # v20 · lectura aparte: si la columna aún no existe no se pierde el resto de la configuración.
+                    "criteria": _get_setting(group_id, "purge_criteria", DEFAULT_PURGE_CRITERIA) or DEFAULT_PURGE_CRITERIA,
                 }
         except sqlite3.OperationalError:
             pass
@@ -1839,13 +1845,51 @@ def get_ghost_purge_config(group_id: int) -> dict:
         "action": "ban", "purge_action": "ban", "last_free_scan": None,
         "purge_last_free_scan": None, "schedule_status": 0, "purge_schedule_status": 0,
         "schedule_time": "03:00", "purge_schedule_time": "03:00",
-        "schedule_days": "1,2,3,4,5,6,7", "purge_schedule_days": "1,2,3,4,5,6,7"
+        "schedule_days": "1,2,3,4,5,6,7", "purge_schedule_days": "1,2,3,4,5,6,7",
+        "criteria": DEFAULT_PURGE_CRITERIA,
     }
+
+
+DEFAULT_PURGE_CRITERIA = "deleted,scam,fake,flagged"
+
+
+@db_async
+def get_flagged_userbot_ids(group_id: int) -> set:
+    """v20 · Userbots marcados en una comunidad, en una sola lectura (la purga no consulta miembro a miembro)."""
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute("SELECT user_id FROM flagged_userbots WHERE group_id = ?", (int(group_id),)).fetchall()
+        except sqlite3.OperationalError:
+            return set()
+    return {int(r[0]) for r in rows if r and r[0] is not None}
+
+
+@db_async
+def get_kv_setting(key: str, default=None):
+    """v20 · Lee un ajuste global de bunker_kv (p. ej. 'support_ai_directives')."""
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute("SELECT value FROM bunker_kv WHERE key = ?", (str(key),)).fetchone()
+        except sqlite3.OperationalError:
+            return default
+    return row[0] if row and row[0] is not None else default
+
+
+@db_async
+def set_kv_setting(key: str, value, updated_by: int = None) -> None:
+    with _write_transaction() as conn:
+        conn.execute(
+            "INSERT INTO bunker_kv (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, "
+            "updated_by = excluded.updated_by",
+            (str(key), None if value is None else str(value), _now_ts(), updated_by),
+        )
 
 
 @db_async
 def set_ghost_purge_config(group_id: int, field: str, value):
-    valid_fields = ["purge_action", "purge_last_free_scan", "purge_schedule_status", "purge_schedule_time", "purge_schedule_days"]
+    valid_fields = ["purge_action", "purge_last_free_scan", "purge_schedule_status", "purge_schedule_time",
+                    "purge_schedule_days", "purge_criteria"]
     if field not in valid_fields:
         return
     with get_db_connection() as conn:
@@ -4776,7 +4820,7 @@ def compose_gamification_card(cfg: dict) -> dict:
 # ==========================================
 # 🛡️ v9 · BLOQUEOS DEL SISTEMA DE SEGURIDAD (ANALÍTICA EN VIVO)
 # ==========================================
-SECURITY_SOURCES = ("captcha", "antiflood", "antispam", "ai_guardian", "raid_shield")
+SECURITY_SOURCES = ("captcha", "antiflood", "antispam", "ai_guardian", "raid_shield", "ghost_purge")   # v20: + ghost_purge
 SECURITY_BLOCK_ACTIONS = ("decline", "kick", "ban", "mute", "delete")
 SECURITY_EXPEL_ACTIONS = ("decline", "kick", "ban")
 SECURITY_PASS_ACTION = "verified"            # captcha superado: no es un bloqueo, alimenta la tasa de acierto
