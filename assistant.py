@@ -623,6 +623,17 @@ _last_join_attempt: dict[int, float] = {}
 CALL_RIGHTS_TTL_SECONDS = 300
 JOIN_RETRY_SECONDS = 60
 
+# ==========================================
+# 🧹 v16 · HIGIENE DE MEMORIA 24/7 (TTL + TOPES DE TAMAÑO)
+# ==========================================
+# Cada STATE_JANITOR_INTERVAL segundos `_state_janitor_loop` purga las entradas caducadas de los
+# diccionarios globales por chat / usuario y aplica un tope duro de tamaño como red de seguridad.
+STATE_JANITOR_INTERVAL = _env_float("STATE_JANITOR_INTERVAL", 120.0)
+STATE_MAX_ENTRIES = max(1000, int(_env_float("STATE_MAX_ENTRIES", 20000.0)))
+VC_NOTICE_STATE_TTL = 3600.0      # _vc_notice_locks: más allá del hueco anti-flood ya no aporta nada
+AI_CACHE_STALE_FACTOR = 10        # las cachés IA se conservan 10×TTL como "último valor conocido"
+CLIENT_IDENTITY_TTL = 600.0
+
 
 async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
     now = time.time()
@@ -910,32 +921,72 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None, 
         # Los avisos del radar son comunicaciones de comunidad: jamás se envían a un chat privado.
         logger.warning(f"🔒 [Radar] Aviso bloqueado: destino {chat_id} no es un grupo.")
         return None
+    if not text:
+        return None
 
     sent = None
-    if _global_bot:
-        try:
-            sent = await _send_notice_with(_global_bot, chat_id, text, media_id, media_type, reply_markup)
-        except Exception as e:
-            logger.error(f"❌ [Radar] El bot maestro no pudo publicar el aviso en {chat_id}: {e}", exc_info=True)
-
-    if sent is None:
-        clone_bot = await _resolve_clone_bot(chat_id)
-        if clone_bot is not None and clone_bot is not _global_bot:
+    try:
+        if _global_bot:
             try:
-                sent = await _send_notice_with(clone_bot, chat_id, text, reply_markup=reply_markup, allow_media=False)
-                logger.info(f"🧬 [Radar] Aviso publicado en {chat_id} con el bot clon de la comunidad.")
+                sent = await _send_notice_with(_global_bot, chat_id, text, media_id, media_type, reply_markup)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                logger.error(f"❌ [Radar] El bot clon tampoco pudo publicar en {chat_id}: {e}", exc_info=True)
+                _log_notice_failure("maestro", chat_id, e)
+
+        if sent is None:
+            clone_bot = await _resolve_clone_bot(chat_id)
+            if clone_bot is not None and clone_bot is not _global_bot:
+                try:
+                    sent = await _send_notice_with(clone_bot, chat_id, text, reply_markup=reply_markup, allow_media=False)
+                    logger.info(f"🧬 [Radar] Aviso publicado en {chat_id} con el bot clon de la comunidad.")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    _log_notice_failure("clon", chat_id, e)
+            elif not _global_bot:
+                logger.debug(f"[Radar] Sin bot maestro ni clon disponible para publicar en {chat_id}.")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # Red de seguridad: un aviso jamás debe romper el bucle de monitoreo que lo invoca.
+        logger.warning(f"⚠️ [Radar] Fallo inesperado despachando aviso en {chat_id}: {e}")
+        sent = None
 
     if sent and auto_delete_after and auto_delete_after > 0:
         async def _auto_delete_notice(msg, delay: int):
             await asyncio.sleep(delay)
             try:
-                await msg.delete()
+                await asyncio.wait_for(msg.delete(), timeout=MTPROTO_RPC_TIMEOUT)
             except Exception:
                 pass
-        _spawn(_auto_delete_notice(sent, auto_delete_after))
+        try:
+            _spawn(_auto_delete_notice(sent, int(auto_delete_after)), name=f"notice_autodel:{chat_id}")
+        except (TypeError, ValueError):
+            pass
     return sent
+
+
+# Errores esperables de la Bot API (permisos, expulsión, chat inexistente, restricción temporal):
+# se registran como advertencia sin traza para no inundar los logs de Railway.
+_EXPECTED_NOTICE_ERRORS = (
+    "forbidden", "not enough rights", "have no rights", "need administrator rights", "chat not found",
+    "bot was kicked", "kicked", "not a member", "chat_write_forbidden", "chat_restricted",
+    "topic_closed", "retry after", "too many requests", "user is deactivated",
+)
+
+
+def _log_notice_failure(origin: str, chat_id: int, exc: Exception) -> None:
+    lowered = str(exc).lower()
+    if any(marker in lowered for marker in _EXPECTED_NOTICE_ERRORS):
+        logger.warning(f"⚠️ [Radar] El bot {origin} no pudo publicar en {chat_id}: {exc}")
+    else:
+        logger.error(f"❌ [Radar] El bot {origin} no pudo publicar el aviso en {chat_id}: {exc}", exc_info=True)
+
+
+def _has_notice_channel() -> bool:
+    """Hay al menos una vía de publicación: bot maestro o resolución de bot clon."""
+    return bool(_global_bot) or _clone_bot_resolver is not None
 
 
 VC_NOTICE_BATCH_WINDOW_SECONDS = 2.5   # se agrupan las entradas casi simultáneas en un solo aviso
@@ -965,15 +1016,20 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
     descartaba a todo el que entraba justo después de otro (y ya quedaba marcado como avisado: nunca recibía su
     aviso). Ahora las entradas casi simultáneas se agrupan en un único mensaje, sin perder a nadie y sin flood.
     """
-    if not _global_bot:
+    if not _has_notice_channel() or not _is_group_chat_id(chat_id):
         return
-    svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    try:
+        svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
+    except Exception as cfg_err:
+        logger.debug(f"[Radar] No se pudo leer la configuración de avisos de {chat_id}: {cfg_err}")
+        return
     # 🚫 Si el módulo de entrada a VC está desactivado, no se envía absolutamente nada.
     if not _vc_join_notice_enabled(svc_cfg):
         return
 
     pending = _vc_notice_pending.setdefault(chat_id, [])
-    if user_name not in pending:
+    # Tope por chat: una avalancha de entradas no puede hacer crecer la cola sin límite.
+    if user_name not in pending and len(pending) < VC_NOTICE_MAX_MENTIONS * 4:
         pending.append(user_name)
     task = _vc_notice_flush_tasks.get(chat_id)
     if task is None or task.done():
@@ -990,7 +1046,7 @@ async def _flush_member_vc_notice(chat_id: int, lang: str = "es"):
         if not mentions:
             return
         # Se relee la configuración: el operador pudo apagar el aviso durante la ventana de agrupación.
-        svc_cfg = await get_sentinel_service_messages_config(chat_id)
+        svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
         if not _vc_join_notice_enabled(svc_cfg):
             return
         _vc_notice_locks[chat_id] = time.time()
@@ -1008,15 +1064,23 @@ async def _flush_member_vc_notice(chat_id: int, lang: str = "es"):
 
 
 async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, lang: str = "es"):
-    last_id = _last_vc_notice.get(chat_id)
+    last_id = _last_vc_notice.pop(chat_id, None)
     if last_id:
-        try:
-            await _global_bot.delete_message(chat_id=chat_id, message_id=last_id)
-        except Exception:
-            pass
+        # El aviso previo pudo publicarlo el maestro o el clon: se intenta con ambos, en silencio.
+        for deleter in (_global_bot, await _resolve_clone_bot(chat_id)):
+            if deleter is None:
+                continue
+            try:
+                await asyncio.wait_for(deleter.delete_message(chat_id=chat_id, message_id=last_id), timeout=MTPROTO_RPC_TIMEOUT)
+                break
+            except Exception:
+                continue
 
     bot_username = await _get_bot_username()
-    price = await get_mic_vip_price(chat_id) or 50
+    try:
+        price = await get_mic_vip_price(chat_id) or 50
+    except Exception:
+        price = 50
     try:
         pct = max(1, min(10, int(await get_autolower_pct(chat_id) or 2)))
     except Exception:
@@ -1069,10 +1133,10 @@ async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, la
 
 
 async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
-    if not _global_bot:
+    if not _has_notice_channel() or not _is_group_chat_id(chat_id):
         return
     try:
-        svc_cfg = await get_sentinel_service_messages_config(chat_id)
+        svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
         if svc_cfg.get("vc_welcome_enabled", 1) == 0:
             return
 
@@ -1097,17 +1161,32 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
             auto_delete_after=autodel if autodel > 0 else None, reply_markup=final_markup
         )
         if sent:
-            try:
-                await _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, both_sides=True)
-            except Exception:
-                pass
+            # Se fija con el bot que publicó el aviso (maestro o clon); sin permisos se omite en silencio.
+            pinned = False
+            pin_method = getattr(sent, "pin", None)
+            if callable(pin_method):
+                try:
+                    await asyncio.wait_for(pin_method(disable_notification=True), timeout=MTPROTO_RPC_TIMEOUT)
+                    pinned = True
+                except Exception:
+                    pinned = False
+            if not pinned and _global_bot:
+                try:
+                    await asyncio.wait_for(
+                        _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, disable_notification=True),
+                        timeout=MTPROTO_RPC_TIMEOUT
+                    )
+                except Exception:
+                    pass
             _pinned_vc_messages[chat_id] = sent.message_id
+    except asyncio.CancelledError:
+        raise
     except Exception as e:
         logger.warning(f"Aviso bienvenida de VC en {chat_id}: {e}")
 
 
 async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
-    if not _global_bot:
+    if not _has_notice_channel():
         return None
     try:
         payload_cfg = await get_sentinel_payload_config(chat_id)
@@ -1528,8 +1607,10 @@ async def semantic_scan_content(text: str, custom_prompt: str = "") -> dict:
         "por ejemplo, [ENLACE] junto a promesas de dinero fácil sugiere estafa, y [TELEFONO] o "
         "[CORREO] publicados sobre un tercero sugieren difusión de datos personales ajenos."
     )
-    if custom_prompt:
-        system_prompt += f"\nDirectivas adicionales del administrador: {custom_prompt}"
+    # Capa 0 también sobre las directivas del administrador (pueden citar teléfonos, enlaces o @usuarios).
+    safe_directives = sanitize_pii_for_ai(custom_prompt or "")[:1500]
+    if safe_directives:
+        system_prompt += f"\nDirectivas adicionales del administrador: {safe_directives}"
     # Capa 0: el texto original nunca sale del proceso; Mistral recibe la versión minimizada.
     safe_text = sanitize_pii_for_ai(text)[:4000]
     try:
@@ -1593,7 +1674,7 @@ async def generate_sentinel_ai_response(
     tone_prompt = tones.get(personality_tone, tones["guardian"])
     system_instruction = (
         f"{tone_prompt}\n"
-        f"Directivas personalizadas del Creador: {custom_prompt if custom_prompt else 'Ninguna adicional'}\n"
+        f"Directivas personalizadas del Creador: {sanitize_pii_for_ai(custom_prompt or '')[:1500] or 'Ninguna adicional'}\n"
         "Reglas obligatorias:\n"
         "- Responde en el idioma del usuario (generalmente español).\n"
         "- Máximo 2 a 3 oraciones (máximo 80 palabras).\n"
@@ -2519,8 +2600,8 @@ async def vc_scheduler_loop():
                         if raw_call_obj:
                             await _invoke(client, DiscardGroupCall(call=raw_call_obj))
                         await update_vc_call_status(group_id, 0)
-                        if _global_bot:
-                            await _global_bot.send_message(chat_id=group_id, text=VC_SCHED_MESSAGES["end"], parse_mode="HTML")
+                        # Vía resiliente (maestro → clon); un fallo de Telegram no se confunde con un fallo de cierre.
+                        _spawn(_dispatch_radar_notice(chat_id=group_id, text=VC_SCHED_MESSAGES["end"]), name=f"vc_sched_end:{group_id}")
                         logger.info(f"📡 [Cierre VC Programado] Sala concluida ordenadamente en comunidad {group_id}.")
                     except Exception as e:
                         err_up = str(e).upper()
@@ -2580,15 +2661,10 @@ async def night_mode_autonomous_loop():
 
                     if in_night_time and not night_engaged:
                         await activate_universal_night_mode(group_id)
-                        if _global_bot:
-                            try:
-                                await _global_bot.send_message(
-                                    chat_id=group_id,
-                                    text="🌙 <b>Modo Nocturno Autónomo:</b> 🟢 Activado automáticamente según el horario programado.\n\n🛡️ <i>Cloud Media Management</i>",
-                                    parse_mode="HTML"
-                                )
-                            except Exception:
-                                pass
+                        _spawn(_dispatch_radar_notice(
+                            chat_id=group_id,
+                            text="🌙 <b>Modo Nocturno Autónomo:</b> 🟢 Activado automáticamente según el horario programado.\n\n🛡️ <i>Cloud Media Management</i>"
+                        ), name=f"night_on:{group_id}")
                         logger.info(f"🌙 [Modo Nocturno Activado] Perímetro asegurado automáticamente en comunidad {group_id}.")
 
                     elif not in_night_time and night_engaged:
@@ -2598,15 +2674,10 @@ async def night_mode_autonomous_loop():
                             # deactivate_universal_night_mode pone night_mode_status=0, que también
                             # es el interruptor de la programación: se reactiva para la próxima noche.
                             await set_night_mode_config(group_id, "night_mode_status", 1)
-                            if _global_bot:
-                                try:
-                                    await _global_bot.send_message(
-                                        chat_id=group_id,
-                                        text="☀️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>",
-                                        parse_mode="HTML"
-                                    )
-                                except Exception:
-                                    pass
+                            _spawn(_dispatch_radar_notice(
+                                chat_id=group_id,
+                                text="☀️ <b>Modo Nocturno Autónomo:</b> 🔴 Desactivado. Se restablecen los permisos perimetrales diurnos.\n\n🛡️ <i>Cloud Media Management</i>"
+                            ), name=f"night_off:{group_id}")
                             logger.info(f"☀️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
                 except Exception as inner_err:
                     logger.debug(f"Aviso evaluando modo nocturno autónomo en grupo {group_id}: {inner_err}")
@@ -2797,20 +2868,163 @@ async def _disconnect_sentinel_unlocked(group_id: int):
             still_used = any(info.get("client") is client for info in active_sentinels.values())
             if not still_used:
                 await _safe_stop_client(client, label=f"grupo {group_id}")
+                # id(client) puede reutilizarse para un cliente nuevo: la identidad cacheada se descarta.
+                _client_identity_cache.pop(id(client), None)
         logger.info(f"🛑 [Centinela Desconectado] Grupo {group_id} liberado.")
 
+    _purge_group_state(group_id)
+
+
+def _purge_group_state(group_id: int) -> None:
+    """
+    v16 · Limpieza completa del estado en memoria asociado a un grupo. Se invoca al desconectar el
+    Centinela y desde el janitor para grupos que ya no tienen monitor. No toca `_sentinel_launch_locks`
+    (puede estar retenido por quien llama): esos locks los poda el janitor cuando están libres.
+    """
     admin_caches.pop(group_id, None)
     _forbidden_strikes.pop(group_id, None)
     _autolower_cooldowns.pop(group_id, None)
-
-    for key in [k for k in _screen_shield_flagged if k[0] == group_id]:
-        _screen_shield_flagged.pop(key, None)
-    for key in [k for k in _noise_unmute_history if k[0] == group_id]:
-        _noise_unmute_history.pop(key, None)
-    for key in [k for k in _last_mute_state if k[0] == group_id]:
-        _last_mute_state.pop(key, None)
     _call_rights_cache.pop(group_id, None)
     _last_join_attempt.pop(group_id, None)
+
+    for store in (_screen_shield_flagged, _noise_unmute_history, _last_mute_state, _noise_mute_until, _copilot_user_last):
+        for key in [k for k in list(store) if isinstance(k, tuple) and k and k[0] == group_id]:
+            store.pop(key, None)
+    for key in [k for k in list(_sentinel_muted) if k[0] == group_id]:
+        _sentinel_muted.discard(key)
+
+    # Avisos de voz: se cancela el lote en espera y se olvidan los ids de mensajes previos.
+    flush_task = _vc_notice_flush_tasks.pop(group_id, None)
+    if flush_task is not None and not flush_task.done():
+        flush_task.cancel()
+    _vc_notice_pending.pop(group_id, None)
+    _last_vc_notice.pop(group_id, None)
+    _vc_notice_locks.pop(group_id, None)
+    _pinned_vc_messages.pop(group_id, None)
+    _sentinel_payload_last_sent.pop(group_id, None)
+
+    # Copiloto / Guardián IA
+    _copilot_chat_last.pop(group_id, None)
+    if not _copilot_inflight.get(group_id):
+        _copilot_inflight.pop(group_id, None)
+
+
+def _purge_expired(store: dict, ttl: float, now: float, ts_of=lambda value: value) -> int:
+    """Elimina las entradas cuyo timestamp (extraído con `ts_of`) supera `ttl`. Tolera valores corruptos."""
+    expired = []
+    for key, value in list(store.items()):
+        try:
+            if now - float(ts_of(value)) > ttl:
+                expired.append(key)
+        except (TypeError, ValueError, IndexError):
+            expired.append(key)
+    for key in expired:
+        store.pop(key, None)
+    return len(expired)
+
+
+def _enforce_cap(store: dict, cap: int = None) -> int:
+    """Tope duro de tamaño: descarta las entradas más antiguas por orden de inserción (FIFO)."""
+    cap = cap or STATE_MAX_ENTRIES
+    overflow = len(store) - cap
+    if overflow <= 0:
+        return 0
+    for key in list(store)[:overflow]:
+        store.pop(key, None)
+    return overflow
+
+
+def _sweep_global_state() -> int:
+    """
+    Pasada síncrona (sin `await`) del janitor: al no ceder el event loop durante el barrido, ninguna
+    corrutina observa un diccionario a medio modificar. Devuelve el número de entradas purgadas.
+    """
+    mono = time.monotonic()
+    wall = time.time()
+    live_groups = set(active_sentinels.keys())
+    purged = 0
+
+    # 1. Antispam / cooldowns: pasado el TTL la ausencia de la clave equivale al valor caducado.
+    purged += _purge_expired(_copilot_user_last, max(COPILOT_USER_COOLDOWN, COPILOT_AMBIENT_COOLDOWN), mono)
+    purged += _purge_expired(_copilot_chat_last, COPILOT_AMBIENT_COOLDOWN, mono)
+    purged += _purge_expired(_sentinel_payload_last_sent, SENTINEL_PAYLOAD_MIN_GAP_SECONDS, mono)
+    purged += _purge_expired(_last_join_attempt, JOIN_RETRY_SECONDS, mono)
+    purged += _purge_expired(_vc_notice_locks, VC_NOTICE_STATE_TTL, wall)
+    purged += _purge_expired(_call_rights_cache, CALL_RIGHTS_TTL_SECONDS * 2, wall, ts_of=lambda v: v[1])
+    purged += _purge_expired(_ai_tier_cache, AI_TIER_CACHE_TTL * AI_CACHE_STALE_FACTOR, mono, ts_of=lambda v: v[1])
+    purged += _purge_expired(_ai_cfg_cache, AI_CFG_CACHE_TTL * AI_CACHE_STALE_FACTOR, mono, ts_of=lambda v: v[1])
+    purged += _purge_expired(_client_identity_cache, CLIENT_IDENTITY_TTL, mono, ts_of=lambda v: v[2])
+
+    # 2. Valores que son instantes de expiración (no de registro).
+    for store in (_autolower_cooldowns, _noise_mute_until):
+        for key in [k for k, until in list(store.items()) if not isinstance(until, (int, float)) or until <= mono]:
+            store.pop(key, None)
+            purged += 1
+    for key, history in list(_noise_unmute_history.items()):
+        if not history or mono - max(history) > NOISE_SPIKE_WINDOW_SECONDS:
+            _noise_unmute_history.pop(key, None)
+            purged += 1
+
+    # 3. Contadores de respuestas en curso a cero.
+    for chat_id in [c for c, n in list(_copilot_inflight.items()) if not n or n <= 0]:
+        _copilot_inflight.pop(chat_id, None)
+        purged += 1
+
+    # 4. Avisos de voz: tareas terminadas y colas huérfanas (sin tarea viva que las vacíe).
+    for chat_id in [c for c, t in list(_vc_notice_flush_tasks.items()) if t is None or t.done()]:
+        _vc_notice_flush_tasks.pop(chat_id, None)
+        purged += 1
+    for chat_id in [c for c, pend in list(_vc_notice_pending.items()) if not pend or c not in _vc_notice_flush_tasks]:
+        _vc_notice_pending.pop(chat_id, None)
+        purged += 1
+
+    # 5. Estado de grupos sin monitor activo (Centinela retirado, expulsado o membresía perdida).
+    stale_groups = set()
+    for store in (_last_vc_notice, _pinned_vc_messages, admin_caches, _forbidden_strikes):
+        stale_groups.update(c for c in list(store) if c not in live_groups)
+    for store in (_screen_shield_flagged, _last_mute_state):
+        stale_groups.update(k[0] for k in list(store) if isinstance(k, tuple) and k and k[0] not in live_groups)
+    stale_groups.update(k[0] for k in list(_sentinel_muted) if k[0] not in live_groups)
+    for chat_id in stale_groups:
+        if chat_id in _vc_notice_flush_tasks:
+            continue  # un lote en vuelo terminará y se limpiará en la próxima pasada
+        _purge_group_state(chat_id)
+        purged += 1
+
+    # 6. Locks de lanzamiento libres de grupos sin monitor. Un asyncio.Lock libre no tiene esperas, y entre
+    #    `_get_launch_lock()` y `async with lock` no hay punto de suspensión: no hay carrera posible.
+    for chat_id in [c for c, lk in list(_sentinel_launch_locks.items()) if c not in live_groups and not lk.locked()]:
+        _sentinel_launch_locks.pop(chat_id, None)
+        purged += 1
+
+    # 7. Red de seguridad: topes duros de tamaño.
+    for store in (
+        _copilot_user_last, _copilot_chat_last, _sentinel_payload_last_sent, _last_join_attempt,
+        _vc_notice_locks, _last_vc_notice, _pinned_vc_messages, _call_rights_cache, _ai_tier_cache,
+        _ai_cfg_cache, _client_identity_cache, _last_mute_state, _screen_shield_flagged,
+        _noise_unmute_history, _noise_mute_until,
+    ):
+        purged += _enforce_cap(store)
+    if len(_sentinel_muted) > STATE_MAX_ENTRIES:
+        for key in list(_sentinel_muted)[: len(_sentinel_muted) - STATE_MAX_ENTRIES]:
+            _sentinel_muted.discard(key)
+            purged += 1
+    return purged
+
+
+async def _state_janitor_loop():
+    """Bucle de higiene de memoria 24/7: purga por TTL y topes de tamaño cada STATE_JANITOR_INTERVAL s."""
+    logger.info(f"🧹 [Janitor] Higiene de memoria activa (cada {STATE_JANITOR_INTERVAL:.0f}s, tope {STATE_MAX_ENTRIES}).")
+    while True:
+        await asyncio.sleep(STATE_JANITOR_INTERVAL)
+        try:
+            purged = _sweep_global_state()
+            if purged:
+                logger.debug(f"🧹 [Janitor] {purged} entrada(s) de estado purgada(s).")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"⚠️ [Janitor] Error en la pasada de limpieza: {e}")
 
 
 async def load_all_sentinels():
@@ -3116,6 +3330,7 @@ async def init_assistant_master():
     _spawn(vc_scheduler_loop(), name="vc_scheduler_loop")
     _spawn(pending_auth_cleanup_loop(), name="pending_auth_cleanup_loop")
     _spawn(night_mode_autonomous_loop(), name="night_mode_autonomous_loop")
+    _spawn(_state_janitor_loop(), name="state_janitor_loop")
     await load_all_sentinels()
 
 
