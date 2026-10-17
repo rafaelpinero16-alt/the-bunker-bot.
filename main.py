@@ -251,6 +251,7 @@ from handlers import (
     ecosystem,
     groups,
     media_locks,
+    ban_appeals,
     moderation,
     payments,
     user_private,
@@ -1363,7 +1364,7 @@ async def api_chat_micvip_audit(
 # Escritura: SOLO el dueño legítimo o el Arquitecto (assert_chat_ownership), igual que /configuration.
 # Toda escritura emite 'settings_updated' con `changed` prefijado (shield_* / vip_* / alq_*): el bot y las demás
 # sesiones de la Mini App repintan sin recargar.
-def _v23_validation_error(err):
+def _v23_validation_error(err) -> Exception:
     errors = getattr(err, "errors", None) or {}
     detail = "; ".join(f"{k}: {v}" for k, v in errors.items()) or str(err)
     return HTTPException(status_code=422, detail=detail)
@@ -1558,6 +1559,52 @@ async def api_update_admin_link_quotas(
     logger.info(f"🔗 [LinkQuota] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(sorted(patch))}")
     return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "admin_link_quotas": overview},
                         headers=_NO_STORE)
+
+
+# ==========================================
+# ⚖️ v24 · APELACIÓN DE BANEOS POR TELEGRAM STARS
+# ==========================================
+@api_router.get("/chat/{chat_id}/ban-appeals")
+async def api_get_ban_appeals(
+    chat_id: str,
+    status: str = "all",
+    limit: int = 20,
+    offset: int = 0,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """Configuración de apelaciones + historial (sin enlaces de reingreso). Lectura: dueño, Arquitecto, delegados de analítica."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_access(user_id, numeric_id)
+    from database.database import appeal_list, get_appeal_config
+    status = status if status in ("all", "open", "paid", "closed") else "all"
+    config = await get_appeal_config(numeric_id)
+    listing = await appeal_list(numeric_id, status=status, limit=limit, offset=offset)
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "filter": status,
+                                 "ban_appeals": config, **listing}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/ban-appeals")
+async def api_update_ban_appeals(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{ban_appeals: {enabled?, price_stars?, link_ttl_min?, window_days?, max_per_user?}} — solo el dueño. 422 "campo: motivo"."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    from database.database import BunkerValidationError, update_appeal_config
+    patch = payload.get("ban_appeals", payload) if isinstance(payload, dict) else {}
+    try:
+        config = await update_appeal_config(numeric_id, patch)
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v23_emit(numeric_id, [f"appeal_{k}" for k in patch])
+    logger.info(f"⚖️ [Apelaciones] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(sorted(patch))}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "ban_appeals": config}, headers=_NO_STORE)
 
 
 @api_router.get("/user/language")
@@ -3605,6 +3652,10 @@ async def main():
     vip_roles.register_master_bot(master_bot)
     vip_roles.register_bot_resolver(_clone_bot_for_chat)
     _spawn(vip_roles.vip_sweeper_loop(), name="vip_roles_sweeper")
+    # ⚖️ v24 · Apelaciones: desbaneo / enlaces con el clon de la comunidad o el maestro; barrido de enlaces y ofertas.
+    ban_appeals.register_master_bot(master_bot)
+    ban_appeals.register_bot_resolver(_clone_bot_for_chat)
+    _spawn(ban_appeals.appeals_sweeper_loop(), name="ban_appeals_sweeper")
     try:
         master_info = await master_bot.get_me()
         set_master_bot_username(master_info.username or "")
@@ -3630,6 +3681,8 @@ async def main():
     dp.message.outer_middleware.register(SettingsSyncMiddleware())
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
+    # (v25) Las apelaciones de baneo entran por payments.router (familia appeal_ en sus regex): ban_appeals ya no
+    #       registra manejadores propios, así ningún pago puede procesarse por dos rutas.
     # 1. payments: captura facturas Stars, pre_checkouts y deep-links (/start tip_, sub_, vipmic_)
     dp.include_router(payments.router)
     # 1a. architect_matrix: Matriz del Arquitecto Supremo (100 % exclusiva de SUPER_ADMIN_IDS). Va ANTES de

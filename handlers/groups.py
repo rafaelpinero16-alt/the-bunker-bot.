@@ -20,6 +20,7 @@ import inspect
 import logging
 import contextlib
 import html
+import types
 from typing import Optional
 
 from aiogram import Router, F, Bot
@@ -64,6 +65,7 @@ import assistant as _assistant_module
 import vip_roles     # 👑 v23 · Roles y etiquetas VIP automáticos (exenciones parciales, flood y prioridad acústica)
 import link_quotas   # 🔗 v23 · Cuota diaria de enlaces / promociones por administrador
 from . import media_locks   # 🔒 v15 · Matriz granular de bloqueo multimedia (30 vectores)
+from . import ban_appeals   # ⚖️ v24 · Apelación de baneos por Telegram Stars
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
 
 try:
@@ -1053,6 +1055,10 @@ async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
     if new_status in ("left", "kicked"):
         await registry_forget(group_id, user.id)
         return
+    # ⚖️ v24 · Reingreso por un enlace de apelación: se revoca y se borra el mensaje privado que lo contenía.
+    invite = getattr(event, "invite_link", None)
+    if invite is not None and str(getattr(invite, "name", "") or "").startswith("appeal-"):
+        _spawn(ban_appeals.on_member_joined(group_id, user.id, invite))
     if new_status == "restricted" and getattr(event.new_chat_member, "is_member", True) is False:
         await registry_forget(group_id, user.id)
         return
@@ -2377,6 +2383,15 @@ async def enforce_warn_ladder(
     # CASO B: SE ALCANZÓ EL LÍMITE DE ADVERTENCIAS (APLICACIÓN DE CASTIGO)
     await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit, force_mute=True)
 
+    # ⚖️ v24 · ¿La marca global users.is_banned ya existía ANTES de este baneo (Arquitecto, otra causa)? Se lee antes
+    # de ban_user(): una apelación pagada solo retira la marca que puso ESTE baneo, nunca una anterior.
+    prior_global_ban = False
+    if action == "ban":
+        try:
+            prior_global_ban = await _db_module.is_user_globally_banned(target_id)
+        except Exception:
+            prior_global_ban = True   # ante la duda, no se ofrece apelación (se conserva la seguridad)
+
     try:
         if action == "mute":
             await bot.restrict_chat_member(
@@ -2397,6 +2412,13 @@ async def enforce_warn_ladder(
         logger.error(f"Error aplicando sanción '{action}' a {target_id} en {chat_id}: {e}")
         return {"status": "error", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
+    # ⚖️ v25 · Origen de la marca global: solo si la activó ESTE baneo (/unban y apelaciones la retiran con seguridad).
+    if action == "ban" and not prior_global_ban:
+        try:
+            await _db_module.record_global_ban_origin(target_id, chat_id, "warn_ladder")
+        except Exception as ex:
+            logger.debug(f"Aviso registrando el origen del baneo global de {target_id}: {ex}")
+
     await _reset_warnings_safe(chat_id, target_id)
 
     if reason != "manual":     # las advertencias manuales son decisiones del administrador, no del sistema
@@ -2404,6 +2426,16 @@ async def enforce_warn_ladder(
 
     if action in ("kick", "ban"):
         await registry_forget(chat_id, target_id)
+
+    # ⚖️ v24 · Baneo AUTOMÁTICO por warns_limit (enlaces, lista negra, anti-spam, matriz…): DM privado con el motivo y
+    # la oferta de apelación por Stars. Las advertencias manuales de un administrador no son apelables por pago.
+    if action == "ban" and reason != "manual":
+        _spawn(ban_appeals.on_ladder_ban(
+            bot, group_id=chat_id,
+            user=types.SimpleNamespace(id=target_id, username=target_username or None, full_name=None, language_code=None),
+            reason_key=str(reason), reason_es=es_txt, reason_en=en_txt, strikes=strikes, limit=limit,
+            prior_global_ban=prior_global_ban,
+        ))
 
     if not silent:
         icon, title, s_es, s_en = _SANCTION_TEXT[action]

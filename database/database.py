@@ -191,6 +191,64 @@ def _ensure_columns(cursor, table: str, columns) -> None:
                     raise
 
 
+def _ensure_v24_schema(cursor) -> None:
+    """
+    v24 · Esquema ADITIVO de apelaciones de baneo: columnas con DEFAULT en group_settings y la tabla ban_appeals
+    (una fila por baneo apelable; charge_id UNIQUE garantiza que un cobro de Stars se procese una sola vez).
+    """
+    _ensure_columns(cursor, "group_settings", [
+        ("appeal_enabled", "INTEGER DEFAULT 1"),
+        ("appeal_price_stars", "INTEGER DEFAULT 250"),
+        ("appeal_link_ttl_min", "INTEGER DEFAULT 30"),
+        ("appeal_window_days", "INTEGER DEFAULT 7"),
+        ("appeal_max_per_user", "INTEGER DEFAULT 3"),
+    ])
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ban_appeals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            reason_key TEXT,
+            reason_es TEXT,
+            reason_en TEXT,
+            strikes INTEGER,
+            warn_limit INTEGER,
+            status TEXT NOT NULL DEFAULT 'offered',
+            price_stars INTEGER NOT NULL,
+            prior_global_ban INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            offer_expires_at INTEGER NOT NULL,
+            dm_bot_id INTEGER,
+            dm_message_id INTEGER,
+            charge_id TEXT UNIQUE,
+            paid_at INTEGER,
+            reinstated_at INTEGER,
+            invite_link TEXT,
+            link_expires_at INTEGER,
+            link_message_id INTEGER,
+            link_bot_id INTEGER,
+            rejoined_at INTEGER,
+            error TEXT,
+            updated_at INTEGER
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ban_appeals_user ON ban_appeals (group_id, user_id, created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ban_appeals_status ON ban_appeals (status, link_expires_at)")
+    # v25 · Origen de la marca global users.is_banned: qué comunidad (y qué mecanismo) la activó. Permite que un /unban
+    # manual o una apelación pagada la retiren SOLO si la puso esa misma comunidad (antes un /unban no tenía efecto
+    # real: el middleware anti-spam volvía a expulsar al usuario con su primer mensaje).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS global_ban_origins (
+            user_id INTEGER PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+
 def _ensure_v23_schema(cursor) -> None:
     """
     v23 · Esquema ADITIVO (CREATE IF NOT EXISTS + columnas con DEFAULT): ninguna tabla ni columna existente cambia.
@@ -559,6 +617,8 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_micvip_audit_user ON micvip_audit (group_id, user_id, expires_at)")
         # v23 · Refuerzo perimetral, Roles VIP automáticos y Cuotas de enlaces de administradores (tablas aditivas).
         _ensure_v23_schema(cursor)
+        # v24 · Apelación de baneos por Telegram Stars (columnas aditivas + tabla ban_appeals).
+        _ensure_v24_schema(cursor)
         cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
         cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")
@@ -6695,6 +6755,362 @@ def admin_link_usage_summary(group_id: int) -> dict:
         except sqlite3.OperationalError:
             return {}
     return {str(int(r[0])): {"used": int(r[1] or 0), "blocked": int(r[2] or 0), "last_at": r[3], "oldest_at": r[4]} for r in rows}
+
+
+# ==========================================================================================
+# ⚖️ v24 · APELACIÓN DE BANEOS POR TELEGRAM STARS
+# ==========================================================================================
+# Ciclo de vida de una apelación (una fila por baneo apelable):
+#   offered ──(DM entregado)──▶ offered        dm_failed (sin chat privado: se entrega en el próximo /start)
+#   offered / dm_failed ──(pago verificado, claim atómico)──▶ paid ──▶ reinstated ──(entra por el enlace)──▶ rejoined
+#                                                                  └──▶ refunded (no se pudo desbanear: reembolso)
+#   offered / dm_failed ──(vence la oferta)──▶ expired · superseded (nuevo baneo del mismo usuario)
+APPEAL_OPEN_STATUSES = ("offered", "dm_failed")
+APPEAL_STATUSES = ("offered", "dm_failed", "paid", "reinstated", "rejoined", "refunded", "failed", "expired", "superseded")
+APPEAL_PRICE_RANGE = (1, 10000)
+APPEAL_PRICE_CHOICES = (50, 100, 250, 500, 1000, 2500)
+APPEAL_LINK_TTL_CHOICES = (10, 30, 60, 1440)      # minutos
+APPEAL_WINDOW_RANGE = (1, 30)                       # días que la oferta sigue abierta
+APPEAL_MAX_CHOICES = (0, 1, 3, 5, 10)               # apelaciones pagadas por usuario y comunidad en 90 días (0 = sin tope)
+APPEAL_MAX_LOOKBACK_S = 90 * 86400
+APPEAL_DEFAULTS = {"enabled": True, "price_stars": 250, "link_ttl_min": 30, "window_days": 7, "max_per_user": 3}
+_APPEAL_COLS = ("id", "group_id", "user_id", "username", "full_name", "reason_key", "reason_es", "reason_en", "strikes",
+                "warn_limit", "status", "price_stars", "prior_global_ban", "created_at", "offer_expires_at", "dm_bot_id",
+                "dm_message_id", "charge_id", "paid_at", "reinstated_at", "invite_link", "link_expires_at",
+                "link_message_id", "link_bot_id", "rejoined_at", "error", "updated_at")
+_APPEAL_MUTABLE = frozenset({"status", "dm_bot_id", "dm_message_id", "reinstated_at", "invite_link", "link_expires_at",
+                             "link_message_id", "link_bot_id", "rejoined_at", "error"})
+
+
+def _appeal_row(row):
+    return dict(zip(_APPEAL_COLS, row)) if row else None
+
+
+def _appeal_config_sync(conn, group_id: int) -> dict:
+    try:
+        row = conn.execute("SELECT appeal_enabled, appeal_price_stars, appeal_link_ttl_min, appeal_window_days, "
+                           "appeal_max_per_user FROM group_settings WHERE group_id = ?", (int(group_id),)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    cfg = dict(APPEAL_DEFAULTS)
+    if row:
+        ttl = _as_int(row[2], 30)
+        cfg.update({
+            "enabled": _as_flag(row[0], 1) == 1,
+            "price_stars": max(APPEAL_PRICE_RANGE[0], min(APPEAL_PRICE_RANGE[1], _as_int(row[1], 250))),
+            "link_ttl_min": ttl if ttl in APPEAL_LINK_TTL_CHOICES else 30,
+            "window_days": max(APPEAL_WINDOW_RANGE[0], min(APPEAL_WINDOW_RANGE[1], _as_int(row[3], 7))),
+            "max_per_user": max(0, _as_int(row[4], 3)),
+        })
+    return cfg
+
+
+@db_async
+def get_appeal_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cfg = _appeal_config_sync(conn, group_id)
+    cfg["choices"] = {"price_stars": list(APPEAL_PRICE_CHOICES), "link_ttl_min": list(APPEAL_LINK_TTL_CHOICES),
+                      "max_per_user": list(APPEAL_MAX_CHOICES), "price_range": list(APPEAL_PRICE_RANGE),
+                      "window_range": list(APPEAL_WINDOW_RANGE)}
+    return cfg
+
+
+@db_async
+def update_appeal_config(group_id: int, patch: dict) -> dict:
+    """{enabled?, price_stars?, link_ttl_min?, window_days?, max_per_user?} — todo o nada; "campo: motivo"."""
+    if not isinstance(patch, dict) or not patch:
+        raise BunkerValidationError({"ban_appeals": "se esperaba un objeto con al menos un campo."})
+    cols, errors = {}, {}
+    for key, value in patch.items():
+        if key == "enabled":
+            if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
+                errors[key] = "se esperaba true/false."
+            else:
+                cols["appeal_enabled"] = 1 if value else 0
+        elif key == "price_stars":
+            v = _as_int(value, -1)
+            if not APPEAL_PRICE_RANGE[0] <= v <= APPEAL_PRICE_RANGE[1]:
+                errors[key] = f"entre {APPEAL_PRICE_RANGE[0]} y {APPEAL_PRICE_RANGE[1]} Stars."
+            else:
+                cols["appeal_price_stars"] = v
+        elif key == "link_ttl_min":
+            v = _as_int(value, -1)
+            if v not in APPEAL_LINK_TTL_CHOICES:
+                errors[key] = f"usa {', '.join(map(str, APPEAL_LINK_TTL_CHOICES))} minutos."
+            else:
+                cols["appeal_link_ttl_min"] = v
+        elif key == "window_days":
+            v = _as_int(value, -1)
+            if not APPEAL_WINDOW_RANGE[0] <= v <= APPEAL_WINDOW_RANGE[1]:
+                errors[key] = f"entre {APPEAL_WINDOW_RANGE[0]} y {APPEAL_WINDOW_RANGE[1]} días."
+            else:
+                cols["appeal_window_days"] = v
+        elif key == "max_per_user":
+            v = _as_int(value, -1)
+            if not 0 <= v <= 100:
+                errors[key] = "entre 0 (sin tope) y 100."
+            else:
+                cols["appeal_max_per_user"] = v
+        else:
+            errors[key] = "campo desconocido."
+    if errors:
+        raise BunkerValidationError({f"ban_appeals.{k}": v for k, v in errors.items()})
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+        for col, val in cols.items():
+            conn.execute(f"UPDATE group_settings SET {_ident(col)} = ? WHERE group_id = ?", (val, int(group_id)))
+        return _appeal_config_sync(conn, group_id)
+
+
+@db_async
+def is_user_globally_banned(user_id: int) -> bool:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT is_banned FROM users WHERE user_id = ?", (int(user_id),)).fetchone()
+    return bool(row and row[0])
+
+
+@db_async
+def unban_user_global(user_id: int) -> None:
+    """Contraparte de ban_user(): solo la usa una apelación pagada cuyo baneo FUE el que activó la marca global."""
+    with _write_transaction() as conn:
+        conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (int(user_id),))
+
+
+@db_async
+def record_global_ban_origin(user_id: int, group_id: int, source: str) -> bool:
+    """Anota la comunidad que activó la marca global. Nunca sobrescribe un origen anterior (el primero manda)."""
+    with _write_transaction() as conn:
+        cur = conn.execute("INSERT OR IGNORE INTO global_ban_origins (user_id, group_id, source, created_at) VALUES (?, ?, ?, ?)",
+                           (int(user_id), int(group_id), str(source)[:32], _now_ts()))
+        return cur.rowcount > 0
+
+
+@db_async
+def get_global_ban_origin(user_id: int):
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute("SELECT group_id, source, created_at FROM global_ban_origins WHERE user_id = ?",
+                               (int(user_id),)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return {"group_id": int(row[0]), "source": row[1], "created_at": row[2]} if row else None
+
+
+@db_async
+def lift_global_ban_if_origin(user_id: int, group_id: int) -> bool:
+    """
+    Retira users.is_banned SOLO si la marca la puso esta comunidad (BEGIN IMMEDIATE). Una marca sin origen registrado
+    (anterior a v25, CAS, Arquitecto) o de otra comunidad se conserva. → True si se retiró.
+    """
+    with _write_transaction() as conn:
+        row = conn.execute("SELECT group_id FROM global_ban_origins WHERE user_id = ?", (int(user_id),)).fetchone()
+        if not row or int(row[0]) != int(group_id):
+            return False
+        conn.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (int(user_id),))
+        conn.execute("DELETE FROM global_ban_origins WHERE user_id = ?", (int(user_id),))
+        return True
+
+
+@db_async
+def appeal_cancel_open(group_id: int, user_id: int) -> int:
+    """Un administrador desbaneó a mano: las ofertas abiertas se cierran para que nadie pague por algo ya resuelto."""
+    now = _now_ts()
+    with _write_transaction() as conn:
+        try:
+            cur = conn.execute(f"UPDATE ban_appeals SET status = 'superseded', updated_at = ? WHERE group_id = ? AND user_id = ? "
+                               f"AND status IN ({','.join('?' * len(APPEAL_OPEN_STATUSES))})",
+                               (now, int(group_id), int(user_id), *APPEAL_OPEN_STATUSES))
+        except sqlite3.OperationalError:
+            return 0
+        return cur.rowcount
+
+
+@db_async
+def appeal_create(group_id: int, user_id: int, *, reason_key: str, reason_es: str, reason_en: str, strikes: int,
+                  warn_limit: int, prior_global_ban: bool, username: str = None, full_name: str = None) -> dict:
+    """
+    Registra una apelación para un baneo recién aplicado (BEGIN IMMEDIATE). Precio y vigencia se FIJAN aquí: cambiar
+    la configuración después no altera una oferta ya enviada. → {"created": bool, "reason": str, "appeal": dict|None}
+    """
+    now = _now_ts()
+    with _write_transaction() as conn:
+        cfg = _appeal_config_sync(conn, group_id)
+        if not cfg["enabled"]:
+            return {"created": False, "reason": "disabled", "appeal": None}
+        if prior_global_ban:
+            return {"created": False, "reason": "prior_global_ban", "appeal": None}
+        if cfg["max_per_user"]:
+            paid = conn.execute("SELECT COUNT(*) FROM ban_appeals WHERE group_id = ? AND user_id = ? AND paid_at IS NOT NULL "
+                                "AND paid_at > ?", (int(group_id), int(user_id), now - APPEAL_MAX_LOOKBACK_S)).fetchone()[0]
+            if paid >= cfg["max_per_user"]:
+                return {"created": False, "reason": "max_reached", "appeal": None}
+        conn.execute(f"UPDATE ban_appeals SET status = 'superseded', updated_at = ? WHERE group_id = ? AND user_id = ? "
+                     f"AND status IN ({','.join('?' * len(APPEAL_OPEN_STATUSES))})",
+                     (now, int(group_id), int(user_id), *APPEAL_OPEN_STATUSES))
+        cur = conn.execute("""
+            INSERT INTO ban_appeals (group_id, user_id, username, full_name, reason_key, reason_es, reason_en, strikes,
+                                     warn_limit, status, price_stars, prior_global_ban, created_at, offer_expires_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'offered', ?, 0, ?, ?, ?)
+        """, (int(group_id), int(user_id), username, full_name, str(reason_key or "")[:64], str(reason_es or "")[:300],
+              str(reason_en or "")[:300], int(strikes or 0), int(warn_limit or 0), cfg["price_stars"], now,
+              now + cfg["window_days"] * 86400, now))
+        row = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE id = ?", (cur.lastrowid,)).fetchone()
+        return {"created": True, "reason": "ok", "appeal": _appeal_row(row)}
+
+
+@db_async
+def appeal_get(appeal_id: int):
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE id = ?", (int(appeal_id),)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return _appeal_row(row)
+
+
+@db_async
+def appeal_open_for(group_id: int, user_id: int):
+    """Última apelación ABIERTA y vigente del usuario en esa comunidad (o None)."""
+    with get_db_connection() as conn:
+        row = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE group_id = ? AND user_id = ? "
+                           f"AND status IN ({','.join('?' * len(APPEAL_OPEN_STATUSES))}) AND offer_expires_at > ? "
+                           f"ORDER BY id DESC LIMIT 1",
+                           (int(group_id), int(user_id), *APPEAL_OPEN_STATUSES, _now_ts())).fetchone()
+    return _appeal_row(row)
+
+
+@db_async
+def appeal_pending_for_user(user_id: int, limit: int = 5) -> list:
+    """Apelaciones que no se pudieron entregar por privado (se entregan cuando el usuario abre el bot)."""
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE user_id = ? AND status = 'dm_failed' "
+                                f"AND offer_expires_at > ? ORDER BY id DESC LIMIT ?",
+                                (int(user_id), _now_ts(), int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [_appeal_row(r) for r in rows]
+
+
+@db_async
+def appeal_update(appeal_id: int, **fields) -> None:
+    clean = {k: v for k, v in fields.items() if k in _APPEAL_MUTABLE}
+    if "status" in clean and clean["status"] not in APPEAL_STATUSES:
+        raise ValueError(f"Estado de apelación desconocido: {clean['status']!r}")
+    if "error" in clean and clean["error"]:
+        clean["error"] = str(clean["error"])[:300]
+    if not clean:
+        return
+    clean["updated_at"] = _now_ts()
+    with _write_transaction() as conn:
+        conn.execute(f"UPDATE ban_appeals SET {', '.join(f'{_ident(k)} = ?' for k in clean)} WHERE id = ?",
+                     (*clean.values(), int(appeal_id)))
+
+
+@db_async
+def appeal_claim_payment(appeal_id: int, user_id: int, charge_id: str, amount: int, bot_id: int = None) -> tuple:
+    """
+    Reclama el cobro para la apelación (BEGIN IMMEDIATE, idempotente). → (resultado, apelación):
+      'ok'        — primera vez: la apelación pasa a 'paid' con este charge_id.
+      'duplicate' — este charge_id ya se procesó (reintento de Telegram / doble update): no hacer nada.
+      'invalid'   — no corresponde (otro usuario, importe distinto, ya pagada o cerrada): reembolsar.
+    """
+    now = _now_ts()
+    with _write_transaction() as conn:
+        dup = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE charge_id = ?", (str(charge_id),)).fetchone()
+        if dup:
+            return "duplicate", _appeal_row(dup)
+        row = _appeal_row(conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE id = ?", (int(appeal_id),)).fetchone())
+        if (not row or int(row["user_id"]) != int(user_id) or int(row["price_stars"]) != int(amount)
+                or row["status"] not in APPEAL_OPEN_STATUSES):
+            return "invalid", row
+        # dm_bot_id = bot que COBRÓ: es el único que puede reembolsar y escribir al usuario en este chat.
+        conn.execute("UPDATE ban_appeals SET status = 'paid', charge_id = ?, paid_at = ?, dm_bot_id = COALESCE(?, dm_bot_id), "
+                     "updated_at = ? WHERE id = ?", (str(charge_id), now, bot_id, now, int(appeal_id)))
+        row.update({"status": "paid", "charge_id": str(charge_id), "paid_at": now, "dm_bot_id": bot_id or row.get("dm_bot_id")})
+        return "ok", row
+
+
+@db_async
+def appeal_by_invite_link(group_id: int, invite_link: str):
+    with get_db_connection() as conn:
+        row = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE group_id = ? AND invite_link = ? "
+                           f"ORDER BY id DESC LIMIT 1", (int(group_id), str(invite_link))).fetchone()
+    return _appeal_row(row)
+
+
+@db_async
+def appeal_due_links(limit: int = 50) -> list:
+    """Enlaces de reingreso vencidos y sin usar (para revocarlos y borrar el mensaje que los contiene)."""
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE status = 'reinstated' "
+                                f"AND invite_link IS NOT NULL AND link_expires_at <= ? LIMIT ?", (_now_ts(), int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [_appeal_row(r) for r in rows]
+
+
+@db_async
+def appeal_stuck_paid(older_than_s: int = 120, limit: int = 20) -> list:
+    """Cobros reclamados ('paid') cuyo desbaneo no terminó (p. ej. reinicio a mitad): el barrido los completa o reembolsa."""
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE status = 'paid' AND paid_at <= ? LIMIT ?",
+                                (_now_ts() - int(older_than_s), int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [_appeal_row(r) for r in rows]
+
+
+@db_async
+def appeal_expire_offers() -> int:
+    now = _now_ts()
+    with _write_transaction() as conn:
+        try:
+            cur = conn.execute(f"UPDATE ban_appeals SET status = 'expired', updated_at = ? WHERE offer_expires_at <= ? "
+                               f"AND status IN ({','.join('?' * len(APPEAL_OPEN_STATUSES))})", (now, now, *APPEAL_OPEN_STATUSES))
+            # Retención acotada: 400 días de historial (los cobros siguen también en processed_payments).
+            conn.execute("DELETE FROM ban_appeals WHERE created_at < ?", (now - 400 * 86400,))
+        except sqlite3.OperationalError:
+            return 0
+        return cur.rowcount
+
+
+@db_async
+def appeal_list(group_id: int, status: str = "all", limit: int = 20, offset: int = 0) -> dict:
+    limit = max(1, min(200, _as_int(limit, 20)))
+    offset = max(0, _as_int(offset, 0))
+    groups = {"open": APPEAL_OPEN_STATUSES, "paid": ("paid", "reinstated", "rejoined"), "closed": ("expired", "superseded", "refunded", "failed")}
+    where, params = "group_id = ?", [int(group_id)]
+    if status in groups:
+        where += f" AND status IN ({','.join('?' * len(groups[status]))})"
+        params += list(groups[status])
+    with get_db_connection() as conn:
+        try:
+            total = conn.execute(f"SELECT COUNT(*) FROM ban_appeals WHERE {where}", params).fetchone()[0]
+            rows = conn.execute(f"SELECT {', '.join(_APPEAL_COLS)} FROM ban_appeals WHERE {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+                                (*params, limit, offset)).fetchall()
+            s = conn.execute("""
+                SELECT COUNT(*),
+                       COALESCE(SUM(CASE WHEN status IN ('offered', 'dm_failed') THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN paid_at IS NOT NULL AND status != 'refunded' THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status IN ('reinstated', 'rejoined') THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN paid_at IS NOT NULL AND status != 'refunded' THEN price_stars ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN status = 'dm_failed' THEN 1 ELSE 0 END), 0)
+                FROM ban_appeals WHERE group_id = ?
+            """, (int(group_id),)).fetchone()
+        except sqlite3.OperationalError:
+            return {"records": [], "total": 0, "summary": {}}
+    records = []
+    for r in rows:
+        rec = _appeal_row(r)
+        rec.pop("invite_link", None)      # el enlace de reingreso es personal: nunca sale por la API
+        records.append(rec)
+    return {"records": records, "total": int(total),
+            "summary": {"appeals": int(s[0]), "open": int(s[1]), "paid": int(s[2]), "reinstated": int(s[3]),
+                        "stars": int(s[4]), "refunded": int(s[5]), "undelivered": int(s[6])}}
 
 
 # Inicialización del esquema al importar (al final, para que todas las funciones —incluida la Matriz— existan).

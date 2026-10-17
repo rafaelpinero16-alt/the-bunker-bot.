@@ -3,10 +3,21 @@ moderation.py — The Bunker OS (Aiogram 3.x)
 
 Módulo de moderación táctica, sanciones remotas y control perimetral.
 Integrado con la matriz de advertencias granular (Free / PRO / ULTRA PRO) y Centinela MTProto.
+
+v25:
+  • Seguridad: un operador de moderación debe ser creador, Arquitecto, administrador anónimo o un administrador con el
+    derecho REAL de restringir miembros (can_restrict_members). Antes bastaba con figurar como "administrator", y los
+    compradores de un pase MicVIP (ascendidos sin derechos solo para mostrar su título) podían ejecutar /ban, /mute,
+    /kick, /warn o editar las listas globales.
+  • /unban funciona de verdad con usuarios baneados por la escalera de advertencias: retira la marca global
+    users.is_banned si la puso esta comunidad (antes el middleware anti-spam los volvía a expulsar al primer mensaje),
+    reinicia sus strikes y cierra las apelaciones de pago abiertas para que nadie pague por algo ya resuelto.
+  • Los baneos permanentes manuales registran el origen de la marca global (global_ban_origins).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
 import asyncio
+import contextlib
 import time
 import html
 import logging
@@ -24,6 +35,7 @@ from database.database import (
     is_whitelisted, add_user_strike, get_user_strikes,
     reset_user_strikes, get_warns_config
 )
+import database.database as _db_module   # v25 · origen de la marca global y apelaciones (resolución diferida)
 from assistant import set_participant_mic
 
 logger = logging.getLogger("moderation_handler")
@@ -97,14 +109,47 @@ async def _chat_default_permissions(bot: Bot, chat_id: int) -> ChatPermissions:
 
 
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Verifica si el ejecutor cuenta con facultades de creador, administrador o Arquitecto."""
+    """
+    Creador, Arquitecto, administrador anónimo o administrador con el derecho REAL de restringir miembros.
+    v25: un "administrador" sin can_restrict_members (p. ej. el título temporal de un pase MicVIP) no modera.
+    """
     if is_super_admin(user_id) or user_id == 1087968824:  # Group Anonymous Bot
         return True
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-        return member.status in ["creator", "administrator"]
     except Exception:
         return False
+    status = str(getattr(getattr(member, "status", ""), "value", getattr(member, "status", "")) or "")
+    if status == "creator":
+        return True
+    return status == "administrator" and bool(getattr(member, "can_restrict_members", False))
+
+
+async def _record_ban_origin(user_id: int, chat_id: int, source: str) -> None:
+    """v25 · Anota qué comunidad activó la marca global users.is_banned (nunca sobrescribe un origen anterior)."""
+    try:
+        await _db_module.record_global_ban_origin(user_id, chat_id, source)
+    except Exception as ex:
+        logger.debug(f"Aviso registrando el origen del baneo global de {user_id}: {ex}")
+
+
+async def _lift_after_unban(chat_id: int, user_id: int) -> dict:
+    """
+    v25 · Tras un /unban manual: retira la marca global SOLO si la puso esta comunidad, reinicia los strikes y cierra las
+    apelaciones de pago abiertas. Nunca lanza. → {"global_lifted": bool, "appeals_closed": int}
+    """
+    out = {"global_lifted": False, "appeals_closed": 0}
+    try:
+        out["global_lifted"] = bool(await _db_module.lift_global_ban_if_origin(user_id, chat_id))
+    except Exception as ex:
+        logger.debug(f"Aviso retirando la marca global de {user_id}: {ex}")
+    with contextlib.suppress(Exception):
+        await reset_user_strikes(chat_id, user_id)
+    try:
+        out["appeals_closed"] = int(await _db_module.appeal_cancel_open(chat_id, user_id) or 0)
+    except Exception as ex:
+        logger.debug(f"Aviso cerrando apelaciones abiertas de {user_id}: {ex}")
+    return out
 
 
 async def is_target_protected(bot: Bot, chat_id: int, target_id: int) -> bool:
@@ -195,6 +240,7 @@ TEXTS = {
         "ban_success": "🚫 <b>{name}</b> has been permanently banned from the community.\n\n🛡️ <i>Cloud Media Management</i>",
         "ban_timed_success": "🚫 <b>{name}</b> has been banned for <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "unban_success": "🔓 <b>{name}</b> has been unbanned and unblocked from the community.\n\n🛡️ <i>Cloud Media Management</i>",
+        "unban_global_kept": "ℹ️ This user also carries a global ban set by another community or the Architect: they may be removed again when they post.",
         "kick_success": "👢 <b>{name}</b> has been kicked from the community.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_success": "🔇 <b>{name}</b> has been silenced for <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_perm": "🔇 <b>{name}</b> has been permanently silenced.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -234,6 +280,7 @@ TEXTS = {
         "ban_success": "🚫 <b>{name}</b> ha sido desterrado permanentemente de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "ban_timed_success": "🚫 <b>{name}</b> ha sido baneado por <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "unban_success": "🔓 <b>{name}</b> ha sido desbaneado y desbloqueado de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
+        "unban_global_kept": "ℹ️ Este usuario además tiene un baneo global puesto por otra comunidad o por el Arquitecto: podría ser expulsado de nuevo al escribir.",
         "kick_success": "👢 <b>{name}</b> ha sido expulsado temporalmente del grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_success": "🔇 <b>{name}</b> ha sido silenciado por <b>{duration}</b>.\n\n🛡️ <i>Cloud Media Management</i>",
         "mute_perm": "🔇 <b>{name}</b> ha sido silenciado permanentemente.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -427,9 +474,16 @@ async def cmd_unban(message: Message, command: CommandObject, bot: Bot):
 
     try:
         await bot.unban_chat_member(chat_id=message.chat.id, user_id=target.id, only_if_banned=True)
+        lifted = await _lift_after_unban(message.chat.id, target.id)
         raw_name = getattr(target, "full_name", getattr(target, "first_name", f"ID {target.id}"))
         target_name = html.escape(raw_name)
         text = t["unban_success"].format(name=target_name)
+        still_global = False
+        if not lifted["global_lifted"]:
+            with contextlib.suppress(Exception):
+                still_global = bool(await _db_module.is_user_globally_banned(target.id))
+        if still_global:
+            text = text.replace("\n\n🛡️", "\n" + t["unban_global_kept"] + "\n\n🛡️", 1)
         await send_remote_menu(message, lang, text, None)
     except Exception as e:
         msg = await message.reply(t["error"].format(error=e), parse_mode="HTML")
@@ -664,7 +718,12 @@ async def cb_mod_execution(callback: CallbackQuery):
         if action == "ban":
             if minutes == 0:
                 await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id)
+                already_global = False
+                with contextlib.suppress(Exception):
+                    already_global = bool(await _db_module.is_user_globally_banned(target_id))
                 await ban_user(target_id)
+                if not already_global:
+                    await _record_ban_origin(target_id, group_id, "manual_ban")
                 await callback.message.edit_text(t["ban_success"].format(name=target_name), parse_mode="HTML")
             else:
                 until_timestamp = int(time.time() + (minutes * 60))
@@ -914,7 +973,12 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
                     _spawn(auto_delete_pair(message, msg, delay=8))
                     return
 
+                already_global = False
+                with contextlib.suppress(Exception):
+                    already_global = bool(await _db_module.is_user_globally_banned(target.id))
                 await ban_user(target.id)
+                if not already_global:
+                    await _record_ban_origin(target.id, message.chat.id, "blacklist_ban")
                 try:
                     await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
                 except Exception as ban_err:

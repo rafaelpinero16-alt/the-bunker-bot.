@@ -14,6 +14,10 @@ Fase 3 · Exclusividad financiera y SLA de pagos:
 - Libro mayor `stars_payment_ledger`: telegram_payment_charge_id, user_id, chat_id e importe
   de cada pago, con estado de reembolso, para trazabilidad y conciliación.
 - `process_star_refund()`: devolución transparente vía refundStarPayment, idempotente.
+
+v25 · Apelación de baneos (familia `appeal_<grupo>_<usuario>_<id>`): payments es la única puerta de entrada (deep link
+/start appeal_<grupo>, pre-checkout y pago); la lógica vive en handlers/ban_appeals.py y reutiliza la emisión de facturas,
+el libro mayor, la idempotencia y los reembolsos de este módulo.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -800,7 +804,7 @@ def _payload_chat_id(payload: str) -> int:
             return int(parts[2])
         if payload.startswith("sub_"):
             return int(parts[2])
-        if payload.startswith(("speaker_", "tip_")):
+        if payload.startswith(("speaker_", "tip_", "appeal_")):
             return int(parts[1])
     except (IndexError, ValueError):
         pass
@@ -1232,7 +1236,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
 # ==========================================
 # 🔗 ENRUTAMIENTO UNIFICADO DE DEEP LINKS (/start sub_, vipmic_, chanplan_, speaker_, tip_)
 # ==========================================
-@router.message(Command("start"), F.text.regexp(r"^/start\s+(sub_|vipmic_|chanplan_|speaker_|tip_)"))
+@router.message(Command("start"), F.text.regexp(r"^/start\s+(sub_|vipmic_|chanplan_|speaker_|tip_|appeal_)"))
 async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type != "private":
         return
@@ -1240,6 +1244,19 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
     args = command.args or ""
+
+    # 0. ⚖️ v25 · APELACIÓN DE BANEO: reenvía al usuario baneado la factura de SU apelación abierta.
+    if args.startswith("appeal_"):
+        try:
+            handle_deeplink = importlib.import_module(
+                ".ban_appeals", package=__package__
+            ).handle_deeplink
+            if not await handle_deeplink(message, bot):
+                await message.answer(t["err_link"], parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Error abriendo la apelación de baneo de {message.from_user.id}: {e}")
+            await message.answer(t["err_link"], parse_mode="HTML")
+        return
 
     # 1. SUSCRIPCIONES DE COMUNIDAD
     if args.startswith("sub_"):
@@ -1695,7 +1712,7 @@ def _validate_offer_in_memory(payload: str, amount: int):
     return True if known is None else known
 
 
-@router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_)"))
+@router.pre_checkout_query(F.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_|appeal_)"))
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     """
     SLA < 2 s (Telegram corta a los 10 s y el usuario ve un error de pago).
@@ -1707,6 +1724,23 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     payload = pre_checkout_query.invoice_payload or ""
     amount = int(pre_checkout_query.total_amount or 0)
     ok = False
+    # ⚖️ v25 · Apelaciones: validación propia (titular, importe fijado al ofrecer, vigencia, baneo real y CAS) con
+    # mensaje de rechazo explícito. Lecturas de base de datos + comprobaciones externas en paralelo acotadas a 1,5 s.
+    if payload.startswith("appeal_"):
+        try:
+            appeal_pre_checkout = importlib.import_module(
+                ".ban_appeals", package=__package__
+            ).appeal_pre_checkout
+            await asyncio.wait_for(appeal_pre_checkout(pre_checkout_query), timeout=8)
+        except Exception as ex:
+            logger.warning(f"⚠️ [Pre-Checkout] Apelación no validada {payload!r}: {ex}")
+            with contextlib.suppress(Exception):
+                await pre_checkout_query.answer(ok=False, error_message=PRECHECKOUT_DECLINE_MESSAGE)
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed > PRECHECKOUT_SLA_SECONDS:
+                logger.warning(f"🐢 [Pre-Checkout] SLA excedido: {elapsed:.2f}s para la apelación {payload!r}.")
+        return
     try:
         if pre_checkout_query.currency != STARS_CURRENCY or amount < 1:
             ok = False
@@ -1736,7 +1770,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 # ==========================================
 # 💎 PROCESADOR DE PAGO EXITOSO CON CONTROL DE IDEMPOTENCIA
 # ==========================================
-@router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_)"))
+@router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_|appeal_)"))
 async def process_successful_payment(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
@@ -1755,6 +1789,22 @@ async def process_successful_payment(message: Message, bot: Bot):
         f"💳 [Pago Stars] charge_id={charge_id} user_id={user_id} "
         f"chat_id={_payload_chat_id(payload)} stars={message.successful_payment.total_amount} payload={payload!r}"
     )
+
+    # CASO 0: ⚖️ v25 · APELACIÓN DE BANEO — claim atómico por charge_id, desbaneo, marca global, strikes y enlace de
+    # un solo uso; si el desbaneo no es posible, reembolso vía process_star_refund (queda en el libro mayor).
+    if payload.startswith("appeal_"):
+        try:
+            process_appeal_payment = importlib.import_module(
+                ".ban_appeals", package=__package__
+            ).process_payment
+            await process_appeal_payment(bot, message)
+        except Exception as e:
+            logger.error(f"Error procesando la apelación {payload!r} (reembolso automático): {e}")
+            refunded = await process_star_refund(bot, user_id, charge_id, reason=f"Apelación de baneo fallida: {e}")
+            with contextlib.suppress(Exception):
+                await message.answer(t["err_sub_refund"] if refunded else
+                                     t["err_sub_refund_failed"].format(charge_id=html.escape(charge_id or "")), parse_mode="HTML")
+        return
 
     # CASO 1: SUSCRIPCIONES PRO / ULTRA PRO (GRUPOS Y CANALES)
     if payload.startswith("sub_"):
