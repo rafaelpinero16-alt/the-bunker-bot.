@@ -1321,6 +1321,94 @@ export const ui = {
     },
 
     // ======================================================================
+    // 🧬 v17/v18 · SUPERVISIÓN DEL BOT CLON Y DEL CENTINELA (solo estado, nunca credenciales)
+    // ======================================================================
+    ASSET_TONES: {
+        ok:   'border-emerald-400/60 text-emerald-300 bg-emerald-400/10 shadow-[0_0_12px_rgba(52,211,153,0.35)]',
+        warn: 'border-amber-400/60 text-amber-300 bg-amber-400/10',
+        down: 'border-rose-500/60 text-rose-300 bg-rose-500/10',
+        idle: 'border-neutral-700 text-neutral-400 bg-black/40'
+    },
+
+    setAssetPill(id, tone, label) {
+        const el = byId(id);
+        if (!el) return;
+        el.textContent = label;
+        el.className = `shrink-0 px-2.5 py-1 rounded-full border text-[10px] font-extrabold uppercase tracking-wide ${this.ASSET_TONES[tone] || this.ASSET_TONES.idle}`;
+    },
+
+    /** Detalle de la tarjeta; el texto completo queda en title (se trunca en pantallas estrechas). */
+    setAssetDetail(id, text) {
+        const el = byId(id);
+        if (!el) return;
+        el.textContent = text;
+        el.title = text;
+    },
+
+    /**
+     * Pinta las tarjetas. assets = respuesta del servidor ({clone, sentinel, checked_at}) o null.
+     * opts: loading (comprobación en curso), idle (sin comunidad), channel (los canales no usan clon/Centinela).
+     */
+    renderAssetsStatus(assets, { loading = false, idle = false, channel = false } = {}) {
+        const icon = byId('assets-refresh-icon');
+        if (icon) icon.className = `fa-solid fa-rotate text-xs${loading ? ' fa-spin' : ''}`;
+        const refresh = byId('assets-refresh-btn');
+        if (refresh) refresh.disabled = Boolean(loading || idle || channel);
+        const config = byId('assets-config-btn');
+        if (config) config.disabled = Boolean(idle || channel);
+
+        if (idle || channel) {
+            const note = this.t(channel ? 'assets_channel_only' : 'assets_pick');
+            this.setAssetPill('assets-clone-status', 'idle', '—');
+            this.setAssetPill('assets-sentinel-status', 'idle', '—');
+            this.setText('assets-clone-detail', note);
+            this.setText('assets-sentinel-detail', note);
+            this.setText('assets-checked-at', '');
+            return;
+        }
+        if (!assets) {
+            if (loading) this.setText('assets-checked-at', this.t('assets_loading'));
+            return;
+        }
+
+        // Escala única de tres estados (v18): 🟢 Conectado/Activo · 🟡 Desconectado/Inactivo · 🔴 Sin vincular.
+        const clone = assets.clone || {};
+        if (!clone.registered) {
+            this.setAssetPill('assets-clone-status', 'down', `🔴 ${this.t('assets_not_linked')}`);
+            this.setAssetDetail('assets-clone-detail', this.t('assets_clone_none'));
+        } else if (clone.connected) {
+            this.setAssetPill('assets-clone-status', 'ok', `🟢 ${this.t('assets_connected')}`);
+            this.setAssetDetail('assets-clone-detail', clone.username ? `@${clone.username}` : '—');
+        } else {
+            const starting = clone.running && clone.state !== 'retrying' && clone.last_ok_seconds == null;
+            this.setAssetPill('assets-clone-status', 'warn', `🟡 ${this.t(starting ? 'assets_starting' : 'assets_disconnected')}`);
+            const handle = clone.username ? `@${clone.username}` : '';
+            const why = clone.running ? (clone.state === 'retrying' ? this.t('assets_clone_retrying') : '') : this.t('assets_clone_stopped');
+            this.setAssetDetail('assets-clone-detail', [handle, why].filter(Boolean).join(' · ') || '—');
+        }
+
+        const sentinel = assets.sentinel || {};
+        if (sentinel.active) {
+            this.setAssetPill('assets-sentinel-status', 'ok', `🟢 ${this.t('assets_active')}`);
+            this.setAssetDetail('assets-sentinel-detail', this.t(sentinel.mode === 'own' ? 'assets_sentinel_own' : 'assets_sentinel_master'));
+        } else if (sentinel.registered) {
+            this.setAssetPill('assets-sentinel-status', 'warn', `🟡 ${this.t('assets_inactive')}`);
+            this.setAssetDetail('assets-sentinel-detail', this.t('assets_sentinel_down'));
+        } else {
+            this.setAssetPill('assets-sentinel-status', 'down', `🔴 ${this.t('assets_not_linked')}`);
+            const revoked = sentinel.status === 'revoked';
+            this.setAssetDetail('assets-sentinel-detail', revoked
+                ? (sentinel.last_error ? `${this.t('assets_sentinel_revoked')}: ${sentinel.last_error}` : this.t('assets_sentinel_revoked'))
+                : this.t('assets_sentinel_none'));
+        }
+
+        const at = assets.checked_at ? new Date(assets.checked_at) : null;
+        const time = at && !Number.isNaN(at.getTime())
+            ? at.toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false }) : '';
+        this.setText('assets-checked-at', time ? this.tf('assets_checked', { time }) : '');
+    },
+
+    // ======================================================================
     // 🔒 v15 · MATRIZ DE BLOQUEO MULTIMEDIA (30 vectores · 3 páginas, estilo Group Help)
     // ======================================================================
     /** Tono de cada acción (botón activo de la fila). */
@@ -1959,4 +2047,4 @@ export const ui = {
             body: this.tf('toast_payment_body', { stars, name })
         });
     }
-}; 
+};

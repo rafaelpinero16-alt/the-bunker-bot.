@@ -2,6 +2,12 @@
    THE BUNKER — COMMAND OS
    api.js — Sesión estricta, Cliente HTTP Centralizado, Radar WebSocket y Railway API
    The Bunker Command OS © 2026 — Cloud Media Management
+
+   v18: separación Bot ↔ Mini App. Las credenciales del Bot Clon (token de BotFather) y del Centinela
+   (String Session de Pyrogram) se vinculan SOLO en el chat privado del bot. Este cliente nunca las envía:
+   deployBotClone / connectSentinel responden en local con 410 y updateChatSettings bloquea cualquier
+   payload que las contenga. La supervisión llega por GET /chat/{id}/assets-status y por el evento
+   'assets_status' del radar WebSocket.
    ========================================================================== */
 
 import { CONFIG } from './config.js';
@@ -137,6 +143,25 @@ function numericId(value) {
 
 const INVALID_ID_RESULT = Object.freeze({ __error: 'invalid_id', __status: 400 });
 
+/**
+ * v18 · Credenciales que JAMÁS salen del navegador. Mismo criterio que el servidor (POST /settings → 410):
+ * se corta aquí para que el token o la sesión no lleguen ni a la red ni a los registros del proxy.
+ */
+const CREDENTIAL_ACTIONS = new Set(['deploy_clone', 'connect_sentinel']);
+const CREDENTIAL_FIELDS = ['bot_token', 'session_string'];
+const CREDENTIALS_BOT_ONLY = Object.freeze({
+    __error: 'Las credenciales del Bot Clon y del Centinela se vinculan solo en el chat privado del bot ' +
+             '(🧬 Clon & Centinela). La Mini App únicamente muestra su estado.',
+    __status: 410,
+    __bot_only: true
+});
+
+function carriesCredentials(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+    if (CREDENTIAL_ACTIONS.has(String(payload.action || ''))) return true;
+    return CREDENTIAL_FIELDS.some(field => Object.prototype.hasOwnProperty.call(payload, field));
+}
+
 /** Mensaje legible de un cuerpo de error de FastAPI (detail puede ser string, lista u objeto). */
 function errorDetail(errData, status) {
     const detail = errData && errData.detail;
@@ -261,8 +286,25 @@ export const api = {
         return await this.get(`/chat/${chatId}/top-users`);
     },
 
+    /** POST /api/chat/{chat_id}/settings — acciones perimetrales. Nunca transporta credenciales (v18). */
     async updateChatSettings(chatId, settings) {
-        return await this.post(`/chat/${chatId}/settings`, settings);
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        if (carriesCredentials(settings)) {
+            console.warn('[API] Bloqueado: las credenciales del Bot Clon y del Centinela solo se vinculan en el bot.');
+            return CREDENTIALS_BOT_ONLY;
+        }
+        return await this.post(`/chat/${chat}/settings`, settings);
+    },
+
+    /**
+     * v17/v18 · GET /api/chat/{chat_id}/assets-status → { assets: { clone, sentinel, checked_at },
+     * has_active_clone, has_active_sentinel }. Solo estado: el servidor nunca devuelve tokens ni sesiones.
+     */
+    async fetchAssetsStatus(chatId, opts = {}) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/assets-status`, { timeoutMs: CONFIG.ASSETS?.REFRESH_TIMEOUT_MS || 10000, ...opts });
     },
 
     // --- Analítica Unificada de Comunidad (Fase 5) ---
@@ -432,18 +474,16 @@ export const api = {
 
     // --- Acciones Tácticas Ultra Pro ---
 
-    async deployBotClone(chatId, botToken) {
-        return await this.updateChatSettings(chatId, {
-            action: 'deploy_clone',
-            bot_token: botToken
-        });
+    /**
+     * Compatibilidad (v18): las firmas se conservan para código antiguo, pero NO envían nada. El token y la
+     * sesión se ignoran y nunca llegan a la red; la vinculación se hace en el bot (deep link gclone_<chat_id>).
+     */
+    async deployBotClone(chatId, _botToken) {
+        return CREDENTIALS_BOT_ONLY;
     },
 
-    async connectSentinel(chatId, sessionString) {
-        return await this.updateChatSettings(chatId, {
-            action: 'connect_sentinel',
-            session_string: sessionString
-        });
+    async connectSentinel(chatId, _sessionString) {
+        return CREDENTIALS_BOT_ONLY;
     },
 
     async triggerGhostPurge(chatId) {
@@ -492,7 +532,7 @@ export const api = {
    Eventos del servidor: hello, pong, error, analytics_snapshot, initial_state,
    state_refresh, message, level_up, voice_presence, voice_call_started,
    voice_call_ended, stars_payment, settings_updated, security_block, raid_shield (v9),
-   subscribed, server_shutdown.
+   assets_status (v18 · estado en vivo del Bot Clon y del Centinela), subscribed, server_shutdown.
    Eventos locales: status, open, close, reconnect_scheduled, reconnected, gap, dead,
    auth_failed.
 
@@ -502,7 +542,8 @@ export const api = {
 
 const LIVE_EVENTS = new Set([
     'message', 'level_up', 'voice_call_started', 'voice_call_ended',
-    'voice_presence', 'stars_payment', 'settings_updated', 'security_block', 'raid_shield'
+    'voice_presence', 'stars_payment', 'settings_updated', 'security_block', 'raid_shield',
+    'assets_status'
 ]);
 const SNAPSHOT_EVENTS = new Set(['analytics_snapshot', 'initial_state', 'state_refresh']);
 const AUTH_CLOSE_CODES = new Set([4401, 4403, 1008]);

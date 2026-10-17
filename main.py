@@ -22,6 +22,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any, Optional, Set, Dict
 import urllib.parse
 from dotenv import load_dotenv
@@ -135,6 +136,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message, Update
 
+import assistant as _assistant_runtime   # v17 · lectura del estado EN VIVO de los Centinelas (active_sentinels)
 from assistant import (
     close_all_sentinels,
     execute_ghost_purge,
@@ -188,6 +190,8 @@ from database.database import (
     get_settings_snapshot,
     # v15 · Respaldo del Centinela: bot clon activo de la comunidad
     get_active_clone_tokens_for_group,
+    # v17 · Supervisión de activos (sin credenciales)
+    get_chat_assets_registry,
 )
 try:
     import raid_shield  # type: ignore[import-not-found]
@@ -1102,6 +1106,8 @@ async def api_chat_dashboard(
         # ULTRA PRO 💎, source="operator") en lugar de un plan vacío.
         data["plan"] = await _resolve_dashboard_plan(user_id, data.get("plan"))
         data["raid_shield"] = raid_shield.status_payload(numeric_id)
+        # v17 · Supervisión del Bot Clon y del Centinela (estado en vivo; jamás credenciales).
+        data.update(await build_assets_status(numeric_id))
 
         # v8.2: difusión personalizada del Estudio (chat destino, intervalo, texto promocional).
         if load_broadcast_config is not None:
@@ -1117,6 +1123,22 @@ async def api_chat_dashboard(
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.get("/chat/{chat_id}/assets-status")
+async def api_chat_assets_status(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """v17 · Estado en vivo del Bot Clon y del Centinela (botón 🔄 y sondeo de la Mini App). Sin credenciales."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    try:
+        numeric_id = int(chat_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+    await assert_chat_ownership(user_id, numeric_id)
+    return {"status": "success", "chat_id": str(numeric_id), **(await build_assets_status(numeric_id))}
 
 
 @api_router.get("/chat/{chat_id}/stats")
@@ -1393,7 +1415,18 @@ async def api_update_chat_settings(
         await assert_chat_ownership(user_id, numeric_id)
         action = payload.get("action")
 
-        # 1. Despliegue de Bot Clon
+        # v17 · Separación de responsabilidades: los tokens de Bot Clon y las String Sessions del Centinela se
+        # vinculan EXCLUSIVAMENTE en el chat privado del bot (flujos guiados con verificación). La Mini App solo
+        # supervisa. Cualquier credencial que llegue por aquí se rechaza SIN procesarla ni registrarla.
+        if action in ("deploy_clone", "connect_sentinel") or "bot_token" in (payload or {}) or "session_string" in (payload or {}):
+            logger.warning(f"⛔ [Activos] {user_id} intentó vincular credenciales desde la Mini App en {numeric_id}: rechazado.")
+            raise HTTPException(
+                status_code=410,
+                detail="Las credenciales del Bot Clon y del Centinela se vinculan solo en el chat privado del bot "
+                       "(🧬 Clon & Centinela). La Mini App únicamente muestra su estado."
+            )
+
+        # 1. Despliegue de Bot Clon (ruta heredada; inalcanzable desde v17: se rechaza arriba)
         if action == "deploy_clone":
             bot_token = (payload.get("bot_token") or "").strip()
             if not bot_token:
@@ -1779,6 +1812,7 @@ WS_ALLOWED_ORIGINS = {
 RADAR_EVENTS = {
     "message", "level_up", "voice_call_started", "voice_call_ended", "voice_presence",
     "stars_payment", "settings_updated", "security_block", "raid_shield",
+    "assets_status",   # v18 · supervisión en vivo del Bot Clon y del Centinela (sin credenciales)
 }
 
 # Códigos de cierre de aplicación (4000-4999) legibles por la Mini App.
@@ -1949,6 +1983,7 @@ async def websocket_radar(
         return
 
     client = await radar_hub.connect(numeric_id, websocket, user_id=user_id, accept=False)
+    _assets_watch_add(numeric_id)
 
     # 3. Saludo + snapshots iniciales (en segundo plano: el lector arranca ya)
     radar_hub.send_to(client, _ws_envelope(numeric_id, "hello", {
@@ -1958,6 +1993,7 @@ async def websocket_radar(
         "signature": "Cloud Media Management",
     }))
     snapshot_task = _spawn(_ws_send_snapshots(client, numeric_id), name=f"ws_snapshot:{numeric_id}")
+    _spawn(_ws_send_assets_status(client, numeric_id), name=f"ws_assets:{numeric_id}")
 
     # 4. Bucle lector con límite de tamaño, token bucket e inactividad
     tokens = WS_RATE_CAPACITY
@@ -2031,6 +2067,7 @@ async def websocket_radar(
     finally:
         if not snapshot_task.done():
             snapshot_task.cancel()
+        _assets_watch_remove(numeric_id)
         await radar_hub.disconnect(numeric_id, websocket)
 
 # Router de planes de canal (handlers/channel_plans_api.py, resuelto una sola vez por
@@ -2434,6 +2471,8 @@ class SettingsSyncMiddleware(BaseMiddleware):
                 changed = _settings_changed_fields(before[cid], after)
                 logger.info(f"🔄 [Sync] Consola del bot cambió {cid}: {', '.join(changed)}")
                 _spawn(emit_settings_updated(cid, "bot_console", changed), name=f"settings_sync:{cid}")
+                if any(f.startswith(("clone_", "sentinel_")) for f in changed):
+                    request_assets_push(cid)   # v18 · la tarjeta de la Mini App cambia al instante
 
 
 class ChatAutoDetectMiddleware(BaseMiddleware):
@@ -2482,6 +2521,163 @@ async def _dispatch_clone_update_limited(semaphore: asyncio.Semaphore, clone_bot
         await _dispatch_clone_update(clone_bot, bot_username, update)
 
 
+CLONE_HEALTHY_WINDOW_S = 90.0   # un long-poll dura 15 s: sin respuesta correcta en 90 s el clon no está conectado
+
+
+def _clone_health(token: str, state: str, username: str = None, ok: bool = False) -> None:
+    """v17 · Estado real del worker del clon (lo lee la supervisión de la Mini App)."""
+    entry = active_clone_tasks.get(token)
+    if entry is None:
+        return
+    entry["state"] = state
+    if username:
+        entry["username"] = username
+    if ok:
+        entry["last_ok"] = time.monotonic()
+
+
+def _clone_runtime_for_tokens(tokens: list) -> dict:
+    """{connected, state, username, last_ok_seconds} del clon en ejecución que coincida con alguno de los tokens."""
+    for stored, plain in tokens:
+        for key in (plain, stored):
+            entry = active_clone_tasks.get((key or "").strip())
+            if not entry:
+                continue
+            task = entry.get("task")
+            alive = task is not None and not task.done()
+            last_ok = entry.get("last_ok")
+            age = (time.monotonic() - last_ok) if last_ok else None
+            connected = bool(alive and entry.get("state") == "polling" and age is not None and age <= CLONE_HEALTHY_WINDOW_S)
+            return {"running": alive, "connected": connected, "state": entry.get("state") or "starting",
+                    "username": entry.get("username"), "last_ok_seconds": int(age) if age is not None else None}
+    return {"running": False, "connected": False, "state": "stopped", "username": None, "last_ok_seconds": None}
+
+
+def _sentinel_runtime(chat_id: int) -> dict:
+    """{active, mode: own|master|none, connected} del Centinela que vigila la comunidad (assistant.active_sentinels)."""
+    entry = getattr(_assistant_runtime, "active_sentinels", {}).get(int(chat_id))
+    if not entry:
+        return {"active": False, "mode": "none", "connected": False}
+    task = entry.get("task")
+    alive = task is not None and not task.done()
+    client = entry.get("client")
+    connected = bool(getattr(client, "is_connected", False)) if client is not None else False
+    mode = "own" if entry.get("user_id") else "master"
+    return {"active": bool(alive and connected), "mode": mode, "connected": connected}
+
+
+async def build_assets_status(chat_id: int) -> dict:
+    """
+    v17 · Supervisión del Bot Clon y del Centinela para la Mini App: registro (base de datos) + estado EN VIVO
+    (worker de polling y cliente MTProto). Nunca incluye tokens ni sesiones.
+    """
+    try:
+        registry = await get_chat_assets_registry(int(chat_id))
+    except Exception as ex:
+        logger.debug(f"[Activos] Registro no disponible para {chat_id}: {ex}")
+        registry = {"clone": {"registered": False, "username": None, "status": "none", "since": None},
+                    "sentinel": {"registered": False, "status": "none", "last_error": None, "since": None}}
+    try:
+        tokens = await get_active_clone_tokens_for_group(int(chat_id)) if registry["clone"]["registered"] else []
+    except Exception:
+        tokens = []
+    clone_rt = _clone_runtime_for_tokens(tokens)
+    sentinel_rt = _sentinel_runtime(int(chat_id))
+    clone = {**registry["clone"], **{k: v for k, v in clone_rt.items() if k != "username"},
+             "username": clone_rt.get("username") or registry["clone"]["username"]}
+    sentinel = {**registry["sentinel"], **sentinel_rt}
+    return {
+        "assets": {"clone": clone, "sentinel": sentinel, "checked_at": datetime.now(timezone.utc).isoformat()},
+        "has_active_clone": bool(clone["registered"] and clone["connected"]),
+        "has_active_sentinel": bool(sentinel["active"]),
+    }
+
+
+# ------------------------------------------------------------------
+# 📡 v18 · Radar de activos: empuja 'assets_status' por WebSocket cuando cambia el estado
+# ------------------------------------------------------------------
+# Solo se vigilan las salas con al menos una Mini App conectada. Cada ASSETS_WATCH_INTERVAL_S se recalcula el
+# estado (registro + runtime) y, si su huella cambió, se emite a la sala. Así la tarjeta pasa a «Desconectado»
+# en cuanto vence la ventana de salud de 90 s, sin esperar al sondeo REST de la Mini App.
+ASSETS_WATCH_INTERVAL_S = 15.0
+ASSETS_WATCH_MAX_CHATS = 2000
+_ASSETS_WATCH: Dict[int, int] = {}            # chat_id → nº de conexiones WS abiertas
+_ASSETS_LAST: Dict[int, tuple] = {}           # chat_id → última huella emitida
+
+
+def _assets_watch_add(chat_id: int) -> None:
+    cid = int(chat_id)
+    if cid in _ASSETS_WATCH or len(_ASSETS_WATCH) < ASSETS_WATCH_MAX_CHATS:
+        _ASSETS_WATCH[cid] = _ASSETS_WATCH.get(cid, 0) + 1
+
+
+def _assets_watch_remove(chat_id: int) -> None:
+    cid = int(chat_id)
+    left = _ASSETS_WATCH.get(cid, 0) - 1
+    if left > 0:
+        _ASSETS_WATCH[cid] = left
+    else:
+        _ASSETS_WATCH.pop(cid, None)
+        _ASSETS_LAST.pop(cid, None)
+
+
+def _assets_fingerprint(status: dict) -> tuple:
+    a = (status or {}).get("assets") or {}
+    c, s = a.get("clone") or {}, a.get("sentinel") or {}
+    return (bool(c.get("registered")), bool(c.get("connected")), bool(c.get("running")), c.get("state"), c.get("username"),
+            bool(s.get("registered")), bool(s.get("active")), s.get("mode"), s.get("status"), s.get("last_error"))
+
+
+def request_assets_push(chat_id: int) -> None:
+    """Recalcula YA (y emite si cambió) el estado de activos de una sala vigilada (p. ej. tras vincular en el bot)."""
+    try:
+        cid = int(chat_id)
+    except (TypeError, ValueError):
+        return
+    if cid in _ASSETS_WATCH:
+        _spawn(push_assets_status(cid), name=f"assets_push:{cid}")
+
+
+async def push_assets_status(chat_id: int, force: bool = False) -> bool:
+    """Emite 'assets_status' a la sala si la huella cambió (o si force). Devuelve True si emitió."""
+    cid = int(chat_id)
+    status = await build_assets_status(cid)
+    fp = _assets_fingerprint(status)
+    if not force and _ASSETS_LAST.get(cid) == fp:
+        return False
+    _ASSETS_LAST[cid] = fp
+    await emit_radar_event(cid, "assets_status", {"chat_id": str(cid), **status})
+    return True
+
+
+async def _ws_send_assets_status(client, chat_id: int) -> None:
+    """Estado inicial de activos para un cliente recién conectado (solo a él)."""
+    try:
+        status = await asyncio.wait_for(build_assets_status(int(chat_id)), timeout=5)
+        _ASSETS_LAST.setdefault(int(chat_id), _assets_fingerprint(status))
+        radar_hub.send_to(client, _ws_envelope(int(chat_id), "assets_status", {"chat_id": str(chat_id), **status}))
+    except Exception as ex:
+        logger.debug(f"Aviso snapshot de activos WS ({chat_id}): {ex}")
+
+
+async def assets_watch_loop() -> None:
+    """Bucle del radar de activos (una sola tarea para todas las salas vigiladas)."""
+    logger.info("📡 [Radar de Activos]: supervisión en vivo del Bot Clon y del Centinela activa.")
+    while True:
+        try:
+            await asyncio.sleep(ASSETS_WATCH_INTERVAL_S)
+            for cid in list(_ASSETS_WATCH):
+                try:
+                    await push_assets_status(cid, force=False)
+                except Exception as ex:
+                    logger.debug(f"[Radar de Activos] {cid}: {ex}")
+                await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.warning(f"⚠️ [Radar de Activos] ciclo fallido: {ex}")
+
+
 async def _clone_worker(clone_bot: Bot, token: str):
     allowed_updates = ["message", "callback_query", "pre_checkout_query", "chat_join_request", "chat_member", "my_chat_member"]
     token_tag = token.split(":", 1)[0]
@@ -2493,6 +2689,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
                 await clone_bot.delete_webhook(drop_pending_updates=False)   # ver nota en main(): pagos pendientes
                 bot_info = await clone_bot.get_me()
                 bot_username = bot_info.username or "BotClon"
+                _clone_health(token, state="polling", username=bot_username, ok=True)
                 break
             except TelegramUnauthorizedError:
                 logger.warning(f"🔒 [Clon {token_tag}] Token revocado o inválido; se detiene el clon.")
@@ -2501,6 +2698,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
                 raise
             except Exception as ex:
                 logger.warning(f"⚠️ [Clon {token_tag}] Error al iniciar ({ex}); reintento en {backoff:.0f}s.")
+                _clone_health(token, state="retrying")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
 
@@ -2514,6 +2712,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
             try:
                 updates = await clone_bot.get_updates(offset=offset, timeout=15, allowed_updates=allowed_updates)
                 error_backoff = 2.0
+                _clone_health(token, state="polling", ok=True)
                 for update in updates:
                     offset = update.update_id + 1
                     _spawn(
@@ -2527,6 +2726,7 @@ async def _clone_worker(clone_bot: Bot, token: str):
                 return
             except Exception as ex:
                 logger.debug(f"Aviso polling clon @{bot_username}: {ex}")
+                _clone_health(token, state="retrying")
                 await asyncio.sleep(error_backoff)
                 error_backoff = min(error_backoff * 2, 30.0)
     finally:
@@ -2798,6 +2998,7 @@ async def main():
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
     start_analytics_flusher()
     logger.info("📈 [Analítica en Caliente]: Búfer de volcado por lotes activo.")
+    _spawn(assets_watch_loop(), name="assets_watch")
 
     if ALLOW_INSECURE_AUTH_FALLBACK:
         logger.warning("🚨 [Seguridad] ALLOW_INSECURE_AUTH_FALLBACK=1: la API acepta peticiones sin firma. NO usar en producción.")

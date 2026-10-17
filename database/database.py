@@ -1599,6 +1599,45 @@ def get_active_clone_tokens_for_group(group_id: int) -> list:
     return out
 
 
+# ==========================================================================================
+# 🧬 v17 · REGISTRO DE ACTIVOS (Bot Clon + Centinela MTProto) — SOLO ESTADO, NUNCA CREDENCIALES
+# ==========================================================================================
+# La vinculación de tokens y String Sessions se hace EXCLUSIVAMENTE en el chat privado del bot (flujos guiados
+# clone_token_ / clone_phone_). La Mini App solo supervisa: este registro jamás devuelve tokens ni sesiones.
+def _assets_registry_sync(conn, chat_id: int) -> dict:
+    clone = {"registered": False, "username": None, "status": "none", "since": None}
+    sentinel = {"registered": False, "status": "none", "last_error": None, "since": None}
+    try:
+        row = conn.execute("""
+            SELECT bot_username, status, created_at FROM bot_clones
+            WHERE group_id = ? AND bot_token IS NOT NULL AND bot_token != ''
+            ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at DESC LIMIT 1
+        """, (int(chat_id),)).fetchone()
+        if row:
+            clone.update({"registered": (row[1] or "") == "active", "username": row[0] or None,
+                          "status": row[1] or "none", "since": row[2]})
+    except sqlite3.OperationalError:
+        pass
+    try:
+        row = conn.execute("""
+            SELECT status, last_error, updated_at FROM owner_sessions WHERE group_id = ?
+            ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC LIMIT 1
+        """, (int(chat_id),)).fetchone()
+        if row:
+            sentinel.update({"registered": (row[0] or "") == "active", "status": row[0] or "none",
+                             "last_error": (row[1] or None) if (row[0] or "") != "active" else None, "since": row[2]})
+    except sqlite3.OperationalError:
+        pass
+    return {"clone": clone, "sentinel": sentinel}
+
+
+@db_async
+def get_chat_assets_registry(chat_id: int) -> dict:
+    """{"clone": {registered, username, status, since}, "sentinel": {registered, status, last_error, since}}."""
+    with get_db_connection() as conn:
+        return _assets_registry_sync(conn, int(chat_id))
+
+
 SENTINEL_FLAG_KEYS = ("vc_enabled", "vc_join_enabled", "micvip_enabled", "reset_enabled", "sched_enabled", "vc_welcome_enabled")
 
 
@@ -1619,6 +1658,16 @@ def get_settings_snapshot(chat_id: int) -> dict:
         snapshot["sentinel"] = {key: _as_flag(svc.get(key), 1) for key in SENTINEL_FLAG_KEYS}
     except Exception as ex:
         logger.debug(f"[Radar] Centinela no disponible para {chat_id}: {ex}")
+    try:
+        # v17 · Registro de activos (sin credenciales): vincular o desconectar un clon o un Centinela en el bot
+        # cambia esta parte del estado y el middleware universal lo emite a la Mini App al instante.
+        registry = get_chat_assets_registry.sync(int(chat_id))
+        snapshot["assets"] = {
+            "clone_registered": registry["clone"]["registered"], "clone_username": registry["clone"]["username"],
+            "sentinel_registered": registry["sentinel"]["registered"], "sentinel_status": registry["sentinel"]["status"],
+        }
+    except Exception as ex:
+        logger.debug(f"[Radar] Registro de activos no disponible para {chat_id}: {ex}")
     return snapshot
 
 
@@ -3568,8 +3617,14 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         shield_active = bool(row[7]) if row and row[7] is not None else True
         linklock_active = bool(row[8]) if row and row[8] is not None else False
 
+        assets = _assets_registry_sync(conn, chat_id)
         return {
             "chat_id": str(chat_id),
+            # v17 · Supervisión de activos. Aquí solo el registro; main.py añade el estado en vivo y recalcula
+            # has_active_clone / has_active_sentinel con la conexión real.
+            "assets": assets,
+            "has_active_clone": assets["clone"]["registered"],
+            "has_active_sentinel": assets["sentinel"]["registered"],
             "plan": describe_license(tier, expires_at, "community"),
             "log_channel": {"enabled": log_id is not None, "channel_id": log_id},
             "modules": {"active": active_mods, "total": 91},

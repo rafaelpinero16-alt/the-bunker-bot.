@@ -17,7 +17,6 @@ import { ui } from './ui.js';
 
 const STUDIO_ALIAS_RE = /^@[A-Za-z][A-Za-z0-9_]{4,31}$/;
 const CHAT_ID_RE = /^-?\d{5,20}$/;
-const CLONE_TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 const SWITCH_LABEL_KEYS = { captcha: 'captcha_pro', autolower: 'autolower_title', shield: 'shield_title', linklock: 'linklock_title' };
 const STUDIO_TME_RE = /^(?:t\.me|telegram\.me)\/\S+$/i;
 
@@ -180,6 +179,7 @@ export const app = {
     _planForm: { busy: false, lastCreated: null },
     _chatConfig: { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {}, seq: 0 },
     _mediaLocks: { page: 1, busyKey: null },   // v15 · matriz de bloqueo multimedia (página visible y vector en vuelo)
+    _assets: { chatId: null, data: null, loading: false, timer: null, wsAt: 0 },   // v17/v18 · supervisión Clon / Centinela
     validatePlanForm,
     validateConfigSection,
 
@@ -406,6 +406,8 @@ export const app = {
         if (targetView) targetView.classList.remove('hidden');
 
         tgApp.hapticImpact('light');
+        // v17 · Al abrir la consola, el estado del Clon / Centinela se comprueba al momento.
+        if (tabId === 'bot-settings' && this._assets.chatId) this.loadAssetsStatus(this._assets.chatId);
     },
 
     switchContext(val) {
@@ -1078,6 +1080,7 @@ export const app = {
      * respuestas en vuelo. No toca la sesión en sí (token, webUser) ni las preferencias (idioma, tema).
      */
     resetSessionState() {
+        this.stopAssetsSupervision();
         session.invalidate();
         this.disconnectLiveRadar();
 
@@ -2411,6 +2414,7 @@ export const app = {
         } else if (!hasLiveForChat) {
             this.connectLiveRadar(chatId);
         }
+        this.startAssetsSupervision(chatId, { channel: isChannel });
 
         // Desde el botón del bot el operador espera ver la analítica ya: se muestra el cargador al instante.
         if (opts.tab === 'analytics') this.switchTab('analytics');
@@ -2473,6 +2477,12 @@ export const app = {
             if (!isCurrent()) return;
             this.scheduleDashboardReload(chatId);
             this.onRemoteSettingsUpdated(chatId, data);
+        });
+        client.on('assets_status', (data, envelope) => {
+            if (!isCurrent()) return;
+            // Evento fuera de LIVE_EVENTS en api.js: se registra su seq para no provocar falsos huecos ('gap').
+            if (envelope && typeof client._trackSeq === 'function') client._trackSeq(envelope);
+            this.onRemoteAssetsStatus(chatId, data);
         });
         client.on('gap', () => { if (isCurrent()) this.scheduleAnalyticsRefresh(500); });
         client.on('auth_failed', ({ code }) => { if (isCurrent()) this.onRadarAuthFailed(code); });
@@ -2776,6 +2786,9 @@ export const app = {
             ui.setRadarTarget(data.title);
         }
 
+        // 0. v17 · Supervisión del Bot Clon y del Centinela (estado en vivo calculado por el servidor)
+        if (data.assets && String(this._assets.chatId) === String(chatId)) this.applyAssetsStatus(chatId, data.assets);
+
         // 1. Canal de Registro (Log Channel)
         ui.renderLogChannelStatus(data.log_channel);
 
@@ -3000,66 +3013,118 @@ export const app = {
         }
     },
 
-    /** 🧬 Despliegue de Bot Clon → api.updateChatSettings(chatId, { action: 'deploy_clone', bot_token }) */
-    async deployClone() {
+    // ======================================================================
+    // 🧬 v17 · BOT CLON Y CENTINELA: SUPERVISIÓN (la vinculación se hace SOLO en el bot)
+    // ======================================================================
+    /**
+     * Compatibilidad: un HTML antiguo en caché aún puede llamar a deployClone / connectSentinel. Ya no se envía
+     * ninguna credencial desde el navegador (el servidor las rechaza con 410): se abre el panel del bot.
+     */
+    deployClone() { return this.openAssetsInBot(); },
+    connectSentinel() { return this.openAssetsInBot(); },
+
+    /** Abre el chat privado del bot en el panel 🧬 Clon & Centinela de la comunidad (deep link gclone_). */
+    openAssetsInBot() {
         const chatId = this.selectedGroupId();
         if (!chatId) return this.consolePickFirst();
-        const tokenInput = document.getElementById('clone-bot-token');
-        const token = String(tokenInput?.value || '').trim();
-        if (!token) {
-            tgApp.hapticNotification('warning');
-            this.consoleToast('warn', '🔑', ui.t('gc_clone_err_token'));
-            return false;
-        }
-        if (!CLONE_TOKEN_RE.test(token)) {
-            tgApp.hapticNotification('error');
-            this.consoleToast('error', '🔑', ui.t('gc_clone_err_format'));
-            return false;
-        }
         tgApp.hapticImpact('medium');
-        const res = await this.runConsoleAction('btn-deploy-clone', chatId, id => api.updateChatSettings(id, { action: 'deploy_clone', bot_token: token }));
-        if (!res) return false;
-        if (res.__error || res.status !== 'success') {
-            tgApp.hapticNotification('error');
-            this.consoleToast('error', '❌', ui.tf('gc_clone_toast_error', { error: this.consoleErrorMessage(res) }));
-            return false;
-        }
-        if (tokenInput) tokenInput.value = '';
-        tgApp.hapticNotification('success');
-        this.consoleToast('success', '🚀', ui.tf('gc_clone_toast_ok', { name: res.clone_username || 'Bot' }));
+        this.consoleToast('info', '🔐', ui.t('assets_toast_open_bot'));
+        const prefix = CONFIG.ASSETS?.BOT_DEEPLINK_PREFIX || 'gclone_';
+        tgApp.openTelegramLink(`https://t.me/${CONFIG.BOT_USERNAME}?start=${prefix}${chatId}`);
         return true;
     },
 
-    /** 📡 Centinela MTProto → api.updateChatSettings(chatId, { action: 'connect_sentinel', session_string }) */
-    async connectSentinel() {
-        const chatId = this.selectedGroupId();
-        if (!chatId) return this.consolePickFirst();
-        const sessionInput = document.getElementById('sentinel-session-string');
-        const sessionString = String(sessionInput?.value || '').trim();
+    startAssetsSupervision(chatId, { channel = false } = {}) {
+        this.stopAssetsSupervision();
+        const a = this._assets;
+        a.chatId = channel ? null : String(chatId);
+        a.data = null;
+        if (channel) {
+            ui.renderAssetsStatus(null, { channel: true });
+            return;
+        }
+        ui.renderAssetsStatus(null, { loading: true });
+        this.loadAssetsStatus(chatId);
+        const every = CONFIG.ASSETS?.POLL_MS || 30000;
+        a.timer = setInterval(() => {
+            // Solo con la consola visible y la Mini App en primer plano (ahorra batería y peticiones).
+            if (document.visibilityState !== 'visible' || state.currentTab !== 'bot-settings') return;
+            // Con el radar al día (v18) el sondeo REST sobra: solo actúa como respaldo si el WebSocket calla.
+            if (a.wsAt && Date.now() - a.wsAt < (CONFIG.ASSETS?.WS_FRESH_MS || 45000)) return;
+            if (a.chatId) this.loadAssetsStatus(a.chatId);
+        }, every);
+    },
 
-        // El REST solo admite una String Session; el acceso por teléfono (código + 2FA) se hace en el bot.
-        if (sessionString && /^\+?[\d\s()\-]{7,16}$/.test(sessionString)) {
-            tgApp.hapticNotification('warning');
-            this.consoleToast('warn', '📱', ui.t('sentinel_phone_hint'));
+    stopAssetsSupervision() {
+        const a = this._assets;
+        if (a.timer) clearInterval(a.timer);
+        Object.assign(a, { chatId: null, data: null, loading: false, timer: null, wsAt: 0 });
+        ui.renderAssetsStatus(null, { idle: true });
+    },
+
+    /** GET /api/chat/{id}/assets-status. manual=true (botón 🔄) confirma con aviso y vibración. */
+    async loadAssetsStatus(chatId, { manual = false } = {}) {
+        const a = this._assets;
+        if (!chatId || a.loading || String(a.chatId) !== String(chatId)) return false;
+        const epoch = session.epoch;
+        a.loading = true;
+        ui.renderAssetsStatus(a.data, { loading: true });
+        const res = await api.get(`/chat/${encodeURIComponent(chatId)}/assets-status`,
+            { timeoutMs: CONFIG.ASSETS?.REFRESH_TIMEOUT_MS || 10000 });
+        a.loading = false;
+        if (res?.__stale || epoch !== session.epoch || String(a.chatId) !== String(chatId)) return false;
+        if (res?.__error) {
+            ui.renderAssetsStatus(a.data, { loading: false });
+            if (manual) {
+                tgApp.hapticNotification('error');
+                this.consoleToast('error', '⚠️', ui.tf('assets_toast_error', { error: this.consoleErrorMessage(res) }));
+            }
             return false;
         }
-        if (!sessionString) {
-            tgApp.hapticNotification('warning');
-            this.consoleToast('warn', '🔑', ui.t('gc_sentinel_err_session'));
-            return false;
+        this.applyAssetsStatus(chatId, res.assets, { announce: !manual });
+        if (manual) {
+            tgApp.hapticNotification('success');
+            this.consoleToast('success', '🔄', ui.t('assets_toast_ok'));
         }
-        tgApp.hapticImpact('medium');
-        const res = await this.runConsoleAction('btn-connect-sentinel', chatId, id => api.updateChatSettings(id, { action: 'connect_sentinel', session_string: sessionString }));
-        if (!res) return false;
-        if (res.__error || res.status !== 'success') {
-            tgApp.hapticNotification('error');
-            this.consoleToast('error', '❌', ui.tf('gc_sentinel_toast_error', { error: this.consoleErrorMessage(res) }));
-            return false;
-        }
-        if (sessionInput) sessionInput.value = '';
-        tgApp.hapticNotification('success');
-        this.consoleToast('success', '📡', ui.t('gc_sentinel_toast_ok'));
         return true;
+    },
+
+    refreshAssets() {
+        const chatId = this._assets.chatId;
+        if (!chatId) return this.consolePickFirst();
+        tgApp.hapticImpact('light');
+        return this.loadAssetsStatus(chatId, { manual: true });
+    },
+
+    /** v18 · 'assets_status' del radar WebSocket (instantáneo al conectar y en cada cambio de un activo). */
+    onRemoteAssetsStatus(chatId, data) {
+        if (!data?.assets || String(this._assets.chatId) !== String(chatId)) return;
+        this._assets.wsAt = Date.now();
+        this.applyAssetsStatus(chatId, data.assets, { announce: true });
+    },
+
+    /** Aplica un estado recibido (sondeo, botón, radar o dashboard) y avisa si un activo cambió de conexión. */
+    applyAssetsStatus(chatId, assets, { announce = true } = {}) {
+        const a = this._assets;
+        if (!assets || String(a.chatId) !== String(chatId)) return;
+        const prev = a.data;
+        a.data = assets;
+        ui.renderAssetsStatus(assets, { loading: a.loading });
+        if (!announce || !prev) return;
+        const changes = [];
+        const cloneLabel = c => ui.t(!c?.registered ? 'assets_not_linked' : (c.connected ? 'assets_connected' : 'assets_disconnected'));
+        if (cloneLabel(prev.clone) !== cloneLabel(assets.clone)) {
+            changes.push(ui.tf('assets_toast_changed', { name: `🧬 ${ui.t('assets_clone_title')}`, status: cloneLabel(assets.clone) }));
+        }
+        const sentinelLabel = x => ui.t(x?.active ? 'assets_active' : (x?.registered ? 'assets_inactive' : 'assets_not_linked'));
+        if (sentinelLabel(prev.sentinel) !== sentinelLabel(assets.sentinel)) {
+            changes.push(ui.tf('assets_toast_changed', { name: `📡 ${ui.t('assets_sentinel_title')}`, status: sentinelLabel(assets.sentinel) }));
+        }
+        if (!changes.length) return;
+        const up = (assets.clone?.connected || !assets.clone?.registered) && (assets.sentinel?.active || !assets.sentinel?.registered);
+        tgApp.hapticNotification(up ? 'success' : 'warning');
+        ui.showToast({ key: 'assets-status', force: true, icon: up ? '🟢' : '🔴', tone: up ? 'success' : 'warn',
+            ttl: CONFIG.CONSOLE?.TOAST_MS || 3600, title: changes.join(' · ') });
     },
 
     /** 💀 Ghost Purge → api.updateChatSettings(chatId, { action: 'run_ghost_purge' }) */

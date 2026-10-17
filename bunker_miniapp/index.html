@@ -1038,25 +1038,43 @@
                                 <i class="fa-solid fa-dna"></i> <span data-i18n="gc_ultra_title">Herramientas Ultra & Clones MTProto</span>
                             </h4>
 
-                            <!-- Despliegue de Clon -->
-                            <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
-                                <label for="clone-bot-token" class="text-[10px] text-theme-muted uppercase font-bold block" data-i18n="gc_clone_label">Token de Bot Clon (BotFather):</label>
-                                <div class="flex gap-2">
-                                    <input type="password" id="clone-bot-token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ" class="flex-1 bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#ff00ff]">
-                                    <button type="button" id="btn-deploy-clone" onclick="app.deployClone()" class="bg-[#ff00ff]/20 text-[#ff00ff] border border-[#ff00ff]/40 px-3 py-2 rounded-lg text-xs font-bold hover:bg-[#ff00ff]/30 transition active:scale-95 disabled:opacity-50 disabled:cursor-wait"><span data-i18n="gc_btn_deploy">Desplegar</span></button>
+                            <!-- 🧬 v17 · SUPERVISIÓN DE ACTIVOS (solo estado). Los tokens de Bot Clon y las String Sessions del
+                                 Centinela se vinculan EXCLUSIVAMENTE en el chat privado del bot (flujos guiados); aquí nunca se
+                                 escriben credenciales. ui.renderAssetsStatus pinta las tarjetas; app.refreshAssets las actualiza. -->
+                            <div id="assets-panel" class="space-y-2.5" aria-live="polite">
+                                <div class="flex items-center justify-between gap-2">
+                                    <p class="text-[10px] text-theme-muted leading-snug" data-i18n="assets_hint">El Bot Clon y el Centinela se vinculan en el chat privado del bot. Aquí ves su estado en vivo.</p>
+                                    <button type="button" id="assets-refresh-btn" onclick="app.refreshAssets()" title="Refresh" class="shrink-0 w-9 h-9 rounded-xl bg-black/60 border border-neutral-700 text-[#00f3ff] flex items-center justify-center hover:bg-[#00f3ff]/15 active:scale-95 transition disabled:opacity-50 disabled:cursor-wait">
+                                        <i id="assets-refresh-icon" class="fa-solid fa-rotate text-xs"></i>
+                                    </button>
                                 </div>
-                            </div>
 
-                            <!-- Sesión de Centinela MTProto -->
-                            <div class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 space-y-2">
-                                <div class="flex items-center justify-between">
-                                    <label for="sentinel-session-string" class="text-[10px] text-theme-muted uppercase font-bold" data-i18n="gc_sentinel_label">Centinela Acústico MTProto:</label>
-                                    <span class="text-[9px] text-[#00f3ff]">String Session</span>
+                                <!-- Tarjeta: Bot Clon -->
+                                <div id="assets-clone-card" class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 flex items-center gap-3">
+                                    <span class="w-10 h-10 shrink-0 rounded-xl bg-[#ff00ff]/10 border border-[#ff00ff]/30 text-[#ff00ff] flex items-center justify-center"><i class="fa-solid fa-dna"></i></span>
+                                    <div class="min-w-0 flex-1">
+                                        <p class="text-[10px] text-theme-muted uppercase font-bold tracking-wide" data-i18n="assets_clone_title">Bot Clon</p>
+                                        <p id="assets-clone-detail" class="text-[11px] text-neutral-400 font-mono truncate">—</p>
+                                    </div>
+                                    <span id="assets-clone-status" class="shrink-0 px-2.5 py-1 rounded-full border border-neutral-700 text-[10px] font-extrabold uppercase tracking-wide text-neutral-400">—</span>
                                 </div>
-                                <input type="password" id="sentinel-session-string" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="String Session (Pyrogram)" class="w-full bg-black/80 border border-neutral-700 rounded-lg p-2 text-xs text-white focus:outline-none focus:border-[#00f3ff]">
-                                <button type="button" id="btn-connect-sentinel" onclick="app.connectSentinel()" class="w-full bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40 py-2 rounded-xl text-xs font-bold hover:bg-[#00f3ff]/30 transition active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-wait">
-                                    <i class="fa-solid fa-plug"></i> <span data-i18n="gc_btn_sentinel">Conectar Centinela</span>
-                                </button>
+
+                                <!-- Tarjeta: Centinela MTProto -->
+                                <div id="assets-sentinel-card" class="bg-black/50 p-3.5 rounded-2xl border border-neutral-800 flex items-center gap-3">
+                                    <span class="w-10 h-10 shrink-0 rounded-xl bg-[#00f3ff]/10 border border-[#00f3ff]/30 text-[#00f3ff] flex items-center justify-center"><i class="fa-solid fa-satellite-dish"></i></span>
+                                    <div class="min-w-0 flex-1">
+                                        <p class="text-[10px] text-theme-muted uppercase font-bold tracking-wide" data-i18n="assets_sentinel_title">Centinela MTProto</p>
+                                        <p id="assets-sentinel-detail" class="text-[11px] text-neutral-400 font-mono truncate">—</p>
+                                    </div>
+                                    <span id="assets-sentinel-status" class="shrink-0 px-2.5 py-1 rounded-full border border-neutral-700 text-[10px] font-extrabold uppercase tracking-wide text-neutral-400">—</span>
+                                </div>
+
+                                <div class="flex items-center justify-between gap-2">
+                                    <span id="assets-checked-at" class="text-[9px] text-neutral-500 font-mono"></span>
+                                    <button type="button" id="assets-config-btn" onclick="app.openAssetsInBot()" class="px-3 py-2 rounded-xl bg-[#ff00ff]/15 text-[#ff00ff] border border-[#ff00ff]/40 text-[10px] font-extrabold uppercase transition active:scale-95 flex items-center gap-1.5 disabled:opacity-50">
+                                        <i class="fa-brands fa-telegram"></i> <span data-i18n="assets_open_bot">Vincular en el bot</span>
+                                    </button>
+                                </div>
                             </div>
 
                             <!-- Botón Táctico Ghost Purge -->

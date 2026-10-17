@@ -17,6 +17,10 @@
    consola de programación; mismo contrato que database.MEDIA_LOCK_KEYS / MEDIA_LOCK_ACTIONS (CONFIG.MEDIA_LOCKS).
    v16: sincronización universal bot → Mini App (cualquier ajuste de la consola privada emite 'settings_updated'
    con los campos exactos que cambiaron) y bóveda Fernet de tokens de clones y sesiones MTProto.
+   v17: separación Bot ↔ Mini App. El Bot Clon y el Centinela se vinculan SOLO en el chat privado del bot; la
+   Mini App los supervisa con tarjetas de estado en vivo (CONFIG.ASSETS) y nunca recibe ni envía credenciales.
+   v18: el radar WebSocket empuja 'assets_status' cuando cambia un activo; el sondeo REST queda como respaldo y
+   se omite mientras el radar esté al día. Escala única 🟢 Conectado · 🟡 Desconectado · 🔴 Sin vincular.
    ========================================================================== */
 
 export const CONFIG = {
@@ -159,6 +163,14 @@ export const CONFIG = {
         ACTION_BUTTONS: ['off', 'warn', 'kick', 'mute', 'ban'],
         ACTION_ICONS: { off: '☑️', del: '🗑️', warn: '❕', kick: '❗', mute: '🔇', ban: '🚫' },
         LONG_VIDEO_CHOICES: [300, 600]
+    },
+
+    // 🧬 v17 · Supervisión del Bot Clon y del Centinela (GET /api/chat/{id}/assets-status). Solo estado.
+    ASSETS: {
+        POLL_MS: 30000,             // sondeo mientras la consola de la comunidad está visible
+        REFRESH_TIMEOUT_MS: 10000,
+        BOT_DEEPLINK_PREFIX: 'gclone_',  // t.me/<bot>?start=gclone_<chat_id> abre el panel 🧬 Clon & Centinela
+        WS_FRESH_MS: 45000              // si el radar entregó 'assets_status' hace menos de esto, el sondeo REST se omite
     },
 
     // 📈 Analítica de comunidad
@@ -622,6 +634,33 @@ export const translations = {
         ml_delete_on: "borra el mensaje",
         ml_empty: "Selecciona una comunidad para configurar sus bloqueos.",
         cfg_remote_media_locks: "Bloqueo multimedia",
+        // v17 · Supervisión del Bot Clon y del Centinela
+        assets_hint: "El Bot Clon y el Centinela se vinculan en el chat privado del bot. Aquí ves su estado en vivo.",
+        assets_clone_title: "Bot Clon",
+        assets_sentinel_title: "Centinela MTProto",
+        assets_open_bot: "Vincular en el bot",
+        assets_connected: "Conectado",
+        assets_disconnected: "Desconectado",
+        assets_starting: "Iniciando",
+        assets_active: "Activo",
+        assets_inactive: "Inactivo",
+        assets_not_linked: "Sin vincular",
+        assets_clone_none: "Sin bot clon vinculado",
+        assets_clone_retrying: "Reintentando conexión con Telegram…",
+        assets_clone_stopped: "Worker detenido · revísalo en el bot",
+        assets_sentinel_none: "Sin Centinela vinculado",
+        assets_sentinel_own: "Cuenta propia vigilando la llamada",
+        assets_sentinel_master: "Centinela maestro compartido",
+        assets_sentinel_down: "Sesión vinculada, sin conexión",
+        assets_sentinel_revoked: "Sesión revocada",
+        assets_checked: "Comprobado {time}",
+        assets_loading: "Comprobando…",
+        assets_pick: "Selecciona una comunidad",
+        assets_channel_only: "Disponible para comunidades (grupos)",
+        assets_toast_ok: "Estado actualizado",
+        assets_toast_error: "No se pudo comprobar el estado: {error}",
+        assets_toast_open_bot: "Abriendo el bot para vincular de forma segura…",
+        assets_toast_changed: "{name}: {status}",
         ml_photo: "Fotos",
         ml_video: "Videos",
         ml_animation: "GIFs",
@@ -1223,6 +1262,33 @@ export const translations = {
         ml_delete_on: "deletes the message",
         ml_empty: "Select a community to configure its locks.",
         cfg_remote_media_locks: "Media locks",
+        // v17 · Clone Bot & Sentinel supervision
+        assets_hint: "The Clone Bot and the Sentinel are linked in the bot's private chat. Here you see their live status.",
+        assets_clone_title: "Clone Bot",
+        assets_sentinel_title: "MTProto Sentinel",
+        assets_open_bot: "Link in the bot",
+        assets_connected: "Connected",
+        assets_disconnected: "Disconnected",
+        assets_starting: "Starting",
+        assets_active: "Active",
+        assets_inactive: "Inactive",
+        assets_not_linked: "Not linked",
+        assets_clone_none: "No clone bot linked",
+        assets_clone_retrying: "Retrying connection to Telegram…",
+        assets_clone_stopped: "Worker stopped · check it in the bot",
+        assets_sentinel_none: "No Sentinel linked",
+        assets_sentinel_own: "Own account watching the call",
+        assets_sentinel_master: "Shared master Sentinel",
+        assets_sentinel_down: "Session linked, not connected",
+        assets_sentinel_revoked: "Session revoked",
+        assets_checked: "Checked {time}",
+        assets_loading: "Checking…",
+        assets_pick: "Select a community",
+        assets_channel_only: "Available for communities (groups)",
+        assets_toast_ok: "Status refreshed",
+        assets_toast_error: "Could not check the status: {error}",
+        assets_toast_open_bot: "Opening the bot to link securely…",
+        assets_toast_changed: "{name}: {status}",
         ml_photo: "Photos",
         ml_video: "Videos",
         ml_animation: "GIFs",

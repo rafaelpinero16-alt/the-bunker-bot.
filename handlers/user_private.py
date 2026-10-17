@@ -3614,6 +3614,26 @@ def get_eco_keyboard(group_id: int, lang: str):
     ])
 
 
+async def send_clone_panel(bot: Bot, user, group_id: int, lang: str) -> None:
+    """v17 · Panel 🧬 Clon & Centinela como mensaje nuevo (deep link gclone_ desde la Mini App)."""
+    t = TEXTS.get(lang, TEXTS["es"])
+    tier = await get_effective_group_tier(group_id, user.id)
+    try:
+        g_name = html.escape((await bot.get_chat(group_id)).title or "")
+    except Exception:
+        g_name = tr(lang, "Comunidad", "Community")
+    clone_info = await get_bot_clone(user.id, group_id)
+    has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
+    status = tr(lang, "Operativo 🟢", "Active 🟢") if has_clone else tr(lang, "No Configurado 🔴", "Not Configured 🔴")
+    session_info = await get_owner_session(user.id, group_id)
+    sentinel_status = tr(lang, "Conectado 🟢", "Connected 🟢") if session_info else tr(lang, "No Configurado 🔴", "Not Configured 🔴")
+    chat_kind = await resolve_chat_kind(bot, group_id)
+    clone_text = t["clone_main_title"].format(group_name=g_name, tier=tier.upper(), status=status, sentinel_status=sentinel_status)
+    clone_kb = await get_clone_keyboard(group_id, user.id, lang, chat_type=chat_kind)
+    if not await render_card(bot, user.id, "sentinel", lang, clone_kb, caption=clone_text):
+        await bot.send_message(user.id, clone_text, reply_markup=clone_kb, parse_mode="HTML")
+
+
 async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: str = "g"):
     t = TEXTS.get(lang, TEXTS["es"])
     tier = await get_effective_group_tier(group_id, user_id)
@@ -3719,6 +3739,20 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                 if not await verify_admin_privileges_msg(message, bot, gami_chat_id, perm="can_manage_broadcast"):
                     return
                 await send_gamification_panel(bot, message.from_user.id, gami_chat_id, lang)
+                return
+
+        # 🧬 v17 · Deep link desde la Mini App («Configurar en el bot»): abre directamente el panel Clon & Centinela.
+        # La vinculación de tokens y String Sessions solo ocurre aquí, en el chat privado, con flujos guiados.
+        if command.args and command.args.startswith("gclone_"):
+            try:
+                clone_chat_id = int(command.args.split("_", 1)[1])
+            except (ValueError, IndexError):
+                clone_chat_id = 0
+            if clone_chat_id:
+                # perm=None: exclusivo del Dueño legítimo y del Arquitecto (las credenciales nunca se delegan).
+                if not await verify_admin_privileges_msg(message, bot, clone_chat_id):
+                    return
+                await send_clone_panel(bot, message.from_user, clone_chat_id, lang)
                 return
 
         if command.args and command.args.startswith("gset_"):
