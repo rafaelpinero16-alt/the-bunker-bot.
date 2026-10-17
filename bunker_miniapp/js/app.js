@@ -179,7 +179,7 @@ export const app = {
     _planForm: { busy: false, lastCreated: null },
     _chatConfig: { chatId: null, data: null, dirty: {}, saving: {}, switchBusy: {}, seq: 0 },
     _mediaLocks: { page: 1, busyKey: null },   // v15 · matriz de bloqueo multimedia (página visible y vector en vuelo)
-    _assets: { chatId: null, data: null, loading: false, timer: null, wsAt: 0 },   // v17/v18 · supervisión Clon / Centinela
+    _assets: { chatId: null, data: null, loading: false, timer: null, wsAt: 0, reqSeq: 0 },   // v17/v18/v19 · supervisión Clon / Centinela
     validatePlanForm,
     validateConfigSection,
 
@@ -2769,6 +2769,8 @@ export const app = {
                 // pudo cambiar (Wi-Fi ↔ datos). Ping inmediato: si no hay pong en PONG_TIMEOUT_MS se reconecta.
                 client.probe();
             }
+            // v19 · Al volver a primer plano con la consola abierta, el estado del Clon / Centinela se relee ya.
+            if (state.currentTab === 'bot-settings' && this._assets.chatId) this.loadAssetsStatus(this._assets.chatId);
         });
     },
 
@@ -3058,19 +3060,28 @@ export const app = {
     stopAssetsSupervision() {
         const a = this._assets;
         if (a.timer) clearInterval(a.timer);
-        Object.assign(a, { chatId: null, data: null, loading: false, timer: null, wsAt: 0 });
+        // reqSeq sube (no se reinicia): cualquier respuesta en vuelo de la comunidad anterior queda descartada.
+        Object.assign(a, { chatId: null, data: null, loading: false, timer: null, wsAt: 0, reqSeq: a.reqSeq + 1 });
         ui.renderAssetsStatus(null, { idle: true });
     },
 
     /** GET /api/chat/{id}/assets-status. manual=true (botón 🔄) confirma con aviso y vibración. */
     async loadAssetsStatus(chatId, { manual = false } = {}) {
         const a = this._assets;
-        if (!chatId || a.loading || String(a.chatId) !== String(chatId)) return false;
+        if (!chatId || String(a.chatId) !== String(chatId)) return false;
+        // v19 · Un sondeo automático no se duplica, pero el botón 🔄 SIEMPRE lanza una lectura nueva (antes,
+        // con una petición colgada hasta 10 s, el toque se ignoraba en silencio). Gana la petición más reciente.
+        if (a.loading && !manual) return false;
+        const seq = ++a.reqSeq;
         const epoch = session.epoch;
         a.loading = true;
         ui.renderAssetsStatus(a.data, { loading: true });
-        const res = await api.get(`/chat/${encodeURIComponent(chatId)}/assets-status`,
-            { timeoutMs: CONFIG.ASSETS?.REFRESH_TIMEOUT_MS || 10000 });
+        // Vía rápida en paralelo: con el radar abierto, el servidor responde con 'assets_status' al instante.
+        if (manual && state.wsClient && String(state.wsClient.chatId) === String(chatId)) {
+            state.wsClient.requestAssets?.();
+        }
+        const res = await api.fetchAssetsStatus(chatId);
+        if (seq !== a.reqSeq) return false;   // otra lectura más reciente (o un cambio de comunidad) la reemplazó
         a.loading = false;
         if (res?.__stale || epoch !== session.epoch || String(a.chatId) !== String(chatId)) return false;
         if (res?.__error) {
@@ -3108,6 +3119,11 @@ export const app = {
         const a = this._assets;
         if (!assets || String(a.chatId) !== String(chatId)) return;
         const prev = a.data;
+        // v19 · Las cuatro fuentes (REST, 🔄, radar WS y dashboard) llegan en cualquier orden: un estado
+        // calculado ANTES que el ya pintado no lo pisa (evita volver a «Sin conexión» con datos viejos).
+        const t = Date.parse(assets.checked_at || '');
+        const prevT = Date.parse(prev?.checked_at || '');
+        if (Number.isFinite(t) && Number.isFinite(prevT) && t < prevT) return;
         a.data = assets;
         ui.renderAssetsStatus(assets, { loading: a.loading });
         if (!announce || !prev) return;
@@ -3116,12 +3132,14 @@ export const app = {
         if (cloneLabel(prev.clone) !== cloneLabel(assets.clone)) {
             changes.push(ui.tf('assets_toast_changed', { name: `🧬 ${ui.t('assets_clone_title')}`, status: cloneLabel(assets.clone) }));
         }
-        const sentinelLabel = x => ui.t(x?.active ? 'assets_active' : (x?.registered ? 'assets_inactive' : 'assets_not_linked'));
+        // v19 · `linked` (servidor v19) cubre al Centinela Maestro, que protege sin sesión propia en owner_sessions.
+        const sentinelLinked = x => Boolean(x?.linked ?? x?.registered);
+        const sentinelLabel = x => ui.t(x?.active ? 'assets_active' : (sentinelLinked(x) ? 'assets_inactive' : 'assets_not_linked'));
         if (sentinelLabel(prev.sentinel) !== sentinelLabel(assets.sentinel)) {
             changes.push(ui.tf('assets_toast_changed', { name: `📡 ${ui.t('assets_sentinel_title')}`, status: sentinelLabel(assets.sentinel) }));
         }
         if (!changes.length) return;
-        const up = (assets.clone?.connected || !assets.clone?.registered) && (assets.sentinel?.active || !assets.sentinel?.registered);
+        const up = (assets.clone?.connected || !assets.clone?.registered) && (assets.sentinel?.active || !sentinelLinked(assets.sentinel));
         tgApp.hapticNotification(up ? 'success' : 'warning');
         ui.showToast({ key: 'assets-status', force: true, icon: up ? '🟢' : '🔴', tone: up ? 'success' : 'warn',
             ttl: CONFIG.CONSOLE?.TOAST_MS || 3600, title: changes.join(' · ') });

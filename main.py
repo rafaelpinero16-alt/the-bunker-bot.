@@ -1138,7 +1138,9 @@ async def api_chat_assets_status(
     except ValueError:
         raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
     await assert_chat_ownership(user_id, numeric_id)
-    return {"status": "success", "chat_id": str(numeric_id), **(await build_assets_status(numeric_id))}
+    payload = {"status": "success", "chat_id": str(numeric_id), **(await build_assets_status(numeric_id))}
+    # v19 · Estado en vivo: el WebView de Telegram (iOS/Android) y los proxies no deben cachear esta respuesta.
+    return JSONResponse(content=payload, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache"})
 
 
 @api_router.get("/chat/{chat_id}/stats")
@@ -2000,6 +2002,7 @@ async def websocket_radar(
     last_refill = time.monotonic()
     violations = 0
     last_refresh = 0.0
+    last_assets_request = 0.0
     try:
         while not client.closed:
             try:
@@ -2050,6 +2053,12 @@ async def websocket_radar(
                     _ws_send_snapshots(client, numeric_id, include_legacy=(action == "refresh"), legacy_event="state_refresh"),
                     name=f"ws_refresh:{numeric_id}"
                 )
+            elif action == "assets":
+                # v19 · Botón 🔄 de la Mini App: estado de activos recalculado al momento, solo para este cliente.
+                if now_mono - last_assets_request < ASSETS_WS_REQUEST_COOLDOWN_S:
+                    continue
+                last_assets_request = now_mono
+                _spawn(_ws_send_assets_status(client, numeric_id), name=f"ws_assets:{numeric_id}")
             elif action == "subscribe":
                 events = request.get("events")
                 if isinstance(events, list):
@@ -2554,7 +2563,14 @@ def _clone_runtime_for_tokens(tokens: list) -> dict:
 
 
 def _sentinel_runtime(chat_id: int) -> dict:
-    """{active, mode: own|master|none, connected} del Centinela que vigila la comunidad (assistant.active_sentinels)."""
+    """{active, mode: own|master|none, connected, …} del Centinela que vigila la comunidad (assistant.active_sentinels)."""
+    # v19 · Si assistant expone la instantánea con latido, se usa: tolera reconexiones breves de Pyrogram.
+    snapshot = getattr(_assistant_runtime, "get_sentinel_runtime_snapshot", None)
+    if callable(snapshot):
+        try:
+            return snapshot(int(chat_id))
+        except Exception as ex:
+            logger.debug(f"[Activos] Instantánea del Centinela no disponible para {chat_id}: {ex}")
     entry = getattr(_assistant_runtime, "active_sentinels", {}).get(int(chat_id))
     if not entry:
         return {"active": False, "mode": "none", "connected": False}
@@ -2571,26 +2587,80 @@ async def build_assets_status(chat_id: int) -> dict:
     v17 · Supervisión del Bot Clon y del Centinela para la Mini App: registro (base de datos) + estado EN VIVO
     (worker de polling y cliente MTProto). Nunca incluye tokens ni sesiones.
     """
+    cid = int(chat_id)
+    registry_stale = False
     try:
-        registry = await get_chat_assets_registry(int(chat_id))
+        registry = await asyncio.wait_for(get_chat_assets_registry(cid), timeout=ASSETS_REGISTRY_TIMEOUT_S)
+        _assets_registry_remember(cid, registry)
     except Exception as ex:
-        logger.debug(f"[Activos] Registro no disponible para {chat_id}: {ex}")
-        registry = {"clone": {"registered": False, "username": None, "status": "none", "since": None},
-                    "sentinel": {"registered": False, "status": "none", "last_error": None, "since": None}}
+        # v19 · Un "database is locked" o un time-out transitorio ya no pinta «no vinculado» (ni se empuja por WS):
+        # se reutiliza el último registro bueno de esta comunidad.
+        logger.debug(f"[Activos] Registro no disponible para {cid}: {ex}")
+        registry = _assets_registry_recall(cid)
+        registry_stale = True
+    clone_reg = dict(registry.get("clone") or {})
+    sentinel_reg = dict(registry.get("sentinel") or {})
+    clone_reg.setdefault("registered", False)
+    clone_reg.setdefault("username", None)
+    sentinel_reg.setdefault("registered", False)
+
+    # v19 · Los tokens se consultan SIEMPRE (antes solo si el registro decía «registrado»): así el runtime
+    # reconcilia la tarjeta aunque la fila de bot_clones esté desfasada o la lectura del registro fallara.
     try:
-        tokens = await get_active_clone_tokens_for_group(int(chat_id)) if registry["clone"]["registered"] else []
+        tokens = await asyncio.wait_for(get_active_clone_tokens_for_group(cid), timeout=ASSETS_REGISTRY_TIMEOUT_S)
     except Exception:
         tokens = []
     clone_rt = _clone_runtime_for_tokens(tokens)
-    sentinel_rt = _sentinel_runtime(int(chat_id))
-    clone = {**registry["clone"], **{k: v for k, v in clone_rt.items() if k != "username"},
-             "username": clone_rt.get("username") or registry["clone"]["username"]}
-    sentinel = {**registry["sentinel"], **sentinel_rt}
+    sentinel_rt = _sentinel_runtime(cid)
+
+    clone = {**clone_reg, **{k: v for k, v in clone_rt.items() if k != "username"},
+             "username": clone_rt.get("username") or clone_reg.get("username")}
+    if clone_rt.get("running") and not clone["registered"]:
+        clone["registered"] = True       # un clon EN EJECUCIÓN para este grupo está vinculado de hecho
+        clone["source"] = "runtime"
+    sentinel = {**sentinel_reg, **sentinel_rt}
+    # Centinela Maestro (MASTER_SESSION, p. ej. @Alphacentinel): protege sin fila en owner_sessions. `registered`
+    # conserva su significado (sesión propia vinculada); `linked` indica que hay un Centinela operativo.
+    sentinel["linked"] = bool(sentinel_reg.get("registered") or sentinel_rt.get("running"))
+
+    clone["ui_state"] = "online" if clone.get("connected") else ("offline" if clone["registered"] else "unlinked")
+    sentinel["ui_state"] = "online" if sentinel.get("active") else ("offline" if sentinel["linked"] else "unlinked")
     return {
-        "assets": {"clone": clone, "sentinel": sentinel, "checked_at": datetime.now(timezone.utc).isoformat()},
-        "has_active_clone": bool(clone["registered"] and clone["connected"]),
-        "has_active_sentinel": bool(sentinel["active"]),
+        "assets": {"clone": clone, "sentinel": sentinel, "checked_at": datetime.now(timezone.utc).isoformat(),
+                   "registry_stale": registry_stale},
+        "has_active_clone": bool(clone["registered"] and clone.get("connected")),
+        "has_active_sentinel": bool(sentinel.get("active")),
     }
+
+
+# v19 · Último registro bueno por comunidad (acotado por TTL y tamaño: sin fugas en despliegues 24/7).
+ASSETS_REGISTRY_TIMEOUT_S = 5.0
+ASSETS_REGISTRY_CACHE_TTL_S = 600.0
+ASSETS_REGISTRY_CACHE_MAX = 2000
+_ASSETS_REGISTRY_CACHE: Dict[int, tuple] = {}     # chat_id → (registry, monotonic_ts)
+_ASSETS_EMPTY_REGISTRY = {
+    "clone": {"registered": False, "username": None, "status": "none", "since": None},
+    "sentinel": {"registered": False, "status": "none", "last_error": None, "since": None},
+}
+
+
+def _assets_registry_remember(chat_id: int, registry: dict) -> None:
+    if not isinstance(registry, dict):
+        return
+    _ASSETS_REGISTRY_CACHE.pop(chat_id, None)
+    _ASSETS_REGISTRY_CACHE[chat_id] = (registry, time.monotonic())
+    overflow = len(_ASSETS_REGISTRY_CACHE) - ASSETS_REGISTRY_CACHE_MAX
+    if overflow > 0:
+        for key in list(_ASSETS_REGISTRY_CACHE)[:overflow]:
+            _ASSETS_REGISTRY_CACHE.pop(key, None)
+
+
+def _assets_registry_recall(chat_id: int) -> dict:
+    cached = _ASSETS_REGISTRY_CACHE.get(chat_id)
+    if cached and time.monotonic() - cached[1] <= ASSETS_REGISTRY_CACHE_TTL_S:
+        return cached[0]
+    _ASSETS_REGISTRY_CACHE.pop(chat_id, None)
+    return _ASSETS_EMPTY_REGISTRY
 
 
 # ------------------------------------------------------------------
@@ -2600,6 +2670,7 @@ async def build_assets_status(chat_id: int) -> dict:
 # estado (registro + runtime) y, si su huella cambió, se emite a la sala. Así la tarjeta pasa a «Desconectado»
 # en cuanto vence la ventana de salud de 90 s, sin esperar al sondeo REST de la Mini App.
 ASSETS_WATCH_INTERVAL_S = 15.0
+ASSETS_WS_REQUEST_COOLDOWN_S = 2.0   # v19 · {action: 'assets'} por conexión
 ASSETS_WATCH_MAX_CHATS = 2000
 _ASSETS_WATCH: Dict[int, int] = {}            # chat_id → nº de conexiones WS abiertas
 _ASSETS_LAST: Dict[int, tuple] = {}           # chat_id → última huella emitida
@@ -2625,17 +2696,36 @@ def _assets_fingerprint(status: dict) -> tuple:
     a = (status or {}).get("assets") or {}
     c, s = a.get("clone") or {}, a.get("sentinel") or {}
     return (bool(c.get("registered")), bool(c.get("connected")), bool(c.get("running")), c.get("state"), c.get("username"),
-            bool(s.get("registered")), bool(s.get("active")), s.get("mode"), s.get("status"), s.get("last_error"))
+            bool(s.get("registered")), bool(s.get("active")), s.get("mode"), s.get("status"), s.get("last_error"),
+            c.get("ui_state"), s.get("ui_state"), bool(s.get("linked")))
+
+
+_ASSETS_PUSH_PENDING: set = set()   # salas con un recálculo ya en curso (acotado por _ASSETS_WATCH)
 
 
 def request_assets_push(chat_id: int) -> None:
-    """Recalcula YA (y emite si cambió) el estado de activos de una sala vigilada (p. ej. tras vincular en el bot)."""
+    """
+    Recalcula YA (y emite si cambió) el estado de activos de una sala vigilada (p. ej. tras vincular en el bot, o
+    cuando assistant avisa de que un Centinela arrancó, se reconectó o se retiró). Las ráfagas se agrupan.
+    """
     try:
         cid = int(chat_id)
     except (TypeError, ValueError):
         return
-    if cid in _ASSETS_WATCH:
-        _spawn(push_assets_status(cid), name=f"assets_push:{cid}")
+    if cid not in _ASSETS_WATCH or cid in _ASSETS_PUSH_PENDING:
+        return
+    _ASSETS_PUSH_PENDING.add(cid)
+
+    async def _run() -> None:
+        try:
+            await asyncio.sleep(0.3)   # agrupa disconnect + launch del mismo cambio en una sola emisión
+            await push_assets_status(cid)
+        except Exception as ex:
+            logger.debug(f"[Activos] Empuje inmediato fallido ({cid}): {ex}")
+        finally:
+            _ASSETS_PUSH_PENDING.discard(cid)
+
+    _spawn(_run(), name=f"assets_push:{cid}")
 
 
 async def push_assets_status(chat_id: int, force: bool = False) -> bool:
@@ -2651,9 +2741,9 @@ async def push_assets_status(chat_id: int, force: bool = False) -> bool:
 
 
 async def _ws_send_assets_status(client, chat_id: int) -> None:
-    """Estado inicial de activos para un cliente recién conectado (solo a él)."""
+    """Estado de activos para UN cliente: al conectar y cuando lo pide con {action: 'assets'} (botón 🔄)."""
     try:
-        status = await asyncio.wait_for(build_assets_status(int(chat_id)), timeout=5)
+        status = await asyncio.wait_for(build_assets_status(int(chat_id)), timeout=8)
         _ASSETS_LAST.setdefault(int(chat_id), _assets_fingerprint(status))
         radar_hub.send_to(client, _ws_envelope(int(chat_id), "assets_status", {"chat_id": str(chat_id), **status}))
     except Exception as ex:
@@ -2999,6 +3089,10 @@ async def main():
     start_analytics_flusher()
     logger.info("📈 [Analítica en Caliente]: Búfer de volcado por lotes activo.")
     _spawn(assets_watch_loop(), name="assets_watch")
+    # v19 · assistant avisa al instante cuando un Centinela arranca, se reconecta, se retira o se desconecta.
+    _register_assets_listener = getattr(_assistant_runtime, "register_assets_change_listener", None)
+    if callable(_register_assets_listener):
+        _register_assets_listener(request_assets_push)
 
     if ALLOW_INSECURE_AUTH_FALLBACK:
         logger.warning("🚨 [Seguridad] ALLOW_INSECURE_AUTH_FALLBACK=1: la API acepta peticiones sin firma. NO usar en producción.")

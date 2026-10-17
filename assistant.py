@@ -611,6 +611,74 @@ _vc_notice_locks = {}
 _auth_locks: dict[int, asyncio.Lock] = {}
 
 
+# ==========================================
+# 📡 v19 · SUPERVISIÓN EN VIVO PARA LA MINI APP (latido + aviso de cambios)
+# ==========================================
+# El latido se guarda DENTRO de la entrada de active_sentinels (sin diccionarios nuevos: muere con ella).
+# main.py registra un oyente que recalcula y empuja 'assets_status' por WebSocket en cuanto el Centinela
+# arranca, se reconecta, se retira o se desconecta (antes la tarjeta esperaba hasta 15 s al radar de activos).
+SENTINEL_HEARTBEAT_STALE_S = _env_float("SENTINEL_HEARTBEAT_STALE_S", 180.0)
+_assets_change_listener = None
+
+
+def register_assets_change_listener(listener) -> None:
+    """listener(chat_id) síncrono y no bloqueante (main.request_assets_push). Lo registra main.py al arrancar."""
+    global _assets_change_listener
+    _assets_change_listener = listener
+
+
+def _notify_assets_change(chat_id) -> None:
+    listener = _assets_change_listener
+    if listener is None:
+        return
+    try:
+        listener(int(chat_id))
+    except Exception as e:
+        logger.debug(f"[Activos] Oyente de cambios falló para {chat_id}: {e}")
+
+
+def _sentinel_heartbeat(chat_id: int, client: Client) -> None:
+    """Marca el monitor como vivo y conectado. El primer latido (o el que sigue a uno vencido) avisa a la Mini App."""
+    entry = active_sentinels.get(chat_id)
+    if not entry or entry.get("client") is not client:
+        return
+    now = time.monotonic()
+    previous = entry.get("last_ok")
+    entry["last_ok"] = now
+    if previous is None or now - previous > SENTINEL_HEARTBEAT_STALE_S:
+        _notify_assets_change(chat_id)
+
+
+def get_sentinel_runtime_snapshot(chat_id: int) -> dict:
+    """
+    Estado EN VIVO del Centinela de una comunidad para la Mini App. `active` exige la tarea viva y, o bien el
+    socket MTProto conectado ahora, o bien un latido reciente: una reconexión breve de Pyrogram ya no pinta
+    la tarjeta en rojo. Nunca expone sesiones ni credenciales.
+    """
+    try:
+        entry = active_sentinels.get(int(chat_id))
+    except (TypeError, ValueError):
+        entry = None
+    if not entry:
+        return {"active": False, "running": False, "mode": "none", "connected": False, "last_ok_seconds": None, "account": None}
+    task = entry.get("task")
+    running = task is not None and not task.done()
+    client = entry.get("client")
+    connected = bool(getattr(client, "is_connected", False)) if client is not None else False
+    last_ok = entry.get("last_ok")
+    age = (time.monotonic() - last_ok) if last_ok else None
+    fresh = age is not None and age <= SENTINEL_HEARTBEAT_STALE_S
+    me = getattr(client, "me", None)
+    return {
+        "active": bool(running and (connected or fresh)),
+        "running": running,
+        "mode": "own" if entry.get("user_id") else "master",
+        "connected": connected,
+        "last_ok_seconds": int(age) if age is not None else None,
+        "account": (f"@{me.username}" if getattr(me, "username", None) else None),
+    }
+
+
 def _get_auth_lock(user_id: int) -> asyncio.Lock:
     lock = _auth_locks.get(user_id)
     if lock is None:
@@ -2036,6 +2104,7 @@ async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reaso
     current = active_sentinels.get(chat_id)
     if current and current.get("client") is client:
         active_sentinels.pop(chat_id, None)
+        _notify_assets_change(chat_id)
     if revoke and user_id:
         try:
             await revoke_owner_session(user_id, chat_id, reason=reason)
@@ -2138,6 +2207,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
 
         try:
             current_time = time.monotonic()
+            # v19 · Latido: el monitor itera con el cliente MTProto conectado (lo lee la Mini App).
+            _sentinel_heartbeat(chat_id, client)
             cache_info = admin_caches.get(chat_id, {'admins': set(), 'ts': 0})
 
             if current_time - cache_info['ts'] > ADMIN_CACHE_TTL:
@@ -2755,6 +2826,7 @@ async def radar_master_loop():
                                 "user_id": 0
                             }
                             task.add_done_callback(_make_sentinel_cleanup(chat_id))
+                            _notify_assets_change(chat_id)
                         except Exception as launch_err:
                             logger.debug(f"Aviso lanzando monitor maestro en {chat_id}: {launch_err}")
         except asyncio.CancelledError:
@@ -2771,6 +2843,7 @@ def _make_sentinel_cleanup(group_id: int):
         current = active_sentinels.get(group_id)
         if current and current.get("task") is task:
             active_sentinels.pop(group_id, None)
+            _notify_assets_change(group_id)
     return _cleanup
 
 
@@ -2819,6 +2892,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             "user_id": user_id
         }
         task.add_done_callback(_make_sentinel_cleanup(group_id))
+        _notify_assets_change(group_id)
         logger.info(f"💎 [Centinela Propio Conectado] Comunidad {group_id} protegida por @{me.username or me.id}")
         return True
     except FATAL_SESSION_ERRORS as auth_err:
@@ -2871,6 +2945,7 @@ async def _disconnect_sentinel_unlocked(group_id: int):
                 # id(client) puede reutilizarse para un cliente nuevo: la identidad cacheada se descarta.
                 _client_identity_cache.pop(id(client), None)
         logger.info(f"🛑 [Centinela Desconectado] Grupo {group_id} liberado.")
+        _notify_assets_change(group_id)
 
     _purge_group_state(group_id)
 

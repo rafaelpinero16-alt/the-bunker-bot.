@@ -182,6 +182,8 @@ export const api = {
         let timer = null;
         try {
             const init = { method, headers: { ...session.headers(creds) } };
+            // v19 · Estado en vivo: sin caché HTTP del WebView ni del proxy (opts.noStore).
+            if (opts.noStore) init.cache = 'no-store';
             if (body !== undefined) {
                 init.headers['Content-Type'] = 'application/json';
                 init.body = JSON.stringify(body);
@@ -304,7 +306,9 @@ export const api = {
     async fetchAssetsStatus(chatId, opts = {}) {
         const chat = numericId(chatId);
         if (!chat) return INVALID_ID_RESULT;
-        return await this.get(`/chat/${chat}/assets-status`, { timeoutMs: CONFIG.ASSETS?.REFRESH_TIMEOUT_MS || 10000, ...opts });
+        // v19 · `_` evita respuestas cacheadas en WebViews que ignoran Cache-Control (el servidor no lo lee).
+        return await this.get(`/chat/${chat}/assets-status?_=${Date.now()}`,
+            { timeoutMs: CONFIG.ASSETS?.REFRESH_TIMEOUT_MS || 10000, noStore: true, ...opts });
     },
 
     // --- Analítica Unificada de Comunidad (Fase 5) ---
@@ -1026,6 +1030,14 @@ export class BunkerWebSocketClient {
     /** Pide state_refresh (telemetría heredada) + analytics_snapshot. */
     requestRefresh() {
         return this._throttledAction('refresh');
+    }
+
+    /**
+     * v19 · Pide al servidor el estado del Bot Clon y del Centinela recalculado al momento (respuesta:
+     * evento 'assets_status' solo para esta conexión). Devuelve false si el socket no está abierto.
+     */
+    requestAssets() {
+        return this.send({ action: 'assets' });
     }
 
     /** Filtra los eventos en vivo recibidos (analytics_snapshot, pong, hello… siempre llegan). */
