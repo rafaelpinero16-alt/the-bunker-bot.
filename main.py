@@ -139,6 +139,8 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message,
 import assistant as _assistant_runtime   # v17 · lectura del estado EN VIVO de los Centinelas (active_sentinels)
 import perimeter_ops                      # v20 · purga v2, canal de registro, IA, estado del perímetro y soporte IA
 import micvip_audit                       # v22 · auditoría MicVIP de extremo a extremo (cobro → pase → Centinela)
+import vip_roles                          # v23 · roles y etiquetas VIP automáticos post-donación / pase
+import link_quotas                        # v23 · cuota diaria de enlaces por administrador
 from assistant import (
     close_all_sentinels,
     execute_ghost_purge,
@@ -1352,6 +1354,210 @@ async def api_chat_micvip_audit(
         data["autolower_enabled"] = None
     data["sentinel_active"] = bool(_sentinel_runtime(numeric_id).get("active"))
     return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "filter": status, **data}, headers=_NO_STORE)
+
+
+# ==========================================
+# 🛡️👑🔗 v23 · REFUERZO PERIMETRAL · ROLES VIP · CUOTAS DE ENLACES DE ADMINISTRADORES
+# ==========================================
+# Lectura: dueño, Arquitecto o delegado con can_view_analytics (assert_chat_access).
+# Escritura: SOLO el dueño legítimo o el Arquitecto (assert_chat_ownership), igual que /configuration.
+# Toda escritura emite 'settings_updated' con `changed` prefijado (shield_* / vip_* / alq_*): el bot y las demás
+# sesiones de la Mini App repintan sin recargar.
+def _v23_validation_error(err):
+    errors = getattr(err, "errors", None) or {}
+    detail = "; ".join(f"{k}: {v}" for k, v in errors.items()) or str(err)
+    return HTTPException(status_code=422, detail=detail)
+
+
+def _v23_emit(chat_id: int, changed: list) -> None:
+    _spawn(emit_settings_updated(int(chat_id), "configuration", changed), name=f"settings_updated:{chat_id}")
+
+
+def _v23_forget_shield(chat_id: int) -> None:
+    with contextlib.suppress(Exception):
+        from handlers import media_locks as _ml
+        _ml.forget_shield_cache(int(chat_id))
+
+
+@api_router.get("/chat/{chat_id}/shield")
+async def api_get_chat_shield(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🛡️ v23 · Ráfaga de reenvíos masivos + bots autorizados (inline, botones, invitaciones)."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_access(user_id, numeric_id)
+    from database.database import get_shield_config
+    shield = await get_shield_config(numeric_id)
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "shield": shield}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/shield")
+async def api_update_chat_shield(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{shield: {fwd_burst_limit?, fwd_burst_window?, add_bot?: "@alias", remove_bot?: "alias"}} → 422 "campo: motivo"."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    from database.database import (BunkerValidationError, add_authorized_bot, get_shield_config, remove_authorized_bot,
+                                   set_fwd_burst)
+    body = payload.get("shield", payload) if isinstance(payload, dict) else {}
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(status_code=422, detail="shield: se esperaba un objeto con al menos un campo.")
+    unknown = [k for k in body if k not in ("fwd_burst_limit", "fwd_burst_window", "add_bot", "remove_bot")]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"shield.{unknown[0]}: campo desconocido.")
+    changed = []
+    try:
+        if "fwd_burst_limit" in body or "fwd_burst_window" in body:
+            await set_fwd_burst(numeric_id, limit=body.get("fwd_burst_limit"), window=body.get("fwd_burst_window"))
+            changed.append("shield_fwd_burst")
+        if body.get("add_bot"):
+            await add_authorized_bot(numeric_id, str(body["add_bot"]), added_by=user_id)
+            changed.append("shield_authorized_bots")
+        if body.get("remove_bot"):
+            await remove_authorized_bot(numeric_id, str(body["remove_bot"]))
+            changed.append("shield_authorized_bots")
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v23_forget_shield(numeric_id)
+    _v23_emit(numeric_id, changed)
+    shield = await get_shield_config(numeric_id)
+    logger.info(f"🛡️ [Refuerzo] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(changed)}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "shield": shield}, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/vip-roles")
+async def api_get_vip_roles(
+    chat_id: str,
+    status: str = "all",
+    limit: int = 20,
+    offset: int = 0,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """👑 v23 · Configuración de roles VIP + miembros (estado, origen, expiración, estado de la etiqueta)."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_access(user_id, numeric_id)
+    from database.database import get_vip_role_config, vip_role_list
+    status = status if status in ("all", "active", "expired") else "all"
+    config = await get_vip_role_config(numeric_id)
+    members = await vip_role_list(numeric_id, status=status, limit=limit, offset=offset)
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "filter": status,
+                                 "vip_roles": config, **members}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/vip-roles")
+async def api_update_vip_roles(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{vip_roles: {enabled?, tag_text?, donor_min_stars?, donor_days?, micvip_role?, exempt_vectors?, flood_bonus?, …}}"""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    from database.database import BunkerValidationError
+    patch = payload.get("vip_roles", payload) if isinstance(payload, dict) else {}
+    try:
+        config = await vip_roles.update_config(numeric_id, patch, updated_by=user_id)
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v23_emit(numeric_id, [f"vip_{k}" for k in patch])
+    logger.info(f"👑 [VIP Roles] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(sorted(patch))}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "vip_roles": config}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/vip-roles/member")
+async def api_vip_role_member(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{action: 'grant'|'revoke'|'retag', user_id, days?: 0(permanente)…3650} — gestión manual del dueño."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    action = str((payload or {}).get("action") or "")
+    try:
+        target = int((payload or {}).get("user_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="user_id: se esperaba un id numérico.")
+    if target <= 0:
+        raise HTTPException(status_code=422, detail="user_id: se esperaba un id de usuario positivo.")
+    if action == "grant":
+        try:
+            days = int((payload or {}).get("days", 30))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="days: se esperaba un entero.")
+        if not 0 <= days <= 3650:
+            raise HTTPException(status_code=422, detail="days: entre 0 (permanente) y 3650.")
+        result = await vip_roles.grant_manual(numeric_id, target, days, actor_id=user_id)
+        member = result.get("member")
+    elif action == "revoke":
+        member = await vip_roles.revoke(numeric_id, target, actor_id=user_id)
+        if not member:
+            raise HTTPException(status_code=404, detail="Ese usuario no tiene rol VIP en esta comunidad.")
+    elif action == "retag":
+        await vip_roles.retag(numeric_id, target)
+        from database.database import vip_role_member_get
+        member = await vip_role_member_get(numeric_id, target)
+    else:
+        raise HTTPException(status_code=422, detail="action: usa grant, revoke o retag.")
+    _v23_emit(numeric_id, ["vip_members"])
+    logger.info(f"👑 [VIP Roles] {action} manual en {numeric_id} para {target} por {user_id}.")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "member": member}, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/admin-link-quotas")
+async def api_get_admin_link_quotas(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🔗 v23 · Cuota diaria de enlaces: configuración + uso de cada administrador en la ventana móvil de 24 h."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_access(user_id, numeric_id)
+    if master_bot_instance is None:
+        raise HTTPException(status_code=503, detail="Bot no disponible todavía.")
+    overview = await link_quotas.get_overview(master_bot_instance, numeric_id)
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "admin_link_quotas": overview},
+                        headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/admin-link-quotas")
+async def api_update_admin_link_quotas(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{admin_link_quotas: {enabled?, default_limit?, count_forwards?, overrides?: {admin_id: n | -1 | null}}} — solo el dueño."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    from database.database import BunkerValidationError, update_admin_link_quota_config
+    patch = payload.get("admin_link_quotas", payload) if isinstance(payload, dict) else {}
+    try:
+        await update_admin_link_quota_config(numeric_id, patch, updated_by=user_id)
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    link_quotas.invalidate(numeric_id)
+    _v23_emit(numeric_id, [f"alq_{k}" for k in patch])
+    overview = await link_quotas.get_overview(master_bot_instance, numeric_id) if master_bot_instance else None
+    logger.info(f"🔗 [LinkQuota] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(sorted(patch))}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "admin_link_quotas": overview},
+                        headers=_NO_STORE)
 
 
 @api_router.get("/user/language")
@@ -3245,6 +3451,17 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                     )
                 except Exception as audit_ex:
                     logger.error(f"❌ [MicVIP Audit] No se pudo registrar el cobro {payment.telegram_payment_charge_id}: {audit_ex}")
+            # 👑 v23 · Donación → rol / etiqueta VIP automáticos (idempotente por charge_id; nunca bloquea la analítica).
+            try:
+                if vip_roles.is_donation_payload(payment.invoice_payload):
+                    _spawn(vip_roles.on_payment(
+                        group_id=group_id, user_id=payer_id, charge_id=payment.telegram_payment_charge_id,
+                        amount=payment.total_amount, payload=payment.invoice_payload or "",
+                        username=getattr(event.from_user, "username", None),
+                        full_name=getattr(event.from_user, "full_name", None), bot=getattr(event, "bot", None),
+                    ), name="vip_role_donation")
+            except Exception as vip_ex:
+                logger.error(f"❌ [VIP Roles] Donación {payment.telegram_payment_charge_id} no encolada: {vip_ex}")
             inserted = await record_stars_payment(
                 group_id=group_id,
                 user_id=payer_id,
@@ -3384,6 +3601,10 @@ async def main():
     )
     master_bot_instance = master_bot
     set_master_bot_id(master_bot.id)
+    # 👑 v23 · Etiquetas VIP: primero el clon de la comunidad (si está en el grupo), luego el maestro.
+    vip_roles.register_master_bot(master_bot)
+    vip_roles.register_bot_resolver(_clone_bot_for_chat)
+    _spawn(vip_roles.vip_sweeper_loop(), name="vip_roles_sweeper")
     try:
         master_info = await master_bot.get_me()
         set_master_bot_username(master_info.username or "")

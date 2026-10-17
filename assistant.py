@@ -2414,7 +2414,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         or u_id == bot_client_id
                         or u_id in cache_info['admins']
                     )
-                    is_vip = await is_vip_mic_active(u_id, chat_id) or await is_whitelisted(u_id)
+                    is_vip = (await is_vip_mic_active(u_id, chat_id) or await is_whitelisted(u_id)
+                              or await _vip_role_priority(chat_id, u_id))   # v23 · rol VIP con prioridad acústica
                     is_authorized = is_admin_or_owner or is_vip
 
                     if not is_authorized and screen_shield_on and getattr(p, "presentation", None):
@@ -3082,6 +3083,16 @@ def _sweep_global_state() -> int:
     except Exception:
         pass
 
+    # 6c. v23 · Cachés acotadas de roles VIP, refuerzo perimetral (huellas / ráfagas) y cuotas de enlaces.
+    for _mod_name, _fn_name in (("vip_roles", "purge_caches"), ("handlers.media_locks", "purge_v23_state"),
+                                ("link_quotas", "purge_state")):
+        try:
+            import importlib
+            _mod = importlib.import_module(_mod_name)
+            getattr(_mod, _fn_name)()
+        except Exception:
+            pass
+
     # 7. Red de seguridad: topes duros de tamaño.
     for store in (
         _copilot_user_last, _copilot_chat_last, _sentinel_payload_last_sent, _last_join_attempt,
@@ -3525,6 +3536,16 @@ async def disengage_podcast_ducking(group_id: int):
 # ==========================================
 # 🎟️ v22 · EVIDENCIA PARA LA AUDITORÍA MICVIP
 # ==========================================
+async def _vip_role_priority(chat_id: int, user_id: int) -> bool:
+    """v23 · ¿Rol VIP vigente con inmunidad a AutoLower? Caché de 60 s en vip_roles; ante cualquier fallo, False."""
+    try:
+        import vip_roles  # type: ignore[import-not-found]
+        perks = await vip_roles.get_active_perks(chat_id, user_id)
+        return bool(perks and perks.get("autolower_immune"))
+    except Exception:
+        return False
+
+
 def _micvip_evidence(chat_id: int, user_id: int, applied: bool) -> None:
     """Deja constancia (no bloqueante, como mucho una vez por minuto) de que el Centinela aplicó o intentó el pase."""
     try:

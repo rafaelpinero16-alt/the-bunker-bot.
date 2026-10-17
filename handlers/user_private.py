@@ -99,6 +99,8 @@ from assistant import (
 )
 import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purga v2, canal de registro, IA, soporte IA)
 import micvip_audit    # 🎟️ v22 · auditoría MicVIP compartida con la Mini App
+import vip_roles       # 👑 v23 · roles y etiquetas VIP automáticos (compartido con la Mini App)
+import link_quotas     # 🔗 v23 · cuota diaria de enlaces por administrador (compartido con la Mini App)
 from .groups import (
     execute_raid_lockdown, lift_raid_lockdown,
     clear_speaker_queue, get_speaker_queue
@@ -611,6 +613,7 @@ REP_MULTIPLIER_STATES = {}
 GAMI_STATES = {}          # 🎮 Edición del anuncio recurrente de gamificación
 LOG_CHANNEL_STATES = {}   # 🧾 v20 · Vinculación del canal de registro desde el bot
 SUPPORT_AI_STATES = {}    # 🤖 v20 · Conversación con el Asistente de Soporte IA
+VIP_ROLE_STATES = {}      # 👑 v23 · Etiqueta VIP y concesión manual de roles desde el bot
 
 # 🧯 Registro central de TODOS los estados conversacionales: permite liberarlos en bloque (navegación, /start,
 # /cancel) y garantiza que ningún menú privado quede bloqueado por una conversación huérfana.
@@ -622,7 +625,7 @@ ALL_STATE_DICTS = (
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
     SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES,
-    LOG_CHANNEL_STATES, SUPPORT_AI_STATES
+    LOG_CHANNEL_STATES, SUPPORT_AI_STATES, VIP_ROLE_STATES
 )
 
 
@@ -2365,6 +2368,7 @@ def _state_delegate_permission(state_dict: dict):
         (SENTINEL_PAYLOAD_MEDIA_STATES, "can_manage_sentinel"),
         (SENTINEL_PAYLOAD_AUTODEL_STATES, "can_manage_sentinel"),
         (VC_SCHED_STATES, "can_manage_sentinel"),
+        (_v23_auth_bot_states(), "can_manage_locks"),   # 🛡️ v23 · asistente «➕ Autorizar bot» de la matriz
     )
     for store, perm in mapping:
         if store is state_dict:
@@ -2885,6 +2889,11 @@ def get_group_panel_keyboard(group_id: int, lang: str):
         ],
         # 🎟️ v22 · Registro auditable de compras MicVIP (compra → pase → Centinela)
         [InlineKeyboardButton(text="🎟️ " + ("Auditoría MicVIP" if lang == "es" else "MicVIP Audit"), callback_data=f"mvaudit_{group_id}_all_1_{lang}")],
+        # 👑🔗 v23 · Roles VIP post-donación y cuota diaria de enlaces de administradores (solo el Dueño)
+        [
+            InlineKeyboardButton(text="👑 " + ("Roles VIP" if lang == "es" else "VIP Roles"), callback_data=f"vipr_m_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🔗 " + ("Cuotas de enlaces" if lang == "es" else "Link quotas"), callback_data=f"alq_m_{group_id}_{lang}"),
+        ],
         [InlineKeyboardButton(text=t["btn_ultra_tools"], callback_data=f"menu_ultra_{group_id}_{lang}")],
         [
             InlineKeyboardButton(text="🇺🇸 English" if lang == "es" else "🇪🇸 Español", callback_data=f"langpanel_{group_id}_{toggle_lang}"),
@@ -4906,6 +4915,17 @@ async def handle_private_inputs(message: Message, bot: Bot):
     # 🧾 v20 · CANAL DE REGISTRO: @alias, ID numérico o un mensaje reenviado desde el canal
     if (bot.id, user_id) in LOG_CHANNEL_STATES:
         await _handle_log_channel_input(message, bot, LOG_CHANNEL_STATES.pop((bot.id, user_id)), text_input)
+        return
+
+    # 👑 v23 · ROLES VIP: etiqueta personalizada o concesión manual («id [días]» o un mensaje reenviado del usuario)
+    if (bot.id, user_id) in VIP_ROLE_STATES:
+        await _handle_vip_role_input(message, bot, VIP_ROLE_STATES.pop((bot.id, user_id)), text_input)
+        return
+
+    # 🛡️ v23 · MATRIZ: «➕ Autorizar bot» (@alias o mensaje reenviado del bot)
+    if (bot.id, user_id) in _v23_auth_bot_states():
+        from .media_locks import handle_authorized_bot_input
+        await handle_authorized_bot_input(message, bot, _v23_auth_bot_states().pop((bot.id, user_id)), text_input)
         return
 
     # 🤖 v20 · ASISTENTE DE SOPORTE IA (conversación multi-turno hasta «Salir»)
@@ -8958,4 +8978,420 @@ async def cb_micvip_audit(callback: CallbackQuery, bot: Bot):
     except TelegramBadRequest as e:
         if "not modified" not in str(e).lower():
             await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+# ==========================================================================
+# 🛡️👑🔗 v23 · REFUERZO · ROLES VIP · CUOTAS DE ENLACES (paridad 1:1 con la Mini App y el Dashboard)
+# ==========================================================================
+def _v23_auth_bot_states() -> dict:
+    """Almacén del asistente «➕ Autorizar bot» (vive en media_locks); se registra para /start, /cancel y la navegación."""
+    from . import media_locks as _ml
+    register_external_state_store(_ml.AUTH_BOT_STATES)
+    return _ml.AUTH_BOT_STATES
+
+
+_v23_auth_bot_states()
+
+VIPR_PER_PAGE = 6
+_VIPR_TOGGLES = {"en": "enabled", "mv": "micvip_role", "al": "autolower_immune", "an": "announce"}
+_VIPR_CYCLES = {"ms": "donor_min_stars", "dd": "donor_days", "fb": "flood_bonus"}
+
+
+def _v23_back(group_id: int, lang: str) -> list:
+    return [InlineKeyboardButton(text="⬅️ " + tr(lang, "Panel del grupo", "Group panel"), callback_data=f"gpanel_{group_id}_{lang}")]
+
+
+def _vip_days_label(days: int, lang: str) -> str:
+    return tr(lang, "♾️ permanente", "♾️ permanent") if int(days) == 0 else tr(lang, f"{days} días", f"{days} days")
+
+
+def _vip_main_view(group_id: int, cfg: dict, summary: dict, lang: str) -> tuple:
+    on = lambda v: "✅" if v else "❌"
+    exempt = cfg.get("exempt_vectors") or []
+    text = (
+        f"👑 <b>{tr(lang, 'Roles y etiquetas VIP', 'VIP roles & tags')}</b>\n\n"
+        f"• {tr(lang, 'Estado', 'Status')}: <b>{tr(lang, '🟢 Activo', '🟢 Active') if cfg['enabled'] else tr(lang, '🔴 Inactivo', '🔴 Inactive')}</b>\n"
+        f"• 🏷️ {tr(lang, 'Etiqueta', 'Tag')}: <code>{html.escape(cfg.get('tag_text') or '—')}</code>\n"
+        f"• 💝 {tr(lang, 'Donación mínima', 'Minimum donation')}: <b>{cfg['donor_min_stars']} ⭐</b> · ⏳ {_vip_days_label(cfg['donor_days'], lang)}\n"
+        f"• 🎙️ {tr(lang, 'MicVIP otorga rol', 'MicVIP grants role')}: {on(cfg['micvip_role'])}\n"
+        f"• 🛡️ {tr(lang, 'Exenciones parciales', 'Partial exemptions')}: <b>{len(exempt)}</b> · 🌊 {tr(lang, 'Anti-flood', 'Anti-flood')} ×{cfg['flood_bonus']}"
+        f" · 🔊 {tr(lang, 'Prioridad AutoLower', 'AutoLower priority')} {on(cfg['autolower_immune'])}\n\n"
+        f"👥 {tr(lang, 'VIP vigentes', 'Active VIPs')}: <b>{summary.get('active', 0)}</b> · 🏷️ {tr(lang, 'etiquetados', 'tagged')}: "
+        f"<b>{summary.get('tagged', 0)}</b> · ⭐ {summary.get('stars', 0)}\n\n"
+        + tr(lang,
+             "<i>Se concede solo al pagar (donación o pase MicVIP) y vence solo. Las etiquetas usan la función nativa de "
+             "Telegram: el bot necesita el permiso «Gestionar etiquetas». Nunca se asciende a nadie a administrador.</i>",
+             "<i>Granted automatically on payment (donation or MicVIP pass) and expires on its own. Tags use Telegram's "
+             "native feature: the bot needs the “Manage tags” right. Nobody is ever promoted to admin.</i>")
+        + PERIMETER_SIGNATURE
+    )
+    g = group_id
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=(tr(lang, "🟢 Activado", "🟢 Enabled") if cfg["enabled"] else tr(lang, "🔴 Desactivado", "🔴 Disabled")),
+                              callback_data=f"vipr_t_{g}_en_{lang}"),
+         InlineKeyboardButton(text="🏷️ " + tr(lang, "Etiqueta", "Tag") + " ✏️", callback_data=f"vipr_tag_{g}_{lang}")],
+        [InlineKeyboardButton(text=f"💝 {cfg['donor_min_stars']} ⭐", callback_data=f"vipr_c_{g}_ms_{lang}"),
+         InlineKeyboardButton(text=f"⏳ {_vip_days_label(cfg['donor_days'], lang)}", callback_data=f"vipr_c_{g}_dd_{lang}"),
+         InlineKeyboardButton(text=f"🌊 ×{cfg['flood_bonus']}", callback_data=f"vipr_c_{g}_fb_{lang}")],
+        [InlineKeyboardButton(text=f"🎙️ MicVIP {on(cfg['micvip_role'])}", callback_data=f"vipr_t_{g}_mv_{lang}"),
+         InlineKeyboardButton(text=f"🔊 AutoLower {on(cfg['autolower_immune'])}", callback_data=f"vipr_t_{g}_al_{lang}"),
+         InlineKeyboardButton(text=f"📣 {on(cfg['announce'])}", callback_data=f"vipr_t_{g}_an_{lang}")],
+        [InlineKeyboardButton(text=f"🛡️ {tr(lang, 'Exenciones', 'Exemptions')} ({len(exempt)})", callback_data=f"vipr_x_{g}_{lang}"),
+         InlineKeyboardButton(text="👥 " + tr(lang, "Miembros", "Members"), callback_data=f"vipr_l_{g}_1_{lang}")],
+        [InlineKeyboardButton(text="➕ " + tr(lang, "Conceder VIP", "Grant VIP"), callback_data=f"vipr_g_{g}_{lang}")],
+        _v23_back(g, lang),
+    ])
+    return text, kb
+
+
+def _vip_exempt_view(group_id: int, cfg: dict, lang: str) -> tuple:
+    from .media_locks import label as _ml_label
+    from database.database import VIP_EXEMPTIBLE_VECTORS
+    chosen = set(cfg.get("exempt_vectors") or [])
+    text = (f"🛡️ <b>{tr(lang, 'Exenciones parciales VIP', 'VIP partial exemptions')}</b>\n\n"
+            + tr(lang, "Los VIP vigentes pueden enviar estos tipos de contenido aunque estén bloqueados para el resto. "
+                       "Enlaces, reenvíos, botones inline, bots y ediciones maliciosas <b>nunca</b> son eximibles, y durante "
+                       "el Pánico o el modo nocturno las exenciones se suspenden.",
+                 "Active VIPs may send these content types even when they are locked for everyone else. Links, forwards, "
+                 "inline buttons, bots and malicious edits are <b>never</b> exemptible, and exemptions are suspended during "
+                 "Panic or night mode.")
+            + PERIMETER_SIGNATURE)
+    rows, row = [], []
+    for idx, key in enumerate(VIP_EXEMPTIBLE_VECTORS):
+        row.append(InlineKeyboardButton(text=("✅ " if key in chosen else "▫️ ") + _ml_label(key, lang),
+                                        callback_data=f"vipr_e_{group_id}_{idx}_{lang}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="⬅️ " + tr(lang, "Roles VIP", "VIP Roles"), callback_data=f"vipr_m_{group_id}_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _vip_members_view(group_id: int, data: dict, page: int, lang: str) -> tuple:
+    records = data.get("records") or []
+    total = int(data.get("total") or 0)
+    pages = max(1, -(-total // VIPR_PER_PAGE))
+    lines = []
+    for rec in records:
+        who = html.escape(rec.get("full_name") or (f"@{rec['username']}" if rec.get("username") else str(rec["user_id"])))
+        src = vip_roles.SOURCE_LABELS.get(rec.get("source"), ("—", "—"))[0 if lang == "es" else 1]
+        state = tr(lang, "🟢 Vigente", "🟢 Active") if rec.get("active") else tr(lang, "🔴 Vencido", "🔴 Expired")
+        tag = vip_roles.TAG_STATUS_LABELS.get(rec.get("tag_status"), ("", ""))[0 if lang == "es" else 1]
+        lines.append(f"• <b>{who}</b> <code>{rec['user_id']}</code>\n   {state} · {src} · ⏳ {vip_roles.fmt_expiry(rec.get('expires_at'), lang)}"
+                     f" · ⭐ {rec.get('total_stars') or 0}\n   {tag}")
+    text = (f"👥 <b>{tr(lang, 'Miembros VIP', 'VIP members')}</b> · {page}/{pages}\n\n"
+            + ("\n".join(lines) if lines else tr(lang, "<i>Aún no hay miembros VIP.</i>", "<i>No VIP members yet.</i>"))
+            + PERIMETER_SIGNATURE)
+    rows = []
+    for rec in records:
+        if rec.get("active"):
+            rows.append([
+                InlineKeyboardButton(text=f"🏷️ {rec['user_id']}", callback_data=f"vipr_rt_{group_id}_{rec['user_id']}_{page}_{lang}"),
+                InlineKeyboardButton(text=f"❌ {tr(lang, 'Retirar', 'Revoke')}", callback_data=f"vipr_r_{group_id}_{rec['user_id']}_{page}_{lang}"),
+            ])
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"vipr_l_{group_id}_{page - 1}_{lang}"))
+    nav.append(InlineKeyboardButton(text="🔄", callback_data=f"vipr_l_{group_id}_{page}_{lang}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"vipr_l_{group_id}_{page + 1}_{lang}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ " + tr(lang, "Roles VIP", "VIP Roles"), callback_data=f"vipr_m_{group_id}_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _vip_render_main(group_id: int, lang: str) -> tuple:
+    from database.database import vip_role_list
+    cfg = await vip_roles.get_config(group_id)
+    summary = (await vip_role_list(group_id, status="active", limit=1)).get("summary") or {}
+    return _vip_main_view(group_id, cfg, summary, lang)
+
+
+def _vip_changed(group_id: int, fields) -> None:
+    emit_settings_updated_bg(group_id, "bot_console", [f"vip_{f}" for f in fields])
+
+
+@router.callback_query(F.data.startswith("vipr_"))
+async def cb_vip_roles(callback: CallbackQuery, bot: Bot):
+    """vipr_{sub}_{group_id}_…_{lang} — solo el Dueño legítimo o el Arquitecto (no figura en DELEGATE_CALLBACK_RULES)."""
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        sub, group_id = data[1], int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    uid = callback.from_user.id
+    clear_user_states(bot.id, uid)
+    from database.database import (BunkerValidationError, VIP_DAYS_CHOICES, VIP_EXEMPTIBLE_VECTORS, VIP_FLOOD_BONUS_RANGE,
+                                   VIP_MIN_STARS_CHOICES, vip_role_list)
+
+    async def save(patch: dict) -> bool:
+        try:
+            await vip_roles.update_config(group_id, patch, updated_by=uid)
+        except BunkerValidationError as err:
+            await callback.answer("⚠️ " + "; ".join(err.errors.values())[:180], show_alert=True)
+            return False
+        _vip_changed(group_id, patch.keys())
+        return True
+
+    if sub == "t" and len(data) > 4 and data[3] in _VIPR_TOGGLES:
+        field = _VIPR_TOGGLES[data[3]]
+        cfg = await vip_roles.get_config(group_id)
+        if not await save({field: not cfg[field]}):
+            return
+        await callback.answer("✅")
+    elif sub == "c" and len(data) > 4 and data[3] in _VIPR_CYCLES:
+        field = _VIPR_CYCLES[data[3]]
+        seq = {"donor_min_stars": VIP_MIN_STARS_CHOICES, "donor_days": VIP_DAYS_CHOICES,
+               "flood_bonus": tuple(range(VIP_FLOOD_BONUS_RANGE[0], VIP_FLOOD_BONUS_RANGE[1] + 1))}[field]
+        cur = (await vip_roles.get_config(group_id))[field]
+        nxt = seq[(seq.index(cur) + 1) % len(seq)] if cur in seq else seq[0]
+        if not await save({field: nxt}):
+            return
+        await callback.answer("✅")
+    elif sub == "x":
+        text, kb = _vip_exempt_view(group_id, await vip_roles.get_config(group_id), lang)
+        await _safe_edit(callback, text, kb)
+        await callback.answer()
+        return
+    elif sub == "e":
+        try:
+            key = VIP_EXEMPTIBLE_VECTORS[int(data[3])]
+        except (IndexError, ValueError):
+            await callback.answer()
+            return
+        chosen = list((await vip_roles.get_config(group_id)).get("exempt_vectors") or [])
+        chosen = [k for k in chosen if k != key] if key in chosen else chosen + [key]
+        if not await save({"exempt_vectors": chosen}):
+            return
+        text, kb = _vip_exempt_view(group_id, await vip_roles.get_config(group_id), lang)
+        await _safe_edit(callback, text, kb)
+        await callback.answer("✅")
+        return
+    elif sub in ("l", "r", "rt"):
+        try:
+            page = max(1, int(data[-2])) if sub == "l" else max(1, int(data[4]))
+        except (IndexError, ValueError):
+            page = 1
+        if sub in ("r", "rt"):
+            try:
+                target = int(data[3])
+            except (IndexError, ValueError):
+                await callback.answer()
+                return
+            if sub == "r":
+                await vip_roles.revoke(group_id, target, actor_id=uid, bot=bot)
+                _vip_changed(group_id, ["members"])
+                await callback.answer("❌ " + tr(lang, "Rol VIP retirado", "VIP role revoked"))
+            else:
+                status = await vip_roles.retag(group_id, target, bot=bot)
+                await callback.answer(vip_roles.TAG_STATUS_LABELS.get(status, (status, status))[0 if lang == "es" else 1][:180],
+                                      show_alert=status not in ("applied",))
+        listing = await vip_role_list(group_id, status="all", limit=VIPR_PER_PAGE, offset=(page - 1) * VIPR_PER_PAGE)
+        text, kb = _vip_members_view(group_id, listing, page, lang)
+        await _safe_edit(callback, text, kb)
+        if sub == "l":
+            await callback.answer()
+        return
+    elif sub in ("tag", "g"):
+        VIP_ROLE_STATES[(bot.id, uid)] = {"group_id": group_id, "lang": lang, "mode": sub, "ts": time.time()}
+        prompt = (tr(lang, "🏷️ Escribe la nueva etiqueta VIP (máx. 16 caracteres, sin emoji). Envía <code>-</code> para quitarla.",
+                     "🏷️ Type the new VIP tag (max 16 characters, no emoji). Send <code>-</code> to remove it.")
+                  if sub == "tag" else
+                  tr(lang, "➕ Envía el <b>ID numérico</b> del usuario y, opcional, los días (0 = permanente). Ej.: <code>123456789 30</code>. "
+                           "También puedes <b>reenviar</b> aquí un mensaje suyo.",
+                     "➕ Send the user's <b>numeric ID</b> and, optionally, the days (0 = permanent). E.g. <code>123456789 30</code>. "
+                     "You can also <b>forward</b> one of their messages here."))
+        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+        msg = await callback.message.answer(prompt + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"vipr_m_{group_id}_{lang}"), parse_mode="HTML")
+        fire_and_forget_auto_delete([msg], delay=120)
+        await callback.answer()
+        return
+    else:
+        await callback.answer()
+    text, kb = await _vip_render_main(group_id, lang)
+    await _safe_edit(callback, text, kb)
+
+
+async def _handle_vip_role_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
+    group_id, lang, mode = int(st["group_id"]), st.get("lang", DEFAULT_LANG), st.get("mode")
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="⬅️ " + tr(lang, "Roles VIP", "VIP Roles"), callback_data=f"vipr_m_{group_id}_{lang}")]])
+    if time.time() - st.get("ts", 0) > STATE_TTL_SECONDS:
+        await message.answer(tr(lang, "⌛ La edición caducó; vuelve a abrir el menú.", "⌛ This edit expired; reopen the menu.") + PERIMETER_SIGNATURE,
+                             reply_markup=back_kb, parse_mode="HTML")
+        return
+    from database.database import BunkerValidationError
+    raw = (text_input or "").strip()
+    if mode == "tag":
+        try:
+            cfg = await vip_roles.update_config(group_id, {"tag_text": "" if raw == "-" else raw}, updated_by=message.from_user.id)
+        except BunkerValidationError as err:
+            await message.answer("❌ " + html.escape("; ".join(err.errors.values())) + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+            return
+        _vip_changed(group_id, ["tag_text"])
+        await message.answer(tr(lang, f"✅ Etiqueta guardada: <code>{html.escape(cfg.get('tag_text') or '—')}</code>. Se re-aplica a los VIP vigentes.",
+                                f"✅ Tag saved: <code>{html.escape(cfg.get('tag_text') or '—')}</code>. It is being re-applied to active VIPs.")
+                             + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        return
+    # Concesión manual: "id [días]" o mensaje reenviado (si el remitente no ocultó su cuenta).
+    target, days = None, 30
+    origin = getattr(message, "forward_origin", None)
+    sender = getattr(origin, "sender_user", None) or getattr(message, "forward_from", None)
+    parts = raw.split()
+    if sender is not None and not getattr(sender, "is_bot", False):
+        target = sender.id
+    elif parts and parts[0].lstrip("-").isdigit():
+        target = int(parts[0])
+        parts = parts[1:]
+    if parts and parts[0].isdigit():
+        days = int(parts[0])
+    if not target or target <= 0 or not 0 <= days <= 3650:
+        await message.answer(tr(lang, "⚠️ Formato: <code>ID [días]</code> (días 0-3650, 0 = permanente).",
+                                "⚠️ Format: <code>ID [days]</code> (days 0-3650, 0 = permanent).") + PERIMETER_SIGNATURE,
+                             reply_markup=back_kb, parse_mode="HTML")
+        return
+    result = await vip_roles.grant_manual(group_id, target, days, actor_id=message.from_user.id, bot=bot,
+                                          username=getattr(sender, "username", None), full_name=getattr(sender, "full_name", None))
+    _vip_changed(group_id, ["members"])
+    member = result.get("member") or {}
+    tag = vip_roles.TAG_STATUS_LABELS.get(result.get("tag_status") or member.get("tag_status"), ("", ""))[0 if lang == "es" else 1]
+    await message.answer(tr(lang, f"✅ <code>{target}</code> es VIP · ⏳ {vip_roles.fmt_expiry(member.get('expires_at'), lang)}\n{tag}",
+                            f"✅ <code>{target}</code> is now VIP · ⏳ {vip_roles.fmt_expiry(member.get('expires_at'), lang)}\n{tag}")
+                         + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+
+
+# --------------------------------------------------------------------------
+# 🔗 Cuota diaria de enlaces por administrador — alq_{sub}_{group_id}_…_{lang} (solo el Dueño / Arquitecto)
+# --------------------------------------------------------------------------
+ALQ_PANEL_MAX_ADMINS = 12
+
+
+def _alq_limit_label(limit, lang: str) -> str:
+    return "♾️" if limit == -1 else str(limit)
+
+
+def _alq_main_view(group_id: int, ov: dict, lang: str) -> tuple:
+    cfg = ov["config"]
+    now = int(time.time())
+    lines = []
+    for a in ov["admins"][:ALQ_PANEL_MAX_ADMINS]:
+        who = html.escape(a["full_name"] or (f"@{a['username']}" if a["username"] else a["admin_id"]))
+        mark = " ✳️" if a["override"] else ""
+        reset = f" · ⏱️ {link_quotas.fmt_remaining(a['reset_at'] - now, lang)}" if a.get("reset_at") else ""
+        blocked = f" · 🚫 {a['blocked']}" if a.get("blocked") else ""
+        lines.append(f"• {who}: <b>{a['used']}/{_alq_limit_label(a['limit'], lang)}</b>{mark}{reset}{blocked}")
+    text = (
+        f"🔗 <b>{tr(lang, 'Cuota diaria de enlaces de administradores', 'Daily admin link quota')}</b>\n\n"
+        f"• {tr(lang, 'Estado', 'Status')}: <b>{tr(lang, '🟢 Activa', '🟢 On') if cfg['enabled'] else tr(lang, '🔴 Inactiva', '🔴 Off')}</b>\n"
+        f"• {tr(lang, 'Límite general', 'Default limit')}: <b>{cfg['default_limit']}</b> {tr(lang, 'por 24 h', 'per 24 h')}\n"
+        f"• 📥 {tr(lang, 'Reenvíos de canales cuentan', 'Channel forwards count')}: {'✅' if cfg['count_forwards'] else '❌'}\n\n"
+        + ("\n".join(lines) if lines else tr(lang, "<i>No se pudo leer la lista de administradores.</i>", "<i>Could not read the admin list.</i>"))
+        + "\n\n"
+        + tr(lang, "<i>Al superar su cuota, la publicación se borra y el administrador recibe un aviso con el tiempo restante. "
+                   "✳️ = excepción individual. El dueño nunca se limita.</i>",
+             "<i>Over quota, the post is deleted and the admin gets a notice with the time left. ✳️ = individual exception. "
+             "The owner is never limited.</i>")
+        + PERIMETER_SIGNATURE
+    )
+    g = group_id
+    rows = [
+        [InlineKeyboardButton(text=(tr(lang, "🟢 Activada", "🟢 Enabled") if cfg["enabled"] else tr(lang, "🔴 Desactivada", "🔴 Disabled")),
+                              callback_data=f"alq_t_{g}_{lang}"),
+         InlineKeyboardButton(text=f"📥 {'✅' if cfg['count_forwards'] else '❌'}", callback_data=f"alq_f_{g}_{lang}")],
+        [InlineKeyboardButton(text="➖", callback_data=f"alq_d_{g}_dec_{lang}"),
+         InlineKeyboardButton(text=tr(lang, f"General: {cfg['default_limit']}", f"Default: {cfg['default_limit']}"), callback_data=f"alq_m_{g}_{lang}"),
+         InlineKeyboardButton(text="➕", callback_data=f"alq_d_{g}_inc_{lang}")],
+    ]
+    for a in ov["admins"][:ALQ_PANEL_MAX_ADMINS]:
+        name = (a["full_name"] or a["username"] or a["admin_id"])[:18]
+        rows.append([InlineKeyboardButton(text=f"👤 {name} · {a['used']}/{_alq_limit_label(a['limit'], lang)}",
+                                          callback_data=f"alq_a_{g}_{a['admin_id']}_{lang}")])
+    rows.append([InlineKeyboardButton(text="🔄 " + tr(lang, "Actualizar", "Refresh"), callback_data=f"alq_m_{g}_{lang}")])
+    rows.append(_v23_back(g, lang))
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _alq_admin_view(group_id: int, ov: dict, admin_id: str, lang: str) -> tuple:
+    row = next((a for a in ov["admins"] if a["admin_id"] == admin_id), None) or {
+        "admin_id": admin_id, "full_name": "", "username": "", "limit": ov["config"]["default_limit"], "override": False,
+        "used": 0, "blocked": 0, "reset_at": None}
+    who = html.escape(row["full_name"] or (f"@{row['username']}" if row["username"] else admin_id))
+    text = (f"👤 <b>{who}</b> <code>{admin_id}</code>\n\n"
+            f"• {tr(lang, 'Cuota', 'Quota')}: <b>{_alq_limit_label(row['limit'], lang)}</b> "
+            f"({tr(lang, 'excepción', 'exception') if row['override'] else tr(lang, 'general', 'default')})\n"
+            f"• {tr(lang, 'Usadas en 24 h', 'Used in 24 h')}: <b>{row['used']}</b> · 🚫 {row['blocked']}" + PERIMETER_SIGNATURE)
+    g = group_id
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➖", callback_data=f"alq_o_{g}_{admin_id}_dec_{lang}"),
+         InlineKeyboardButton(text=_alq_limit_label(row["limit"], lang), callback_data=f"alq_a_{g}_{admin_id}_{lang}"),
+         InlineKeyboardButton(text="➕", callback_data=f"alq_o_{g}_{admin_id}_inc_{lang}")],
+        [InlineKeyboardButton(text="♾️ " + tr(lang, "Sin límite", "Unlimited"), callback_data=f"alq_o_{g}_{admin_id}_unl_{lang}"),
+         InlineKeyboardButton(text="↩️ " + tr(lang, "Usar general", "Use default"), callback_data=f"alq_o_{g}_{admin_id}_def_{lang}")],
+        [InlineKeyboardButton(text="⬅️ " + tr(lang, "Cuotas de enlaces", "Link quotas"), callback_data=f"alq_m_{g}_{lang}")],
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data.startswith("alq_"))
+async def cb_admin_link_quotas(callback: CallbackQuery, bot: Bot):
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        sub, group_id = data[1], int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    uid = callback.from_user.id
+    clear_user_states(bot.id, uid)
+    from database.database import ALQ_LIMIT_RANGE, BunkerValidationError, get_admin_link_quota_config, update_admin_link_quota_config
+
+    async def save(patch: dict) -> bool:
+        try:
+            await update_admin_link_quota_config(group_id, patch, updated_by=uid)
+        except BunkerValidationError as err:
+            await callback.answer("⚠️ " + "; ".join(err.errors.values())[:180], show_alert=True)
+            return False
+        link_quotas.invalidate(group_id)
+        emit_settings_updated_bg(group_id, "bot_console", [f"alq_{k}" for k in patch])
+        return True
+
+    cfg = await get_admin_link_quota_config(group_id)
+    admin_view = None
+    if sub == "t":
+        if not await save({"enabled": not cfg["enabled"]}):
+            return
+    elif sub == "f":
+        if not await save({"count_forwards": not cfg["count_forwards"]}):
+            return
+    elif sub == "d" and len(data) > 4:
+        step = 1 if data[3] == "inc" else -1
+        new = max(ALQ_LIMIT_RANGE[0], min(ALQ_LIMIT_RANGE[1], cfg["default_limit"] + step))
+        if new != cfg["default_limit"] and not await save({"default_limit": new}):
+            return
+    elif sub == "a" and len(data) > 4:
+        admin_view = data[3]
+    elif sub == "o" and len(data) > 5 and data[3].isdigit():
+        admin_view, op = data[3], data[4]
+        cur = cfg["overrides"].get(admin_view, cfg["default_limit"])
+        if op == "unl":
+            value = -1
+        elif op == "def":
+            value = None
+        else:
+            base = cfg["default_limit"] if cur == -1 else cur
+            value = max(ALQ_LIMIT_RANGE[0], min(ALQ_LIMIT_RANGE[1], base + (1 if op == "inc" else -1)))
+        if not await save({"overrides": {admin_view: value}}):
+            return
+    overview = await link_quotas.get_overview(_master_bot_or(bot), group_id)
+    text, kb = (_alq_admin_view(group_id, overview, admin_view, lang) if admin_view else _alq_main_view(group_id, overview, lang))
+    await _safe_edit(callback, text, kb)
     await callback.answer()

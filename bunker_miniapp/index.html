@@ -1084,6 +1084,105 @@
                             <p id="mva-tz" class="text-[9px] text-neutral-500 font-mono"></p>
                         </div>
 
+                        <!-- 🛡️ v23 · REFUERZO PERIMETRAL: ráfaga de reenvíos masivos + bots autorizados (paridad con el bot: 🔒 Cerraduras). -->
+                        <div id="shield-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-[#00f3ff] uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-shield-halved"></i> <span data-i18n="sh_title">Perimeter Hardening</span>
+                                </h4>
+                                <button type="button" id="sh-refresh-btn" onclick="app.refreshV23('shield')" title="Refresh" class="w-8 h-8 rounded-lg bg-black/60 border border-neutral-700 text-[#00f3ff] flex items-center justify-center active:scale-95 transition disabled:opacity-50"><i class="fa-solid fa-rotate text-[10px]"></i></button>
+                            </div>
+                            <p class="text-[10px] text-theme-muted leading-snug" data-i18n="sh_desc">Spoilers, hidden links, long videos, inline buttons, bot invites and malicious edits are set per vector in the media matrix. Here: mass-forward bursts and the bots you trust.</p>
+                            <p class="text-[10px] font-bold text-theme-muted uppercase tracking-wide" data-i18n="sh_burst">📥 Forward burst</p>
+                            <div id="sh-burst" class="grid grid-cols-4 gap-1.5" role="radiogroup"></div>
+                            <p class="text-[10px] font-bold text-theme-muted uppercase tracking-wide" data-i18n="sh_window">⏱️ Window</p>
+                            <div id="sh-window" class="grid grid-cols-3 gap-1.5" role="radiogroup"></div>
+                            <p class="text-[10px] text-neutral-500 leading-snug" data-i18n="sh_burst_hint">When a member forwards that many external messages within the window, the whole burst is deleted and they are muted (or the 📥 rule if stricter).</p>
+                            <p class="text-[10px] font-bold text-theme-muted uppercase tracking-wide pt-1" data-i18n="sh_bots">🤖 Authorized bots</p>
+                            <div id="sh-bots" class="flex flex-wrap gap-1.5"></div>
+                            <div class="flex gap-1.5">
+                                <input id="sh-bot-input" type="text" maxlength="40" autocomplete="off" spellcheck="false" data-i18n-placeholder="sh_bot_placeholder" placeholder="@AllowedBot" class="flex-1 min-w-0 bg-black/60 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-[11px] font-mono text-theme-main focus:outline-none focus:border-[#00f3ff]/60" onkeydown="if(event.key==='Enter'){event.preventDefault();app.addAuthorizedBot();}">
+                                <button type="button" id="sh-bot-add" onclick="app.addAuthorizedBot()" class="shrink-0 px-3 rounded-lg bg-[#00f3ff]/10 border border-[#00f3ff]/40 text-[#00f3ff] text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50" data-i18n="sh_bot_add">Authorize</button>
+                            </div>
+                            <p id="sh-status" class="text-[10px] text-neutral-500 font-mono"></p>
+                        </div>
+
+                        <!-- 👑 v23 · ROLES Y ETIQUETAS VIP AUTOMÁTICOS (donación / MicVIP → etiqueta nativa + privilegios). -->
+                        <div id="vip-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-crown"></i> <span data-i18n="vip_title">VIP Roles &amp; Tags</span>
+                                </h4>
+                                <div class="flex items-center gap-1.5">
+                                    <button type="button" id="vip-enabled-btn" onclick="app.toggleVip('enabled')" class="h-8 px-2.5 rounded-lg border border-neutral-700 bg-black/60 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50">—</button>
+                                    <button type="button" id="vip-refresh-btn" onclick="app.refreshV23('vip')" title="Refresh" class="w-8 h-8 rounded-lg bg-black/60 border border-neutral-700 text-amber-300 flex items-center justify-center active:scale-95 transition disabled:opacity-50"><i class="fa-solid fa-rotate text-[10px]"></i></button>
+                                </div>
+                            </div>
+                            <p class="text-[10px] text-theme-muted leading-snug" data-i18n="vip_desc">Members who donate or buy a MicVIP pass get a native Telegram tag and perks automatically, and lose them when the period ends. Nobody is promoted to admin.</p>
+                            <div id="vip-summary" class="grid grid-cols-3 gap-1.5"></div>
+                            <p id="vip-context" class="hidden text-[10px] font-bold rounded-lg px-2.5 py-1.5"></p>
+                            <div class="grid grid-cols-2 gap-1.5">
+                                <label class="space-y-1">
+                                    <span class="block text-[9px] font-bold text-theme-muted uppercase tracking-wide" data-i18n="vip_tag">🏷️ Tag (max 16, no emoji)</span>
+                                    <div class="flex gap-1">
+                                        <input id="vip-tag-input" type="text" maxlength="16" autocomplete="off" class="flex-1 min-w-0 bg-black/60 border border-neutral-700 rounded-lg px-2 py-1.5 text-[11px] text-theme-main focus:outline-none focus:border-amber-400/60" onkeydown="if(event.key==='Enter'){event.preventDefault();app.saveVipTag();}">
+                                        <button type="button" id="vip-tag-save" onclick="app.saveVipTag()" class="shrink-0 w-8 rounded-lg bg-amber-400/10 border border-amber-400/40 text-amber-300 active:scale-95 transition disabled:opacity-50"><i class="fa-solid fa-check text-[10px]"></i></button>
+                                    </div>
+                                </label>
+                                <label class="space-y-1">
+                                    <span class="block text-[9px] font-bold text-theme-muted uppercase tracking-wide" data-i18n="vip_min_stars">💝 Minimum donation</span>
+                                    <select id="vip-min-stars" onchange="app.setVipField('donor_min_stars', this.value)" class="w-full bg-black/60 border border-neutral-700 rounded-lg px-2 py-1.5 text-[11px] text-theme-main"></select>
+                                </label>
+                                <label class="space-y-1">
+                                    <span class="block text-[9px] font-bold text-theme-muted uppercase tracking-wide" data-i18n="vip_days">⏳ Role duration</span>
+                                    <select id="vip-days" onchange="app.setVipField('donor_days', this.value)" class="w-full bg-black/60 border border-neutral-700 rounded-lg px-2 py-1.5 text-[11px] text-theme-main"></select>
+                                </label>
+                                <label class="space-y-1">
+                                    <span class="block text-[9px] font-bold text-theme-muted uppercase tracking-wide" data-i18n="vip_flood">🌊 Anti-flood margin</span>
+                                    <select id="vip-flood" onchange="app.setVipField('flood_bonus', this.value)" class="w-full bg-black/60 border border-neutral-700 rounded-lg px-2 py-1.5 text-[11px] text-theme-main"></select>
+                                </label>
+                            </div>
+                            <div id="vip-toggles" class="grid grid-cols-3 gap-1.5"></div>
+                            <details class="rounded-xl border border-neutral-800 bg-black/30">
+                                <summary class="px-2.5 py-2 text-[10px] font-extrabold text-theme-muted uppercase tracking-wide cursor-pointer"><span data-i18n="vip_exempt">🛡️ Partial exemptions</span> <span id="vip-exempt-count" class="font-mono text-amber-300"></span></summary>
+                                <p class="px-2.5 text-[10px] text-neutral-500 leading-snug" data-i18n="vip_exempt_hint">Content types active VIPs may send even when locked. Links, forwards, inline buttons, bots and edits are never exemptible; Panic and night mode suspend exemptions.</p>
+                                <div id="vip-exempt" class="grid grid-cols-2 gap-1.5 p-2.5"></div>
+                            </details>
+                            <div id="vip-filters" class="grid grid-cols-3 gap-1.5" role="radiogroup">
+                                <button type="button" data-vip-filter="all" onclick="app.setVipFilter('all')" class="py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="vip_f_all">All</span></button>
+                                <button type="button" data-vip-filter="active" onclick="app.setVipFilter('active')" class="py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="vip_f_active">🟢 Active</span></button>
+                                <button type="button" data-vip-filter="expired" onclick="app.setVipFilter('expired')" class="py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="vip_f_expired">🔴 Expired</span></button>
+                            </div>
+                            <div id="vip-list" class="space-y-1.5">
+                                <p class="text-center text-[11px] text-neutral-500 font-mono py-2" data-i18n="v23_pick">Select a community.</p>
+                            </div>
+                            <button type="button" id="vip-more-btn" onclick="app.loadMoreVip()" class="hidden w-full py-2 rounded-xl bg-black/50 border border-neutral-800 text-neutral-300 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50" data-i18n="mva_more">Load more</button>
+                            <div class="flex gap-1.5">
+                                <input id="vip-grant-id" type="text" inputmode="numeric" maxlength="20" autocomplete="off" data-i18n-placeholder="vip_grant_id" placeholder="User ID" class="flex-1 min-w-0 bg-black/60 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-[11px] font-mono text-theme-main focus:outline-none focus:border-amber-400/60">
+                                <select id="vip-grant-days" class="w-24 bg-black/60 border border-neutral-700 rounded-lg px-1.5 py-1.5 text-[11px] text-theme-main"></select>
+                                <button type="button" id="vip-grant-btn" onclick="app.vipGrant()" class="shrink-0 px-3 rounded-lg bg-amber-400/10 border border-amber-400/40 text-amber-300 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50" data-i18n="vip_grant">Grant</button>
+                            </div>
+                            <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="vip_tag_hint">Tags use Telegram's native member tags: the bot needs the “Manage tags” admin right.</p>
+                        </div>
+
+                        <!-- 🔗 v23 · CUOTA DIARIA DE ENLACES POR ADMINISTRADOR (ventana móvil de 24 h, solo el dueño la cambia). -->
+                        <div id="alq-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-[#ff00ff] uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-link-slash"></i> <span data-i18n="alq_title">Admin Link Quotas</span>
+                                </h4>
+                                <div class="flex items-center gap-1.5">
+                                    <button type="button" id="alq-enabled-btn" onclick="app.toggleAlq('enabled')" class="h-8 px-2.5 rounded-lg border border-neutral-700 bg-black/60 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50">—</button>
+                                    <button type="button" id="alq-refresh-btn" onclick="app.refreshV23('alq')" title="Refresh" class="w-8 h-8 rounded-lg bg-black/60 border border-neutral-700 text-[#ff00ff] flex items-center justify-center active:scale-95 transition disabled:opacity-50"><i class="fa-solid fa-rotate text-[10px]"></i></button>
+                                </div>
+                            </div>
+                            <p class="text-[10px] text-theme-muted leading-snug" data-i18n="alq_desc">How many posts with links (or channel forwards) each admin may publish every 24 h. Over quota, the post is deleted and the admin is told how long until they can promote again.</p>
+                            <div id="alq-controls" class="grid grid-cols-2 gap-1.5"></div>
+                            <div id="alq-list" class="space-y-1.5">
+                                <p class="text-center text-[11px] text-neutral-500 font-mono py-2" data-i18n="v23_pick">Select a community.</p>
+                            </div>
+                        </div>
+
                         <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->
                         <div class="space-y-3 pt-3 border-t border-neutral-800">
                             <h4 class="text-xs font-bold text-[#ff00ff] uppercase tracking-wider flex items-center gap-1.5">

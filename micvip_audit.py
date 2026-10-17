@@ -32,6 +32,19 @@ SENTINEL_NOTE_MAX = 5000
 _sentinel_notes: dict = {}                # (group_id, user_id, applied) → monotonic_ts
 _BG: set = set()
 _GROUP_ID_RE = re.compile(r"-100\d{6,}|-\d{6,}")
+GRANT_LISTENERS_MAX = 8
+_grant_listeners: list = []               # v23 · async fn(group_id, user_id, charge_id, expires_at) — p. ej. vip_roles
+
+
+def register_grant_listener(fn) -> None:
+    """v23 · Suscribe una corrutina a los pases VERIFICADOS (lista acotada, sin duplicados)."""
+    if fn not in _grant_listeners and len(_grant_listeners) < GRANT_LISTENERS_MAX:
+        _grant_listeners.append(fn)
+
+
+def _notify_granted(group_id: int, user_id: int, charge_id: str, expires_at: int) -> None:
+    for fn in list(_grant_listeners):
+        _spawn(fn(int(group_id), int(user_id), str(charge_id), int(expires_at)), name=f"micvip_listener:{group_id}:{user_id}")
 
 
 def _db():
@@ -100,6 +113,7 @@ async def verify_grant(group_id: int, user_id: int, charge_id: str, purchased_at
             continue
         if expiry and expiry >= minimum:
             await db.micvip_audit_set_grant(charge_id, "granted", expiry)
+            _notify_granted(group_id, user_id, charge_id, expiry)   # v23 · rol VIP automático
             return "granted"
     await db.micvip_audit_set_grant(charge_id, "missing")
     logger.error(f"🚨 [MicVIP Audit] Cobro {charge_id} de {user_id} en {group_id} SIN pase MicVIP concedido. Revisar de inmediato.")

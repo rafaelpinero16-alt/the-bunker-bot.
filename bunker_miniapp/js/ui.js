@@ -1678,6 +1678,256 @@ export const ui = {
         this.setText('mva-tz', tz ? this.tf('mva_tz', { tz }) : '');
     },
 
+    // ======================================================================
+    // 🛡️👑🔗 v23 · REFUERZO PERIMETRAL · ROLES VIP · CUOTAS DE ENLACES
+    // ======================================================================
+    _chip(on, tone = 'cyan') {
+        const tones = {
+            cyan: 'bg-[#00f3ff]/15 border-[#00f3ff]/60 text-[#bff9ff]',
+            amber: 'bg-amber-400/15 border-amber-400/60 text-amber-200',
+            magenta: 'bg-[#ff00ff]/15 border-[#ff00ff]/60 text-[#ffc8ff]'
+        };
+        return on ? tones[tone] : 'bg-black/40 border-neutral-800 text-neutral-400';
+    },
+
+    _v23Message(id, text, tone = 'muted') {
+        const cls = { muted: 'text-neutral-500', error: 'text-rose-300' }[tone] || 'text-neutral-500';
+        const el = byId(id);
+        if (el) el.innerHTML = `<p class="text-center text-[11px] ${cls} font-mono py-2">${this.escapeHtml(text)}</p>`;
+    },
+
+    /** Ráfaga de reenvíos + bots autorizados. shield = respuesta de GET /shield (o null). */
+    renderShield(shield, { idle = false, busy = false, error = '' } = {}) {
+        const cfg = CONFIG.V23 || {};
+        const disabled = Boolean(idle || busy || !shield);
+        const chips = (id, values, current, label, method) => {
+            const box = byId(id);
+            if (!box) return;
+            box.innerHTML = values.map(v => {
+                const on = shield && Number(current) === Number(v);
+                return `<button type="button" role="radio" aria-checked="${on}" ${disabled ? 'disabled' : ''}
+                    onclick="app.${method}(${Number(v)})"
+                    class="py-1.5 rounded-lg border text-[10px] font-extrabold transition disabled:opacity-50 ${this._chip(on)}">${this.escapeHtml(label(v))}</button>`;
+            }).join('');
+        };
+        chips('sh-burst', cfg.BURST_LIMITS || [0, 3, 5, 8], shield?.fwd_burst_limit, v => (v ? String(v) : this.t('sh_off')), 'setBurstLimit');
+        chips('sh-window', cfg.BURST_WINDOWS || [30, 60, 300], shield?.fwd_burst_window, v => this.tf('sh_seconds', { n: v }), 'setBurstWindow');
+        const bots = byId('sh-bots');
+        if (bots) {
+            const list = shield?.authorized_bots || [];
+            if (idle) bots.innerHTML = `<p class="text-[11px] text-neutral-500 font-mono">${this.escapeHtml(this.t('v23_pick'))}</p>`;
+            else if (!shield) bots.innerHTML = error ? `<p class="text-[11px] text-rose-300 font-mono">${this.escapeHtml(this.tf('v23_error', { error }))}</p>` : '';
+            else bots.innerHTML = list.length ? list.map(b => {
+                const name = this.escapeHtml(b.username);
+                return `<span class="inline-flex items-center gap-1 pl-2 pr-1 py-1 rounded-lg border border-[#00f3ff]/40 bg-[#00f3ff]/10 text-[10px] font-mono text-[#bff9ff]">
+                    @${name}<button type="button" ${disabled ? 'disabled' : ''} onclick="app.removeAuthorizedBot('${name}')" title="${this.escapeHtml(this.t('sh_bot_remove'))}"
+                    class="w-5 h-5 rounded-md hover:bg-rose-500/20 text-rose-300 disabled:opacity-50"><i class="fa-solid fa-xmark text-[9px]"></i></button></span>`;
+            }).join('') : `<p class="text-[10px] text-neutral-500 leading-snug">${this.escapeHtml(this.t('sh_bots_empty'))}</p>`;
+        }
+        ['sh-bot-input', 'sh-bot-add', 'sh-refresh-btn'].forEach(id => { const el = byId(id); if (el) el.disabled = Boolean(idle || busy); });
+        this.setText('sh-status', shield ? this.tf('sh_bots_count', { n: (shield.authorized_bots || []).length, max: cfg.AUTHORIZED_BOTS_MAX || 25 }) : '');
+    },
+
+    vipTagStatus(status) {
+        const key = `vip_tag_${status || 'pending'}`;
+        const text = this.t(key);
+        return text === key ? '' : text;
+    },
+
+    vipRowHtml(r) {
+        const who = r.full_name || (r.username ? `@${r.username}` : String(r.user_id));
+        const tone = r.active ? 'border-amber-400/40 bg-amber-400/5' : 'border-neutral-800 bg-black/40';
+        const until = r.expires_at ? this.fmtDateTime(r.expires_at) : this.t('vip_days_perm');
+        const uid = this.escapeHtml(String(r.user_id).replace(/[^0-9]/g, ''));
+        const actions = r.active ? `
+            <div class="flex gap-1 shrink-0">
+                <button type="button" onclick="app.vipRetag('${uid}')" class="px-2 py-1 rounded-md border border-neutral-700 text-[9px] font-extrabold text-neutral-300 uppercase active:scale-95">${this.escapeHtml(this.t('vip_retag'))}</button>
+                <button type="button" onclick="app.vipRevoke('${uid}')" class="px-2 py-1 rounded-md border border-rose-500/40 text-[9px] font-extrabold text-rose-300 uppercase active:scale-95">${this.escapeHtml(this.t('vip_revoke'))}</button>
+            </div>` : '';
+        return `
+            <div class="rounded-xl border px-2.5 py-2 space-y-1 ${tone}">
+                <div class="flex items-start justify-between gap-2">
+                    <div class="min-w-0">
+                        <p class="text-[11px] font-bold text-theme-main truncate">${this.escapeHtml(who)} <span class="font-mono text-neutral-500">${uid}</span></p>
+                        <p class="text-[10px] text-neutral-400">${this.escapeHtml(this.t(r.active ? 'vip_state_active' : 'vip_state_expired'))} · ${this.escapeHtml(this.t(`vip_src_${r.source || 'manual'}`))} · ⭐ ${this.escapeHtml(this.fmtNum(r.total_stars || 0))}</p>
+                        <p class="text-[10px] text-neutral-500 font-mono">${this.escapeHtml(this.t('vip_until'))}: ${this.escapeHtml(until)}</p>
+                        <p class="text-[10px] ${r.tag_status === 'applied' ? 'text-emerald-300' : 'text-amber-300'}">${this.escapeHtml(this.vipTagStatus(r.tag_status))}</p>
+                    </div>${actions}
+                </div>
+            </div>`;
+    },
+
+    /** Roles VIP. data = GET /vip-roles; records = miembros acumulados (paginación). */
+    renderVipRoles(data, { records = [], filter = 'all', loading = false, idle = false, busy = false, hasMore = false, error = '' } = {}) {
+        const cfg = CONFIG.V23 || {};
+        const vip = data?.vip_roles || null;
+        const disabled = Boolean(idle || busy || !vip);
+        const enabledBtn = byId('vip-enabled-btn');
+        if (enabledBtn) {
+            enabledBtn.disabled = disabled;
+            enabledBtn.textContent = vip ? this.t(vip.enabled ? 'vip_on' : 'vip_off') : '—';
+            enabledBtn.className = `h-8 px-2.5 rounded-lg border text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50 ${this._chip(Boolean(vip?.enabled), 'amber')}`;
+        }
+        const refresh = byId('vip-refresh-btn');
+        if (refresh) refresh.disabled = Boolean(idle || loading);
+        const tagInput = byId('vip-tag-input');
+        if (tagInput) {
+            tagInput.disabled = disabled;
+            if (vip && document.activeElement !== tagInput) tagInput.value = vip.tag_text || '';
+        }
+        const tagSave = byId('vip-tag-save');
+        if (tagSave) tagSave.disabled = disabled;
+        const fill = (id, values, current, label) => {
+            const sel = byId(id);
+            if (!sel) return;
+            sel.disabled = disabled;
+            sel.innerHTML = values.map(v => `<option value="${Number(v)}"${vip && Number(current) === Number(v) ? ' selected' : ''}>${this.escapeHtml(label(v))}</option>`).join('');
+        };
+        const daysLabel = v => (Number(v) === 0 ? this.t('vip_days_perm') : this.tf('vip_days_n', { n: v }));
+        fill('vip-min-stars', cfg.VIP_MIN_STARS || [1, 25, 50, 100], vip?.donor_min_stars, v => this.tf('vip_stars_n', { n: v }));
+        fill('vip-days', cfg.VIP_DAYS || [0, 7, 30, 90, 365], vip?.donor_days, daysLabel);
+        fill('vip-flood', cfg.VIP_FLOOD || [1, 2, 3, 4, 5], vip?.flood_bonus, v => this.tf('vip_flood_n', { n: v }));
+        const grantDays = byId('vip-grant-days');
+        if (grantDays && !grantDays.options.length) {
+            grantDays.innerHTML = (cfg.VIP_GRANT_DAYS || [30, 7, 90, 365, 0]).map(v => `<option value="${Number(v)}">${this.escapeHtml(daysLabel(v))}</option>`).join('');
+        } else if (grantDays) {
+            [...grantDays.options].forEach(o => { o.textContent = daysLabel(o.value); });
+        }
+        ['vip-grant-id', 'vip-grant-days', 'vip-grant-btn'].forEach(id => { const el = byId(id); if (el) el.disabled = Boolean(idle || busy || !data); });
+        const toggles = byId('vip-toggles');
+        if (toggles) {
+            toggles.innerHTML = [['micvip_role', 'vip_t_micvip'], ['autolower_immune', 'vip_t_autolower'], ['announce', 'vip_t_announce']].map(([field, key]) => {
+                const on = Boolean(vip?.[field]);
+                return `<button type="button" role="switch" aria-checked="${on}" ${disabled ? 'disabled' : ''} onclick="app.toggleVip('${field}')"
+                    class="py-1.5 rounded-lg border text-[10px] font-extrabold transition disabled:opacity-50 ${this._chip(on, 'amber')}">${on ? '✅' : '⬜'} ${this.escapeHtml(this.t(key))}</button>`;
+            }).join('');
+        }
+        const exemptBox = byId('vip-exempt');
+        const exempt = new Set(vip?.exempt_vectors || []);
+        if (exemptBox) {
+            const keys = vip?.choices?.exemptible_vectors || [];
+            exemptBox.innerHTML = keys.map(k => {
+                const on = exempt.has(k);
+                return `<button type="button" role="checkbox" aria-checked="${on}" ${disabled ? 'disabled' : ''} onclick="app.toggleVipExempt('${this.escapeHtml(k)}')"
+                    class="w-full text-left px-2 py-1.5 rounded-lg border text-[10px] font-bold transition disabled:opacity-50 ${this._chip(on, 'amber')}">${on ? '✅' : '⬜'} ${this.escapeHtml(this.mediaLockLabel(k))}</button>`;
+            }).join('');
+        }
+        this.setText('vip-exempt-count', vip ? `(${exempt.size})` : '');
+        document.querySelectorAll('[data-vip-filter]').forEach(el => {
+            const on = el.getAttribute('data-vip-filter') === filter;
+            el.disabled = Boolean(idle);
+            el.setAttribute('aria-checked', on ? 'true' : 'false');
+            el.className = `py-1.5 rounded-lg border text-[10px] font-extrabold transition ${this._chip(on, 'amber')}`;
+        });
+        const summaryEl = byId('vip-summary');
+        const ctx = byId('vip-context');
+        const more = byId('vip-more-btn');
+        if (idle) {
+            this._v23Message('vip-list', this.t('v23_pick'));
+            if (summaryEl) summaryEl.innerHTML = '';
+            if (ctx) ctx.className = 'hidden';
+            if (more) more.classList.add('hidden');
+            return;
+        }
+        if (!data) {
+            if (error) this._v23Message('vip-list', this.tf('v23_error', { error }), 'error');
+            return;
+        }
+        const s = data.summary || {};
+        if (summaryEl) {
+            summaryEl.innerHTML = [['vip_s_active', s.active], ['vip_s_tagged', s.tagged], ['vip_s_stars', s.stars]]
+                .map(([k, v]) => `<div class="rounded-lg border border-neutral-800 bg-black/40 px-1.5 py-1.5 text-center">
+                    <p class="text-sm font-extrabold text-white">${this.escapeHtml(this.fmtNum(v || 0))}</p>
+                    <p class="text-[8px] uppercase tracking-wide text-neutral-500">${this.escapeHtml(this.t(k))}</p></div>`).join('');
+        }
+        if (ctx) {
+            const untagged = records.filter(r => r.active && r.tag_status === 'no_right').length;
+            let msg = '', cls = '';
+            if (vip && !vip.enabled) { msg = this.t('vip_ctx_disabled'); cls = 'text-sky-200 bg-sky-500/10 border border-sky-500/30'; }
+            else if (untagged) { msg = this.tf('vip_ctx_no_right', { n: untagged }); cls = 'text-amber-200 bg-amber-400/10 border border-amber-400/40'; }
+            ctx.textContent = msg;
+            ctx.className = msg ? `text-[10px] font-bold rounded-lg px-2.5 py-1.5 ${cls}` : 'hidden';
+        }
+        const list = byId('vip-list');
+        if (list) {
+            list.innerHTML = records.length ? records.map(r => this.vipRowHtml(r)).join('')
+                : `<p class="text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t(filter === 'all' ? 'vip_empty' : 'vip_empty_filter'))}</p>`;
+        }
+        if (more) { more.classList.toggle('hidden', !hasMore); more.disabled = Boolean(loading); }
+    },
+
+    fmtRemaining(seconds) {
+        const s = Math.max(60, Number(seconds) || 0);
+        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+        return h ? `${h} h ${String(m).padStart(2, '0')} min` : `${m} min`;
+    },
+
+    /** Cuotas de enlaces. overview = admin_link_quotas de GET /admin-link-quotas ({ config, admins[] }). */
+    renderAdminQuotas(overview, { idle = false, busy = false, error = '' } = {}) {
+        const cfg = overview?.config || null;
+        const disabled = Boolean(idle || busy || !cfg);
+        const enabledBtn = byId('alq-enabled-btn');
+        if (enabledBtn) {
+            enabledBtn.disabled = disabled;
+            enabledBtn.textContent = cfg ? this.t(cfg.enabled ? 'alq_on' : 'alq_off') : '—';
+            enabledBtn.className = `h-8 px-2.5 rounded-lg border text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50 ${this._chip(Boolean(cfg?.enabled), 'magenta')}`;
+        }
+        const refresh = byId('alq-refresh-btn');
+        if (refresh) refresh.disabled = Boolean(idle || busy);
+        const controls = byId('alq-controls');
+        if (controls) {
+            controls.innerHTML = cfg ? `
+                <div class="rounded-lg border border-neutral-800 bg-black/40 px-2 py-1.5">
+                    <p class="text-[9px] uppercase tracking-wide text-neutral-500">${this.escapeHtml(this.t('alq_default'))}</p>
+                    <div class="flex items-center justify-between gap-1 mt-1">
+                        <button type="button" ${disabled ? 'disabled' : ''} onclick="app.stepAlqDefault(-1)" class="w-7 h-7 rounded-md border border-neutral-700 text-neutral-300 disabled:opacity-50">−</button>
+                        <span class="text-sm font-extrabold text-white font-mono">${this.escapeHtml(String(cfg.default_limit))}</span>
+                        <button type="button" ${disabled ? 'disabled' : ''} onclick="app.stepAlqDefault(1)" class="w-7 h-7 rounded-md border border-neutral-700 text-neutral-300 disabled:opacity-50">+</button>
+                    </div>
+                </div>
+                <button type="button" role="switch" aria-checked="${Boolean(cfg.count_forwards)}" ${disabled ? 'disabled' : ''} onclick="app.toggleAlq('count_forwards')"
+                    class="rounded-lg border px-2 py-1.5 text-[10px] font-extrabold text-left transition disabled:opacity-50 ${this._chip(Boolean(cfg.count_forwards), 'magenta')}">
+                    ${cfg.count_forwards ? '✅' : '⬜'} ${this.escapeHtml(this.t('alq_forwards'))}</button>` : '';
+        }
+        if (idle) return this._v23Message('alq-list', this.t('v23_pick'));
+        if (!overview) {
+            if (error) this._v23Message('alq-list', this.tf('v23_error', { error }), 'error');
+            return;
+        }
+        const now = Math.floor(Date.now() / 1000);
+        const admins = overview.admins || [];
+        const list = byId('alq-list');
+        if (!list) return;
+        const rows = admins.map(a => {
+            const id = this.escapeHtml(String(a.admin_id).replace(/[^0-9]/g, ''));
+            const who = a.full_name || (a.username ? `@${a.username}` : id);
+            const unlimited = Number(a.limit) === -1;
+            const limitText = unlimited ? '♾️' : String(a.limit);
+            const full = !unlimited && Number(a.used) >= Number(a.limit);
+            const reset = a.reset_at && a.reset_at > now ? ` · ${this.tf('alq_reset_in', { time: this.fmtRemaining(a.reset_at - now) })}` : '';
+            const blocked = a.blocked ? ` · ${this.tf('alq_blocked', { n: a.blocked })}` : '';
+            const tags = [a.override ? this.t('alq_override') : '', a.listed === false ? this.t('alq_not_listed') : ''].filter(Boolean).join(' · ');
+            return `
+                <div class="rounded-xl border px-2.5 py-2 space-y-1.5 ${full ? 'border-rose-500/50 bg-rose-500/5' : 'border-neutral-800 bg-black/40'}">
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="min-w-0">
+                            <p class="text-[11px] font-bold text-theme-main truncate">${this.escapeHtml(who)} <span class="font-mono text-neutral-500">${id}</span></p>
+                            <p class="text-[10px] text-neutral-400 font-mono">${this.escapeHtml(`${a.used}/${limitText}${reset}${blocked}`)}</p>
+                            ${tags ? `<p class="text-[9px] text-[#ffc8ff]">${this.escapeHtml(tags)}</p>` : ''}
+                        </div>
+                        <div class="flex items-center gap-1 shrink-0">
+                            <button type="button" ${disabled ? 'disabled' : ''} onclick="app.stepAlqAdmin('${id}', -1)" class="w-7 h-7 rounded-md border border-neutral-700 text-neutral-300 disabled:opacity-50">−</button>
+                            <button type="button" ${disabled ? 'disabled' : ''} onclick="app.stepAlqAdmin('${id}', 1)" class="w-7 h-7 rounded-md border border-neutral-700 text-neutral-300 disabled:opacity-50">+</button>
+                            <button type="button" ${disabled ? 'disabled' : ''} onclick="app.setAlqAdmin('${id}', -1)" title="${this.escapeHtml(this.t('alq_unlimited'))}" class="w-7 h-7 rounded-md border border-neutral-700 text-neutral-300 disabled:opacity-50">♾️</button>
+                            ${a.override ? `<button type="button" ${disabled ? 'disabled' : ''} onclick="app.setAlqAdmin('${id}', null)" title="${this.escapeHtml(this.t('alq_use_default'))}" class="w-7 h-7 rounded-md border border-neutral-700 text-neutral-300 disabled:opacity-50">↩️</button>` : ''}
+                        </div>
+                    </div>
+                </div>`;
+        }).join('');
+        list.innerHTML = (rows || `<p class="text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t('alq_empty'))}</p>`)
+            + `<p class="text-[9px] text-neutral-500 leading-snug">${this.escapeHtml(this.t('alq_owner_note'))}</p>`;
+    },
+
     /** Burbuja del chat de soporte. El texto SIEMPRE va escapado: la IA nunca inyecta HTML en la Mini App. */
     appendSupportMessage(role, text, { pending = false } = {}) {
         const log = byId('sai-log');

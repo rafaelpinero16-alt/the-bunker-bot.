@@ -191,6 +191,104 @@ def _ensure_columns(cursor, table: str, columns) -> None:
                     raise
 
 
+def _ensure_v23_schema(cursor) -> None:
+    """
+    v23 · Esquema ADITIVO (CREATE IF NOT EXISTS + columnas con DEFAULT): ninguna tabla ni columna existente cambia.
+      • group_settings: ráfaga de reenvíos (fwd_burst_*) y cuota de enlaces de administradores (alq_*).
+      • authorized_bots: bots inline / invitables autorizados por el dueño (botones inline y bot_added).
+      • vip_role_config / vip_role_members / vip_role_events: roles y etiquetas VIP automáticos post-donación.
+      • admin_link_quotas / admin_link_usage: límite de enlaces promocionales por administrador cada 24 h.
+    """
+    _ensure_columns(cursor, "group_settings", [
+        ("fwd_burst_limit", "INTEGER DEFAULT 0"),
+        ("fwd_burst_window", "INTEGER DEFAULT 60"),
+        ("alq_enabled", "INTEGER DEFAULT 0"),
+        ("alq_default_limit", "INTEGER DEFAULT 3"),
+        ("alq_count_forwards", "INTEGER DEFAULT 1"),
+    ])
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS authorized_bots (
+            group_id INTEGER NOT NULL,
+            bot_username TEXT NOT NULL,
+            bot_id INTEGER,
+            added_by INTEGER,
+            added_at INTEGER,
+            PRIMARY KEY (group_id, bot_username)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vip_role_config (
+            group_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            tag_text TEXT DEFAULT 'VIP',
+            donor_min_stars INTEGER DEFAULT 50,
+            donor_days INTEGER DEFAULT 30,
+            micvip_role INTEGER DEFAULT 1,
+            exempt_vectors TEXT DEFAULT '[]',
+            flood_bonus INTEGER DEFAULT 2,
+            autolower_immune INTEGER DEFAULT 1,
+            announce INTEGER DEFAULT 1,
+            updated_at INTEGER,
+            updated_by INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vip_role_members (
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            full_name TEXT,
+            source TEXT DEFAULT 'manual',
+            status TEXT DEFAULT 'active',
+            granted_at INTEGER,
+            expires_at INTEGER,
+            total_stars INTEGER DEFAULT 0,
+            tag_status TEXT DEFAULT 'pending',
+            tag_error TEXT,
+            updated_at INTEGER,
+            PRIMARY KEY (group_id, user_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vip_role_members_exp ON vip_role_members (status, expires_at)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vip_role_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            charge_id TEXT UNIQUE,
+            stars INTEGER DEFAULT 0,
+            qualified INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER,
+            actor_id INTEGER
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vip_role_events_user ON vip_role_events (group_id, user_id, created_at)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_link_quotas (
+            group_id INTEGER NOT NULL,
+            admin_id INTEGER NOT NULL,
+            max_links INTEGER NOT NULL,
+            updated_at INTEGER,
+            updated_by INTEGER,
+            PRIMARY KEY (group_id, admin_id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS admin_link_usage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            group_id INTEGER NOT NULL,
+            admin_id INTEGER NOT NULL,
+            sent_at INTEGER NOT NULL,
+            message_id INTEGER,
+            kind TEXT DEFAULT 'link',
+            allowed INTEGER DEFAULT 1
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_admin_link_usage ON admin_link_usage (group_id, admin_id, sent_at)")
+
+
 def _upsert_setting(group_id: int, column: str, value) -> None:
     column = _ident(column)
     with get_db_connection() as conn:
@@ -459,6 +557,8 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_micvip_audit_group ON micvip_audit (group_id, purchased_at)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_micvip_audit_user ON micvip_audit (group_id, user_id, expires_at)")
+        # v23 · Refuerzo perimetral, Roles VIP automáticos y Cuotas de enlaces de administradores (tablas aditivas).
+        _ensure_v23_schema(cursor)
         cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
         cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")
@@ -6019,6 +6119,582 @@ def get_architect_matrix_summary() -> dict:
         awards = conn.execute("SELECT COUNT(*) FROM architect_awards WHERE created_at > ?", (now - 30 * 86400,)).fetchone()[0]
         chats = conn.execute("SELECT COUNT(DISTINCT group_id) FROM user_groups").fetchone()[0]
     return {"delegates": int(delegates), "licenses": int(licenses), "awards_30d": int(awards), "chats": int(chats)}
+
+
+# ==========================================================================================
+# 🛡️ v23 · FASE 1 — REFUERZO PERIMETRAL: RÁFAGA DE REENVÍOS + BOTS AUTORIZADOS
+# ==========================================================================================
+FWD_BURST_LIMITS = (0, 3, 5, 8)            # 0 = desactivado
+FWD_BURST_WINDOWS = (30, 60, 300)          # segundos
+AUTHORIZED_BOTS_MAX = 25
+BOT_USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,31}$")
+
+
+class BunkerValidationError(ValueError):
+    """Error de validación con detalle {campo: motivo} (la API lo devuelve como 422 "campo: motivo")."""
+
+    def __init__(self, errors: dict):
+        self.errors = dict(errors or {})
+        super().__init__("; ".join(f"{k}: {v}" for k, v in self.errors.items()))
+
+
+def normalize_bot_username(raw) -> str:
+    """'@MiBot' / 't.me/MiBot' / 'mibot' → 'mibot' (minúsculas). '' si no es un alias de bot válido."""
+    text = str(raw or "").strip()
+    text = re.sub(r"^(?:https?://)?(?:t\.me|telegram\.me)/", "", text, flags=re.IGNORECASE).lstrip("@").split("?")[0].strip("/")
+    if not BOT_USERNAME_RE.match(text) or not text.lower().endswith("bot"):
+        return ""
+    return text.lower()
+
+
+def _shield_row_sync(conn, group_id: int) -> dict:
+    try:
+        row = conn.execute("SELECT fwd_burst_limit, fwd_burst_window FROM group_settings WHERE group_id = ?",
+                           (int(group_id),)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    limit = _as_int(row[0], 0) if row else 0
+    window = _as_int(row[1], 60) if row else 60
+    return {"fwd_burst_limit": limit if limit in FWD_BURST_LIMITS else 0,
+            "fwd_burst_window": window if window in FWD_BURST_WINDOWS else 60}
+
+
+def _authorized_bots_sync(conn, group_id: int) -> list:
+    try:
+        rows = conn.execute("SELECT bot_username, bot_id, added_by, added_at FROM authorized_bots WHERE group_id = ? "
+                            "ORDER BY added_at", (int(group_id),)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [{"username": r[0], "bot_id": r[1], "added_by": r[2], "added_at": r[3]} for r in rows]
+
+
+@db_async
+def get_shield_config(group_id: int) -> dict:
+    """{fwd_burst_limit, fwd_burst_window, authorized_bots[], choices} — lo consumen media_locks, el bot y la API."""
+    with get_db_connection() as conn:
+        out = _shield_row_sync(conn, group_id)
+        out["authorized_bots"] = _authorized_bots_sync(conn, group_id)
+    out["choices"] = {"fwd_burst_limit": list(FWD_BURST_LIMITS), "fwd_burst_window": list(FWD_BURST_WINDOWS),
+                      "authorized_bots_max": AUTHORIZED_BOTS_MAX}
+    return out
+
+
+@db_async
+def set_fwd_burst(group_id: int, limit=None, window=None) -> dict:
+    errors = {}
+    if limit is not None and _as_int(limit, -1) not in FWD_BURST_LIMITS:
+        errors["fwd_burst_limit"] = f"usa {', '.join(map(str, FWD_BURST_LIMITS))}."
+    if window is not None and _as_int(window, -1) not in FWD_BURST_WINDOWS:
+        errors["fwd_burst_window"] = f"usa {', '.join(map(str, FWD_BURST_WINDOWS))} s."
+    if errors:
+        raise BunkerValidationError(errors)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+        if limit is not None:
+            conn.execute("UPDATE group_settings SET fwd_burst_limit = ? WHERE group_id = ?", (int(limit), int(group_id)))
+        if window is not None:
+            conn.execute("UPDATE group_settings SET fwd_burst_window = ? WHERE group_id = ?", (int(window), int(group_id)))
+        return _shield_row_sync(conn, group_id)
+
+
+@db_async
+def add_authorized_bot(group_id: int, username: str, bot_id: int = None, added_by: int = None) -> list:
+    clean = normalize_bot_username(username)
+    if not clean:
+        raise BunkerValidationError({"username": "alias de bot inválido (debe terminar en 'bot')."})
+    with _write_transaction() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM authorized_bots WHERE group_id = ?", (int(group_id),)).fetchone()[0]
+        exists = conn.execute("SELECT 1 FROM authorized_bots WHERE group_id = ? AND bot_username = ?",
+                              (int(group_id), clean)).fetchone()
+        if not exists and count >= AUTHORIZED_BOTS_MAX:
+            raise BunkerValidationError({"username": f"máximo {AUTHORIZED_BOTS_MAX} bots autorizados."})
+        conn.execute("""
+            INSERT INTO authorized_bots (group_id, bot_username, bot_id, added_by, added_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(group_id, bot_username) DO UPDATE SET bot_id = COALESCE(excluded.bot_id, authorized_bots.bot_id)
+        """, (int(group_id), clean, int(bot_id) if bot_id else None, added_by, _now_ts()))
+        return _authorized_bots_sync(conn, group_id)
+
+
+@db_async
+def remove_authorized_bot(group_id: int, username: str) -> list:
+    clean = normalize_bot_username(username) or str(username or "").strip().lstrip("@").lower()
+    with _write_transaction() as conn:
+        conn.execute("DELETE FROM authorized_bots WHERE group_id = ? AND bot_username = ?", (int(group_id), clean))
+        return _authorized_bots_sync(conn, group_id)
+
+
+# ==========================================================================================
+# 👑 v23 · FASE 2 — ROLES Y ETIQUETAS VIP AUTOMÁTICOS POST-DONACIÓN / PASE
+# ==========================================================================================
+# Exenciones PARCIALES: solo vectores de contenido "inofensivo". Enlaces, reenvíos, botones inline, ediciones
+# maliciosas, bots inline, invitación de bots, facturas, sorteos y archivos (.apk/.exe…) NUNCA son eximibles:
+# un donante no puede convertirse en vector de estafa.
+VIP_EXEMPTIBLE_VECTORS = ("photo", "video", "long_video", "animation", "sticker", "voice", "audio", "video_note",
+                          "media_group", "poll", "contact", "long_text", "caps", "location", "external_reply",
+                          "spoiler_text", "spoiler_media", "rich_message", "game")
+VIP_SOURCES = ("donation", "micvip", "manual")
+VIP_MIN_STARS_CHOICES = (1, 25, 50, 100, 250, 500, 1000)
+VIP_DAYS_CHOICES = (0, 7, 30, 90, 365)     # 0 = permanente
+VIP_FLOOD_BONUS_RANGE = (1, 5)
+VIP_TAG_MAX = 16                           # límite de Telegram (setChatMemberTag): 0-16 caracteres, sin emoji
+VIP_DEFAULTS = {"enabled": False, "tag_text": "VIP", "donor_min_stars": 50, "donor_days": 30, "micvip_role": True,
+                "exempt_vectors": [], "flood_bonus": 2, "autolower_immune": True, "announce": True}
+_VIP_CFG_COLUMNS = ("enabled", "tag_text", "donor_min_stars", "donor_days", "micvip_role", "exempt_vectors",
+                    "flood_bonus", "autolower_immune", "announce", "updated_at", "updated_by")
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️‍⃣\U000E0000-\U000E007F]")
+
+
+def sanitize_vip_tag(raw) -> str:
+    """Etiqueta apta para Telegram: sin emoji ni controles, espacios colapsados, ≤16 caracteres."""
+    text = _EMOJI_RE.sub("", str(raw or ""))
+    text = "".join(ch for ch in text if ch.isprintable())
+    return re.sub(r"\s+", " ", text).strip()[:VIP_TAG_MAX]
+
+
+def _parse_exempt(raw) -> list:
+    try:
+        values = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except (TypeError, ValueError):
+        values = []
+    return [v for v in VIP_EXEMPTIBLE_VECTORS if v in set(values if isinstance(values, list) else [])]
+
+
+def _vip_config_sync(conn, group_id: int) -> dict:
+    try:
+        row = conn.execute(f"SELECT {', '.join(_VIP_CFG_COLUMNS)} FROM vip_role_config WHERE group_id = ?",
+                           (int(group_id),)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    cfg = dict(VIP_DEFAULTS)
+    cfg["exempt_vectors"] = list(VIP_DEFAULTS["exempt_vectors"])
+    cfg["updated_at"] = cfg["updated_by"] = None
+    if row:
+        data = dict(zip(_VIP_CFG_COLUMNS, row))
+        cfg.update({
+            "enabled": _as_flag(data["enabled"], 0) == 1,
+            "tag_text": sanitize_vip_tag(data["tag_text"]) if data["tag_text"] is not None else VIP_DEFAULTS["tag_text"],
+            "donor_min_stars": max(1, _as_int(data["donor_min_stars"], 50)),
+            "donor_days": max(0, _as_int(data["donor_days"], 30)),
+            "micvip_role": _as_flag(data["micvip_role"], 1) == 1,
+            "exempt_vectors": _parse_exempt(data["exempt_vectors"]),
+            "flood_bonus": max(VIP_FLOOD_BONUS_RANGE[0], min(VIP_FLOOD_BONUS_RANGE[1], _as_int(data["flood_bonus"], 2))),
+            "autolower_immune": _as_flag(data["autolower_immune"], 1) == 1,
+            "announce": _as_flag(data["announce"], 1) == 1,
+            "updated_at": data["updated_at"], "updated_by": data["updated_by"],
+        })
+    return cfg
+
+
+@db_async
+def get_vip_role_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        cfg = _vip_config_sync(conn, group_id)
+    cfg["choices"] = {"donor_min_stars": list(VIP_MIN_STARS_CHOICES), "donor_days": list(VIP_DAYS_CHOICES),
+                      "flood_bonus": list(range(VIP_FLOOD_BONUS_RANGE[0], VIP_FLOOD_BONUS_RANGE[1] + 1)),
+                      "exemptible_vectors": list(VIP_EXEMPTIBLE_VECTORS), "tag_max": VIP_TAG_MAX}
+    return cfg
+
+
+def validate_vip_role_patch(patch) -> dict:
+    """Valida un cambio parcial de la configuración VIP → {columna: valor_db}. Lanza BunkerValidationError."""
+    if not isinstance(patch, dict) or not patch:
+        raise BunkerValidationError({"vip_roles": "se esperaba un objeto con al menos un campo."})
+    clean, errors = {}, {}
+    for key, value in patch.items():
+        if key in ("enabled", "micvip_role", "autolower_immune", "announce"):
+            if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
+                errors[key] = "se esperaba true/false."
+            else:
+                clean[key] = 1 if value else 0
+        elif key == "tag_text":
+            tag = sanitize_vip_tag(value)
+            if str(value or "").strip() and not tag:
+                errors[key] = "la etiqueta no puede ser solo emoji."
+            else:
+                clean[key] = tag
+        elif key == "donor_min_stars":
+            stars = _as_int(value, -1)
+            if not 1 <= stars <= TIP_MAX_STARS:
+                errors[key] = f"entre 1 y {TIP_MAX_STARS} Stars."
+            else:
+                clean[key] = stars
+        elif key == "donor_days":
+            days = _as_int(value, -1)
+            if not 0 <= days <= 3650:
+                errors[key] = "entre 0 (permanente) y 3650 días."
+            else:
+                clean[key] = days
+        elif key == "flood_bonus":
+            bonus = _as_int(value, -1)
+            if not VIP_FLOOD_BONUS_RANGE[0] <= bonus <= VIP_FLOOD_BONUS_RANGE[1]:
+                errors[key] = f"entre {VIP_FLOOD_BONUS_RANGE[0]} y {VIP_FLOOD_BONUS_RANGE[1]}."
+            else:
+                clean[key] = bonus
+        elif key == "exempt_vectors":
+            if not isinstance(value, list) or any(v not in VIP_EXEMPTIBLE_VECTORS for v in value):
+                errors[key] = f"lista de vectores eximibles ({', '.join(VIP_EXEMPTIBLE_VECTORS)})."
+            else:
+                clean[key] = json.dumps([v for v in VIP_EXEMPTIBLE_VECTORS if v in set(value)])
+        else:
+            errors[key] = "campo desconocido."
+    if errors:
+        raise BunkerValidationError({f"vip_roles.{k}": v for k, v in errors.items()})
+    return clean
+
+
+@db_async
+def update_vip_role_config(group_id: int, patch: dict, updated_by: int = None) -> dict:
+    clean = validate_vip_role_patch(patch)
+    clean["updated_at"] = _now_ts()
+    clean["updated_by"] = updated_by
+    cols = ", ".join(_ident(c) for c in clean)
+    marks = ", ".join("?" for _ in clean)
+    updates = ", ".join(f"{_ident(c)} = excluded.{_ident(c)}" for c in clean)
+    with _write_transaction() as conn:
+        conn.execute(f"INSERT INTO vip_role_config (group_id, {cols}) VALUES (?, {marks}) "
+                     f"ON CONFLICT(group_id) DO UPDATE SET {updates}", (int(group_id), *clean.values()))
+        return _vip_config_sync(conn, group_id)
+
+
+_VIP_MEMBER_COLS = ("group_id", "user_id", "username", "full_name", "source", "status", "granted_at", "expires_at",
+                    "total_stars", "tag_status", "tag_error", "updated_at")
+
+
+def _vip_member_row(conn, group_id: int, user_id: int):
+    row = conn.execute(f"SELECT {', '.join(_VIP_MEMBER_COLS)} FROM vip_role_members WHERE group_id = ? AND user_id = ?",
+                       (int(group_id), int(user_id))).fetchone()
+    return dict(zip(_VIP_MEMBER_COLS, row)) if row else None
+
+
+def _vip_is_active(member: dict, now: int) -> bool:
+    return bool(member) and member.get("status") == "active" and (member.get("expires_at") is None or int(member["expires_at"]) > now)
+
+
+@db_async
+def vip_role_grant(group_id: int, user_id: int, source: str, *, stars: int = 0, charge_id: str = None,
+                   days: int = None, expires_at: int = None, username: str = None, full_name: str = None,
+                   actor_id: int = None) -> dict:
+    """
+    Concede o extiende el rol VIP (BEGIN IMMEDIATE, idempotente por charge_id). Reglas:
+      • donation: suma las donaciones del periodo (donor_days; 0 = histórico). Si alcanza donor_min_stars, el rol
+        se concede / extiende donor_days días desde max(ahora, expiración actual) — 0 días = permanente.
+      • micvip: el rol dura lo mismo que el pase (expires_at), nunca acorta una expiración mayor.
+      • manual: days (0 = permanente) concedido por el dueño desde el bot o la Mini App.
+    → {"granted": bool, "duplicate": bool, "qualified": bool, "is_new": bool, "member": dict|None, "config": dict}
+    """
+    if source not in VIP_SOURCES:
+        raise ValueError(f"Origen VIP desconocido: {source!r}")
+    now = _now_ts()
+    with _write_transaction() as conn:
+        cfg = _vip_config_sync(conn, group_id)
+        if charge_id and conn.execute("SELECT 1 FROM vip_role_events WHERE charge_id = ?", (str(charge_id),)).fetchone():
+            return {"granted": False, "duplicate": True, "qualified": False, "is_new": False,
+                    "member": _vip_member_row(conn, group_id, user_id), "config": cfg}
+        current = _vip_member_row(conn, group_id, user_id)
+        was_active = _vip_is_active(current, now)
+        qualified, new_exp, permanent = False, None, False
+
+        if source == "donation":
+            window_start = 0 if cfg["donor_days"] == 0 else now - cfg["donor_days"] * 86400
+            prior = conn.execute("SELECT COALESCE(SUM(stars), 0) FROM vip_role_events WHERE group_id = ? AND user_id = ? "
+                                 "AND source = 'donation' AND created_at >= ?",
+                                 (int(group_id), int(user_id), window_start)).fetchone()[0]
+            qualified = cfg["enabled"] and int(prior) + int(stars or 0) >= cfg["donor_min_stars"]
+            if qualified:
+                if cfg["donor_days"] == 0:
+                    permanent = True
+                else:
+                    base = max(now, int(current["expires_at"])) if (was_active and current["expires_at"]) else now
+                    new_exp = base + cfg["donor_days"] * 86400
+        elif source == "micvip":
+            qualified = cfg["enabled"] and cfg["micvip_role"] and bool(expires_at) and int(expires_at) > now
+            new_exp = int(expires_at) if qualified else None
+        else:  # manual
+            qualified = True
+            d = max(0, _as_int(days, 30))
+            permanent = d == 0
+            new_exp = None if permanent else now + d * 86400
+
+        if qualified and was_active and current["expires_at"] is None:
+            permanent = True                                  # un rol permanente nunca pasa a temporal
+        if qualified and not permanent and was_active and current["expires_at"]:
+            new_exp = max(int(new_exp), int(current["expires_at"]))
+
+        conn.execute("INSERT INTO vip_role_events (group_id, user_id, source, charge_id, stars, qualified, created_at, "
+                     "expires_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (int(group_id), int(user_id), source, str(charge_id) if charge_id else None, int(stars or 0),
+                      1 if qualified else 0, now, None if permanent else new_exp, actor_id))
+        add_stars = int(stars or 0) if source in ("donation", "micvip") else 0
+        if qualified:
+            conn.execute("""
+                INSERT INTO vip_role_members (group_id, user_id, username, full_name, source, status, granted_at,
+                                              expires_at, total_stars, tag_status, tag_error, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, 'pending', NULL, ?)
+                ON CONFLICT(group_id, user_id) DO UPDATE SET
+                    username = COALESCE(excluded.username, vip_role_members.username),
+                    full_name = COALESCE(excluded.full_name, vip_role_members.full_name),
+                    source = excluded.source, status = 'active',
+                    granted_at = CASE WHEN vip_role_members.status = 'active' AND
+                                      (vip_role_members.expires_at IS NULL OR vip_role_members.expires_at > ?)
+                                 THEN vip_role_members.granted_at ELSE excluded.granted_at END,
+                    expires_at = excluded.expires_at,
+                    total_stars = vip_role_members.total_stars + ?,
+                    tag_status = CASE WHEN vip_role_members.tag_status = 'applied' AND vip_role_members.status = 'active'
+                                 THEN 'applied' ELSE 'pending' END,
+                    updated_at = excluded.updated_at
+            """, (int(group_id), int(user_id), username, full_name, source, now, None if permanent else new_exp,
+                  add_stars, now, now, add_stars))
+        elif add_stars and current:
+            conn.execute("UPDATE vip_role_members SET total_stars = total_stars + ?, updated_at = ? WHERE group_id = ? AND user_id = ?",
+                         (add_stars, now, int(group_id), int(user_id)))
+        member = _vip_member_row(conn, group_id, user_id)
+        return {"granted": bool(qualified), "duplicate": False, "qualified": bool(qualified),
+                "is_new": bool(qualified) and not was_active, "member": member, "config": cfg}
+
+
+@db_async
+def vip_role_revoke(group_id: int, user_id: int, actor_id: int = None) -> dict:
+    now = _now_ts()
+    with _write_transaction() as conn:
+        current = _vip_member_row(conn, group_id, user_id)
+        if not current:
+            return {}
+        conn.execute("UPDATE vip_role_members SET status = 'revoked', expires_at = ?, updated_at = ? "
+                     "WHERE group_id = ? AND user_id = ?", (now, now, int(group_id), int(user_id)))
+        conn.execute("INSERT INTO vip_role_events (group_id, user_id, source, stars, qualified, created_at, actor_id) "
+                     "VALUES (?, ?, 'manual', 0, 0, ?, ?)", (int(group_id), int(user_id), now, actor_id))
+        return _vip_member_row(conn, group_id, user_id)
+
+
+@db_async
+def vip_role_member_get(group_id: int, user_id: int):
+    """Miembro con rol VIP VIGENTE (dict) o None. Lo consulta la matriz perimetral (con caché TTL en vip_roles)."""
+    with get_db_connection() as conn:
+        try:
+            member = _vip_member_row(conn, group_id, user_id)
+        except sqlite3.OperationalError:
+            return None
+    return member if _vip_is_active(member, _now_ts()) else None
+
+
+@db_async
+def vip_role_set_tag_status(group_id: int, user_id: int, status: str, error: str = None) -> None:
+    with _write_transaction() as conn:
+        conn.execute("UPDATE vip_role_members SET tag_status = ?, tag_error = ?, updated_at = ? WHERE group_id = ? AND user_id = ?",
+                     (str(status)[:16], (error or None) and str(error)[:200], _now_ts(), int(group_id), int(user_id)))
+
+
+@db_async
+def vip_role_list(group_id: int, status: str = "all", limit: int = 20, offset: int = 0) -> dict:
+    now = _now_ts()
+    limit = max(1, min(200, _as_int(limit, 20)))
+    offset = max(0, _as_int(offset, 0))
+    active_sql = "(status = 'active' AND (expires_at IS NULL OR expires_at > ?))"
+    where, params = "group_id = ?", [int(group_id)]
+    if status == "active":
+        where += f" AND {active_sql}"
+        params.append(now)
+    elif status == "expired":
+        where += f" AND NOT {active_sql}"
+        params.append(now)
+    with get_db_connection() as conn:
+        try:
+            total = conn.execute(f"SELECT COUNT(*) FROM vip_role_members WHERE {where}", params).fetchone()[0]
+            rows = conn.execute(f"SELECT {', '.join(_VIP_MEMBER_COLS)} FROM vip_role_members WHERE {where} "
+                                f"ORDER BY updated_at DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+            summary = conn.execute(f"""
+                SELECT COUNT(*), COALESCE(SUM(CASE WHEN {active_sql} THEN 1 ELSE 0 END), 0),
+                       COALESCE(SUM(total_stars), 0),
+                       COALESCE(SUM(CASE WHEN {active_sql} AND tag_status = 'applied' THEN 1 ELSE 0 END), 0)
+                FROM vip_role_members WHERE group_id = ?
+            """, (now, now, int(group_id))).fetchone()
+        except sqlite3.OperationalError:
+            return {"records": [], "total": 0, "summary": {"members": 0, "active": 0, "stars": 0, "tagged": 0}}
+    records = []
+    for r in rows:
+        rec = dict(zip(_VIP_MEMBER_COLS, r))
+        rec["active"] = _vip_is_active(rec, now)
+        records.append(rec)
+    return {"records": records, "total": int(total),
+            "summary": {"members": int(summary[0]), "active": int(summary[1]), "stars": int(summary[2]), "tagged": int(summary[3])}}
+
+
+@db_async
+def vip_role_expire_due(limit: int = 200) -> list:
+    """Marca 'expired' los roles vencidos y devuelve [(group_id, user_id, tag_status)] para retirar su etiqueta."""
+    now = _now_ts()
+    with _write_transaction() as conn:
+        try:
+            rows = conn.execute("SELECT group_id, user_id, tag_status FROM vip_role_members WHERE status = 'active' "
+                                "AND expires_at IS NOT NULL AND expires_at <= ? LIMIT ?", (now, int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        for gid, uid, _tag in rows:
+            conn.execute("UPDATE vip_role_members SET status = 'expired', updated_at = ? WHERE group_id = ? AND user_id = ?",
+                         (now, gid, uid))
+        # Retención acotada del libro de eventos: 400 días (el resumen por miembro conserva el total de Stars).
+        conn.execute("DELETE FROM vip_role_events WHERE created_at < ?", (now - 400 * 86400,))
+    return [(int(r[0]), int(r[1]), r[2]) for r in rows]
+
+
+@db_async
+def vip_role_pending_tags(limit: int = 50) -> list:
+    """Roles vigentes cuya etiqueta aún no se aplicó (reintento periódico): [(group_id, user_id, tag_status)]."""
+    now = _now_ts()
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute("SELECT group_id, user_id, tag_status FROM vip_role_members WHERE status = 'active' "
+                                "AND (expires_at IS NULL OR expires_at > ?) AND tag_status IN ('pending', 'failed') "
+                                "ORDER BY updated_at LIMIT ?", (now, int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [(int(r[0]), int(r[1]), r[2]) for r in rows]
+
+
+# ==========================================================================================
+# 🔗 v23 · FASE 3 — CUOTA DIARIA DE ENLACES / PROMOCIONES POR ADMINISTRADOR (ventana móvil de 24 h)
+# ==========================================================================================
+ALQ_LIMIT_RANGE = (0, 100)        # 0 = el administrador no puede publicar enlaces
+ALQ_UNLIMITED = -1                # excepción individual: sin límite
+ALQ_WINDOW_SECONDS = 86400
+ALQ_RETENTION_SECONDS = 3 * 86400
+ALQ_OVERRIDES_MAX = 200
+
+
+def _alq_config_sync(conn, group_id: int) -> dict:
+    try:
+        row = conn.execute("SELECT alq_enabled, alq_default_limit, alq_count_forwards FROM group_settings WHERE group_id = ?",
+                           (int(group_id),)).fetchone()
+        overrides = conn.execute("SELECT admin_id, max_links FROM admin_link_quotas WHERE group_id = ?",
+                                 (int(group_id),)).fetchall()
+    except sqlite3.OperationalError:
+        row, overrides = None, []
+    limit = _as_int(row[1], 3) if row else 3
+    return {
+        "enabled": bool(row and _as_flag(row[0], 0) == 1),
+        "default_limit": max(ALQ_LIMIT_RANGE[0], min(ALQ_LIMIT_RANGE[1], limit)),
+        "count_forwards": bool(_as_flag(row[2], 1) == 1) if row else True,
+        "overrides": {str(int(a)): int(m) for a, m in overrides},
+        "window_seconds": ALQ_WINDOW_SECONDS,
+    }
+
+
+@db_async
+def get_admin_link_quota_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        return _alq_config_sync(conn, group_id)
+
+
+@db_async
+def update_admin_link_quota_config(group_id: int, patch: dict, updated_by: int = None) -> dict:
+    """
+    {enabled?, default_limit?, count_forwards?, overrides?: {admin_id: límite | -1 (sin límite) | null (borrar)}}.
+    Todo o nada (BEGIN IMMEDIATE). Lanza BunkerValidationError con "campo: motivo".
+    """
+    if not isinstance(patch, dict) or not patch:
+        raise BunkerValidationError({"admin_link_quotas": "se esperaba un objeto con al menos un campo."})
+    errors, cols, ov_changes = {}, {}, {}
+    for key, value in patch.items():
+        if key in ("enabled", "count_forwards"):
+            if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
+                errors[key] = "se esperaba true/false."
+            else:
+                cols["alq_enabled" if key == "enabled" else "alq_count_forwards"] = 1 if value else 0
+        elif key == "default_limit":
+            lim = _as_int(value, -999)
+            if not ALQ_LIMIT_RANGE[0] <= lim <= ALQ_LIMIT_RANGE[1]:
+                errors[key] = f"entre {ALQ_LIMIT_RANGE[0]} y {ALQ_LIMIT_RANGE[1]}."
+            else:
+                cols["alq_default_limit"] = lim
+        elif key == "overrides":
+            if not isinstance(value, dict):
+                errors[key] = "se esperaba {admin_id: límite}."
+                continue
+            for admin_raw, lim_raw in value.items():
+                admin_id = _as_int(admin_raw, 0)
+                if admin_id <= 0:
+                    errors[f"overrides.{admin_raw}"] = "id de administrador inválido."
+                    continue
+                if lim_raw is None:
+                    ov_changes[admin_id] = None
+                    continue
+                lim = _as_int(lim_raw, -999)
+                if lim != ALQ_UNLIMITED and not ALQ_LIMIT_RANGE[0] <= lim <= ALQ_LIMIT_RANGE[1]:
+                    errors[f"overrides.{admin_id}"] = f"entre {ALQ_LIMIT_RANGE[0]} y {ALQ_LIMIT_RANGE[1]}, o -1 (sin límite)."
+                else:
+                    ov_changes[admin_id] = lim
+        else:
+            errors[key] = "campo desconocido."
+    if errors:
+        raise BunkerValidationError({f"admin_link_quotas.{k}": v for k, v in errors.items()})
+    now = _now_ts()
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
+        for col, val in cols.items():
+            conn.execute(f"UPDATE group_settings SET {_ident(col)} = ? WHERE group_id = ?", (val, int(group_id)))
+        for admin_id, lim in ov_changes.items():
+            if lim is None:
+                conn.execute("DELETE FROM admin_link_quotas WHERE group_id = ? AND admin_id = ?", (int(group_id), admin_id))
+            else:
+                conn.execute("INSERT INTO admin_link_quotas (group_id, admin_id, max_links, updated_at, updated_by) "
+                             "VALUES (?, ?, ?, ?, ?) ON CONFLICT(group_id, admin_id) DO UPDATE SET "
+                             "max_links = excluded.max_links, updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                             (int(group_id), admin_id, lim, now, updated_by))
+        total = conn.execute("SELECT COUNT(*) FROM admin_link_quotas WHERE group_id = ?", (int(group_id),)).fetchone()[0]
+        if total > ALQ_OVERRIDES_MAX:
+            raise BunkerValidationError({"admin_link_quotas.overrides": f"máximo {ALQ_OVERRIDES_MAX} excepciones."})
+        return _alq_config_sync(conn, group_id)
+
+
+@db_async
+def admin_link_quota_consume(group_id: int, admin_id: int, message_id: int = None, kind: str = "link", now: int = None) -> dict:
+    """
+    Consume UNA publicación promocional del administrador (atómico, BEGIN IMMEDIATE).
+    → {"enabled", "allowed", "used", "limit", "unlimited", "reset_at", "remaining"}. Los intentos rechazados quedan
+    registrados (allowed=0) para la auditoría, pero NO consumen cuota.
+    """
+    now = int(now or _now_ts())
+    since = now - ALQ_WINDOW_SECONDS
+    with _write_transaction() as conn:
+        cfg = _alq_config_sync(conn, group_id)
+        if not cfg["enabled"]:
+            return {"enabled": False, "allowed": True, "used": 0, "limit": None, "unlimited": True, "reset_at": None, "remaining": None}
+        limit = cfg["overrides"].get(str(int(admin_id)), cfg["default_limit"])
+        unlimited = limit == ALQ_UNLIMITED
+        rows = conn.execute("SELECT sent_at FROM admin_link_usage WHERE group_id = ? AND admin_id = ? AND allowed = 1 "
+                            "AND sent_at > ? ORDER BY sent_at", (int(group_id), int(admin_id), since)).fetchall()
+        used = len(rows)
+        allowed = unlimited or used < limit
+        conn.execute("INSERT INTO admin_link_usage (group_id, admin_id, sent_at, message_id, kind, allowed) VALUES (?, ?, ?, ?, ?, ?)",
+                     (int(group_id), int(admin_id), now, message_id, str(kind)[:16], 1 if allowed else 0))
+        conn.execute("DELETE FROM admin_link_usage WHERE group_id = ? AND sent_at < ?", (int(group_id), now - ALQ_RETENTION_SECONDS))
+        if allowed:
+            used += 1
+        reset_at = None
+        if not unlimited and used >= limit:
+            # El cupo se libera cuando la publicación más antigua de la ventana cumple 24 h.
+            stamps = [int(r[0]) for r in rows] + ([now] if allowed else [])
+            reset_at = (stamps[used - limit] if limit > 0 and len(stamps) >= limit else None)
+            reset_at = (reset_at + ALQ_WINDOW_SECONDS) if reset_at else None
+        return {"enabled": True, "allowed": bool(allowed), "used": used, "limit": None if unlimited else limit,
+                "unlimited": unlimited, "reset_at": reset_at,
+                "remaining": None if unlimited else max(0, limit - used)}
+
+
+@db_async
+def admin_link_usage_summary(group_id: int) -> dict:
+    """{admin_id(str): {used, blocked, last_at, oldest_at}} en la ventana móvil de 24 h."""
+    since = _now_ts() - ALQ_WINDOW_SECONDS
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute("""
+                SELECT admin_id, SUM(CASE WHEN allowed = 1 THEN 1 ELSE 0 END), SUM(CASE WHEN allowed = 0 THEN 1 ELSE 0 END),
+                       MAX(sent_at), MIN(CASE WHEN allowed = 1 THEN sent_at END)
+                FROM admin_link_usage WHERE group_id = ? AND sent_at > ? GROUP BY admin_id
+            """, (int(group_id), since)).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    return {str(int(r[0])): {"used": int(r[1] or 0), "blocked": int(r[2] or 0), "last_at": r[3], "oldest_at": r[4]} for r in rows}
 
 
 # Inicialización del esquema al importar (al final, para que todas las funciones —incluida la Matriz— existan).

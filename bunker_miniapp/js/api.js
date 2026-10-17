@@ -369,6 +369,60 @@ export const api = {
         return await this.get(`/chat/${chat}/micvip-audit?${q}`, { timeoutMs: CONFIG.MICVIP_AUDIT?.TIMEOUT_MS || 12000, noStore: true });
     },
 
+    // --- v23 · Refuerzo perimetral, Roles VIP y Cuotas de enlaces de administradores ---
+
+    /** GET /api/chat/{id}/shield → { shield: { fwd_burst_limit, fwd_burst_window, authorized_bots[], choices } } */
+    async fetchShield(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/shield?_=${Date.now()}`, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/shield — { fwd_burst_limit?, fwd_burst_window?, add_bot?, remove_bot? }. Solo el dueño (403). */
+    async updateShield(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/shield`, { shield: patch }, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
+    },
+
+    /** GET /api/chat/{id}/vip-roles?status=all|active|expired&limit&offset → { vip_roles, records[], total, summary } */
+    async fetchVipRoles(chatId, { status = 'all', limit = 20, offset = 0 } = {}) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        const q = `status=${encodeURIComponent(status)}&limit=${Number(limit) || 20}&offset=${Number(offset) || 0}&_=${Date.now()}`;
+        return await this.get(`/chat/${chat}/vip-roles?${q}`, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/vip-roles — cambio parcial de la configuración VIP. 422 "campo: motivo". */
+    async updateVipRoles(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/vip-roles`, { vip_roles: patch }, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
+    },
+
+    /** POST /api/chat/{id}/vip-roles/member — { action: 'grant'|'revoke'|'retag', user_id, days? } */
+    async vipRoleMember(chatId, action, userId, days) {
+        const chat = numericId(chatId), user = numericId(userId);
+        if (!chat || !user) return INVALID_ID_RESULT;
+        const body = { action, user_id: Number(user) };
+        if (action === 'grant') body.days = Number(days) || 0;
+        return await this.post(`/chat/${chat}/vip-roles/member`, body, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
+    },
+
+    /** GET /api/chat/{id}/admin-link-quotas → { admin_link_quotas: { config, admins[], checked_at } } */
+    async fetchAdminQuotas(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/admin-link-quotas?_=${Date.now()}`, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/admin-link-quotas — { enabled?, default_limit?, count_forwards?, overrides?: { id: n|-1|null } } */
+    async updateAdminQuotas(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/admin-link-quotas`, { admin_link_quotas: patch }, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
+    },
+
     // --- v21 · Idioma del operador (compartido con el bot: users.lang) ---
 
     /** GET /api/user/language → { lang, chosen, default, supported } */
@@ -610,7 +664,8 @@ export const api = {
    Eventos del servidor: hello, pong, error, analytics_snapshot, initial_state,
    state_refresh, message, level_up, voice_presence, voice_call_started,
    voice_call_ended, stars_payment, settings_updated, security_block, raid_shield (v9),
-   assets_status (v18 · estado en vivo del Bot Clon y del Centinela), subscribed, server_shutdown.
+   assets_status (v18 · estado en vivo del Bot Clon y del Centinela), vip_role y link_quota (v23),
+   subscribed, server_shutdown.
    Eventos locales: status, open, close, reconnect_scheduled, reconnected, gap, dead,
    auth_failed.
 
@@ -621,7 +676,7 @@ export const api = {
 const LIVE_EVENTS = new Set([
     'message', 'level_up', 'voice_call_started', 'voice_call_ended',
     'voice_presence', 'stars_payment', 'settings_updated', 'security_block', 'raid_shield',
-    'assets_status'
+    'assets_status', 'vip_role', 'link_quota'   // v23
 ]);
 const SNAPSHOT_EVENTS = new Set(['analytics_snapshot', 'initial_state', 'state_refresh']);
 const AUTH_CLOSE_CODES = new Set([4401, 4403, 1008]);

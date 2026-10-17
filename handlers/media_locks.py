@@ -29,6 +29,7 @@ import html
 import logging
 import re
 import time
+from collections import OrderedDict, deque
 from typing import Optional
 
 from aiogram import BaseMiddleware, Bot, F, Router
@@ -41,10 +42,17 @@ from database.database import (
     MEDIA_LOCK_SEVERITY,
     LEGACY_LOCK_GROUPS,
     LONG_VIDEO_RANGE,
+    FWD_BURST_LIMITS,
+    FWD_BURST_WINDOWS,
+    BunkerValidationError,
+    add_authorized_bot,
     ban_user,
     effective_media_lock_rule,
     get_lock_status,
     get_media_locks_config,
+    get_shield_config,
+    remove_authorized_bot,
+    set_fwd_burst,
     set_lock_status,
     set_long_video_max_seconds,
     set_media_lock_rule,
@@ -188,11 +196,36 @@ def _is_tg_url(url: str) -> bool:
     return bool(_TG_RE.search(url or ""))
 
 
+def _hidden_urls(message: Message) -> list:
+    """
+    v23 · URLs que NO están en el texto visible: vista previa forzada (link_preview_options.url) y botones URL de un
+    teclado inline (mensajes reenviados de bots o enviados vía bot inline). Son la forma más común de camuflar un enlace.
+    """
+    out = []
+    preview = getattr(message, "link_preview_options", None)
+    if preview is not None and getattr(preview, "url", None):
+        out.append(("vista previa", str(preview.url)))
+    markup = getattr(message, "reply_markup", None)
+    for row in (getattr(markup, "inline_keyboard", None) or []):
+        for button in row or []:
+            url = getattr(button, "url", None) or getattr(getattr(button, "login_url", None), "url", None)
+            if url:
+                out.append(("botón", str(url)))
+    return out[:20]
+
+
 def _link_scan(message: Message, text: str) -> dict:
     """Análisis de enlaces: {'web': bool, 'tg': bool, 'masked': bool, 'detail': str}."""
     entities = list(message.entities or []) + list(message.caption_entities or [])
     web = tg = masked = False
     detail = ""
+    for where, url in _hidden_urls(message):
+        masked = True
+        detail = detail or where
+        if _is_tg_url(url):
+            tg = True
+        else:
+            web = True
     for ent in entities:
         kind = _etype(ent)
         if kind == "text_link" and getattr(ent, "url", None):
@@ -228,14 +261,32 @@ def _link_scan(message: Message, text: str) -> dict:
     return {"web": web, "tg": tg, "masked": masked, "detail": detail}
 
 
-def detect_vectors(message: Message, long_video_seconds: int, bot_id: Optional[int] = None) -> list:
+def _origin_bot_username(message: Message) -> str:
+    """Alias (minúsculas) del bot de origen de un reenvío o de un mensaje vía bot inline; '' si no hay bot."""
+    via = getattr(message, "via_bot", None)
+    if via is not None and getattr(via, "username", None):
+        return via.username.lower()
+    origin = getattr(message, "forward_origin", None)
+    sender = getattr(origin, "sender_user", None) if origin is not None else None
+    if sender is not None and getattr(sender, "is_bot", False) and getattr(sender, "username", None):
+        return sender.username.lower()
+    return ""
+
+
+def detect_vectors(message: Message, long_video_seconds: int, bot_id: Optional[int] = None,
+                   authorized_bots: frozenset = frozenset()) -> list:
     """
     Vectores presentes en el mensaje → [(vector, detalle)]. Puro (sin E/S). No evalúa reglas: solo detecta.
     'bot_added' y 'edited_msg' no se detectan aquí (son eventos, no contenido).
+    v23: authorized_bots = alias (minúsculas) que el dueño autorizó. Un mensaje vía / reenviado desde uno de ellos
+    no dispara via_bot, inline_buttons ni forward_any (sí los enlaces y el resto de vectores de contenido).
     """
     found = []
     add = found.append
     text = message.text or message.caption or ""
+    origin_bot = _origin_bot_username(message)
+    own_via = bot_id is not None and getattr(getattr(message, "via_bot", None), "id", None) == bot_id
+    trusted_bot = own_via or (bool(origin_bot) and origin_bot in authorized_bots)
 
     # ---- Página 1 ----
     if message.photo:
@@ -249,6 +300,11 @@ def detect_vectors(message: Message, long_video_seconds: int, bot_id: Optional[i
             add(("long_video", f"{duration // 60} min" if duration else f"{size // (1024 * 1024)} MB"))
     if message.animation:
         add(("animation", ""))
+        # v23 · Película camuflada como GIF (MP4 "animación" sin sonido de larga duración).
+        anim_duration = int(getattr(message.animation, "duration", 0) or 0)
+        anim_size = int(getattr(message.animation, "file_size", 0) or 0)
+        if anim_duration > long_video_seconds or anim_size > LARGE_VIDEO_BYTES:
+            add(("long_video", f"GIF {anim_duration // 60} min" if anim_duration else f"GIF {anim_size // (1024 * 1024)} MB"))
     if message.sticker:
         add(("sticker", ""))
     if message.voice:
@@ -271,24 +327,27 @@ def detect_vectors(message: Message, long_video_seconds: int, bot_id: Optional[i
         add(("media_group", ""))
 
     # ---- Página 2 ----
-    if text or message.entities or message.caption_entities:
+    if text or message.entities or message.caption_entities or _hidden_urls(message):
         links = _link_scan(message, text)
         if links["web"] or links["masked"]:
             add(("masked_links", links["detail"]))
         if links["tg"]:
             add(("tg_links", ""))
     origin = getattr(message, "forward_origin", None)
-    if origin is not None and not getattr(message, "is_automatic_forward", False):
+    if origin is not None and not getattr(message, "is_automatic_forward", False) and not trusted_bot:
         origin_chat = getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
         if not (origin_chat is not None and getattr(origin_chat, "id", None) == message.chat.id):
-            add(("forward_any", type(origin).__name__.replace("MessageOrigin", "").lower()))
+            kind = type(origin).__name__.replace("MessageOrigin", "").lower()
+            if origin_bot:
+                kind = f"bot @{origin_bot}"   # v23 · reenvío desde un bot externo
+            add(("forward_any", kind))
     if getattr(message, "story", None) is not None:
         add(("forward_story", ""))
     if getattr(message, "external_reply", None) is not None:
         add(("external_reply", ""))
     markup = getattr(message, "reply_markup", None)
-    if markup is not None and getattr(markup, "inline_keyboard", None):
-        add(("inline_buttons", ""))
+    if markup is not None and getattr(markup, "inline_keyboard", None) and not trusted_bot:
+        add(("inline_buttons", f"@{origin_bot}" if origin_bot else ""))
     if message.poll:
         add(("poll", ""))
     if message.contact:
@@ -314,7 +373,7 @@ def detect_vectors(message: Message, long_video_seconds: int, bot_id: Optional[i
     if getattr(message, "giveaway", None) is not None or getattr(message, "giveaway_winners", None) is not None:
         add(("giveaway", ""))
     via = getattr(message, "via_bot", None)
-    if via is not None and getattr(via, "id", None) != bot_id:
+    if via is not None and getattr(via, "id", None) != bot_id and not trusted_bot:
         add(("via_bot", f"@{via.username}" if getattr(via, "username", None) else ""))
     rich = sum(1 for e in entities if _etype(e) in _RICH_TYPES)
     if rich >= RICH_ENTITY_LIMIT:
@@ -330,22 +389,34 @@ def _most_severe(candidates: list) -> Optional[tuple]:
 
 
 def evaluate_message(message: Message, state: dict, *, is_edit: bool = False, blacklist_hit: str = "",
-                     bot_id: Optional[int] = None) -> Optional[dict]:
+                     bot_id: Optional[int] = None, authorized_bots: frozenset = frozenset(),
+                     exempt: frozenset = frozenset(), original: Optional[frozenset] = None,
+                     found: Optional[list] = None) -> Optional[dict]:
     """
     Decide la sanción de un mensaje. Devuelve {'key', 'detail', 'action', 'delete', 'edit'} o None si se permite.
     Una sola sanción por mensaje (la más severa); el borrado se aplica si CUALQUIER regla implicada lo pide.
     En EDICIONES se aplican las reglas de cada vector y, además, la de 'edited_msg' si la edición inyecta un
     vector de EDIT_INJECTION_VECTORS o una palabra de la lista negra.
+    v23:
+      • exempt: vectores eximidos por un rol VIP (nunca durante el Pánico / modo nocturno: el piso manda).
+      • original: huella de vectores del mensaje ANTES de editarse. Si se conoce, la edición solo se evalúa por
+        lo que AÑADE (no se re-sanciona contenido ya juzgado al publicarse); sin huella, criterio heredado.
     """
-    found = detect_vectors(message, state["long_video_max_seconds"], bot_id=bot_id)
+    if found is None:
+        found = detect_vectors(message, state["long_video_max_seconds"], bot_id=bot_id, authorized_bots=authorized_bots)
+    floor = state.get("floor", ())
     candidates = []
     for key, detail in found:
+        if is_edit and original is not None and key in original:
+            continue
+        if key in exempt and key not in floor:
+            continue
         rule = effective_media_lock_rule(state, key)
         if rule["action"] != "off":
             candidates.append((key, detail, rule))
     if is_edit:
         edit_rule = effective_media_lock_rule(state, "edited_msg")
-        injected = [(k, d) for k, d in found if k in EDIT_INJECTION_VECTORS]
+        injected = [(k, d) for k, d in found if k in EDIT_INJECTION_VECTORS and (original is None or k not in original)]
         if blacklist_hit:
             injected.append(("edited_msg", f"lista negra: {blacklist_hit}"))
         if edit_rule["action"] != "off" and injected:
@@ -446,10 +517,130 @@ async def apply_sanction(bot: Bot, chat_id: int, user, verdict: dict, message: O
         logger.error(f"❌ [MediaLocks] Sanción '{action}' fallida para {user_id} en {chat_id}: {ex}")
 
 
-async def inspect_and_enforce(bot: Bot, message: Message, *, is_edit: bool = False, blacklist=None) -> bool:
+# ==========================================
+# 🛡️ v23 · REFUERZO: HUELLAS DE EDICIÓN, RÁFAGAS DE REENVÍOS Y BOTS AUTORIZADOS
+# ==========================================
+# Todas las estructuras en memoria son ACOTADAS (tamaño máximo + TTL) y se purgan solas (purge_v23_state).
+FINGERPRINT_TTL_S = 48 * 3600
+FINGERPRINT_MAX = 20000
+_fingerprints: "OrderedDict" = OrderedDict()   # (chat, message_id) -> (monotonic, frozenset(vectores))
+
+FWD_BURST_MAX_KEYS = 5000
+_fwd_bursts: dict = {}                          # (chat, user) -> deque[(monotonic, message_id)]
+
+SHIELD_CACHE_TTL_S = 30
+SHIELD_CACHE_MAX = 2000
+_shield_cache: dict = {}                        # chat -> (monotonic, config)
+
+
+def remember_fingerprint(chat_id: int, message_id: int, vectors) -> None:
+    key = (int(chat_id), int(message_id))
+    _fingerprints.pop(key, None)
+    _fingerprints[key] = (time.monotonic(), frozenset(vectors))
+    while len(_fingerprints) > FINGERPRINT_MAX:
+        _fingerprints.popitem(last=False)
+
+
+def original_vectors(chat_id: int, message_id: int) -> Optional[frozenset]:
+    """Vectores que tenía el mensaje al publicarse (o en su última edición revisada); None si no se conoce."""
+    entry = _fingerprints.get((int(chat_id), int(message_id)))
+    if not entry:
+        return None
+    if time.monotonic() - entry[0] > FINGERPRINT_TTL_S:
+        _fingerprints.pop((int(chat_id), int(message_id)), None)
+        return None
+    return entry[1]
+
+
+def forget_shield_cache(chat_id: Optional[int] = None) -> None:
+    if chat_id is None:
+        _shield_cache.clear()
+    else:
+        _shield_cache.pop(int(chat_id), None)
+
+
+async def get_shield(chat_id: int) -> dict:
+    """Configuración de refuerzo (ráfaga + bots autorizados) con caché de 30 s. Nunca lanza."""
+    now = time.monotonic()
+    hit = _shield_cache.get(int(chat_id))
+    if hit and now - hit[0] < SHIELD_CACHE_TTL_S:
+        return hit[1]
+    try:
+        cfg = await get_shield_config(int(chat_id))
+    except Exception as ex:
+        logger.debug(f"[MediaLocks] Refuerzo no disponible en {chat_id}: {ex}")
+        cfg = {"fwd_burst_limit": 0, "fwd_burst_window": 60, "authorized_bots": []}
+    cfg["authorized_set"] = frozenset(b["username"] for b in cfg.get("authorized_bots") or [])
+    if len(_shield_cache) >= SHIELD_CACHE_MAX:
+        _shield_cache.clear()
+    _shield_cache[int(chat_id)] = (now, cfg)
+    return cfg
+
+
+def _register_forward(chat_id: int, user_id: int, message_id: int, window: int) -> list:
+    """Registra un reenvío y devuelve los (ts, message_id) de la ventana (incluido el actual)."""
+    now = time.monotonic()
+    key = (int(chat_id), int(user_id))
+    bucket = _fwd_bursts.get(key)
+    if bucket is None:
+        if len(_fwd_bursts) >= FWD_BURST_MAX_KEYS:
+            purge_v23_state()
+            if len(_fwd_bursts) >= FWD_BURST_MAX_KEYS:
+                _fwd_bursts.pop(next(iter(_fwd_bursts)), None)
+        bucket = _fwd_bursts[key] = deque(maxlen=20)
+    while bucket and now - bucket[0][0] > window:
+        bucket.popleft()
+    bucket.append((now, int(message_id)))
+    return list(bucket)
+
+
+def purge_v23_state() -> dict:
+    """Purga de las estructuras v23 (la invoca el janitor y, por seguridad, el propio módulo al crecer)."""
+    now = time.monotonic()
+    stale = [k for k, (ts, _v) in list(_fingerprints.items()) if now - ts > FINGERPRINT_TTL_S]
+    for k in stale:
+        _fingerprints.pop(k, None)
+    dead = [k for k, b in list(_fwd_bursts.items()) if not b or now - b[-1][0] > max(FWD_BURST_WINDOWS)]
+    for k in dead:
+        _fwd_bursts.pop(k, None)
+    old = [k for k, (ts, _c) in list(_shield_cache.items()) if now - ts > SHIELD_CACHE_TTL_S]
+    for k in old:
+        _shield_cache.pop(k, None)
+    return {"fingerprints": len(_fingerprints), "fwd_bursts": len(_fwd_bursts), "shield_cache": len(_shield_cache)}
+
+
+async def _delete_burst(bot: Bot, chat_id: int, message_ids: list) -> int:
+    """Borra los reenvíos previos de la ráfaga (máx. 20). Nunca lanza."""
+    deleted = 0
+    ids = [m for m in message_ids if m]
+    if not ids:
+        return 0
+    try:
+        if hasattr(bot, "delete_messages"):
+            await asyncio.wait_for(bot.delete_messages(chat_id=chat_id, message_ids=ids[:100]), timeout=8)
+            return len(ids)
+    except Exception as ex:
+        logger.debug(f"[MediaLocks] Borrado en lote de la ráfaga fallido en {chat_id}: {ex}")
+    for mid in ids:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(bot.delete_message(chat_id=chat_id, message_id=mid), timeout=5)
+            deleted += 1
+    return deleted
+
+
+def _burst_verdict(state: dict, count: int, window: int) -> dict:
+    """Ráfaga de reenvíos: al menos Silenciar + borrado (o la regla de 📥 si es más severa)."""
+    rule = effective_media_lock_rule(state, "forward_any")
+    action = rule["action"] if MEDIA_LOCK_SEVERITY[rule["action"]] > MEDIA_LOCK_SEVERITY["mute"] else "mute"
+    return {"key": "forward_any", "detail": f"ráfaga {count} / {window} s", "action": action, "delete": True,
+            "edit": False, "burst": True}
+
+
+async def inspect_and_enforce(bot: Bot, message: Message, *, is_edit: bool = False, blacklist=None,
+                              exempt=None) -> bool:
     """
     Punto de entrada desde group_security_matrix (miembros NO privilegiados). Devuelve True si el mensaje fue
-    sancionado o eliminado (el pipeline debe detenerse).
+    sancionado o eliminado (el pipeline debe detenerse). v23: exempt = vectores eximidos por un rol VIP.
     """
     chat_id = message.chat.id
     try:
@@ -457,16 +648,71 @@ async def inspect_and_enforce(bot: Bot, message: Message, *, is_edit: bool = Fal
     except Exception as ex:
         logger.warning(f"⚠️ [MediaLocks] Configuración no disponible en {chat_id}: {ex}")
         return False
+    shield = await get_shield(chat_id)
 
     blacklist_hit = ""
     if is_edit and blacklist:
         lowered = _normalize_text((message.text or message.caption or "")).lower()
         blacklist_hit = next((w for w in blacklist if w and w in lowered), "")
 
-    verdict = evaluate_message(message, state, is_edit=is_edit, blacklist_hit=blacklist_hit, bot_id=bot.id)
+    found = detect_vectors(message, state["long_video_max_seconds"], bot_id=bot.id,
+                           authorized_bots=shield["authorized_set"])
+    original = original_vectors(chat_id, message.message_id) if is_edit else None
+    verdict = evaluate_message(message, state, is_edit=is_edit, blacklist_hit=blacklist_hit, bot_id=bot.id,
+                               authorized_bots=shield["authorized_set"], exempt=frozenset(exempt or ()),
+                               original=original, found=found)
+
+    # 📥 Ráfaga de reenvíos masivos: N reenvíos externos en la ventana → borrado de TODA la ráfaga + sanción.
+    limit = int(shield.get("fwd_burst_limit") or 0)
+    if not is_edit and limit and message.from_user and any(k == "forward_any" for k, _ in found):
+        window = int(shield.get("fwd_burst_window") or 60)
+        burst = _register_forward(chat_id, message.from_user.id, message.message_id, window)
+        if len(burst) >= limit:
+            previous = [mid for _ts, mid in burst if mid != message.message_id]
+            _fwd_bursts.pop((chat_id, message.from_user.id), None)
+            burst_verdict = _burst_verdict(state, len(burst), window)
+            if verdict is None or MEDIA_LOCK_SEVERITY[burst_verdict["action"]] >= MEDIA_LOCK_SEVERITY[verdict["action"]]:
+                verdict = burst_verdict
+            verdict["delete"] = True
+            await _delete_burst(bot, chat_id, previous)
+
+    if verdict is None or not verdict.get("delete"):
+        remember_fingerprint(chat_id, message.message_id, (k for k, _ in found))
     if verdict is None:
         return False
     await apply_sanction(bot, chat_id, message.from_user, verdict, message=message)
+    return True
+
+
+async def inspect_sender_chat(bot: Bot, message: Message, *, is_edit: bool = False) -> bool:
+    """
+    v23 · Mensajes publicados COMO un canal externo (sender_chat ≠ grupo). Un canal no acumula strikes ni puede
+    silenciarse: Warn / Del → solo se borra; Kick / Mute / Ban → se borra y se bloquea el canal emisor
+    (ban_chat_sender_chat). Devuelve True si se actuó. Nunca lanza.
+    """
+    sender = getattr(message, "sender_chat", None)
+    if sender is None or sender.id == message.chat.id:
+        return False
+    chat_id = message.chat.id
+    try:
+        state = await get_media_locks_config(chat_id)
+    except Exception:
+        return False
+    shield = await get_shield(chat_id)
+    verdict = evaluate_message(message, state, is_edit=is_edit, bot_id=bot.id, authorized_bots=shield["authorized_set"])
+    if verdict is None:
+        return False
+    from . import groups as g
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(message.delete(), timeout=8)
+        g.track_security(chat_id, sender.id, "antispam", "delete", True)
+    if verdict["action"] in ("kick", "mute", "ban"):
+        try:
+            await asyncio.wait_for(bot.ban_chat_sender_chat(chat_id, sender.id), timeout=8)
+            g.track_security(chat_id, sender.id, "antispam", "ban", True)
+            logger.warning(f"🛡️ [MediaLocks] Canal emisor {sender.id} bloqueado en {chat_id} por {verdict['key']}.")
+        except Exception as ex:
+            logger.debug(f"[MediaLocks] No se pudo bloquear el canal emisor {sender.id} en {chat_id}: {ex}")
     return True
 
 
@@ -486,6 +732,11 @@ async def handle_bot_added(bot: Bot, message: Message, adder, new_bot) -> bool:
         return False
     rule = effective_media_lock_rule(state, "bot_added")
     if rule["action"] == "off":
+        return False
+    # v23 · Bot autorizado por el dueño (lista blanca de la consola / Mini App): se permite.
+    shield = await get_shield(chat_id)
+    if (getattr(new_bot, "username", "") or "").lower() in shield["authorized_set"]:
+        logger.info(f"🛸 [MediaLocks] Bot autorizado @{new_bot.username} añadido por {adder.id} en {chat_id}: permitido.")
         return False
     tier = await g.get_privilege_tier(bot, chat_id, adder.id, adder.username or "")
     if g._tier_is_privileged(tier):
@@ -544,12 +795,22 @@ async def render_panel(group_id: int, page: int, lang: str) -> tuple:
                         "🚨 <i>Pánico / modo nocturno activo: los vectores marcados aplican como mínimo Warn + 🗑️ hasta que se levante.</i>",
                         "🚨 <i>Panic / night mode active: marked vectors apply at least Warn + 🗑️ until lifted.</i>"))
     minutes = state["long_video_max_seconds"] // 60
+    forget_shield_cache(group_id)
+    shield = await get_shield(group_id)
+    burst_limit, burst_window = int(shield["fwd_burst_limit"]), int(shield["fwd_burst_window"])
+    shield_line = tr(
+        lang,
+        f"🛡️ <b>Refuerzo v23</b> · 📥 Ráfaga de reenvíos: <b>{f'{burst_limit} en {burst_window} s' if burst_limit else 'Off'}</b>"
+        f" · 🤖 Bots autorizados: <b>{len(shield['authorized_bots'])}</b>",
+        f"🛡️ <b>Hardening v23</b> · 📥 Forward burst: <b>{f'{burst_limit} in {burst_window} s' if burst_limit else 'Off'}</b>"
+        f" · 🤖 Authorized bots: <b>{len(shield['authorized_bots'])}</b>")
     text = (
         f"🔒 <b>{tr(lang, 'Bloqueo de contenido multimedia', 'Media content locks')}</b>\n"
         f"{_legend(lang)}\n\n"
         f"<b>{PAGE_TITLES[page][0 if lang == 'es' else 1]}</b>\n"
         + "\n".join(lines)
         + ("\n\n" + "\n".join(notes) if notes else "")
+        + "\n\n" + shield_line
         + "\n\n"
         + tr(lang,
              f"<i>Toca una acción en la fila de cada vector. 🗑️ activa o quita el borrado del mensaje (sobre ☑️ Off equivale a «solo eliminar»). Películas: más de {minutes} min.</i>",
@@ -587,9 +848,71 @@ async def render_panel(group_id: int, page: int, lang: str) -> tuple:
         text=tr(lang, f"⌨️ Comandos de bots: {'🟢 Bloqueados' if commands_on else '🔴 Permitidos'}",
                 f"⌨️ Bot commands: {'🟢 Locked' if commands_on else '🔴 Allowed'}"),
         callback_data=f"mlk_c_{group_id}_{page}_{lang}")])
+    # 🛡️ v23 · Ráfaga de reenvíos masivos (umbral y ventana) y lista blanca de bots.
+    rows.append([
+        InlineKeyboardButton(text=tr(lang, f"📥 Ráfaga: {burst_limit or 'Off'}", f"📥 Burst: {burst_limit or 'Off'}"),
+                             callback_data=f"mlk_b_{group_id}_{page}_{lang}"),
+        InlineKeyboardButton(text=f"⏱️ {burst_window} s", callback_data=f"mlk_w_{group_id}_{page}_{lang}"),
+        InlineKeyboardButton(text=tr(lang, f"🤖 Bots ({len(shield['authorized_bots'])})", f"🤖 Bots ({len(shield['authorized_bots'])})"),
+                             callback_data=f"mlk_a_{group_id}_{page}_{lang}"),
+    ])
     back_text = "🔙 Volver" if lang == "es" else "🔙 Back"
     rows.append([InlineKeyboardButton(text=back_text, callback_data=f"gpanel_{group_id}_{lang}")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+AUTH_BOT_STATES: dict = {}   # (bot_id, user_id) -> {"group_id", "lang", "page", "ts"} · registrado en user_private
+AUTH_BOT_STATE_TTL_S = 600
+
+
+async def render_bots_panel(group_id: int, page: int, lang: str) -> tuple:
+    forget_shield_cache(group_id)
+    shield = await get_shield(group_id)
+    bots = shield["authorized_bots"]
+    listing = "\n".join(f"• <code>@{html.escape(b['username'])}</code>" for b in bots) or tr(lang, "<i>Ninguno.</i>", "<i>None.</i>")
+    text = (
+        f"🤖 <b>{tr(lang, 'Bots autorizados', 'Authorized bots')}</b>\n\n"
+        + tr(lang,
+             "Solo estos bots pueden: ser invitados por miembros (🛸), publicar vía modo inline (🤖) y traer botones "
+             "inline (⌨️) o reenvíos (📥). Los enlaces que contengan se siguen inspeccionando.",
+             "Only these bots may be invited by members (🛸), post via inline mode (🤖) and carry inline buttons (⌨️) "
+             "or forwards (📥). Any links they contain are still inspected.")
+        + f"\n\n{listing}" + SIG
+    )
+    rows = [[InlineKeyboardButton(text=f"❌ @{b['username']}", callback_data=f"mlk_x_{group_id}_{i}_{page}_{lang}")]
+            for i, b in enumerate(bots[:20])]
+    rows.append([InlineKeyboardButton(text=tr(lang, "➕ Autorizar bot", "➕ Authorize bot"), callback_data=f"mlk_n_{group_id}_{page}_{lang}")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "🔙 Volver a la matriz", "🔙 Back to matrix"), callback_data=f"mlk_p_{group_id}_{page}_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def handle_authorized_bot_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
+    """Respuesta al asistente «➕ Autorizar bot»: @alias, enlace t.me o un mensaje reenviado desde el bot."""
+    group_id, lang, page = int(st["group_id"]), st.get("lang", "es"), int(st.get("page", 2))
+    back = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=tr(lang, "🔙 Bots autorizados", "🔙 Authorized bots"), callback_data=f"mlk_a_{group_id}_{page}_{lang}")]])
+    if time.time() - float(st.get("ts", 0)) > AUTH_BOT_STATE_TTL_S:
+        await message.answer(tr(lang, "⌛ La edición caducó; vuelve a abrir el menú.", "⌛ This edit expired; reopen the menu.") + SIG,
+                             reply_markup=back, parse_mode="HTML")
+        return
+    raw, bot_id = text_input or "", None
+    origin = getattr(message, "forward_origin", None)
+    sender = getattr(origin, "sender_user", None) or getattr(message, "forward_from", None)
+    if sender is not None and getattr(sender, "is_bot", False) and getattr(sender, "username", None):
+        raw, bot_id = sender.username, sender.id
+    try:
+        await add_authorized_bot(group_id, raw, bot_id=bot_id, added_by=message.from_user.id)
+    except BunkerValidationError as err:
+        await message.answer(f"❌ {html.escape('; '.join(err.errors.values()))}" + SIG, reply_markup=back, parse_mode="HTML")
+        return
+    except Exception as ex:
+        logger.error(f"❌ [MediaLocks] No se pudo autorizar el bot en {group_id}: {ex}")
+        await message.answer(tr(lang, "⚠️ No se pudo guardar.", "⚠️ Could not save.") + SIG, reply_markup=back, parse_mode="HTML")
+        return
+    forget_shield_cache(group_id)
+    _emit_change(group_id, ["shield_authorized_bots"])
+    text, kb = await render_bots_panel(group_id, page, lang)
+    await message.answer(tr(lang, "✅ <b>Bot autorizado.</b>\n\n", "✅ <b>Bot authorized.</b>\n\n") + text, reply_markup=kb, parse_mode="HTML")
 
 
 class _CallbackAutoAnswer(BaseMiddleware):
@@ -693,6 +1016,55 @@ async def media_locks_callbacks(callback: CallbackQuery, bot: Bot):
         await callback.answer(tr(lang, f"🎬 Películas: más de {seconds // 60} min", f"🎬 Movies: over {seconds // 60} min"))
         _emit_change(group_id, ["media_locks", "long_video_max_seconds"])
         await open_media_locks_panel(callback, bot, group_id, lang, page=page)
+        return
+
+    if sub in ("b", "w"):
+        page = _int(3)
+        shield = await get_shield(group_id)
+        if sub == "b":
+            seq, cur = FWD_BURST_LIMITS, int(shield["fwd_burst_limit"])
+        else:
+            seq, cur = FWD_BURST_WINDOWS, int(shield["fwd_burst_window"])
+        nxt = seq[(seq.index(cur) + 1) % len(seq)] if cur in seq else seq[0]
+        try:
+            await (set_fwd_burst(group_id, limit=nxt) if sub == "b" else set_fwd_burst(group_id, window=nxt))
+        except Exception as ex:
+            logger.error(f"❌ [MediaLocks] Ráfaga no guardada en {group_id}: {ex}")
+            return
+        forget_shield_cache(group_id)
+        _emit_change(group_id, ["shield_fwd_burst"])
+        await callback.answer(tr(lang, "📥 Ráfaga de reenvíos actualizada", "📥 Forward burst updated"))
+        await open_media_locks_panel(callback, bot, group_id, lang, page=page)
+        return
+
+    if sub == "a":
+        text, kb = await render_bots_panel(group_id, _int(3, 2), lang)
+        await _show(callback, text, kb)
+        return
+
+    if sub == "x":
+        idx, page = _int(3, -1), _int(4, 2)
+        bots = (await get_shield(group_id))["authorized_bots"]
+        if 0 <= idx < len(bots):
+            await remove_authorized_bot(group_id, bots[idx]["username"])
+            forget_shield_cache(group_id)
+            _emit_change(group_id, ["shield_authorized_bots"])
+            await callback.answer(f"❌ @{bots[idx]['username']}")
+        text, kb = await render_bots_panel(group_id, page, lang)
+        await _show(callback, text, kb)
+        return
+
+    if sub == "n":
+        page = _int(3, 2)
+        if len(AUTH_BOT_STATES) > 2000:
+            cutoff = time.time() - AUTH_BOT_STATE_TTL_S
+            for k in [k for k, v in AUTH_BOT_STATES.items() if v.get("ts", 0) < cutoff]:
+                AUTH_BOT_STATES.pop(k, None)
+        AUTH_BOT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang, "page": page, "ts": time.time()}
+        await callback.message.answer(
+            tr(lang, "🤖 Envía el <b>@alias</b> del bot a autorizar (debe terminar en <i>bot</i>) o <b>reenvía</b> aquí un mensaje suyo.",
+               "🤖 Send the <b>@username</b> of the bot to authorize (must end in <i>bot</i>) or <b>forward</b> one of its messages here.") + SIG,
+            parse_mode="HTML")
         return
 
     if sub == "c":

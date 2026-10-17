@@ -61,6 +61,8 @@ from database.database import (
 )
 import raid_shield
 import assistant as _assistant_module
+import vip_roles     # 👑 v23 · Roles y etiquetas VIP automáticos (exenciones parciales, flood y prioridad acústica)
+import link_quotas   # 🔗 v23 · Cuota diaria de enlaces / promociones por administrador
 from . import media_locks   # 🔒 v15 · Matriz granular de bloqueo multimedia (30 vectores)
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
 
@@ -330,7 +332,11 @@ def _tier_is_privileged(tier: str) -> bool:
 
 async def _autolower_can_mute(bot: Bot, group_id: int, user_id: int, username: str = "") -> bool:
     tier = await get_privilege_tier(bot, group_id, user_id, username)
-    return tier not in AUTOLOWER_IMMUNE_TIERS
+    if tier in AUTOLOWER_IMMUNE_TIERS:
+        return False
+    # 👑 v23 · Rol VIP con prioridad acústica (configurable): tampoco se atenúa.
+    perks = await vip_roles.get_active_perks(group_id, user_id)
+    return not (perks and perks.get("autolower_immune"))
 
 
 FLOOD_CACHE = {}
@@ -2781,9 +2787,15 @@ async def group_security_matrix(message: Message, bot: Bot):
 
     tier = await get_privilege_tier(bot, group_id, user_id, username)
     if _tier_is_privileged(tier):
+        # 🔗 v23 · Los administradores comunes siguen sujetos a su cuota diaria de enlaces (si el dueño la activó).
+        if tier == "admin" and await link_quotas.enforce_admin_link_quota(bot, message, tier, is_edit=is_edit):
+            return
         # Miembros inmunes también registran densidad horaria
         _spawn(record_hourly_chat_activity(group_id))
         return
+
+    # 👑 v23 · Privilegios VIP vigentes (caché 60 s): exenciones parciales de la matriz y margen anti-flood.
+    vip_perks = await vip_roles.get_active_perks(group_id, user_id)
 
     # 1. Cerradura de Comandos
     if text_content.startswith("/") and await get_lock_status(group_id, "lock_commands") == 1:
@@ -2819,7 +2831,8 @@ async def group_security_matrix(message: Message, bot: Bot):
     #    inyecta enlaces, spoilers, botones, formato abusivo o palabras de la lista negra se sanciona con la
     #    regla del vector 17 (edited_msg) además de la regla propia de cada vector.
     if await media_locks.inspect_and_enforce(
-        bot, message, is_edit=is_edit, blacklist=(await get_blacklist()) if is_edit else None
+        bot, message, is_edit=is_edit, blacklist=(await get_blacklist()) if is_edit else None,
+        exempt=vip_perks["exempt"] if vip_perks else None,
     ):
         return
 
@@ -2875,6 +2888,8 @@ async def group_security_matrix(message: Message, bot: Bot):
     # 5. Escudo Anti-Flood
     af_cfg = await get_antiflood_config(group_id)
     max_msgs, time_window, af_action = af_cfg["msgs"], af_cfg["time"], af_cfg["action"]
+    if vip_perks and int(vip_perks.get("flood_bonus") or 1) > 1:
+        max_msgs = int(max_msgs) * int(vip_perks["flood_bonus"])   # 👑 v23 · interacción privilegiada
 
     if af_action != "off":
         now = time.time()

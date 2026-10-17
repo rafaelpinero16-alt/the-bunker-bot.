@@ -210,6 +210,18 @@ class AntiSpamMiddleware(BaseMiddleware):
                         pass
                     return
 
+            # 🛡️ v23 · Matriz multimedia también para mensajes "como canal": su from_user es el bot de servicio
+            # (is_bot=True) y group_security_matrix los ignoraba, así que spoilers, enlaces camuflados, botones inline,
+            # reenvíos o películas publicados como canal evadían los 30 vectores. Las publicaciones automáticas del
+            # canal vinculado (is_automatic_forward) son del propio dueño y no se tocan.
+            if event.chat.type in ("group", "supergroup") and not getattr(event, "is_automatic_forward", False):
+                try:
+                    from handlers import media_locks
+                    if await media_locks.inspect_sender_chat(event.bot, event):
+                        return
+                except Exception as ml_err:
+                    logger.debug(f"Aviso inspeccionando canal emisor en {event.chat.id}: {ml_err}")
+
         # 3. 🛡️ Inmunidad Táctica para Administradores, Aliados y Centinelas
         if await is_immune(event):
             return await handler(event, data)

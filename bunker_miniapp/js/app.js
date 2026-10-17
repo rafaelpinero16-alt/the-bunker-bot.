@@ -187,6 +187,10 @@ export const app = {
     _support: { busy: false, greeted: false },
     // v22 · Auditoría MicVIP (paginada; cada respuesta se ata a su comunidad, filtro y secuencia)
     _micvip: { chatId: null, filter: 'all', records: [], data: null, loading: false, seq: 0, timer: null },
+    // v23 · Refuerzo perimetral, Roles VIP y Cuotas de enlaces (secuencias contra respuestas obsoletas)
+    _shield: { chatId: null, data: null, busy: false, seq: 0 },
+    _vip: { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: 0, timer: null },
+    _alq: { chatId: null, data: null, busy: false, seq: 0, timer: null },
     validatePlanForm,
     validateConfigSection,
 
@@ -1010,6 +1014,9 @@ export const app = {
         if (this._ai?.data) ui.renderAiSentinel(this._ai.data, { licensed: this._ai.licensed });
         if (this._ghost?.data) ui.renderGhostPurge(this._ghost.data);
         if (this._micvip?.data) this.paintMicvip();
+        if (this._shield?.chatId) ui.renderShield(this._shield.data, { busy: this._shield.busy });   // v23
+        if (this._vip?.chatId) this.paintVip();
+        if (this._alq?.chatId) ui.renderAdminQuotas(this._alq.data, { busy: this._alq.busy });
 
         if (state.selectedChatId && state.data.currentChatDashboard) {
             this.loadChatDashboard(state.selectedChatId);
@@ -2546,6 +2553,8 @@ export const app = {
         client.on('voice_call_started', (data) => { if (isCurrent()) this.onVoiceCall(true, data); });
         client.on('voice_call_ended', (data) => { if (isCurrent()) this.onVoiceCall(false, data); });
         client.on('stars_payment', (data) => { if (isCurrent()) this.onStarsPayment(data); });
+        client.on('vip_role', () => { if (isCurrent()) this.scheduleV23Reload('vip'); });       // v23
+        client.on('link_quota', () => { if (isCurrent()) this.scheduleV23Reload('alq'); });     // v23
         client.on('security_block', (data) => { if (isCurrent()) this.onSecurityBlock(data); });
         client.on('raid_shield', (data) => { if (isCurrent()) this.onRaidShield(data); });
         client.on('settings_updated', (data) => {
@@ -3271,6 +3280,7 @@ export const app = {
         this.loadAiSentinel(id);
         this.loadGhostPurge(id);
         this.startMicvipAudit(id);   // v22
+        this.startV23Console(id);    // v23
     },
 
     stopPerimeterConsole() {
@@ -3283,6 +3293,7 @@ export const app = {
         ui.renderAiSentinel(null, { idle: true });
         ui.renderGhostPurge(null, { idle: true });
         this.stopMicvipAudit();   // v22
+        this.stopV23Console();    // v23
     },
 
     applyPerimeter(chatId, perimeter) {
@@ -3333,6 +3344,10 @@ export const app = {
         const changed = Array.isArray(data?.changed) ? data.changed.map(String) : [];
         if (changed.some(f => f.startsWith('ai_'))) this.loadAiSentinel(chatId);
         if (changed.some(f => f.startsWith('purge_'))) this.loadGhostPurge(chatId);
+        // v23 · cambios hechos en el bot o en otra sesión de la Mini App
+        if (changed.some(f => f.startsWith('shield_'))) this.loadShield();
+        if (changed.some(f => f.startsWith('vip_'))) this.scheduleV23Reload('vip');
+        if (changed.some(f => f.startsWith('alq_'))) this.scheduleV23Reload('alq');
         this.schedulePerimeterRefresh(chatId);
     },
 
@@ -3603,6 +3618,330 @@ export const app = {
             }
         }
         return true;
+    },
+
+    // ======================================================================
+    // 🛡️👑🔗 v23 · REFUERZO PERIMETRAL · ROLES VIP · CUOTAS DE ENLACES
+    // ======================================================================
+    startV23Console(chatId) {
+        this.stopV23Console();
+        const id = String(chatId);
+        Object.assign(this._shield, { chatId: id, data: null, busy: false });
+        Object.assign(this._vip, { chatId: id, data: null, records: [], filter: 'all', loading: false, busy: false });
+        Object.assign(this._alq, { chatId: id, data: null, busy: false });
+        ui.renderShield(null, { busy: true });
+        ui.renderVipRoles(null, { loading: true });
+        ui.renderAdminQuotas(null, { busy: true });
+        this.loadShield();
+        this.loadVipRoles({ reset: true });
+        this.loadAdminQuotas();
+    },
+
+    stopV23Console() {
+        clearTimeout(this._vip.timer);
+        clearTimeout(this._alq.timer);
+        this._shield = { chatId: null, data: null, busy: false, seq: this._shield.seq + 1 };
+        this._vip = { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: this._vip.seq + 1, timer: null };
+        this._alq = { chatId: null, data: null, busy: false, seq: this._alq.seq + 1, timer: null };
+        ui.renderShield(null, { idle: true });
+        ui.renderVipRoles(null, { idle: true });
+        ui.renderAdminQuotas(null, { idle: true });
+    },
+
+    /** Respuesta de escritura: aviso de error (403 = solo el dueño) y háptica. Devuelve true si fue bien. */
+    v23Result(res, okText) {
+        if (res?.__stale) return false;
+        if (res?.__error) {
+            const msg = res.__status === 403 ? ui.t('v23_owner_only') : this.consoleErrorMessage(res);
+            this.consoleToast('error', '⚠️', ui.tf('v23_error', { error: msg }));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        if (okText) this.consoleToast('success', '✅', okText);
+        tgApp.hapticNotification('success');
+        return true;
+    },
+
+    refreshV23(kind) {
+        if (!this._shield.chatId) return this.consolePickFirst();
+        tgApp.hapticImpact('light');
+        if (kind === 'shield') return this.loadShield();
+        if (kind === 'vip') return this.loadVipRoles({ reset: true });
+        return this.loadAdminQuotas();
+    },
+
+    /** Agrupa ráfagas de eventos (pago → rol, varios enlaces seguidos) en una sola relectura. */
+    scheduleV23Reload(kind) {
+        const target = kind === 'vip' ? this._vip : this._alq;
+        if (!target.chatId) return;
+        clearTimeout(target.timer);
+        target.timer = setTimeout(() => (kind === 'vip' ? this.loadVipRoles({ reset: true }) : this.loadAdminQuotas()),
+            CONFIG.V23?.LIVE_RELOAD_MS || 2500);
+    },
+
+    // --- 🛡️ Refuerzo perimetral ---
+    async loadShield() {
+        const sh = this._shield;
+        const chatId = sh.chatId;
+        if (!chatId) return false;
+        const seq = ++sh.seq;
+        const epoch = session.epoch;
+        const res = await api.fetchShield(chatId);
+        if (seq !== sh.seq || epoch !== session.epoch || res?.__stale || sh.chatId !== chatId) return false;
+        if (res?.__error) {
+            ui.renderShield(sh.data, { error: this.consoleErrorMessage(res) });
+            return false;
+        }
+        sh.data = res.shield || null;
+        ui.renderShield(sh.data, { busy: sh.busy });
+        return true;
+    },
+
+    async saveShield(patch, okText) {
+        const sh = this._shield;
+        const chatId = sh.chatId;
+        if (!chatId || sh.busy) return false;
+        sh.busy = true;
+        ui.renderShield(sh.data, { busy: true });
+        const seq = ++sh.seq;
+        const res = await api.updateShield(chatId, patch);
+        sh.busy = false;
+        if (seq !== sh.seq || sh.chatId !== chatId) return false;
+        const ok = this.v23Result(res, okText);
+        if (ok) sh.data = res.shield || sh.data;
+        ui.renderShield(sh.data, {});
+        return ok;
+    },
+
+    setBurstLimit(n) {
+        if (Number(this._shield.data?.fwd_burst_limit) === Number(n)) return false;
+        tgApp.hapticSelection?.();
+        return this.saveShield({ fwd_burst_limit: Number(n) }, ui.t('v23_saved'));
+    },
+
+    setBurstWindow(n) {
+        if (Number(this._shield.data?.fwd_burst_window) === Number(n)) return false;
+        tgApp.hapticSelection?.();
+        return this.saveShield({ fwd_burst_window: Number(n) }, ui.t('v23_saved'));
+    },
+
+    async addAuthorizedBot() {
+        const input = document.getElementById('sh-bot-input');
+        const raw = String(input?.value || '').trim().replace(/^(?:https?:\/\/)?(?:t\.me|telegram\.me)\//i, '').replace(/^@/, '');
+        if (!/^[A-Za-z][A-Za-z0-9_]{3,31}$/.test(raw) || !/bot$/i.test(raw)) {
+            this.consoleToast('error', '⚠️', ui.t('sh_bot_invalid'));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        const ok = await this.saveShield({ add_bot: raw }, ui.tf('sh_bot_added', { name: raw.toLowerCase() }));
+        if (ok && input) input.value = '';
+        return ok;
+    },
+
+    removeAuthorizedBot(name) {
+        tgApp.hapticImpact('light');
+        return this.saveShield({ remove_bot: String(name) }, ui.tf('sh_bot_removed', { name }));
+    },
+
+    // --- 👑 Roles VIP ---
+    paintVip() {
+        const v = this._vip;
+        ui.renderVipRoles(v.data, { records: v.records, filter: v.filter, loading: v.loading, busy: v.busy,
+            hasMore: Boolean(v.data && v.records.length < (v.data.total || 0)) });
+    },
+
+    async loadVipRoles({ reset = false } = {}) {
+        const v = this._vip;
+        const chatId = v.chatId;
+        if (!chatId || (v.loading && !reset)) return false;
+        const seq = ++v.seq;
+        const epoch = session.epoch;
+        v.loading = true;
+        const res = await api.fetchVipRoles(chatId, { status: v.filter, limit: CONFIG.V23?.VIP_PAGE_SIZE || 20,
+            offset: reset ? 0 : v.records.length });
+        if (seq !== v.seq || epoch !== session.epoch || res?.__stale || v.chatId !== chatId) return false;
+        v.loading = false;
+        if (res?.__error) {
+            if (v.data) this.paintVip();
+            else ui.renderVipRoles(null, { filter: v.filter, error: this.consoleErrorMessage(res) });
+            return false;
+        }
+        v.data = res;
+        v.records = reset ? (res.records || []) : v.records.concat(res.records || []);
+        this.paintVip();
+        return true;
+    },
+
+    loadMoreVip() {
+        tgApp.hapticImpact('light');
+        return this.loadVipRoles({ reset: false });
+    },
+
+    setVipFilter(filter) {
+        const v = this._vip;
+        if (!v.chatId || v.filter === filter) return false;
+        tgApp.hapticSelection?.();
+        v.filter = filter;
+        v.records = [];
+        return this.loadVipRoles({ reset: true });
+    },
+
+    async saveVipRoles(patch) {
+        const v = this._vip;
+        const chatId = v.chatId;
+        if (!chatId || v.busy || !v.data) return false;
+        v.busy = true;
+        this.paintVip();
+        const res = await api.updateVipRoles(chatId, patch);
+        v.busy = false;
+        if (v.chatId !== chatId) return false;
+        const ok = this.v23Result(res, ui.t('v23_saved'));
+        if (ok && res.vip_roles) v.data = { ...v.data, vip_roles: { ...v.data.vip_roles, ...res.vip_roles } };
+        this.paintVip();
+        return ok;
+    },
+
+    toggleVip(field) {
+        const cur = this._vip.data?.vip_roles;
+        if (!cur) return this._vip.chatId ? false : this.consolePickFirst();
+        tgApp.hapticSelection?.();
+        return this.saveVipRoles({ [field]: !cur[field] });
+    },
+
+    setVipField(field, value) {
+        const cur = this._vip.data?.vip_roles;
+        if (!cur || Number(cur[field]) === Number(value)) return false;
+        return this.saveVipRoles({ [field]: Number(value) });
+    },
+
+    saveVipTag() {
+        const cur = this._vip.data?.vip_roles;
+        const input = document.getElementById('vip-tag-input');
+        if (!cur || !input) return false;
+        const tag = String(input.value || '').trim().slice(0, CONFIG.V23?.VIP_TAG_MAX || 16);
+        if (tag === (cur.tag_text || '')) return false;
+        input.blur();
+        return this.saveVipRoles({ tag_text: tag });
+    },
+
+    toggleVipExempt(key) {
+        const cur = this._vip.data?.vip_roles;
+        if (!cur) return false;
+        const set = new Set(cur.exempt_vectors || []);
+        if (set.has(key)) set.delete(key); else set.add(key);
+        tgApp.hapticSelection?.();
+        return this.saveVipRoles({ exempt_vectors: [...set] });
+    },
+
+    async vipMember(action, userId, days, okText) {
+        const v = this._vip;
+        const chatId = v.chatId;
+        if (!chatId || v.busy) return false;
+        v.busy = true;
+        this.paintVip();
+        const res = await api.vipRoleMember(chatId, action, userId, days);
+        v.busy = false;
+        if (v.chatId !== chatId) return false;
+        const status = res?.member?.tag_status;
+        const ok = this.v23Result(res, action === 'retag' ? ui.tf('vip_retagged', { status: ui.vipTagStatus(status) || status || '—' }) : okText);
+        if (ok) await this.loadVipRoles({ reset: true });
+        else this.paintVip();
+        return ok;
+    },
+
+    vipGrant() {
+        const idInput = document.getElementById('vip-grant-id');
+        const daysSel = document.getElementById('vip-grant-days');
+        const userId = String(idInput?.value || '').trim();
+        if (!/^\d{3,20}$/.test(userId)) {
+            this.consoleToast('error', '⚠️', ui.t('vip_bad_id'));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        const days = Number(daysSel?.value ?? 30);
+        return this.vipMember('grant', userId, days, ui.tf('vip_granted', { id: userId })).then(ok => {
+            if (ok && idInput) idInput.value = '';
+            return ok;
+        });
+    },
+
+    async vipRevoke(userId) {
+        const row = this._vip.records.find(r => String(r.user_id) === String(userId));
+        const name = row?.full_name || (row?.username ? `@${row.username}` : String(userId));
+        if (!(await this.confirmAction(ui.tf('vip_revoke_confirm', { name })))) return false;
+        return this.vipMember('revoke', userId, 0, ui.t('vip_revoked'));
+    },
+
+    vipRetag(userId) {
+        tgApp.hapticImpact('light');
+        return this.vipMember('retag', userId, 0, '');
+    },
+
+    // --- 🔗 Cuotas de enlaces de administradores ---
+    async loadAdminQuotas() {
+        const q = this._alq;
+        const chatId = q.chatId;
+        if (!chatId) return false;
+        const seq = ++q.seq;
+        const epoch = session.epoch;
+        const res = await api.fetchAdminQuotas(chatId);
+        if (seq !== q.seq || epoch !== session.epoch || res?.__stale || q.chatId !== chatId) return false;
+        if (res?.__error) {
+            ui.renderAdminQuotas(q.data, { error: this.consoleErrorMessage(res) });
+            return false;
+        }
+        q.data = res.admin_link_quotas || null;
+        ui.renderAdminQuotas(q.data, { busy: q.busy });
+        return true;
+    },
+
+    async saveAdminQuotas(patch) {
+        const q = this._alq;
+        const chatId = q.chatId;
+        if (!chatId || q.busy || !q.data) return false;
+        q.busy = true;
+        ui.renderAdminQuotas(q.data, { busy: true });
+        const seq = ++q.seq;
+        const res = await api.updateAdminQuotas(chatId, patch);
+        q.busy = false;
+        if (seq !== q.seq || q.chatId !== chatId) return false;
+        const ok = this.v23Result(res, ui.t('v23_saved'));
+        if (ok && res.admin_link_quotas) q.data = res.admin_link_quotas;
+        ui.renderAdminQuotas(q.data, {});
+        return ok;
+    },
+
+    toggleAlq(field) {
+        const cfg = this._alq.data?.config;
+        if (!cfg) return this._alq.chatId ? false : this.consolePickFirst();
+        tgApp.hapticSelection?.();
+        return this.saveAdminQuotas({ [field]: !cfg[field] });
+    },
+
+    stepAlqDefault(delta) {
+        const cfg = this._alq.data?.config;
+        if (!cfg) return false;
+        const c = CONFIG.V23 || {};
+        const next = Math.max(c.ALQ_MIN ?? 0, Math.min(c.ALQ_MAX ?? 100, Number(cfg.default_limit) + Number(delta)));
+        if (next === Number(cfg.default_limit)) return false;
+        tgApp.hapticSelection?.();
+        return this.saveAdminQuotas({ default_limit: next });
+    },
+
+    stepAlqAdmin(adminId, delta) {
+        const data = this._alq.data;
+        if (!data?.config) return false;
+        const row = (data.admins || []).find(a => String(a.admin_id) === String(adminId));
+        const c = CONFIG.V23 || {};
+        const base = row && Number(row.limit) !== -1 ? Number(row.limit) : Number(data.config.default_limit);
+        const next = Math.max(c.ALQ_MIN ?? 0, Math.min(c.ALQ_MAX ?? 100, base + Number(delta)));
+        tgApp.hapticSelection?.();
+        return this.saveAdminQuotas({ overrides: { [String(adminId)]: next } });
+    },
+
+    setAlqAdmin(adminId, value) {
+        tgApp.hapticSelection?.();
+        return this.saveAdminQuotas({ overrides: { [String(adminId)]: value === null ? null : Number(value) } });
     },
 
     // --- 🤖 Soporte IA ---
