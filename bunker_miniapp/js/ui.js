@@ -81,9 +81,16 @@ function clampPct(value) {
 }
 
 export const ui = {
+    /** 🌐 v21 · Respaldo: idioma activo → idioma por defecto (inglés) → español → la propia clave. */
     t(key) {
         const dict = translations[state.currentLang] || {};
-        return dict[key] || (translations.es && translations.es[key]) || key;
+        const fallback = translations[CONFIG.DEFAULT_LANG || 'en'] || {};
+        return dict[key] || fallback[key] || (translations.es && translations.es[key]) || key;
+    },
+
+    /** Locale BCP-47 del idioma activo (fechas y números): en-US / es-419. */
+    locale() {
+        return (CONFIG.LOCALES || {})[state.currentLang] || (state.currentLang === 'es' ? 'es-419' : 'en-US');
     },
 
     /** Traducción con variables: tf('toast_level_up_body', { name, level }) sustituye {name} y {level}. */
@@ -105,7 +112,7 @@ export const ui = {
         const n = Number(value);
         if (!Number.isFinite(n)) return '—';
         try {
-            return new Intl.NumberFormat(state.currentLang === 'es' ? 'es-CO' : 'en-US').format(n);
+            return new Intl.NumberFormat(this.locale()).format(n);
         } catch (err) {
             return String(n);
         }
@@ -120,14 +127,27 @@ export const ui = {
     },
 
     updateTranslations() {
-        const dict = translations[state.currentLang];
+        const dict = translations[state.currentLang] || {};
+        const fallback = translations[CONFIG.DEFAULT_LANG || 'en'] || {};
         document.querySelectorAll('[data-i18n]').forEach(el => {
             const key = el.getAttribute('data-i18n');
-            if (dict[key]) el.innerText = dict[key];
+            const value = dict[key] || fallback[key];
+            if (value) el.innerText = value;
         });
         document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
             const key = el.getAttribute('data-i18n-placeholder');
-            if (dict[key]) el.placeholder = dict[key];
+            const value = dict[key] || fallback[key];
+            if (value) el.placeholder = value;
+        });
+        // 🌐 v21 · Idioma del documento (lectores de pantalla, corrector, traductor del navegador) e indicador flotante.
+        if (document.documentElement) document.documentElement.lang = state.currentLang === 'es' ? 'es' : 'en';
+        const indicator = document.getElementById('lang-indicator');
+        if (indicator) indicator.innerText = String(state.currentLang || 'en').toUpperCase();
+        document.querySelectorAll('[data-lang-option]').forEach(btn => {
+            const active = btn.getAttribute('data-lang-option') === state.currentLang;
+            btn.setAttribute('aria-checked', active ? 'true' : 'false');
+            btn.className = `flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition ${active
+                ? 'bg-[#00f3ff]/20 text-[#00f3ff] border border-[#00f3ff]/40' : 'text-neutral-400'}`;
         });
     },
 
@@ -298,8 +318,8 @@ export const ui = {
         const isGrace = daysLeft <= 0;
         const statusColor = isGrace ? 'rose-400' : (daysLeft <= 3 ? 'amber-400' : 'emerald-400');
         const daysLabel = isGrace 
-            ? (state.currentLang === 'es' ? 'Período de Gracia 🔴' : 'Grace Period 🔴')
-            : `${daysLeft} ${state.currentLang === 'es' ? 'días' : 'days'}`;
+            ? this.t('i18n_sub_grace')
+            : this.tf('i18n_sub_days', { n: daysLeft });
 
         const safeUsername = this.escapeHtml(s.username || s.user_id);
         const safePlanName = this.escapeHtml(s.plan_name || 'Membresía');
@@ -337,8 +357,8 @@ export const ui = {
 
         const isGroup = kind ? kind === 'group' : id.includes('group');
         const placeholderText = isGroup 
-            ? (state.currentLang === 'es' ? '— Selecciona una comunidad —' : '— Select a community —')
-            : (state.currentLang === 'es' ? '— Selecciona un canal —' : '— Select a channel —');
+            ? this.t('i18n_pick_community')
+            : this.t('i18n_pick_channel');
 
         elements.forEach(sel => {
             if (!list || list.length === 0) {
@@ -655,7 +675,7 @@ export const ui = {
         }
         if (Number.isNaN(date.getTime())) return '';
         try {
-            return date.toLocaleString(state.currentLang === 'en' ? 'en-US' : 'es-CO', { dateStyle: 'short', timeStyle: 'short' });
+            return date.toLocaleString(this.locale(), { dateStyle: 'short', timeStyle: 'short' });
         } catch (err) {
             return date.toISOString().slice(0, 16).replace('T', ' ');
         }
@@ -1405,7 +1425,7 @@ export const ui = {
 
         const at = assets.checked_at ? new Date(assets.checked_at) : null;
         const time = at && !Number.isNaN(at.getTime())
-            ? at.toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false }) : '';
+            ? at.toLocaleTimeString(this.locale(), { hour12: false }) : '';
         this.setText('assets-checked-at', time ? this.tf('assets_checked', { time }) : '');
     },
 
@@ -1424,7 +1444,7 @@ export const ui = {
     localTime(iso) {
         const at = iso ? new Date(iso) : null;
         return at && !Number.isNaN(at.getTime())
-            ? at.toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false }) : '';
+            ? at.toLocaleTimeString(this.locale(), { hour12: false }) : '';
     },
 
     /** Rejilla 🟢/🟡/🔴 del perímetro. perimeter = respuesta del servidor o null (opts: loading, idle, error). */
@@ -1558,6 +1578,104 @@ export const ui = {
         if (run) run.disabled = Boolean(idle || settings?.running);
         const last = settings?.last_scan ? String(settings.last_scan).replace('T', ' ').slice(0, 16) : '';
         this.setText('gp-last-scan', last ? this.tf('gp_last_scan', { time: last }) : '');
+    },
+
+    // ======================================================================
+    // 🎟️ v22 · AUDITORÍA MICVIP
+    // ======================================================================
+    fmtDateTime(ts) {
+        if (!ts) return '—';
+        const d = new Date(Number(ts) * 1000);
+        return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString(this.locale(), {
+            year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+        });
+    },
+
+    micvipEvidence(r) {
+        if (r.evidence === 'applied') {
+            const at = new Date(Number(r.sentinel_applied_at) * 1000);
+            return this.tf('mva_ev_applied', { time: Number.isNaN(at.getTime()) ? '—'
+                : at.toLocaleTimeString(this.locale(), { hour: '2-digit', minute: '2-digit', hour12: false }) });
+        }
+        return this.t(`mva_ev_${r.evidence || 'none'}`).replace(/^mva_ev_.*/, '');
+    },
+
+    micvipRowHtml(r) {
+        const who = r.username ? `@${r.username}` : (r.full_name || '—');
+        const tone = { active: 'border-emerald-500/40 bg-emerald-500/5', expired: 'border-neutral-800 bg-black/40',
+                       issue: 'border-rose-500/60 bg-rose-500/10', verifying: 'border-amber-400/40 bg-amber-400/5' }[r.state]
+                     || 'border-neutral-800 bg-black/40';
+        const evidence = this.micvipEvidence(r);
+        return `
+            <div class="rounded-xl border px-2.5 py-2 space-y-1 ${tone}" data-mva-state="${this.escapeHtml(r.state)}">
+                <div class="flex items-center justify-between gap-2">
+                    <p class="text-[11px] font-extrabold text-white truncate">${this.escapeHtml(who)} <span class="text-neutral-500 font-mono font-normal">${this.escapeHtml(r.user_id)}</span></p>
+                    <span class="shrink-0 text-[10px] font-extrabold">${this.escapeHtml(this.t(`mva_state_${r.state}`))}</span>
+                </div>
+                <div class="grid grid-cols-2 gap-1 text-[9px] font-mono text-neutral-300">
+                    <p>🛒 ${this.escapeHtml(this.t('mva_bought'))}<br><span class="text-white">${this.escapeHtml(this.fmtDateTime(r.purchased_at))}</span></p>
+                    <p>⏳ ${this.escapeHtml(this.t('mva_until'))}<br><span class="text-white">${this.escapeHtml(this.fmtDateTime(r.expires_at))}</span></p>
+                </div>
+                <div class="flex items-center justify-between gap-2 text-[9px]">
+                    <span class="text-neutral-400 truncate">${this.escapeHtml(evidence)}</span>
+                    <span class="shrink-0 font-mono text-amber-300">⭐ ${this.escapeHtml(this.fmtNum(r.amount_stars || 0))}</span>
+                </div>
+                ${r.sentinel_failures ? `<p class="text-[9px] text-rose-300">⚠️ ${this.escapeHtml(this.tf('mva_failures', { n: r.sentinel_failures }))}</p>` : ''}
+            </div>`;
+    },
+
+    /** Registro de auditoría MicVIP. data = respuesta del servidor; records = filas acumuladas (paginación). */
+    renderMicvipAudit(data, { records = [], filter = 'all', loading = false, idle = false, hasMore = false, error = '' } = {}) {
+        const icon = byId('mva-refresh-icon');
+        if (icon) icon.className = `fa-solid fa-rotate text-[10px]${loading ? ' fa-spin' : ''}`;
+        ['mva-refresh-btn', 'mva-export-btn'].forEach(id => { const b = byId(id); if (b) b.disabled = Boolean(loading || idle); });
+        document.querySelectorAll('[data-mva-filter]').forEach(el => {
+            const on = el.getAttribute('data-mva-filter') === filter;
+            el.disabled = Boolean(idle);
+            el.setAttribute('aria-checked', on ? 'true' : 'false');
+            el.classList.toggle('bg-amber-400/15', on); el.classList.toggle('border-amber-400/60', on); el.classList.toggle('text-amber-200', on);
+            el.classList.toggle('bg-black/40', !on); el.classList.toggle('border-neutral-800', !on); el.classList.toggle('text-neutral-400', !on);
+        });
+        const list = byId('mva-list');
+        const more = byId('mva-more-btn');
+        const summaryEl = byId('mva-summary');
+        const ctx = byId('mva-context');
+        if (idle) {
+            if (list) list.innerHTML = `<p class="text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t('mva_pick'))}</p>`;
+            if (summaryEl) summaryEl.innerHTML = '';
+            if (more) more.classList.add('hidden');
+            if (ctx) ctx.classList.add('hidden');
+            this.setText('mva-tz', '');
+            return;
+        }
+        if (!data) {
+            if (error && list) list.innerHTML = `<p class="text-center text-[11px] text-rose-300 font-mono py-2">${this.escapeHtml(this.tf('mva_load_error', { error }))}</p>`;
+            return;
+        }
+        const s = data.summary || {};
+        if (summaryEl) {
+            summaryEl.innerHTML = [['mva_s_purchases', s.purchases], ['mva_s_active', s.active], ['mva_s_stars', s.stars], ['mva_s_confirmed', s.sentinel_confirmed]]
+                .map(([k, v]) => `<div class="rounded-lg border border-neutral-800 bg-black/40 px-1.5 py-1.5 text-center">
+                    <p class="text-sm font-extrabold text-white">${this.escapeHtml(this.fmtNum(v || 0))}</p>
+                    <p class="text-[8px] uppercase tracking-wide text-neutral-500">${this.escapeHtml(this.t(k))}</p></div>`).join('');
+        }
+        if (ctx) {
+            let msg = '', cls = '';
+            if (s.issues) { msg = this.tf('mva_ctx_issues', { n: s.issues }); cls = 'text-rose-300 bg-rose-500/10 border border-rose-500/40'; }
+            else if (data.autolower_enabled === false) { msg = this.t('mva_ctx_autolower_off'); cls = 'text-sky-200 bg-sky-500/10 border border-sky-500/30'; }
+            else if (data.sentinel_active === false && s.active) { msg = this.t('mva_ctx_no_sentinel'); cls = 'text-amber-200 bg-amber-400/10 border border-amber-400/40'; }
+            ctx.textContent = msg;
+            ctx.className = msg ? `text-[10px] font-bold rounded-lg px-2.5 py-1.5 ${cls}` : 'hidden';
+        }
+        if (list) {
+            list.innerHTML = records.length
+                ? records.map(r => this.micvipRowHtml(r)).join('')
+                : `<p class="text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t(filter === 'all' ? 'mva_empty' : 'mva_empty_filter'))}</p>`;
+        }
+        if (more) { more.classList.toggle('hidden', !hasMore); more.disabled = Boolean(loading); }
+        let tz = '';
+        try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { tz = ''; }
+        this.setText('mva-tz', tz ? this.tf('mva_tz', { tz }) : '');
     },
 
     /** Burbuja del chat de soporte. El texto SIEMPRE va escapado: la IA nunca inyecta HTML en la Mini App. */
@@ -2025,7 +2143,7 @@ export const ui = {
 
         const time = document.createElement('span');
         time.className = 'shrink-0 text-[9px] text-neutral-500 font-mono';
-        time.textContent = new Date(item.ts).toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false });
+        time.textContent = new Date(item.ts).toLocaleTimeString(this.locale(), { hour12: false });
 
         row.appendChild(icon);
         row.appendChild(text);

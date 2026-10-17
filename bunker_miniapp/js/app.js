@@ -185,6 +185,8 @@ export const app = {
     _ai: { chatId: null, data: null, licensed: false, busy: false, seq: 0 },
     _ghost: { chatId: null, data: null, busy: false, seq: 0 },
     _support: { busy: false, greeted: false },
+    // v22 · Auditoría MicVIP (paginada; cada respuesta se ata a su comunidad, filtro y secuencia)
+    _micvip: { chatId: null, filter: 'all', records: [], data: null, loading: false, seq: 0, timer: null },
     validatePlanForm,
     validateConfigSection,
 
@@ -221,6 +223,7 @@ export const app = {
         tgApp.initViewport();
         session.purgeLegacy();   // el initData cacheado por versiones anteriores no se usa nunca más
         this.initTheme();
+        this.initLanguage();   // 🌐 v21 · inglés por defecto o la preferencia guardada, antes de pintar textos
         ui.ensureLiveStyles();
         ui.updateTranslations();
         ui.setWsStatus('idle');
@@ -751,7 +754,7 @@ export const app = {
 
         cc.dirty[section] = false;
         this.applyServerConfiguration(res.configuration, { sections: [section] });
-        const time = new Date().toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false });
+        const time = new Date().toLocaleTimeString(ui.locale(), { hour12: false });
         ui.setConfigSectionStatus(section, 'saved', ui.tf('cfg_status_saved', { time }));
         tgApp.hapticNotification('success');
         this.consoleToast('success', '✅', ui.tf('cfg_toast_saved', { section: this.sectionTitle(section) }));
@@ -911,12 +914,69 @@ export const app = {
         }
     },
 
-    toggleLanguage() {
-        state.currentLang = state.currentLang === 'es' ? 'en' : 'es';
-        const indicator = document.getElementById('lang-indicator');
-        if (indicator) indicator.innerText = state.currentLang.toUpperCase();
+    // ======================================================================
+    // 🌐 v21 · IDIOMA — inglés por defecto, español latino persistente (dispositivo + servidor + bot)
+    // ======================================================================
+    normalizeLang(value) {
+        const raw = String(value || '').trim().toLowerCase();
+        if (raw.startsWith('en')) return 'en';
+        if (raw.startsWith('es')) return 'es';
+        return null;
+    },
 
+    storedLang() {
+        try { return this.normalizeLang(localStorage.getItem(CONFIG.LANG_STORAGE_KEY || 'bunker_lang')); }
+        catch (err) { return null; }
+    },
+
+    /** Orden: elección guardada en este dispositivo → idioma por defecto (inglés). */
+    initLanguage() {
+        state.currentLang = this.storedLang() || CONFIG.DEFAULT_LANG || 'en';
+    },
+
+    /**
+     * Cambia el idioma de toda la interfaz al instante. persist=true lo guarda en el dispositivo y en el servidor
+     * (el bot lo usará en su siguiente mensaje). Devuelve el idioma aplicado.
+     */
+    setLanguage(lang, { persist = true, announce = false } = {}) {
+        const next = this.normalizeLang(lang) || CONFIG.DEFAULT_LANG || 'en';
+        const changed = next !== state.currentLang;
+        state.currentLang = next;
+        if (persist) {
+            try { localStorage.setItem(CONFIG.LANG_STORAGE_KEY || 'bunker_lang', next); } catch (err) { /* almacenamiento bloqueado */ }
+            if (state.isAuthenticated) {
+                api.saveUserLanguage(next).then(res => {
+                    if (res?.__error && !res.__stale) console.warn('[i18n] No se pudo guardar el idioma en el servidor:', res.__error);
+                });
+            }
+        }
+        if (changed) this.rerenderForLanguage();
+        if (announce) ui.showToast({ key: 'lang', force: true, icon: '🌐', tone: 'info', ttl: 1800, title: ui.t('i18n_lang_toast') });
+        return next;
+    },
+
+    /** Tras iniciar sesión: el servidor es la fuente de verdad si el usuario ya eligió (en el bot o en otra Mini App). */
+    async syncLanguageWithServer() {
+        const epoch = session.epoch;
+        const res = await api.fetchUserLanguage();
+        if (!res || res.__error || res.__stale || epoch !== session.epoch) return;
+        const serverLang = this.normalizeLang(res.lang);
+        if (res.chosen && serverLang) {
+            if (serverLang !== state.currentLang) this.setLanguage(serverLang, { persist: false });
+            try { localStorage.setItem(CONFIG.LANG_STORAGE_KEY || 'bunker_lang', serverLang); } catch (err) { /* sin almacenamiento */ }
+        } else {
+            const local = this.storedLang();
+            if (local) api.saveUserLanguage(local);   // elección hecha antes de iniciar sesión → se sube al servidor
+        }
+    },
+
+    toggleLanguage() {
         tgApp.hapticImpact('light');
+        return this.setLanguage(state.currentLang === 'es' ? 'en' : 'es', { announce: true });
+    },
+
+    /** Repinta todo texto generado por JS (los elementos con data-i18n los cubre ui.updateTranslations). */
+    rerenderForLanguage() {
         ui.updateTranslations();
         ui.renderChatList('channels-list', state.data.channels, ui.t('no_channels'));
         ui.renderChatList('groups-list', state.data.groups, ui.t('no_groups'));
@@ -943,6 +1003,13 @@ export const app = {
         if (this._logReport?.data) ui.renderLogReportStatus(this._logReport.data);
         ui.setBroadcastStatus(this._studio.broadcast || null);
         if (this._lastBroadcastPreview) ui.renderBroadcastPreview(this._lastBroadcastPreview);
+
+        // v20/v21 · Tarjetas de perímetro, Clon/Centinela, Centinela IA y Ghost Purge (texto generado por JS).
+        if (this._perimeter?.data) ui.renderPerimeterStatus(this._perimeter.data);
+        if (this._assets?.data) ui.renderAssetsStatus(this._assets.data);
+        if (this._ai?.data) ui.renderAiSentinel(this._ai.data, { licensed: this._ai.licensed });
+        if (this._ghost?.data) ui.renderGhostPurge(this._ghost.data);
+        if (this._micvip?.data) this.paintMicvip();
 
         if (state.selectedChatId && state.data.currentChatDashboard) {
             this.loadChatDashboard(state.selectedChatId);
@@ -1007,10 +1074,10 @@ export const app = {
         const textarea = document.getElementById('help-textarea');
         const text = textarea?.value.trim() || '';
         if (!text) {
-            alert(state.currentLang === 'es' ? '⚠️ Escribe un mensaje antes de enviar.' : '⚠️ Write a message before sending.');
+            alert(ui.t('i18n_help_empty'));
             return;
         }
-        alert(state.currentLang === 'es' ? '✅ Enviado con éxito al equipo técnico.' : '✅ Sent successfully to technical team.');
+        alert(ui.t('i18n_help_sent'));
         if (textarea) textarea.value = '';
         const counter = document.getElementById('help-char-counter');
         if (counter) counter.innerText = `0 / ${textarea?.getAttribute('maxlength') || 4096}`;
@@ -1028,7 +1095,7 @@ export const app = {
         const lowercase = document.getElementById('regex-lowercase')?.checked;
 
         if (!patternStr) {
-            alert(state.currentLang === 'es' ? '⚠️ Ingresa una expresión regular.' : '⚠️ Enter a regular expression.');
+            alert(ui.t('i18n_regex_empty'));
             return;
         }
         if (lowercase) testStr = testStr.toLowerCase();
@@ -1037,10 +1104,10 @@ export const app = {
             const re = new RegExp(patternStr);
             const isMatch = re.test(testStr);
             alert(isMatch
-                ? (state.currentLang === 'es' ? '✅ Coincidencia exitosa (Match Successful)' : '✅ Match Successful')
-                : (state.currentLang === 'es' ? '❌ Sin coincidencia (No Match)' : '❌ No Match'));
+                ? ui.t('i18n_regex_match')
+                : ui.t('i18n_regex_no_match'));
         } catch (err) {
-            alert(state.currentLang === 'es' ? `⚠️ Expresión inválida: ${err.message}` : `⚠️ Invalid expression: ${err.message}`);
+            alert(ui.tf('i18n_regex_invalid', { error: err.message }));
         }
     },
 
@@ -1154,7 +1221,7 @@ export const app = {
     },
 
     logout() {
-        if (!confirm(state.currentLang === 'es' ? "¿Deseas cerrar la sesión de The Bunker OS?" : "Close The Bunker OS session?")) return;
+        if (!confirm(ui.t('i18n_logout_confirm'))) return;
 
         // El modo se decide por la credencial real, NO por la existencia de window.Telegram.WebApp:
         // el SDK la define también en un navegador normal, donde close() no hace nada.
@@ -1212,6 +1279,7 @@ export const app = {
     },
 
     async bootstrapDashboard() {
+        this.syncLanguageWithServer();   // 🌐 v21 · en segundo plano: no retrasa el panel
         this.loadTelegramUser();
         this.loadAffiliateLink();
         await Promise.all([
@@ -1289,9 +1357,7 @@ export const app = {
         window.open(url, '_blank', 'noopener,noreferrer');
         const statusEl = document.getElementById('login-status-msg');
         if (statusEl) {
-            statusEl.innerText = state.currentLang === 'es'
-                ? '📲 Continúa el proceso en Telegram y vuelve a esta pestaña.'
-                : '📲 Continue in Telegram, then return to this tab.';
+            statusEl.innerText = ui.t('i18n_login_continue');
         }
     },
 
@@ -1967,7 +2033,7 @@ export const app = {
 
         studio.dirty = false;
         ui.fillStudioForm(payload);   // muestra el valor normalizado (p. ej. @alias → https://t.me/alias)
-        const time = new Date().toLocaleTimeString(state.currentLang === 'es' ? 'es-CO' : 'en-US', { hour12: false });
+        const time = new Date().toLocaleTimeString(ui.locale(), { hour12: false });
         ui.setStudioStatus('saved', ui.tf('studio_status_saved_unverified', { time }));
         if (!auto) tgApp.hapticNotification('success');
 
@@ -2677,6 +2743,8 @@ export const app = {
 
     onStarsPayment(d) {
         if (!d) return;
+        // v22 · Un pago puede ser un MicVIP: la auditoría se relee cuando el pase ya está verificado.
+        if (this._micvip.chatId) this.scheduleMicvipReload(this._micvip.chatId);
         const stars = Number(d.a) || 0;
         const name = `ID ${d.u}`;   // el evento solo lleva el id del pagador
 
@@ -2999,7 +3067,7 @@ export const app = {
                 </div>
             `).join('');
         } else {
-            listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">${state.currentLang === 'es' ? 'Sin estadísticas de administradores' : 'No administrator statistics'}</div>`;
+            listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">${ui.escapeHtml(ui.t('i18n_admin_stats_empty'))}</div>`;
         }
     },
 
@@ -3024,7 +3092,7 @@ export const app = {
                 </div>
             `).join('');
         } else {
-            listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">${state.currentLang === 'es' ? 'Sin registros de actividad reciente' : 'No recent activity records'}</div>`;
+            listEl.innerHTML = `<div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">${ui.escapeHtml(ui.t('i18n_top_users_empty'))}</div>`;
         }
     },
 
@@ -3202,6 +3270,7 @@ export const app = {
         this.loadPerimeter(id);
         this.loadAiSentinel(id);
         this.loadGhostPurge(id);
+        this.startMicvipAudit(id);   // v22
     },
 
     stopPerimeterConsole() {
@@ -3213,6 +3282,7 @@ export const app = {
         ui.renderPerimeterStatus(null, { idle: true });
         ui.renderAiSentinel(null, { idle: true });
         ui.renderGhostPurge(null, { idle: true });
+        this.stopMicvipAudit();   // v22
     },
 
     applyPerimeter(chatId, perimeter) {
@@ -3412,6 +3482,129 @@ export const app = {
         return this.saveGhostPurge({ action });
     },
 
+    // --- 🎟️ v22 · Auditoría MicVIP ---
+    startMicvipAudit(chatId) {
+        const m = this._micvip;
+        clearTimeout(m.timer);
+        Object.assign(m, { chatId: String(chatId), filter: 'all', records: [], data: null, loading: false, seq: m.seq + 1, timer: null });
+        ui.renderMicvipAudit(null, { loading: true, filter: 'all' });
+        this.loadMicvipAudit({ reset: true });
+    },
+
+    stopMicvipAudit() {
+        const m = this._micvip;
+        clearTimeout(m.timer);
+        Object.assign(m, { chatId: null, filter: 'all', records: [], data: null, loading: false, seq: m.seq + 1, timer: null });
+        ui.renderMicvipAudit(null, { idle: true });
+    },
+
+    paintMicvip() {
+        const m = this._micvip;
+        ui.renderMicvipAudit(m.data, { records: m.records, filter: m.filter, loading: m.loading,
+            hasMore: Boolean(m.data && m.records.length < (m.data.total || 0)) });
+    },
+
+    async loadMicvipAudit({ reset = false, manual = false } = {}) {
+        const m = this._micvip;
+        const chatId = m.chatId;
+        if (!chatId || (m.loading && !reset)) return false;
+        const seq = ++m.seq;
+        const epoch = session.epoch;
+        const page = CONFIG.MICVIP_AUDIT?.PAGE_SIZE || 20;
+        m.loading = true;
+        this.paintMicvip();
+        const res = await api.fetchMicvipAudit(chatId, { status: m.filter, limit: page, offset: reset ? 0 : m.records.length });
+        if (seq !== m.seq || epoch !== session.epoch || res?.__stale || m.chatId !== chatId) return false;
+        m.loading = false;
+        if (res?.__error) {
+            if (m.data) this.paintMicvip();
+            else ui.renderMicvipAudit(null, { filter: m.filter, error: this.consoleErrorMessage(res) });
+            if (manual) tgApp.hapticNotification('error');
+            return false;
+        }
+        m.data = res;
+        m.records = reset ? (res.records || []) : m.records.concat(res.records || []);
+        this.paintMicvip();
+        if (manual) tgApp.hapticNotification('success');
+        return true;
+    },
+
+    refreshMicvipAudit() {
+        if (!this._micvip.chatId) return this.consolePickFirst();
+        tgApp.hapticImpact('light');
+        return this.loadMicvipAudit({ reset: true, manual: true });
+    },
+
+    loadMoreMicvipAudit() {
+        tgApp.hapticImpact('light');
+        return this.loadMicvipAudit({ reset: false });
+    },
+
+    setMicvipFilter(filter) {
+        const m = this._micvip;
+        if (!m.chatId || m.filter === filter) return false;
+        tgApp.hapticSelection?.();
+        m.filter = filter;
+        m.records = [];
+        return this.loadMicvipAudit({ reset: true });
+    },
+
+    /** Tras un pago en Stars: relectura diferida (el servidor verifica el pase unos segundos después del cobro). */
+    scheduleMicvipReload(chatId) {
+        const m = this._micvip;
+        if (String(m.chatId) !== String(chatId)) return;
+        clearTimeout(m.timer);
+        m.timer = setTimeout(() => this.loadMicvipAudit({ reset: true }), CONFIG.MICVIP_AUDIT?.LIVE_RELOAD_MS || 6000);
+    },
+
+    /** CSV completo del filtro activo (hasta EXPORT_MAX filas): descarga o, en WebViews sin descargas, portapapeles. */
+    async exportMicvipAudit() {
+        const m = this._micvip;
+        const chatId = m.chatId;
+        if (!chatId) return this.consolePickFirst();
+        const epoch = session.epoch;
+        const max = CONFIG.MICVIP_AUDIT?.EXPORT_MAX || 2000;
+        const rows = [];
+        while (rows.length < max) {
+            const res = await api.fetchMicvipAudit(chatId, { status: m.filter, limit: 200, offset: rows.length });
+            if (epoch !== session.epoch || res?.__stale) return false;
+            if (res?.__error) {
+                this.consoleToast('error', '⚠️', ui.tf('mva_export_error', { error: this.consoleErrorMessage(res) }));
+                return false;
+            }
+            rows.push(...(res.records || []));
+            if (!res.records?.length || rows.length >= (res.total || 0)) break;
+        }
+        const iso = ts => (ts ? new Date(Number(ts) * 1000).toISOString() : '');
+        const cell = v => {
+            const text = String(v ?? '');
+            const safe = /^[=+\-@]/.test(text) ? `'${text}` : text;   // sin inyección de fórmulas en hojas de cálculo
+            return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
+        };
+        const lines = [ui.t('mva_csv_headers')].concat(rows.map(r => [
+            r.user_id, r.username || '', r.full_name || '', r.amount_stars || 0, iso(r.purchased_at), iso(r.expires_at),
+            r.state, r.evidence, iso(r.sentinel_applied_at), r.sentinel_failures || 0, r.source || ''
+        ].map(cell).join(',')));
+        const csv = lines.join('\n');
+        const name = `micvip_audit_${chatId}_${new Date().toISOString().slice(0, 10)}.csv`;
+        try {
+            const url = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }));
+            const a = Object.assign(document.createElement('a'), { href: url, download: name });
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            this.consoleToast('success', '📄', ui.tf('mva_export_ok', { n: rows.length }));
+        } catch (err) {
+            try {
+                await navigator.clipboard.writeText(csv);
+                this.consoleToast('success', '📋', ui.tf('mva_export_copied', { n: rows.length }));
+            } catch (e) {
+                this.consoleToast('error', '⚠️', ui.tf('mva_export_error', { error: String(err?.message || err) }));
+                return false;
+            }
+        }
+        return true;
+    },
+
     // --- 🤖 Soporte IA ---
     openSupportAi() {
         this.closeHelpModal();
@@ -3507,8 +3700,7 @@ export const app = {
         tgApp.hapticNotification(ok ? 'success' : 'error');
         ui.showToast({
             key: 'clipboard', force: true, icon: ok ? '📋' : '⚠️', tone: ok ? 'success' : 'error', ttl: 2500,
-            title: ok ? (state.currentLang === 'es' ? '¡Copiado al portapapeles!' : 'Copied to clipboard!')
-                      : (state.currentLang === 'es' ? 'No se pudo copiar. Mantén pulsado el enlace para copiarlo.' : 'Could not copy. Long-press the link to copy it.'),
+            title: ok ? ui.t('i18n_copy_ok') : ui.t('i18n_copy_fail'),
             body: ok ? '' : value
         });
         return ok;

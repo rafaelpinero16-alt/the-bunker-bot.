@@ -98,6 +98,7 @@ from assistant import (
     engage_podcast_ducking, disengage_podcast_ducking
 )
 import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purga v2, canal de registro, IA, soporte IA)
+import micvip_audit    # 🎟️ v22 · auditoría MicVIP compartida con la Mini App
 from .groups import (
     execute_raid_lockdown, lift_raid_lockdown,
     clear_speaker_queue, get_speaker_queue
@@ -167,7 +168,7 @@ class OwnerCallbackGuardMiddleware(BaseMiddleware):
                     logging.warning(f"⛔ [Aduana] Botón '{raw[:64]}' bloqueado: user={user.id} no es dueño ni delegado autorizado de {chat_id}.")
                     clear_user_states(bot.id, user.id)
                     try:
-                        await event.answer(TEXTS.get(lang, TEXTS["es"])["owner_only_alert"], show_alert=True)
+                        await event.answer(TEXTS.get(lang, TEXTS[DEFAULT_LANG])["owner_only_alert"], show_alert=True)
                     except Exception:
                         pass
                     return None
@@ -1672,9 +1673,130 @@ def tr(lang: str, es: str, en: str) -> str:
     return es if lang == "es" else en
 
 
+# ==========================================
+# 🌐 v21 · IDIOMA DEL OPERADOR: inglés por defecto, español latino persistente
+# ==========================================
+# Orden de resolución: 1) preferencia guardada (users.lang) → 2) idioma de Telegram SOLO si
+# BUNKER_LANG_AUTODETECT=1 → 3) DEFAULT_LANG ('en', o BUNKER_DEFAULT_LANG). La preferencia se precarga en una
+# caché acotada (TTL + tope) mediante LangPreferenceMiddleware, así user_lang() sigue siendo síncrona.
+try:
+    from database.database import (
+        get_user_lang, set_user_lang, normalize_lang, DEFAULT_LANG as _DB_DEFAULT_LANG,
+    )
+except ImportError:  # pragma: no cover - base de datos anterior a v21: sin persistencia, inglés por defecto
+    _DB_DEFAULT_LANG = "en"
+
+    async def get_user_lang(user_id):
+        return None
+
+    async def set_user_lang(user_id, lang, username=None, full_name=None):
+        return "es" if str(lang).lower().startswith("es") else "en"
+
+    def normalize_lang(value, default=None):
+        raw = str(value or "").strip().lower()
+        return "en" if raw.startswith("en") else ("es" if raw.startswith("es") else default)
+
+DEFAULT_LANG = _DB_DEFAULT_LANG
+LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+LANG_PREF_TTL_SECONDS = 600
+LANG_PREF_CACHE_MAX = 20000
+_LANG_PREFS: dict = {}   # user_id → (lang | None, monotonic_ts)
+
+
+def _cache_user_lang(user_id: int, lang) -> None:
+    _LANG_PREFS.pop(user_id, None)
+    _LANG_PREFS[user_id] = (lang, time.monotonic())
+    overflow = len(_LANG_PREFS) - LANG_PREF_CACHE_MAX
+    if overflow > 0:
+        for old in list(_LANG_PREFS)[:overflow]:
+            _LANG_PREFS.pop(old, None)
+
+
+def _cached_user_lang(user_id: int):
+    entry = _LANG_PREFS.get(user_id)
+    if entry and time.monotonic() - entry[1] < LANG_PREF_TTL_SECONDS:
+        return entry[0], True
+    return None, False
+
+
 def user_lang(user) -> str:
-    code = getattr(user, "language_code", None) or ""
-    return "es" if code.startswith("es") else "en"
+    """Idioma con el que se habla a este usuario (síncrono; la preferencia ya está precargada)."""
+    uid = getattr(user, "id", None)
+    if uid:
+        pref, _hit = _cached_user_lang(int(uid))
+        if pref:
+            return pref
+    if LANG_AUTODETECT:
+        detected = normalize_lang(getattr(user, "language_code", None))
+        if detected:
+            return detected
+    return DEFAULT_LANG
+
+
+async def prime_user_lang(user) -> str:
+    """Carga (una vez cada 10 min) la preferencia guardada en la caché y devuelve el idioma efectivo."""
+    uid = getattr(user, "id", None)
+    if not uid:
+        return DEFAULT_LANG
+    _pref, hit = _cached_user_lang(int(uid))
+    if not hit:
+        try:
+            stored = await get_user_lang(int(uid))
+        except Exception as ex:
+            logging.debug(f"[i18n] Preferencia de idioma no disponible para {uid}: {ex}")
+            return user_lang(user)
+        _cache_user_lang(int(uid), stored)
+    return user_lang(user)
+
+
+async def remember_user_lang(user, lang: str) -> str:
+    """Guarda la elección del operador (bot y Mini App comparten users.lang) y la aplica al instante."""
+    clean = normalize_lang(lang, DEFAULT_LANG)
+    uid = int(getattr(user, "id", 0) or 0)
+    if not uid:
+        return clean
+    _cache_user_lang(uid, clean)
+    try:
+        await set_user_lang(uid, clean, getattr(user, "username", None), getattr(user, "full_name", None))
+    except Exception as ex:
+        logging.warning(f"⚠️ [i18n] No se pudo guardar el idioma de {uid}: {ex}")
+    return clean
+
+
+def forget_user_lang_cache(user_id: int) -> None:
+    """Invalida la caché (p. ej. cuando la Mini App cambia el idioma por la API)."""
+    _LANG_PREFS.pop(int(user_id), None)
+
+
+def lang_from_callback(callback, data: list) -> str:
+    """Idioma de un botón: el sufijo _es/_en del menú que lo generó o, si no lo trae, el del operador."""
+    tail = data[-1] if data else ""
+    return tail if tail in ("es", "en") else user_lang(callback.from_user)
+
+
+class LangPreferenceMiddleware(BaseMiddleware):
+    """Precarga users.lang antes de cada handler de esta consola (mensajes y botones)."""
+
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user is not None and not getattr(user, "is_bot", False):
+            await prime_user_lang(user)
+        return await handler(event, data)
+
+
+router.message.middleware(LangPreferenceMiddleware())
+router.callback_query.middleware(LangPreferenceMiddleware())
+
+
+def language_selector_keyboard(current: str, back_callback: str = None) -> InlineKeyboardMarkup:
+    """Selector 🇺🇸 EN / 🇪🇸 ES con la opción vigente marcada."""
+    rows = [[
+        InlineKeyboardButton(text=("✅ " if current == "en" else "") + "🇺🇸 English", callback_data="setlang_en"),
+        InlineKeyboardButton(text=("✅ " if current == "es" else "") + "🇪🇸 Español", callback_data="setlang_es"),
+    ]]
+    if back_callback:
+        rows.append([InlineKeyboardButton(text="⬅️ " + ("Back" if current == "en" else "Volver"), callback_data=back_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def clear_user_states(bot_id: int, user_id: int) -> None:
@@ -2191,6 +2313,7 @@ DELEGATE_CALLBACK_RULES = (
     ("gami_", "can_manage_broadcast"),
     # 📊 Métricas y telemetría (solo lectura)
     ("radar_", "can_view_analytics"), ("tips_telemetry_", "can_view_analytics"), ("rep_viewtop_", "can_view_analytics"),
+    ("mvaudit_", "can_view_analytics"),   # 🎟️ v22 · Auditoría MicVIP (solo lectura)
     # 🎙️ Radar de voz y Centinelas (sin conectar clones ni sesiones por teléfono)
     ("sentinelcfg_", "can_manage_sentinel"), ("payload_", "can_manage_sentinel"), ("cmd_autolower_", "can_manage_sentinel"),
     ("alset_", "can_manage_sentinel"), ("cmd_cams_", "can_manage_sentinel"), ("vcsched_", "can_manage_sentinel"),
@@ -2275,7 +2398,7 @@ async def guard_pending_state_ownership(message: Message, bot: Bot, t: dict) -> 
 
 async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: int) -> bool:
     """Dueño legítimo, Arquitecto o delegado con el permiso exacto que exige este botón (ver DELEGATE_CALLBACK_RULES)."""
-    lang = "es" if callback.from_user.language_code and callback.from_user.language_code.startswith("es") else "en"
+    lang = user_lang(callback.from_user)
     t = TEXTS[lang]
     if await is_authorized_for_callback(bot, callback.from_user.id, group_id, callback.data or ""):
         return True
@@ -2286,7 +2409,7 @@ async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: i
 
 async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int, perm: str = None) -> bool:
     """Igual que verify_admin_privileges para mensajes; perm=None → exclusivo del Dueño / Arquitecto."""
-    lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
+    lang = user_lang(message.from_user)
     t = TEXTS[lang]
     if await is_authorized_operator(bot, message.from_user.id, group_id, perm):
         return True
@@ -2297,7 +2420,7 @@ async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int,
 
 async def _reply_plan_state_lost(message: Message, lang: str, channel_id=None) -> None:
     """Reply when the persisted channel-plan assistant state is missing or invalid."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     await message.answer(t["plan_state_lost"], parse_mode="HTML")
 
 
@@ -2307,7 +2430,7 @@ async def _finalize_and_preview_channel_plan(
     media_type: str = None, target_link: str = None, recurrence_hours: int = 0
 ) -> None:
     """Guarda el plan del canal y envía una vista previa donde el enlace VIP es un botón inline."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     try:
         plan_id = await create_channel_plan(
             channel_id, name, days, price, promo_text, media_id, media_type, target_link
@@ -2410,7 +2533,7 @@ async def resolve_chat_kind(bot: Bot, chat_id: int) -> str:
 
 async def origin_back_button(bot: Bot, chat_id: int, lang: str) -> InlineKeyboardButton:
     """Botón de retorno que respeta el origen real: canal → cpanel (estudio) | grupo → gpanel."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     if await resolve_chat_kind(bot, chat_id) == "c":
         return InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{chat_id}_{lang}")
     return InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"gpanel_{chat_id}_{lang}")
@@ -2418,7 +2541,7 @@ async def origin_back_button(bot: Bot, chat_id: int, lang: str) -> InlineKeyboar
 
 def ultra_back_button(chat_type: str, chat_id: int, lang: str) -> InlineKeyboardButton:
     """Retorno de las Herramientas Ultra: canal → cpanel | grupo → menú de herramientas Ultra del grupo."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     if chat_type == "c":
         return InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{chat_id}_{lang}")
     return InlineKeyboardButton(text=t["btn_back_ultra"], callback_data=f"menu_ultra_{chat_id}_{lang}")
@@ -2507,7 +2630,7 @@ async def _tips_finish(bot: Bot, message: Message, state: dict, group_id: int, l
 
 async def get_channel_perm_warning(bot: Bot, channel_id: int, lang: str) -> str:
     """Auditoría dinámica de permisos del bot en el canal; devuelve un aviso HTML o '' si todo está en orden."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     try:
         me = await bot.get_me()
         member = await bot.get_chat_member(chat_id=channel_id, user_id=me.id)
@@ -2532,7 +2655,7 @@ async def get_channel_perm_warning(bot: Bot, channel_id: int, lang: str) -> str:
 
 def build_channel_request_keyboard(lang: str) -> ReplyKeyboardMarkup:
     """Selector nativo de Telegram: lista los canales cuyo propietario es el usuario y donde el bot es miembro."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(
@@ -2554,7 +2677,7 @@ def build_channel_request_keyboard(lang: str) -> ReplyKeyboardMarkup:
 
 def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False, user_id: int = 0):
     """Teclado principal con bifurcación dual independiente para Grupos y Canales (+ Matriz para Arquitectos)."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     add_group_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
     add_channel_url = f"https://t.me/{bot_username}?startchannel=true&admin=post_messages+edit_messages+delete_messages+manage_video_chats+invite_users"
 
@@ -2572,7 +2695,8 @@ def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False, user
         rows.append([InlineKeyboardButton(text=t["btn_saas"], web_app=WebAppInfo(url=WEBAPP_URL))])
     rows.append([
         InlineKeyboardButton(text=t["btn_id"], callback_data=f"menu_id_{lang}"),
-        InlineKeyboardButton(text="🇪🇸 ES / 🇬🇧 EN", callback_data=f"lang_{'es' if lang == 'en' else 'en'}")
+        # 🌐 v21 · Muestra el idioma al que se cambia (🇺🇸 EN por defecto, 🇪🇸 ES persistente)
+        InlineKeyboardButton(text="🇪🇸 Español" if lang == "en" else "🇺🇸 English", callback_data=f"lang_{'es' if lang == 'en' else 'en'}")
     ])
     rows.append([
         InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}"),
@@ -2616,8 +2740,8 @@ async def _send_welcome_video(bot: Bot, chat_id: int, caption: str, keyboard) ->
 async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str = None) -> None:
     if not bot_username:
         bot_username = (await bot.get_me()).username or "BunkerBot"
-    lang = "es" if user and user.language_code and user.language_code.startswith("es") else "en"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = user_lang(user) if user else DEFAULT_LANG
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     name = html.escape(user.full_name) if user else "Comandante"
     text = t["welcome"].format(name=name)
     keyboard = get_main_keyboard(bot_username, lang, is_clone=is_clone_bot(bot), user_id=getattr(user, "id", 0))
@@ -2630,12 +2754,12 @@ async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str 
 
 
 def get_simple_back_keyboard(lang: str, target: str = "main"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_{target}_{lang}")]])
 
 
 def get_info_keyboard(lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_how_works"], callback_data=f"menu_infohow_{lang}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
@@ -2643,7 +2767,7 @@ def get_info_keyboard(lang: str):
 
 
 def get_support_keyboard(lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         # 🤖 v20 · Arquitecto de Soporte con IA (Mistral, Capa 0 PII)
         [InlineKeyboardButton(text="🤖 " + ("Asistente de Soporte IA" if lang == "es" else "AI Support Assistant"), callback_data=f"supai_start_{lang}")],
@@ -2653,7 +2777,7 @@ def get_support_keyboard(lang: str):
 
 
 def get_groups_keyboard(groups: list, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     if not groups:
         no_groups_text = "⚠️ No hay comunidades activas vinculadas" if lang == "es" else "⚠️ No active communities linked"
         return InlineKeyboardMarkup(inline_keyboard=[
@@ -2667,7 +2791,7 @@ def get_groups_keyboard(groups: list, lang: str):
 
 def get_channels_keyboard(channels: list, lang: str):
     """Selector de canales vinculados + acceso permanente a la Sincronización Activa."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     rows = []
     if not channels:
         no_ch_text = "⚠️ No hay canales activos vinculados" if lang == "es" else "⚠️ No active channels linked"
@@ -2682,7 +2806,7 @@ def get_channels_keyboard(channels: list, lang: str):
 
 def get_channel_panel_keyboard(channel_id: int, lang: str):
     """Consola especializada de estudio para canales (Lives, Membresías y Payload)."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     toggle_lang = "en" if lang == "es" else "es"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💎 ULTRA PRO", callback_data=f"pay_ultra_{channel_id}_{lang}")],
@@ -2699,7 +2823,7 @@ def get_channel_panel_keyboard(channel_id: int, lang: str):
             InlineKeyboardButton(text="🎮 " + ("Anuncio Gamificación" if lang == "es" else "Gamification Ad"), callback_data=f"gami_menu_{channel_id}_{lang}")
         ],
         [
-            InlineKeyboardButton(text=f"🌐 {'English' if lang == 'es' else 'Español'}", callback_data=f"langcpanel_{channel_id}_{toggle_lang}"),
+            InlineKeyboardButton(text="🇺🇸 English" if lang == "es" else "🇪🇸 Español", callback_data=f"langcpanel_{channel_id}_{toggle_lang}"),
             InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")
         ]
     ])
@@ -2745,7 +2869,7 @@ def _plan_recurrence_keyboard(t: dict, channel_id: int, lang: str, plan_id: int 
 
 
 def get_group_panel_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     toggle_lang = "en" if lang == "es" else "es"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐ PRO", callback_data=f"pay_pro_{group_id}_{lang}"), InlineKeyboardButton(text="💎 ULTRA", callback_data=f"pay_ultra_{group_id}_{lang}")],
@@ -2759,16 +2883,18 @@ def get_group_panel_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text="🛰️ " + ("Perímetro" if lang == "es" else "Perimeter"), callback_data=f"perim_view_{group_id}_{lang}"),
             InlineKeyboardButton(text="🧾 " + ("Canal de Registro" if lang == "es" else "Log Channel"), callback_data=f"logch_menu_{group_id}_{lang}"),
         ],
+        # 🎟️ v22 · Registro auditable de compras MicVIP (compra → pase → Centinela)
+        [InlineKeyboardButton(text="🎟️ " + ("Auditoría MicVIP" if lang == "es" else "MicVIP Audit"), callback_data=f"mvaudit_{group_id}_all_1_{lang}")],
         [InlineKeyboardButton(text=t["btn_ultra_tools"], callback_data=f"menu_ultra_{group_id}_{lang}")],
         [
-            InlineKeyboardButton(text=f"🌐 {'English' if lang == 'es' else 'Español'}", callback_data=f"langpanel_{group_id}_{toggle_lang}"),
+            InlineKeyboardButton(text="🇺🇸 English" if lang == "es" else "🇪🇸 Español", callback_data=f"langpanel_{group_id}_{toggle_lang}"),
             InlineKeyboardButton(text=t["btn_back_settings"], callback_data=f"menu_settings_{lang}")
         ]
     ])
 
 
 def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     back_btn = (
         InlineKeyboardButton(text=t["btn_back_channel"], callback_data=f"cpanel_{group_id}_{lang}")
         if chat_type == "c" else
@@ -2792,7 +2918,7 @@ def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
 
 
 def build_ultra_lock_view(group_id: int, lang: str, feature_title: str, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     lock_text = f"{feature_title}\n\n{t['ultra_lock_generic']}"
     # 🧭 Blindaje contextual: canal → cpanel | grupo → gpanel.
     back_btn = (
@@ -2808,7 +2934,7 @@ def build_ultra_lock_view(group_id: int, lang: str, feature_title: str, chat_typ
 
 
 def get_panic_keyboard(group_id: int, lang: str, status: int, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     action_btn = (
         InlineKeyboardButton(text=t["btn_panic_deactivate"], callback_data=f"panic_deactivate_{group_id}_{lang}")
         if status == 1 else
@@ -2820,7 +2946,7 @@ def get_panic_keyboard(group_id: int, lang: str, status: int, chat_type: str = "
         [back_btn]
     ])
 def get_night_keyboard(group_id: int, lang: str, status: int):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     toggle_btn = (
         InlineKeyboardButton(text=t["btn_night_off"], callback_data=f"night_toggle_0_{group_id}_{lang}")
         if status == 1 else
@@ -2834,7 +2960,7 @@ def get_night_keyboard(group_id: int, lang: str, status: int):
 
 
 def get_panic_confirm_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_panic_confirm"], callback_data=f"panic_activate_{group_id}_{lang}")],
         [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"panic_menu_{group_id}_{lang}")]
@@ -2842,7 +2968,7 @@ def get_panic_confirm_keyboard(group_id: int, lang: str):
 
 
 def get_shield_keyboard(group_id: int, lang: str, status: int, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     back_btn = ultra_back_button(chat_type, group_id, lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -2854,7 +2980,7 @@ def get_shield_keyboard(group_id: int, lang: str, status: int, chat_type: str = 
 
 
 def get_podcast_keyboard(group_id: int, lang: str, status: int, duck_level: int, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     back_btn = ultra_back_button(chat_type, group_id, lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -2872,7 +2998,7 @@ def get_podcast_keyboard(group_id: int, lang: str, status: int, duck_level: int,
 
 
 def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     back_btn = ultra_back_button(chat_type, group_id, lang)
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -2890,7 +3016,7 @@ def get_speakers_keyboard(group_id: int, lang: str, status: int, price: int, cha
 
 
 def get_sentinel_payload_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     st = cfg.get("enabled", 0)
     has_text = "🟢" if cfg.get("text") else "🔴"
     has_media = f"🟢 ({cfg.get('media_type')})" if cfg.get("media_id") else "🔴"
@@ -3004,7 +3130,7 @@ def build_tips_panel_text(lang: str, cfg: dict, tier: str, total_stars: int, tar
 
 
 async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g", viewer_id: int = 0, targets: list = None):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     tier = _tips_tier(await get_effective_group_tier(group_id, viewer_id))
     limit = _tips_limit(tier)
     if targets is None:
@@ -3248,7 +3374,7 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat
     nativa in-app (sendInvoice con currency=XTR). Sin enlaces a pasarelas externas ni precios
     fiat, conforme a Telegram, Apple App Store (3.1.1) y Google Play Payments.
     """
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     stars_price = f"{plan_price_stars(tier_level)} XTR"
     stars_label = f"⭐ Pagar con Stars ({stars_price})" if lang == "es" else f"⭐ Pay with Stars ({stars_price})"
 
@@ -3272,7 +3398,7 @@ def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat
 
 
 async def get_captcha_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     cfg = await get_captcha_config(group_id)
     st = cfg["status"]
     st_btn = f"🛡️ Captcha: {'🟢' if st == 1 else '🔴'}"
@@ -3302,7 +3428,7 @@ async def get_captcha_keyboard(group_id: int, lang: str):
 
 
 def get_captcha_time_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="⏱️ 30s", callback_data=f"capval_time_30_{group_id}_{lang}"),
@@ -3317,7 +3443,7 @@ def get_captcha_time_keyboard(group_id: int, lang: str):
 
 
 async def get_captcha_action_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     cfg = await get_captcha_config(group_id)
     current_action = cfg["action"]
     kick_status = "🟢" if current_action == "kick" else "🔴"
@@ -3335,7 +3461,7 @@ async def get_captcha_action_keyboard(group_id: int, lang: str):
 
 
 async def get_antispam_text(group_id: int, lang: str) -> str:
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     st_tg = "🟢" if await get_antispam_filter(group_id, "tg_links") == 1 else "🔴"
     st_fwd = "🟢" if await get_antispam_filter(group_id, "forwards") == 1 else "🔴"
     st_q = "🟢" if await get_antispam_filter(group_id, "quotes") == 1 else "🔴"
@@ -3345,7 +3471,7 @@ async def get_antispam_text(group_id: int, lang: str) -> str:
 
 
 async def get_antispam_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     st_tg = "🟢" if await get_antispam_filter(group_id, "tg_links") == 1 else "🔴"
     st_fwd = "🟢" if await get_antispam_filter(group_id, "forwards") == 1 else "🔴"
     st_q = "🟢" if await get_antispam_filter(group_id, "quotes") == 1 else "🔴"
@@ -3367,7 +3493,7 @@ async def get_antispam_keyboard(group_id: int, lang: str):
 
 
 async def get_forwards_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     st_chan = "🟢" if await get_antispam_filter(group_id, "fwd_channels") == 1 else "🔴"
     st_usr = "🟢" if await get_antispam_filter(group_id, "fwd_users") == 1 else "🔴"
     st_grp = "🟢" if await get_antispam_filter(group_id, "fwd_groups") == 1 else "🔴"
@@ -3386,7 +3512,7 @@ async def get_forwards_keyboard(group_id: int, lang: str):
 
 
 async def get_locks_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     media = "🟢" if await get_lock_status(group_id, "lock_media") == 1 else "🔴"
     stickers = "🟢" if await get_lock_status(group_id, "lock_stickers") == 1 else "🔴"
     links = "🟢" if await get_lock_status(group_id, "lock_links") == 1 else "🔴"
@@ -3444,7 +3570,7 @@ async def get_warns_keyboard(group_id: int, lang: str, user_id: int = 0):
     - PRO: Desbloquea botón para editar texto de sanción.
     - ULTRA PRO: Desbloquea botón para editar texto + botón para adjuntar multimedia (foto/video/gif).
     """
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     cfg = await get_warns_config(group_id)
     limit = cfg["limit"]
     action = cfg["action"].upper()
@@ -3499,7 +3625,7 @@ async def get_warns_keyboard(group_id: int, lang: str, user_id: int = 0):
 
 
 async def get_delmsgs_keyboard(group_id: int, user_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     tier = await get_effective_group_tier(group_id, user_id)
     cfg = await get_captcha_config(group_id)
     srv_mode = await get_service_msgs_mode(group_id)
@@ -3542,7 +3668,7 @@ async def get_delmsgs_keyboard(group_id: int, user_id: int, lang: str):
 
 
 def get_antiflood_keyboard(group_id: int, lang: str, cfg: dict):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     del_st = "🟢" if cfg["delete"] == 1 else "🔴"
     curr_act = cfg["action"]
 
@@ -3569,7 +3695,7 @@ def get_antiflood_keyboard(group_id: int, lang: str, cfg: dict):
 
 
 def get_antiflood_number_keyboard(group_id: int, lang: str, mode: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     numbers = [2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20]
     kb = []
     row = []
@@ -3583,7 +3709,7 @@ def get_antiflood_number_keyboard(group_id: int, lang: str, mode: str):
 
 
 def get_mod_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚫 /ban", callback_data=f"cmd_ban_{group_id}_{lang}"), InlineKeyboardButton(text="👢 /kick", callback_data=f"cmd_kick_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🔇 /mute", callback_data=f"cmd_mute_{group_id}_{lang}"), InlineKeyboardButton(text="🔊 /unmute", callback_data=f"cmd_unmute_{group_id}_{lang}")],
@@ -3593,7 +3719,7 @@ def get_mod_keyboard(group_id: int, lang: str):
 
 
 def get_time_selection_keyboard(action_name: str, group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     min1 = "1 Minuto" if lang == "es" else "1 Minute"
     min10 = "10 Minutos" if lang == "es" else "10 Minutes"
     h1 = "1 Hora" if lang == "es" else "1 Hour"
@@ -3609,7 +3735,7 @@ def get_time_selection_keyboard(action_name: str, group_id: int, lang: str):
 
 
 def get_eco_keyboard(group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📡 Radar Ecosistema" if lang == "es" else "📡 Radar Ecosystem", callback_data=f"radar_eco_{group_id}"), InlineKeyboardButton(text="🎥 /cams", callback_data=f"cmd_cams_{group_id}_{lang}")],
         [InlineKeyboardButton(text="⚙️ /autolower", callback_data=f"cmd_autolower_{group_id}_{lang}"), InlineKeyboardButton(text="🗓️ Programador VC" if lang == "es" else "🗓️ VC Scheduler", callback_data=f"vcsched_menu_{group_id}_{lang}")],
@@ -3628,7 +3754,7 @@ def get_eco_keyboard(group_id: int, lang: str):
 
 async def send_clone_panel(bot: Bot, user, group_id: int, lang: str) -> None:
     """v17 · Panel 🧬 Clon & Centinela como mensaje nuevo (deep link gclone_ desde la Mini App)."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     tier = await get_effective_group_tier(group_id, user.id)
     try:
         g_name = html.escape((await bot.get_chat(group_id)).title or "")
@@ -3647,7 +3773,7 @@ async def send_clone_panel(bot: Bot, user, group_id: int, lang: str) -> None:
 
 
 async def get_clone_keyboard(group_id: int, user_id: int, lang: str, chat_type: str = "g"):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     tier = await get_effective_group_tier(group_id, user_id)
     # 🧭 Blindaje contextual: el Clon & Centinela es compartido por Grupos y Canales;
     # el regreso debe respetar siempre el origen real (cpanel para canal, gpanel para grupo).
@@ -3732,7 +3858,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                 pass
 
         lang = user_lang(message.from_user)
-        t = TEXTS.get(lang, TEXTS["es"])
+        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
         
         # Registro del usuario y despacho de la bienvenida / deep-links.
 
@@ -3834,12 +3960,45 @@ async def cmd_cancel(message: Message, bot: Bot):
         pass
     clear_user_states(bot.id, message.from_user.id)
     lang = user_lang(message.from_user)
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     await _dismiss_reply_keyboard(message)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_main_menu"], callback_data=f"menu_main_{lang}")]
     ])
     await message.answer(f"✅ {t['op_canceled']}{PERIMETER_SIGNATURE}", reply_markup=kb, parse_mode="HTML")
+
+@router.message(Command("language", "lang", "idioma"), F.chat.type == "private")
+async def cmd_language(message: Message, bot: Bot):
+    """🌐 v21 · Selector de idioma persistente (🇺🇸 EN por defecto · 🇪🇸 ES)."""
+    lang = user_lang(message.from_user)
+    text = ("🌐 <b>Language</b>\n\nChoose the language for the bot menus, notices and the Mini App. "
+            "Your choice is saved and applied everywhere."
+            if lang == "en" else
+            "🌐 <b>Idioma</b>\n\nElige el idioma de los menús, avisos del bot y la Mini App. "
+            "Tu elección se guarda y se aplica en todo el ecosistema.")
+    await message.answer(text + PERIMETER_SIGNATURE, reply_markup=language_selector_keyboard(lang, f"menu_main_{lang}"),
+                         parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("setlang_"))
+async def cb_set_language(callback: CallbackQuery, bot: Bot):
+    """Guarda el idioma elegido y repinta el selector y el menú principal en el nuevo idioma al instante."""
+    lang = await remember_user_lang(callback.from_user, (callback.data or "").split("_", 1)[-1])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    await callback.answer("✅ Language: English" if lang == "en" else "✅ Idioma: Español")
+    try:
+        await callback.message.edit_text(
+            t["welcome"].format(name=html.escape(callback.from_user.full_name or "")),
+            reply_markup=get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot),
+                                           user_id=callback.from_user.id),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest:
+        await callback.message.answer(t["welcome"].format(name=html.escape(callback.from_user.full_name or "")),
+                                      reply_markup=get_main_keyboard((await bot.get_me()).username, lang,
+                                                                     is_clone=is_clone_bot(bot), user_id=callback.from_user.id),
+                                      parse_mode="HTML")
+
 
 @router.message(Command("supportkb"), F.chat.type == "private")
 async def cmd_support_directives(message: Message, command: CommandObject):
@@ -3875,7 +4034,7 @@ async def handle_channel_shared(message: Message, bot: Bot):
     """
     user = message.from_user
     lang = user_lang(user)
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     shared = message.chat_shared
 
     await _dismiss_reply_keyboard(message)
@@ -4580,7 +4739,7 @@ async def _handle_gamification_input(message: Message, bot: Bot, lang: str) -> N
     # Defensa en profundidad: la autorización y la licencia se verifican de nuevo al recibir el dato.
     if not await is_authorized_operator(bot, user_id, chat_id, "can_manage_broadcast"):
         GAMI_STATES.pop((bot.id, user_id), None)
-        await message.answer(TEXTS.get(lang, TEXTS["es"])["owner_only_alert"])
+        await message.answer(TEXTS.get(lang, TEXTS[DEFAULT_LANG])["owner_only_alert"])
         return
     tier_key = _gami_tier_key(await get_effective_group_tier(chat_id, user_id))
     if tier_key == "free":
@@ -4665,8 +4824,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
     user_id = message.from_user.id
     text_input = (message.text or "").strip()
 
-    lang = "es" if message.from_user.language_code and message.from_user.language_code.startswith("es") else "en"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = user_lang(message.from_user)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
 
     # 🔐 v11 · Propiedad exclusiva: ninguna respuesta pendiente se aplica si el usuario ya no es el dueño.
     if not await guard_pending_state_ownership(message, bot, t):
@@ -4692,7 +4851,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 downloaded = await bot.download_file(file_obj.file_path)
                 json_content = downloaded.read().decode("utf-8")
             except Exception as dl_err:
-                resp = await message.answer(f"❌ Error leyendo archivo: {dl_err}", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer(f"❌ {tr(lang, 'Error leyendo archivo', 'Error reading file')}: {dl_err}", reply_markup=back_kb, parse_mode="HTML")
                 fire_and_forget_auto_delete([message, resp], delay=60)
                 return
         elif text_input and "payload" in text_input and "signature" in text_input:
@@ -4702,16 +4861,16 @@ async def handle_private_inputs(message: Message, bot: Bot):
             success, report = await import_group_configuration(group_id, json_content)
             if success:
                 resp = await message.answer(
-                    f"✅ <b>¡Respaldo perimetral restaurado con éxito!</b>\n\n"
-                    f"• <b>Comunidad ID:</b> <code>{group_id}</code>\n"
-                    f"• <b>Autenticación:</b> Firma criptográfica HMAC verificada 🟢\n\n"
+                    f"✅ <b>{tr(lang, '¡Respaldo perimetral restaurado con éxito!', 'Perimeter backup restored successfully!')}</b>\n\n"
+                    f"• <b>{tr(lang, 'Comunidad ID', 'Community ID')}:</b> <code>{group_id}</code>\n"
+                    f"• <b>{tr(lang, 'Autenticación', 'Authentication')}:</b> {tr(lang, 'Firma criptográfica HMAC verificada', 'HMAC cryptographic signature verified')} 🟢\n\n"
                     f"🛡️ <i>Cloud Media Management</i>",
                     reply_markup=back_kb, parse_mode="HTML"
                 )
             else:
-                resp = await message.answer(f"❌ <b>Fallo al restaurar:</b> {report}", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer(f"❌ <b>{tr(lang, 'Fallo al restaurar', 'Restore failed')}:</b> {report}", reply_markup=back_kb, parse_mode="HTML")
         else:
-            resp = await message.answer("⚠️ Envía un archivo <code>.bunker</code> válido o pega el JSON con firma HMAC.", reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(tr(lang, "⚠️ Envía un archivo <code>.bunker</code> válido o pega el JSON con firma HMAC.", "⚠️ Send a valid <code>.bunker</code> file or paste the HMAC-signed JSON."), reply_markup=back_kb, parse_mode="HTML")
 
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
@@ -4784,7 +4943,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 await set_sentinel_service_message(group_id, col_name, int(text_val))
                 resp = await message.answer(f"✅ <b>Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
             else:
-                resp = await message.answer("⚠️ Ingresa un número entero de segundos (0 para no borrar).", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer(tr(lang, "⚠️ Ingresa un número entero de segundos (0 para no borrar).", "⚠️ Enter a whole number of seconds (0 to keep the message)."), reply_markup=back_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
@@ -4899,7 +5058,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 await set_sentinel_service_message(group_id, col_name, int(text_val))
                 resp = await message.answer(f"✅ <b>Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
             else:
-                resp = await message.answer("⚠️ Ingresa un número entero de segundos (0 para no borrar).", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer(tr(lang, "⚠️ Ingresa un número entero de segundos (0 para no borrar).", "⚠️ Enter a whole number of seconds (0 to keep the message)."), reply_markup=back_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
             return
 
@@ -4970,11 +5129,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if text_input:
             await set_warn_custom_field(group_id, "warn_custom_text", text_input[:1000])
             resp = await message.answer(
-                "✅ <b>¡Mensaje de advertencia actualizado con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                tr(lang, "✅ <b>¡Mensaje de advertencia actualizado con éxito!</b>", "✅ <b>Warning message updated successfully!</b>") + "\n\n🛡️ <i>Cloud Media Management</i>",
                 reply_markup=back_kb, parse_mode="HTML"
             )
         else:
-            resp = await message.answer("⚠️ El mensaje no puede estar vacío.", reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(tr(lang, "⚠️ El mensaje no puede estar vacío.", "⚠️ The message cannot be empty."), reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -5001,11 +5160,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
             await set_warn_custom_field(group_id, "warn_custom_media_id", media_id)
             await set_warn_custom_field(group_id, "warn_custom_media_type", media_type)
             resp = await message.answer(
-                "✅ <b>¡Multimedia asociada a advertencias guardada con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                tr(lang, "✅ <b>¡Multimedia asociada a advertencias guardada con éxito!</b>", "✅ <b>Warning media saved successfully!</b>") + "\n\n🛡️ <i>Cloud Media Management</i>",
                 reply_markup=back_kb, parse_mode="HTML"
             )
         else:
-            resp = await message.answer("⚠️ Envía una Foto, Video o GIF válido.", reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(tr(lang, "⚠️ Envía una Foto, Video o GIF válido.", "⚠️ Send a valid photo, video or GIF."), reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -5019,11 +5178,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if text_input:
             await set_mic_vip_custom_config(group_id, "mic_vip_custom_text", text_input[:500])
             resp = await message.answer(
-                "✅ <b>¡Descripción explicativa de MicVIP guardada con éxito!</b>\n\n🛡️ <i>Cloud Media Management</i>",
+                tr(lang, "✅ <b>¡Descripción explicativa de MicVIP guardada con éxito!</b>", "✅ <b>MicVIP description saved successfully!</b>") + "\n\n🛡️ <i>Cloud Media Management</i>",
                 reply_markup=back_kb, parse_mode="HTML"
             )
         else:
-            resp = await message.answer("⚠️ El texto no puede estar vacío.", reply_markup=back_kb, parse_mode="HTML")
+            resp = await message.answer(tr(lang, "⚠️ El texto no puede estar vacío.", "⚠️ The text cannot be empty."), reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([message, resp], delay=60)
         return
 
@@ -5231,7 +5390,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
             
             # Envía el aviso de éxito y redibuja el panel con el botón en verde
             success_notice = await message.answer(
-                f"💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\nEl nodo acústico perimetral está patrullando la sala.\n\n🛡️️ <i>Cloud Media Management</i>",
+                tr(lang, "💎 <b>¡Centinela Propio Conectado con Éxito!</b>\n\nEl nodo acústico perimetral está patrullando la sala.", "💎 <b>Dedicated Sentinel Connected!</b>\n\nThe acoustic perimeter node is now patrolling the room.") + "\n\n🛡️ <i>Cloud Media Management</i>",
                 parse_mode="HTML"
             )
             fire_and_forget_auto_delete([message, success_notice], delay=10)
@@ -5958,8 +6117,8 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
     data = callback.data.split("_")
     action = data[0]
-    lang = data[-1] if len(data) > 1 and data[-1] in ["es", "en"] else "es"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = lang_from_callback(callback, data)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
 
     text = ""
     keyboard = None
@@ -5967,15 +6126,17 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
     card_caption = None  # Caption opcional para datos dinámicos
 
     if action == "lang":
-        lang = data[1]
-        text = TEXTS.get(lang, TEXTS["es"])["welcome"].format(name=callback.from_user.full_name)
+        # 🌐 v21 · La elección se guarda (users.lang): bot y Mini App la recuerdan en adelante.
+        lang = await remember_user_lang(callback.from_user, data[1])
+        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+        text = t["welcome"].format(name=callback.from_user.full_name)
         keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=is_clone_bot(bot), user_id=callback.from_user.id)
         card_key = "welcome"
 
     elif action == "langpanel":
         group_id = int(data[1])
-        lang = data[2]
-        t = TEXTS.get(lang, TEXTS["es"])
+        lang = await remember_user_lang(callback.from_user, data[2])   # 🌐 v21 · persistente
+        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
         if not await verify_admin_privileges(callback, bot, group_id):
             return
         try:
@@ -5989,8 +6150,8 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
     elif action == "langcpanel":
         channel_id = int(data[1])
-        lang = data[2]
-        t = TEXTS.get(lang, TEXTS["es"])
+        lang = await remember_user_lang(callback.from_user, data[2])   # 🌐 v21 · persistente
+        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
         if not await verify_admin_privileges(callback, bot, channel_id):
             return
         try:
@@ -6817,8 +6978,8 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
     if callback.data.startswith("cap_set_"):
         action = "cap_set"
 
-    lang = data[-1] if data[-1] in ["es", "en"] else "es"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = lang_from_callback(callback, data)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
 
     if action == "gset" and len(data) == 2 and data[1].lstrip("-").isdigit():
         group_id = int(data[1])
@@ -7213,7 +7374,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 # ==========================================
 def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: str = "g"):
     """Construye la botonera completa del Centinela de IA (Ultra Pro): Guardián, Copiloto, Tono y Modos."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     guardian_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg.get("guardian_status") == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
     copilot_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg.get("copilot_status") == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
 
@@ -7294,8 +7455,8 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
     module = data[0]
     sub = data[1]
-    lang = data[-1] if data[-1] in ["es", "en"] else "es"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = lang_from_callback(callback, data)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
 
     text = ""
     keyboard = None
@@ -7715,7 +7876,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
 # SENTINEL_CFG_STATES se declara una sola vez junto al resto de estados (registro ALL_STATE_DICTS).
 
 async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     cfg = await get_sentinel_service_messages_config(group_id)
 
     # 1. Estados de activación (1 = 🟢 Activado, 0 = 🔴 Desactivado / En edición)
@@ -7803,8 +7964,8 @@ async def _render_sentinel_cfg_menu(bot: Bot, group_id: int, lang: str):
 async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
     sub = data[1]
-    lang = data[-1] if data[-1] in ["es", "en"] else "es"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = lang_from_callback(callback, data)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
 
     try:
         if sub in ("view", "default", "toggle"):
@@ -8000,7 +8161,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
 # ==========================================
 async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
     """Construye el panel de planes con botoneras en cascada: [Ver] + [🟢/🔴] [📢] [🗑️]."""
-    t = TEXTS.get(lang, TEXTS["es"])
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     plans = await get_channel_plans(channel_id, only_active=False)
     sub_count = await get_active_subscribers_count(channel_id)
 
@@ -8071,8 +8232,8 @@ async def _render_plans_menu(bot: Bot, channel_id: int, lang: str):
 @router.callback_query(F.data.startswith("chplans_"))
 async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
     data = callback.data.split("_")
-    lang = data[-1] if data[-1] in ["es", "en"] else "es"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = lang_from_callback(callback, data)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
 
     try:
         sub = data[1]
@@ -8323,7 +8484,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         except Exception:
             pass
 
-        t_dict = TEXTS.get(lang, TEXTS["es"])
+        t_dict = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
         prompt_link = (
             "🔗 <b>Enlace de Destino VIP (Entrega Automática):</b>\n\n"
             "Envía el enlace de invitación o recurso exclusivo que el bot entregará de forma automática al usuario tras confirmar su pago con Stars:"
@@ -8626,7 +8787,7 @@ async def _handle_support_ai_input(message: Message, bot: Bot, st: dict, text_in
 async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
     data = (callback.data or "").split("_")
     module, sub = data[0], data[1] if len(data) > 1 else ""
-    lang = data[-1] if data[-1] in ("es", "en") else "es"
+    lang = lang_from_callback(callback, data)
     uid = callback.from_user.id
 
     # 🤖 Soporte IA: personal, sin comunidad asociada.
@@ -8647,7 +8808,7 @@ async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
             return
         elif sub == "exit":
             SUPPORT_AI_STATES.pop((bot.id, uid), None)
-            t = TEXTS.get(lang, TEXTS["es"])
+            t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
             await _safe_edit(callback, t["support_main"], get_support_keyboard(lang))
         await callback.answer()
         return
@@ -8680,7 +8841,7 @@ async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
             prompt = ("🧾 Envía el <b>@alias</b> o el <b>ID numérico</b> (-100…) del canal de registro, o <b>reenvía</b> aquí "
                       "cualquier mensaje de ese canal." if lang == "es" else
                       "🧾 Send the log channel <b>@alias</b> or <b>numeric ID</b> (-100…), or <b>forward</b> any message from it.")
-            t = TEXTS.get(lang, TEXTS["es"])
+            t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
             msg = await callback.message.answer(prompt + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"logch_menu_{group_id}_{lang}"), parse_mode="HTML")
             fire_and_forget_auto_delete([msg], delay=120)
             await callback.answer()
@@ -8742,3 +8903,59 @@ async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
     else:
         await callback.answer()
     await _safe_edit(callback, _gpurge_text(lang, settings, running), _gpurge_keyboard(group_id, lang, settings, running))
+
+
+
+# ==========================================================================
+# 🎟️ v22 · AUDITORÍA MICVIP EN LA CONSOLA DEL BOT (dueño, Arquitecto y delegados con can_view_analytics)
+# ==========================================================================
+MVAUDIT_PER_PAGE = 8
+MVAUDIT_FILTERS = ("all", "active", "expired", "issues")
+
+
+def _mvaudit_keyboard(group_id: int, flt: str, page: int, pages: int, lang: str) -> InlineKeyboardMarkup:
+    labels = {"all": ("Todos", "All"), "active": ("🟢 Activos", "🟢 Active"),
+              "expired": ("🔴 Expirados", "🔴 Expired"), "issues": ("⚠️ Incidencias", "⚠️ Issues")}
+    filt_row = [InlineKeyboardButton(text=("✓ " if f == flt else "") + labels[f][0 if lang == "es" else 1],
+                                     callback_data=f"mvaudit_{group_id}_{f}_1_{lang}") for f in MVAUDIT_FILTERS]
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"mvaudit_{group_id}_{flt}_{page - 1}_{lang}"))
+    nav.append(InlineKeyboardButton(text="🔄", callback_data=f"mvaudit_{group_id}_{flt}_{page}_{lang}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"mvaudit_{group_id}_{flt}_{page + 1}_{lang}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        filt_row[:2], filt_row[2:], nav,
+        [InlineKeyboardButton(text="⬅️ " + ("Panel del grupo" if lang == "es" else "Group panel"), callback_data=f"gpanel_{group_id}_{lang}")],
+    ])
+
+
+@router.callback_query(F.data.startswith("mvaudit_"))
+async def cb_micvip_audit(callback: CallbackQuery, bot: Bot):
+    """mvaudit_{group_id}_{filtro}_{página}_{lang} — registro paginado con estado y evidencia del Centinela."""
+    data = (callback.data or "").split("_")
+    try:
+        group_id, flt, page = int(data[1]), data[2], max(1, int(data[3]))
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    lang = lang_from_callback(callback, data)
+    flt = flt if flt in MVAUDIT_FILTERS else "all"
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    try:
+        audit = await micvip_audit.get_audit(group_id, status=flt, limit=MVAUDIT_PER_PAGE, offset=(page - 1) * MVAUDIT_PER_PAGE)
+    except Exception as ex:
+        logging.error(f"❌ [MicVIP Audit] Lectura fallida en {group_id}: {ex}")
+        await callback.answer("⚠️ " + tr(lang, "No se pudo leer el registro.", "Could not read the log."), show_alert=True)
+        return
+    pages = max(1, -(-int(audit.get("total", 0)) // MVAUDIT_PER_PAGE))
+    page = min(page, pages)
+    text = micvip_audit.render_bot_page(audit, lang, page=page, per_page=MVAUDIT_PER_PAGE) + PERIMETER_SIGNATURE
+    keyboard = _mvaudit_keyboard(group_id, flt, page, pages, lang)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()

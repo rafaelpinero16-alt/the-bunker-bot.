@@ -138,6 +138,7 @@ from aiogram.types import CallbackQuery, ChatMemberUpdated, ErrorEvent, Message,
 
 import assistant as _assistant_runtime   # v17 · lectura del estado EN VIVO de los Centinelas (active_sentinels)
 import perimeter_ops                      # v20 · purga v2, canal de registro, IA, estado del perímetro y soporte IA
+import micvip_audit                       # v22 · auditoría MicVIP de extremo a extremo (cobro → pase → Centinela)
 from assistant import (
     close_all_sentinels,
     execute_ghost_purge,
@@ -1323,6 +1324,68 @@ async def api_support_reset(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     await perimeter_ops.support_ai_reset(user_id)
     return {"status": "success"}
+
+
+@api_router.get("/chat/{chat_id}/micvip-audit")
+async def api_chat_micvip_audit(
+    chat_id: str,
+    status: str = "all",
+    limit: int = 20,
+    offset: int = 0,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """
+    🎟️ v22 · Registro de auditoría MicVIP: alias, compra, expiración real, estado (🟢 / 🔴) y evidencia del
+    Centinela. Lectura para el dueño, el Arquitecto y los delegados con can_view_analytics.
+    """
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_access(user_id, numeric_id)
+    status = status if status in ("all", "active", "expired", "issues") else "all"
+    data = await micvip_audit.get_audit(numeric_id, status=status, limit=limit, offset=offset)
+    # Sin AutoLower nadie queda atenuado: el pase no tiene restricción que levantar (la interfaz lo explica).
+    try:
+        from database.database import get_autolower_status
+        data["autolower_enabled"] = int(await get_autolower_status(numeric_id) or 0) == 1
+    except Exception:
+        data["autolower_enabled"] = None
+    data["sentinel_active"] = bool(_sentinel_runtime(numeric_id).get("active"))
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "filter": status, **data}, headers=_NO_STORE)
+
+
+@api_router.get("/user/language")
+async def api_get_user_language(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🌐 v21 · Idioma guardado del operador (compartido con el bot). chosen=false → nunca eligió (se usa 'default')."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    from database.database import get_user_lang, DEFAULT_LANG
+    stored = await get_user_lang(user_id)
+    return JSONResponse(content={"status": "success", "lang": stored or DEFAULT_LANG, "chosen": bool(stored),
+                                 "default": DEFAULT_LANG, "supported": ["en", "es"]}, headers=_NO_STORE)
+
+
+@api_router.post("/user/language")
+async def api_set_user_language(
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{lang: 'en' | 'es'} → se guarda en users.lang y el bot lo aplica en el siguiente mensaje."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    from database.database import set_user_lang, normalize_lang
+    lang = normalize_lang((payload or {}).get("lang"))
+    if lang is None:
+        raise HTTPException(status_code=422, detail="lang: usa 'en' o 'es'.")
+    saved = await set_user_lang(user_id, lang)
+    try:
+        from handlers.user_private import forget_user_lang_cache
+        forget_user_lang_cache(user_id)
+    except Exception as ex:
+        logger.debug(f"[i18n] Caché de idioma del bot no invalidada para {user_id}: {ex}")
+    return {"status": "success", "lang": saved}
 
 
 @api_router.get("/support/directives")
@@ -3165,9 +3228,23 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                 group_id = event.chat.id
             else:
                 group_id = extract_group_id_from_payload(payment.invoice_payload)
+            # v22 · El payload de MicVIP siempre lleva la comunidad: respaldo propio si analytics no la extrae.
+            if not group_id and micvip_audit.is_micvip_payload(payment.invoice_payload):
+                group_id = micvip_audit.group_from_payload(payment.invoice_payload)
             if not group_id:
                 return
             payer_id = event.from_user.id if event.from_user else 0
+            if micvip_audit.is_micvip_payload(payment.invoice_payload):
+                # 🎟️ v22 · Registro de auditoría ANTES de la analítica: si esta falla, la compra igual queda trazada.
+                try:
+                    await micvip_audit.record_purchase(
+                        group_id=group_id, user_id=payer_id, charge_id=payment.telegram_payment_charge_id,
+                        amount=payment.total_amount, payload=payment.invoice_payload or "", currency=payment.currency,
+                        username=getattr(event.from_user, "username", None),
+                        full_name=getattr(event.from_user, "full_name", None),
+                    )
+                except Exception as audit_ex:
+                    logger.error(f"❌ [MicVIP Audit] No se pudo registrar el cobro {payment.telegram_payment_charge_id}: {audit_ex}")
             inserted = await record_stars_payment(
                 group_id=group_id,
                 user_id=payer_id,
@@ -3288,6 +3365,8 @@ async def main():
     start_analytics_flusher()
     logger.info("📈 [Analítica en Caliente]: Búfer de volcado por lotes activo.")
     _spawn(assets_watch_loop(), name="assets_watch")
+    # v22 · Importa (una vez, idempotente) los cobros MicVIP anteriores a la auditoría.
+    _spawn(micvip_audit.backfill_legacy(), name="micvip_backfill")
     # v19 · assistant avisa al instante cuando un Centinela arranca, se reconecta, se retira o se desconecta.
     _register_assets_listener = getattr(_assistant_runtime, "register_assets_change_listener", None)
     if callable(_register_assets_listener):

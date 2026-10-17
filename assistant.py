@@ -2456,10 +2456,13 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     EditGroupCallParticipant(call=current_call, participant=p_peer, muted=False, volume=target_vip_vol)
                                 )
                                 _sentinel_muted.discard((chat_id, u_id))
+                                _micvip_evidence(chat_id, u_id, True)    # v22 · el Centinela aplicó el pase
                             except (FloodWait, MTProtoRateLimited):
                                 raise
                             except Exception:
-                                pass
+                                _micvip_evidence(chat_id, u_id, False)   # v22 · intento fallido, queda auditado
+                        else:
+                            _micvip_evidence(chat_id, u_id, True)        # v22 · ya estaba al volumen del pase
                         continue
 
                     if is_admin_or_owner:
@@ -3072,6 +3075,13 @@ def _sweep_global_state() -> int:
         _sentinel_launch_locks.pop(chat_id, None)
         purged += 1
 
+    # 6b. v22 · Notas de evidencia MicVIP (el módulo las acota; aquí se podan las caducadas).
+    try:
+        import micvip_audit  # type: ignore[import-not-found]
+        purged += micvip_audit.purge_sentinel_notes()
+    except Exception:
+        pass
+
     # 7. Red de seguridad: topes duros de tamaño.
     for store in (
         _copilot_user_last, _copilot_chat_last, _sentinel_payload_last_sent, _last_join_attempt,
@@ -3510,6 +3520,18 @@ async def engage_podcast_ducking(group_id: int, duck_level: int = 20):
 async def disengage_podcast_ducking(group_id: int):
     await set_podcast_mode(group_id, 0)
     logger.info(f"🎙️ [Modo Podcast] Ducking desactivado y persistido en el grupo {group_id}")
+
+
+# ==========================================
+# 🎟️ v22 · EVIDENCIA PARA LA AUDITORÍA MICVIP
+# ==========================================
+def _micvip_evidence(chat_id: int, user_id: int, applied: bool) -> None:
+    """Deja constancia (no bloqueante, como mucho una vez por minuto) de que el Centinela aplicó o intentó el pase."""
+    try:
+        import micvip_audit  # type: ignore[import-not-found]
+        micvip_audit.note_sentinel_applied(chat_id, user_id, applied)
+    except Exception as ex:
+        logger.debug(f"[MicVIP Audit] Evidencia no registrada ({chat_id}/{user_id}): {ex}")
 
 
 # ==========================================

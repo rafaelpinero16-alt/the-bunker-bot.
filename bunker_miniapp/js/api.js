@@ -359,6 +359,28 @@ export const api = {
         return await this.post('/support/reset', {});
     },
 
+    // --- v22 · Auditoría MicVIP ---
+
+    /** GET /api/chat/{id}/micvip-audit?status=all|active|expired|issues&limit&offset → { records[], summary, total, … } */
+    async fetchMicvipAudit(chatId, { status = 'all', limit = 20, offset = 0 } = {}) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        const q = `status=${encodeURIComponent(status)}&limit=${Number(limit) || 20}&offset=${Number(offset) || 0}&_=${Date.now()}`;
+        return await this.get(`/chat/${chat}/micvip-audit?${q}`, { timeoutMs: CONFIG.MICVIP_AUDIT?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    // --- v21 · Idioma del operador (compartido con el bot: users.lang) ---
+
+    /** GET /api/user/language → { lang, chosen, default, supported } */
+    async fetchUserLanguage() {
+        return await this.get(`/user/language?_=${Date.now()}`, { timeoutMs: 8000, noStore: true });
+    },
+
+    /** POST /api/user/language { lang: 'en' | 'es' } → { lang } */
+    async saveUserLanguage(lang) {
+        return await this.post('/user/language', { lang }, { timeoutMs: 8000 });
+    },
+
     // --- Analítica Unificada de Comunidad (Fase 5) ---
 
     /**

@@ -252,6 +252,9 @@ def init_db():
                 is_banned INTEGER DEFAULT 0
             )
         """)
+        # v21 · Preferencia de idioma del operador (bot + Mini App). NULL = nunca eligió → DEFAULT_LANG ('en').
+        # Columna nueva y aditiva: ningún usuario existente cambia de fila ni pierde datos.
+        _ensure_columns(cursor, "users", [("lang", "TEXT"), ("lang_updated_at", "INTEGER")])
 
         cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (word TEXT UNIQUE)")
         cursor.execute("CREATE TABLE IF NOT EXISTS whitelist (user_id INTEGER PRIMARY KEY)")
@@ -430,6 +433,32 @@ def init_db():
         cursor.execute("CREATE TABLE IF NOT EXISTS command_usage (group_id INTEGER, command TEXT, usage_date TEXT, count INTEGER DEFAULT 0, PRIMARY KEY (group_id, command, usage_date))")
         cursor.execute("CREATE TABLE IF NOT EXISTS vip_mic_passes (user_id INTEGER, group_id INTEGER, expires_at TIMESTAMP, PRIMARY KEY (user_id, group_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vip_mic_passes ON vip_mic_passes (user_id, group_id, expires_at)")
+        # v22 · Registro de auditoría MicVIP (anti-estafa). Una fila por cobro en Stars (charge_id único):
+        # compra → pase concedido (expiración real leída de vip_mic_passes) → evidencia del Centinela en la sala.
+        # Tabla nueva y aditiva: vip_mic_passes sigue siendo la fuente que consulta el Centinela en cada ciclo.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS micvip_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                charge_id TEXT UNIQUE NOT NULL,
+                group_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                full_name TEXT,
+                amount_stars INTEGER DEFAULT 0,
+                currency TEXT DEFAULT 'XTR',
+                payload TEXT,
+                purchased_at INTEGER NOT NULL,
+                expires_at INTEGER,
+                grant_status TEXT DEFAULT 'pending',
+                verified_at INTEGER,
+                sentinel_applied_at INTEGER,
+                sentinel_last_seen_at INTEGER,
+                sentinel_failures INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'live'
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_micvip_audit_group ON micvip_audit (group_id, purchased_at)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_micvip_audit_user ON micvip_audit (group_id, user_id, expires_at)")
         cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
         cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")
@@ -605,6 +634,51 @@ def get_or_create_user(user_id: int, username: str, full_name: str):
         if row:
             return row[0], row[1] or 0, row[2] or 0
         return None, 0, 0
+
+
+# ==========================================
+# 🌐 v21 · PREFERENCIA DE IDIOMA (por defecto inglés; español latino opcional y persistente)
+# ==========================================
+DEFAULT_LANG = "en" if str(os.getenv("BUNKER_DEFAULT_LANG", "en")).strip().lower() != "es" else "es"
+SUPPORTED_LANGS = ("en", "es")
+
+
+def normalize_lang(value, default: str = None):
+    """'EN', 'es-419', 'es_CO', 'English' → 'en' / 'es'. Desconocido → default (None si no se indica)."""
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw.startswith("en") or raw == "english":
+        return "en"
+    if raw.startswith("es") or raw in ("español", "espanol", "spanish"):
+        return "es"
+    return default
+
+
+@db_async
+def get_user_lang(user_id: int):
+    """Idioma ELEGIDO por el usuario ('en' / 'es') o None si nunca eligió (el llamador aplica DEFAULT_LANG)."""
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute("SELECT lang FROM users WHERE user_id = ?", (int(user_id),)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return normalize_lang(row[0]) if row and row[0] else None
+
+
+@db_async
+def set_user_lang(user_id: int, lang: str, username: str = None, full_name: str = None) -> str:
+    """
+    Guarda la preferencia. Si el usuario aún no existe, crea su fila con username / nombre (los mismos campos
+    que get_or_create_user, para no dejar perfiles incompletos). Devuelve el idioma normalizado.
+    """
+    clean = normalize_lang(lang, DEFAULT_LANG)
+    with _write_transaction() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, full_name, topic_id, warnings, is_banned) VALUES (?, ?, ?, NULL, 0, 0)",
+            (int(user_id), username, full_name),
+        )
+        conn.execute("UPDATE users SET lang = ?, lang_updated_at = ? WHERE user_id = ?",
+                     (clean, int(datetime.now(timezone.utc).timestamp()), int(user_id)))
+    return clean
 
 
 @db_async
@@ -2436,6 +2510,141 @@ def is_vip_mic_active(user_id: int, group_id: int) -> bool:
             WHERE user_id = ? AND group_id = ? AND expires_at > datetime('now')
         """, (user_id, group_id))
         return cursor.fetchone() is not None
+
+
+# ==========================================
+# 🎟️ v22 · AUDITORÍA MICVIP (transparencia de extremo a extremo)
+# ==========================================
+MICVIP_GRANT_STATUSES = ("pending", "granted", "missing")
+
+
+def _sqlite_utc_to_ts(value):
+    """'YYYY-MM-DD HH:MM:SS' (UTC de SQLite) → epoch; None si no se puede leer."""
+    if not value:
+        return None
+    try:
+        return int(datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp())
+    except ValueError:
+        return None
+
+
+@db_async
+def get_vip_mic_expiry_ts(user_id: int, group_id: int):
+    """Expiración REAL del pase vigente en vip_mic_passes (epoch UTC) o None si no existe fila."""
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT expires_at FROM vip_mic_passes WHERE user_id = ? AND group_id = ?",
+                           (int(user_id), int(group_id))).fetchone()
+    return _sqlite_utc_to_ts(row[0]) if row else None
+
+
+@db_async
+def micvip_audit_record_purchase(charge_id: str, group_id: int, user_id: int, purchased_at: int, *,
+                                 amount_stars: int = 0, currency: str = "XTR", payload: str = "",
+                                 username: str = None, full_name: str = None, source: str = "live",
+                                 expires_at: int = None, grant_status: str = "pending") -> bool:
+    """Inserta la compra (idempotente por charge_id). Devuelve True si es nueva."""
+    if not charge_id:
+        return False
+    status = grant_status if grant_status in MICVIP_GRANT_STATUSES else "pending"
+    with _write_transaction() as conn:
+        cur = conn.execute("""
+            INSERT OR IGNORE INTO micvip_audit (charge_id, group_id, user_id, username, full_name, amount_stars,
+                                                currency, payload, purchased_at, expires_at, grant_status, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (str(charge_id), int(group_id), int(user_id), username, full_name, int(amount_stars or 0),
+              (currency or "XTR").upper(), (payload or "")[:256], int(purchased_at), expires_at, status, source))
+        return cur.rowcount > 0
+
+
+@db_async
+def micvip_audit_set_grant(charge_id: str, grant_status: str, expires_at: int = None) -> None:
+    status = grant_status if grant_status in MICVIP_GRANT_STATUSES else "pending"
+    with _write_transaction() as conn:
+        conn.execute("UPDATE micvip_audit SET grant_status = ?, expires_at = COALESCE(?, expires_at), verified_at = ? "
+                     "WHERE charge_id = ?", (status, expires_at, _now_ts(), str(charge_id)))
+
+
+@db_async
+def micvip_audit_mark_sentinel(group_id: int, user_id: int, applied: bool = True) -> int:
+    """
+    Evidencia del Centinela sobre las compras VIGENTES del usuario: primera vez que aplicó el 100 % en la sala
+    (sentinel_applied_at), última comprobación (sentinel_last_seen_at) o un fallo de la RPC. Devuelve filas tocadas.
+    """
+    now = _now_ts()
+    with _write_transaction() as conn:
+        if applied:
+            cur = conn.execute("""
+                UPDATE micvip_audit SET sentinel_applied_at = COALESCE(sentinel_applied_at, ?), sentinel_last_seen_at = ?
+                WHERE group_id = ? AND user_id = ? AND purchased_at <= ? AND grant_status != 'missing'
+                  AND (expires_at IS NULL OR expires_at > ?)
+            """, (now, now, int(group_id), int(user_id), now, now))
+        else:
+            cur = conn.execute("""
+                UPDATE micvip_audit SET sentinel_failures = COALESCE(sentinel_failures, 0) + 1
+                WHERE group_id = ? AND user_id = ? AND purchased_at <= ? AND grant_status != 'missing'
+                  AND (expires_at IS NULL OR expires_at > ?)
+            """, (int(group_id), int(user_id), now, now))
+        return cur.rowcount
+
+
+_MICVIP_COLUMNS = ("id", "charge_id", "group_id", "user_id", "username", "full_name", "amount_stars", "currency",
+                   "purchased_at", "expires_at", "grant_status", "verified_at", "sentinel_applied_at",
+                   "sentinel_last_seen_at", "sentinel_failures", "source")
+
+
+@db_async
+def micvip_audit_list(group_id: int, status: str = "all", limit: int = 20, offset: int = 0) -> dict:
+    """Registro paginado (más reciente primero) + resumen. status ∈ all | active | expired | issues."""
+    now = _now_ts()
+    limit = max(1, min(int(limit or 20), 200))
+    offset = max(0, int(offset or 0))
+    filters = {
+        "all": ("", ()),
+        "active": ("AND expires_at IS NOT NULL AND expires_at > ? AND grant_status = 'granted'", (now,)),
+        "expired": ("AND expires_at IS NOT NULL AND expires_at <= ?", (now,)),
+        "issues": ("AND grant_status = 'missing'", ()),
+    }
+    where, args = filters.get(status, filters["all"])
+    with get_db_connection() as conn:
+        rows = conn.execute(f"SELECT {', '.join(_MICVIP_COLUMNS)} FROM micvip_audit WHERE group_id = ? {where} "
+                            f"ORDER BY purchased_at DESC, id DESC LIMIT ? OFFSET ?",
+                            (int(group_id), *args, limit, offset)).fetchall()
+        total_filtered = conn.execute(f"SELECT COUNT(*) FROM micvip_audit WHERE group_id = ? {where}",
+                                      (int(group_id), *args)).fetchone()[0]
+        s = conn.execute("""
+            SELECT COUNT(*), COALESCE(SUM(amount_stars), 0),
+                   SUM(CASE WHEN grant_status = 'granted' AND expires_at > ? THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN grant_status = 'missing' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN grant_status = 'pending' THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN sentinel_applied_at IS NOT NULL THEN 1 ELSE 0 END),
+                   COUNT(DISTINCT user_id)
+            FROM micvip_audit WHERE group_id = ?
+        """, (now, now, int(group_id))).fetchone()
+    return {
+        "records": [dict(zip(_MICVIP_COLUMNS, r)) for r in rows],
+        "total": int(total_filtered or 0),
+        "summary": {"purchases": int(s[0] or 0), "stars": int(s[1] or 0), "active": int(s[2] or 0),
+                    "expired": int(s[3] or 0), "issues": int(s[4] or 0), "pending": int(s[5] or 0),
+                    "sentinel_confirmed": int(s[6] or 0), "buyers": int(s[7] or 0)},
+        "now": now,
+    }
+
+
+@db_async
+def micvip_audit_legacy_payments(markers: tuple, limit: int = 5000) -> list:
+    """Cobros históricos de processed_payments cuyo payload es de MicVIP (para el backfill único)."""
+    if not markers:
+        return []
+    clause = " OR ".join("LOWER(payload) LIKE ?" for _ in markers)
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute(f"SELECT charge_id, user_id, payload, processed_at FROM processed_payments "
+                                f"WHERE ({clause}) ORDER BY processed_at ASC LIMIT ?",
+                                (*[f"%{m.lower()}%" for m in markers], int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [{"charge_id": r[0], "user_id": r[1], "payload": r[2] or "", "processed_at": _sqlite_utc_to_ts(r[3])} for r in rows]
 
 
 @db_async

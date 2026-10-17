@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!-- THE BUNKER — COMMAND OS v7.3 · UI v8 Elite OLED (Urbanist + Cyber Glow) — Analítica en Vivo · Estudio de Canales reactivo + Planes de Membresía interactivos · Checkout solo Telegram Stars · Sesión estricta por initData -->
-<html lang="es" data-theme="dark">
+<html lang="en" data-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
@@ -142,6 +142,11 @@
                             <i class="fa-regular fa-moon text-[#00f3ff]"></i> <span data-i18n="theme_dark">Dark</span>
                         </button>
                     </div>
+                    <!-- 🌐 v21 · Selector de idioma persistente (dispositivo + servidor + bot) -->
+                    <div class="lang-switch-container flex items-center justify-between p-1 bg-black/60 rounded-xl border border-neutral-800 text-xs" role="radiogroup" aria-label="Language">
+                        <button type="button" onclick="app.setLanguage('en', { announce: true })" id="lang-btn-en" data-lang-option="en" role="radio" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition">🇺🇸 EN</button>
+                        <button type="button" onclick="app.setLanguage('es', { announce: true })" id="lang-btn-es" data-lang-option="es" role="radio" class="flex-1 py-1.5 rounded-lg flex items-center justify-center gap-1.5 font-bold transition">🇪🇸 ES</button>
+                    </div>
 
                     <div class="glass-panel p-2.5 rounded-2xl flex items-center justify-between">
                         <div class="flex items-center space-x-2.5 min-w-0">
@@ -193,7 +198,7 @@
 
                 <!-- Indicador del radar en vivo (WebSocket /ws/radar): abre la analítica de la comunidad activa -->
                 <button id="ws-status-pill" onclick="app.switchTab('analytics')" title="Radar WebSocket" class="bg-black/60 border border-neutral-700 px-2.5 py-1.5 rounded-xl flex items-center gap-1.5 transition-all active:scale-95 hover:bg-[#00f3ff]/10 relative z-10">
-                    <span id="ws-status-label" class="text-[10px] font-bold uppercase tracking-wide text-neutral-500">Radar inactivo</span>
+                    <span id="ws-status-label" class="text-[10px] font-bold uppercase tracking-wide text-neutral-500" data-i18n="ws_idle">Radar idle</span>
                 </button>
             </header>
 
@@ -258,10 +263,10 @@
                             <span><i class="fa-solid fa-shield-halved text-[#00f3ff] mr-2"></i><span data-i18n="perimeter_title">Perímetro Operativo</span></span>
                             <span class="text-[10px] text-neutral-500 font-normal" data-i18n="perimeter_sub">Supervisión 24/7</span>
                         </h3>
-                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="captcha_label">Aduana Captcha:</span> <strong id="telemetry-captcha" class="text-emerald-400">Activa 🟢</strong></p>
-                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="autolower_label">Radar AutoLower:</span> <strong id="telemetry-autolower" class="text-emerald-400">2% Atenuado 🟢</strong></p>
-                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="shield_label">Escudo Antinota:</span> <strong id="telemetry-shield" class="text-emerald-400">Blindado 🟢</strong></p>
-                        <p class="flex justify-between pb-1"><span data-i18n="broadcast_label">Difusión Recurrente:</span> <strong id="telemetry-broadcast" class="text-emerald-400">Worker Activo 🟢</strong></p>
+                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="captcha_label">Aduana Captcha:</span> <strong id="telemetry-captcha" class="text-emerald-400" data-i18n="i18n_telemetry_captcha">Active 🟢</strong></p>
+                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="autolower_label">Radar AutoLower:</span> <strong id="telemetry-autolower" class="text-emerald-400" data-i18n="i18n_telemetry_autolower">2% Lowered 🟢</strong></p>
+                        <p class="flex justify-between border-b border-neutral-800/60 pb-2"><span data-i18n="shield_label">Escudo Antinota:</span> <strong id="telemetry-shield" class="text-emerald-400" data-i18n="i18n_telemetry_shield">Shielded 🟢</strong></p>
+                        <p class="flex justify-between pb-1"><span data-i18n="broadcast_label">Difusión Recurrente:</span> <strong id="telemetry-broadcast" class="text-emerald-400" data-i18n="i18n_telemetry_broadcast">Worker Active 🟢</strong></p>
                     </div>
 
                     <p class="text-center text-[8px] text-theme-muted tracking-widest uppercase pt-1 font-semibold" data-i18n="footer_copyright">The Bunker Command OS © 2026 — Cloud Media Management</p>
@@ -290,7 +295,7 @@
                                 <option value="" data-i18n="select_your_community">Selecciona tu comunidad...</option>
                             </select>
                             <span class="shrink-0 text-right leading-tight">
-                                <span id="an-ws-label" class="block text-[10px] font-bold uppercase tracking-wide text-neutral-500" aria-live="polite">Radar inactivo</span>
+                                <span id="an-ws-label" class="block text-[10px] font-bold uppercase tracking-wide text-neutral-500" aria-live="polite" data-i18n="ws_idle">Radar idle</span>
                                 <span id="an-ws-chat" class="block text-[9px] text-neutral-400 font-mono max-w-[130px] truncate"></span>
                             </span>
                         </div>
@@ -475,9 +480,9 @@
                             <div class="flex items-center justify-between gap-2">
                                 <span class="flex items-center gap-2">
                                     <span id="an-voice-dot" class="w-2.5 h-2.5 rounded-full shrink-0 bg-neutral-600"></span>
-                                    <span id="an-voice-status" class="text-xs font-bold text-neutral-500">Sin llamada activa</span>
+                                    <span id="an-voice-status" class="text-xs font-bold text-neutral-500" data-i18n="an_voice_idle">No active call</span>
                                 </span>
-                                <span class="text-right font-mono text-[10px] text-neutral-400"><span id="an-voice-count">0 en sala</span> · <span id="an-voice-mics">0 micrófonos abiertos</span></span>
+                                <span class="text-right font-mono text-[10px] text-neutral-400"><span id="an-voice-count" data-i18n="i18n_voice_count_zero">0 in the room</span> · <span id="an-voice-mics" data-i18n="i18n_voice_mics_zero">0 open mics</span></span>
                             </div>
                         </div>
 
@@ -615,7 +620,7 @@
                                 <div class="pt-2 border-t border-neutral-800/80 space-y-2">
                                     <div class="flex items-center justify-between gap-2">
                                         <span class="text-[10px] font-bold text-[#00f3ff] uppercase tracking-wide" data-i18n="bc_section_title">Difusión Automática de Promoción</span>
-                                        <span id="studio-broadcast-status" class="text-[9px] text-neutral-500 font-mono shrink-0">Sin programar ⚪</span>
+                                        <span id="studio-broadcast-status" class="text-[9px] text-neutral-500 font-mono shrink-0" data-i18n="bc_status_off">Not scheduled ⚪</span>
                                     </div>
                                     <div class="grid grid-cols-2 gap-2">
                                         <div>
@@ -719,10 +724,10 @@
                         <div class="glass-panel p-4 space-y-3">
                             <h4 class="text-xs font-bold text-theme-main uppercase tracking-wider flex items-center justify-between border-b border-neutral-800 pb-2">
                                 <span><i class="fa-solid fa-trophy text-amber-400 mr-1.5"></i> <span data-i18n="top_users_title">Top 10 Usuarios Activos</span></span>
-                                <span class="text-[9px] text-[#00f3ff] font-normal">30 days</span>
+                                <span class="text-[9px] text-[#00f3ff] font-normal" data-i18n="i18n_days_30">30 days</span>
                             </h4>
                             <div id="chat-top-users-list" class="space-y-2 text-xs">
-                                <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin registros de actividad reciente</div>
+                                <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono" data-i18n="i18n_top_users_empty">No recent activity records</div>
                             </div>
                         </div>
 
@@ -733,7 +738,7 @@
                                 <span class="text-[9px] text-emerald-400 font-semibold" data-i18n="status_enabled">Active</span>
                             </h4>
                             <div id="chat-admin-stats-list" class="space-y-2 text-xs">
-                                <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono">Sin estadísticas de administradores</div>
+                                <div class="glass-panel p-4 text-center text-xs text-neutral-500 font-mono" data-i18n="i18n_admin_stats_empty">No administrator statistics</div>
                             </div>
                         </div>
                     </div>
@@ -810,7 +815,7 @@
                                         </div>
                                         <button type="button" id="cfg-captcha_enabled" role="switch" aria-checked="false" data-field="captcha_enabled" onclick="app.toggleConfigSwitch('captcha_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">Aduana Captcha Pro</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_captcha">Captcha Pro Gate</span>
                                         </button>
                                     </div>
                                     <div class="grid grid-cols-2 gap-2">
@@ -874,7 +879,7 @@
                                         </div>
                                         <button type="button" id="cfg-autolower_enabled" role="switch" aria-checked="false" data-field="autolower_enabled" onclick="app.toggleConfigSwitch('autolower_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">AutoLower de Micrófonos</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_autolower">Microphone AutoLower</span>
                                         </button>
                                     </div>
                                     <div>
@@ -892,7 +897,7 @@
                                         </div>
                                         <button type="button" id="cfg-shield_enabled" role="switch" aria-checked="false" data-field="shield_enabled" onclick="app.toggleConfigSwitch('shield_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">Escudo Antinota (Screen-Sharing Shield)</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_shield">Screen-Sharing Shield</span>
                                         </button>
                                     </div>
                                     <div class="grid grid-cols-2 gap-2">
@@ -933,7 +938,7 @@
                                         </div>
                                         <button type="button" id="cfg-tips_enabled" role="switch" aria-checked="false" data-field="tips_enabled" onclick="app.toggleConfigSwitch('tips_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">Propinas en Stars</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_tips">Tips in Stars</span>
                                         </button>
                                     </div>
                                     <div>
@@ -947,7 +952,7 @@
                                         </div>
                                         <button type="button" id="cfg-custom_tips_allowed" role="switch" aria-checked="false" data-field="custom_tips_allowed" onclick="app.toggleConfigSwitch('custom_tips_allowed')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">Permitir monto libre</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_custom_tips">Allow custom amount</span>
                                         </button>
                                     </div>
                                     <button type="button" id="cfg-save-tips" onclick="app.saveConfigSection('tips')" class="w-full py-2 rounded-xl bg-[#fbbf24]/15 text-[#fbbf24] border border-[#fbbf24]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
@@ -977,7 +982,7 @@
                                         </div>
                                         <button type="button" id="cfg-linklock_enabled" role="switch" aria-checked="false" data-field="linklock_enabled" onclick="app.toggleConfigSwitch('linklock_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">Cerradura de Enlaces (LinkLock)</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_linklock">Link Lock (LinkLock)</span>
                                         </button>
                                     </div>
                                     <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
@@ -1007,7 +1012,7 @@
                                         </div>
                                         <button type="button" id="cfg-service_cleaner_enabled" role="switch" aria-checked="false" data-field="service_cleaner_enabled" onclick="app.toggleConfigSwitch('service_cleaner_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
                                             <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only">Purga de mensajes de servicio (uniones/salidas)</span>
+                                            <span class="sr-only" data-i18n="i18n_sr_service_cleaner">Service message cleanup (joins/leaves)</span>
                                         </button>
                                     </div>
                                     <button type="button" id="cfg-save-perimeter" onclick="app.saveConfigSection('perimeter')" class="w-full py-2 rounded-xl bg-[#34d399]/15 text-[#34d399] border border-[#34d399]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
@@ -1050,6 +1055,33 @@
                                     <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="ml_delete_hint">🗑️ activa o quita el borrado del mensaje; sobre ☑️ Off equivale a «solo eliminar».</p>
                                 </div>
                             </details>
+                        </div>
+
+                        <!-- 🎟️ v22 · AUDITORÍA MICVIP: compra → pase concedido → Centinela aplicó el 100 %. Solo lectura. -->
+                        <div id="micvip-audit-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
+                            <div class="flex items-center justify-between gap-2">
+                                <h4 class="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                                    <i class="fa-solid fa-ticket"></i> <span data-i18n="mva_title">MicVIP Audit</span>
+                                </h4>
+                                <div class="flex items-center gap-1.5">
+                                    <button type="button" id="mva-export-btn" onclick="app.exportMicvipAudit()" title="CSV" class="h-8 px-2.5 rounded-lg bg-black/60 border border-neutral-700 text-amber-300 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50"><i class="fa-solid fa-file-csv mr-1"></i>CSV</button>
+                                    <button type="button" id="mva-refresh-btn" onclick="app.refreshMicvipAudit()" title="Refresh" class="w-8 h-8 rounded-lg bg-black/60 border border-neutral-700 text-amber-300 flex items-center justify-center active:scale-95 transition disabled:opacity-50"><i id="mva-refresh-icon" class="fa-solid fa-rotate text-[10px]"></i></button>
+                                </div>
+                            </div>
+                            <p class="text-[10px] text-theme-muted leading-snug" data-i18n="mva_desc">Every MicVIP purchase paid with Telegram Stars, its exact activation window and proof that the Sentinel unlocked 100% volume on its own.</p>
+                            <div id="mva-summary" class="grid grid-cols-4 gap-1.5"></div>
+                            <p id="mva-context" class="hidden text-[10px] font-bold rounded-lg px-2.5 py-1.5"></p>
+                            <div id="mva-filters" class="grid grid-cols-4 gap-1.5" role="radiogroup">
+                                <button type="button" data-mva-filter="all" onclick="app.setMicvipFilter('all')" class="mva-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="mva_f_all">All</span></button>
+                                <button type="button" data-mva-filter="active" onclick="app.setMicvipFilter('active')" class="mva-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="mva_f_active">🟢 Active</span></button>
+                                <button type="button" data-mva-filter="expired" onclick="app.setMicvipFilter('expired')" class="mva-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="mva_f_expired">🔴 Expired</span></button>
+                                <button type="button" data-mva-filter="issues" onclick="app.setMicvipFilter('issues')" class="mva-chip py-1.5 rounded-lg border border-neutral-800 bg-black/40 text-[10px] font-extrabold text-neutral-400 transition"><span data-i18n="mva_f_issues">⚠️ Issues</span></button>
+                            </div>
+                            <div id="mva-list" class="space-y-1.5">
+                                <p class="text-center text-[11px] text-neutral-500 font-mono py-2" data-i18n="mva_pick">Select a community to audit its MicVIP passes.</p>
+                            </div>
+                            <button type="button" id="mva-more-btn" onclick="app.loadMoreMicvipAudit()" class="hidden w-full py-2 rounded-xl bg-black/50 border border-neutral-800 text-neutral-300 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50" data-i18n="mva_more">Load more</button>
+                            <p id="mva-tz" class="text-[9px] text-neutral-500 font-mono"></p>
                         </div>
 
                         <!-- BLOQUE 2: HERRAMIENTAS ULTRA, CLONES Y CENTINELAS -->
@@ -1281,9 +1313,9 @@
                         </div>
 
                         <div class="bg-black/50 p-3.5 rounded-xl border border-neutral-800 text-left space-y-2 text-xs">
-                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_rank">Rango Operativo:</span><strong class="text-theme-main">Arquitecto Maestro</strong></p>
+                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_rank">Rango Operativo:</span><strong class="text-theme-main" data-i18n="i18n_profile_rank_value">Master Architect</strong></p>
                             <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_reg_date">Fecha de Registro:</span><strong class="text-neutral-300 font-mono">2026-01-03</strong></p>
-                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_account_status">Estado de Cuenta:</span><strong class="text-emerald-400">Verificado 🟢</strong></p>
+                            <p class="flex justify-between"><span class="text-theme-muted" data-i18n="profile_account_status">Estado de Cuenta:</span><strong class="text-emerald-400" data-i18n="i18n_profile_verified">Verified 🟢</strong></p>
                         </div>
 
                         <button onclick="app.logout()" class="w-full bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/40 py-3 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-2">
@@ -1515,7 +1547,7 @@
 
     <!-- BOTÓN FLOTANTE 100% ARRASTRABLE (DRAGGABLE UX) -->
     <div id="floating-lang-btn" class="w-10 h-10 rounded-full bg-[#05070c] border border-[#00f3ff] shadow-[0_0_20px_rgba(0,243,255,0.6)] flex flex-col items-center justify-center cursor-pointer select-none active:scale-95">
-        <span id="lang-indicator" class="text-[10px] font-black text-[#00f3ff] uppercase pointer-events-none">ES</span>
+        <span id="lang-indicator" class="text-[10px] font-black text-[#00f3ff] uppercase pointer-events-none">EN</span>
     </div>
 
     <!-- Sesión de Telegram caducada: el initData ya no es válido y no puede renovarse desde dentro de la Mini App -->
