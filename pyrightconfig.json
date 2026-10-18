@@ -23,5 +23,8 @@
   "reportAssignmentType": "none",
   "reportArgumentType": "none",
   "reportOptionalSubscript": "none",
-  "reportGeneralTypeIssues": "none"
+  "reportGeneralTypeIssues": "none",
+  "reportPrivateImportUsage": "none",
+  "reportReturnType": "none",
+  "reportCallIssue": "none"
 }

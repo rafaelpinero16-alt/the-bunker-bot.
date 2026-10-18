@@ -130,8 +130,67 @@ export const session = {
     /** El initData cacheado por versiones anteriores ya no se usa jamás: se borra al arrancar. */
     purgeLegacy() {
         try { localStorage.removeItem('bunker_init_data'); } catch (err) { /* almacenamiento bloqueado */ }
+    },
+
+    /**
+     * v30 · Purga de arranque en frío (idempotente, nunca lanza):
+     *  • initData cacheado por versiones antiguas → siempre fuera.
+     *  • Dentro de Telegram, un token de sesión web guardado no sirve (la identidad es el initData firmado) y podría
+     *    pertenecer a otra cuenta que usó este dispositivo → se elimina.
+     *  • Un token web con formato imposible (corrupto / truncado) → se elimina antes de enviarlo al servidor.
+     *  • Si cambió el build (BUILD_VERSION): restos de estado de versiones anteriores (claves legadas, sessionStorage
+     *    propio, Service Workers y CacheStorage de builds viejos) se borran. Tema, idioma y avisos se conservan.
+     * Devuelve { buildChanged, removed: [...] } para diagnóstico.
+     */
+    coldStartPurge() {
+        const removed = [];
+        const drop = (store, key) => {
+            try {
+                if (store.getItem(key) !== null) { store.removeItem(key); removed.push(key); }
+            } catch (err) { /* almacenamiento bloqueado */ }
+        };
+        let ls = null, ss = null;
+        try { ls = window.localStorage; } catch (err) { ls = null; }
+        try { ss = window.sessionStorage; } catch (err) { ss = null; }
+        if (ls) {
+            LEGACY_STORAGE_KEYS.forEach(key => drop(ls, key));
+            const token = safeGet('bunker_session_token');
+            if (token && (this.telegramInitData() || !WEB_TOKEN_RE.test(token))) drop(ls, 'bunker_session_token');
+        }
+        let buildChanged = false;
+        try {
+            const previous = ls ? ls.getItem(BUILD_STORAGE_KEY) : null;
+            buildChanged = previous !== null && previous !== BUILD_VERSION;
+            if (ls) ls.setItem(BUILD_STORAGE_KEY, BUILD_VERSION);
+        } catch (err) { /* almacenamiento bloqueado */ }
+        if (buildChanged) {
+            if (ss) {
+                try {
+                    Object.keys(ss).filter(k => k.startsWith('bunker_')).forEach(k => drop(ss, k));
+                } catch (err) { /* sin acceso */ }
+            }
+            try {
+                if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                    navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister())).catch(() => {});
+                }
+                if (window.caches && caches.keys) {
+                    caches.keys().then(keys => keys.forEach(k => caches.delete(k))).catch(() => {});
+                }
+            } catch (err) { /* API no disponible */ }
+            console.info(`[Bunker] Build ${BUILD_VERSION}: estado de versiones anteriores purgado.`, removed);
+        }
+        return { buildChanged, removed };
     }
 };
+
+/** v30 · Versión del build desplegado (index.html fija window.BUNKER_BUILD junto al ?v= de los scripts). */
+export const BUILD_VERSION = String((typeof window !== 'undefined' && window.BUNKER_BUILD) || '30.0');
+const BUILD_STORAGE_KEY = 'bunker_build';
+/** Claves que versiones anteriores dejaron en localStorage y que ya no deben leerse nunca. */
+const LEGACY_STORAGE_KEYS = ['bunker_init_data', 'bunker_entitlements', 'bunker_tier', 'bunker_plan_cache',
+    'bunker_dashboard_cache', 'bunker_selected_chat'];
+/** Token de sesión web: opaco, sin espacios ni comillas (token_urlsafe del servidor u otro formato equivalente). */
+const WEB_TOKEN_RE = /^[A-Za-z0-9._~+\/=-]{16,512}$/;
 
 const STALE_RESULT = Object.freeze({ __error: 'stale_session', __status: 0, __stale: true });
 
@@ -299,8 +358,11 @@ export const api = {
 
     // --- Endpoints del Dashboard de Comunidad ---
 
+    /** v30 · Sin caché del WebView: la licencia (plan + entitlements) se revalida en cada carga. */
     async fetchChatDashboard(chatId) {
-        return await this.get(`/chat/${chatId}/dashboard`);
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/dashboard?_=${Date.now()}`, { noStore: true });
     },
 
     async fetchChatStats(chatId) {

@@ -102,6 +102,7 @@ const PAYWALL_I18N = {
         get_ultra: 'Activar ULTRA PRO 💎',
         compare: 'Comparar planes',
         toast: 'Requiere {tier} en esta comunidad.',
+        verifying: 'Verificando licencia vigente…',
     },
     en: {
         badge: 'Paid feature',
@@ -117,6 +118,7 @@ const PAYWALL_I18N = {
         get_ultra: 'Get ULTRA PRO 💎',
         compare: 'Compare plans',
         toast: 'Requires {tier} in this community.',
+        verifying: 'Verifying current license…',
     },
 };
 const PAYWALL_TIER_LABEL = { pro: 'PRO ⭐', ultra_pro: 'ULTRA PRO 💎' };
@@ -1754,7 +1756,7 @@ export const ui = {
         const headerActions = header && header.children.length > 1 ? header.lastElementChild : null;
         let card = panel.querySelector(':scope > .bunker-paywall-card');
         if (!info) {
-            if (panel.getAttribute('data-locked') !== '1') return;
+            if (!panel.hasAttribute('data-locked')) return;
             panel.removeAttribute('data-locked');
             if (card) card.remove();
             Array.from(panel.children).forEach(el => {
@@ -1768,7 +1770,7 @@ export const ui = {
         const required = info.required_tier === 'ultra_pro' ? 'ultra_pro' : 'pro';
         const target = String(chatId || info.chat_id || '');
         const safeChat = /^-\d+$/.test(target) ? target : '';
-        panel.setAttribute('data-locked', '1');
+        panel.setAttribute('data-locked', info.pending ? 'pending' : '1');
         Array.from(panel.children).forEach(el => {
             if (el === header || el.classList.contains('bunker-paywall-card') || el.classList.contains('hidden')) return;
             el.classList.add('hidden'); el.setAttribute('data-paywall-hidden', '1');
@@ -1777,6 +1779,21 @@ export const ui = {
             headerActions.classList.add('hidden'); headerActions.setAttribute('data-paywall-hidden', '1');
         }
         const tx = PAYWALL_I18N[state.currentLang] || PAYWALL_I18N.en;
+        if (info.pending) {
+            // v30 · Arranque en frío: nada de la función se enseña hasta que el servidor confirme la licencia vigente.
+            if (!card) {
+                card = document.createElement('div');
+                card.className = 'bunker-paywall-card space-y-2.5 rounded-xl border bg-black/70 p-3';
+                if (header) header.insertAdjacentElement('afterend', card); else panel.prepend(card);
+            }
+            card.style.borderColor = 'rgba(0,243,255,0.25)';
+            card.style.boxShadow = '0 0 16px rgba(0,243,255,0.08)';
+            card.setAttribute('data-feature', feature);
+            card.removeAttribute('data-required');
+            card.innerHTML = `<p class="flex items-center gap-2 text-[11px] font-bold text-[#00f3ff]/80 font-mono">
+                <i class="fa-solid fa-shield-halved fa-beat-fade text-[11px]"></i>${this.escapeHtml(tx.verifying)}</p>`;
+            return;
+        }
         const tierLabel = PAYWALL_TIER_LABEL[required];
         const isUltra = required === 'ultra_pro';
         const accent = isUltra ? '#ff00ff' : '#00f3ff';
@@ -1813,6 +1830,17 @@ export const ui = {
         card.setAttribute('data-feature', feature);
         card.setAttribute('data-required', required);
         card.innerHTML = html;
+    },
+
+    /** v30 · Bloqueo preventivo de los paneles de pago mientras se revalida la licencia (arranque en frío / cambio de comunidad). */
+    markEntitlementsPending(chatId) {
+        Object.keys(PAYWALL_PANELS).forEach(name => this.renderPaywall(name, { pending: true }, chatId));
+    },
+
+    /** v30 · Libera un panel que solo estaba «verificando» (el servidor respondió algo que no es un 402). */
+    releasePaywallPending(feature) {
+        const panel = byId(PAYWALL_PANELS[feature]);
+        if (panel && panel.getAttribute('data-locked') === 'pending') this.renderPaywall(feature, null);
     },
 
     /** Aplica el bloque `entitlements` del dashboard a los cuatro paneles (sin esperar a cada 402). */

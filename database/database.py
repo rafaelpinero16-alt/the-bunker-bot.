@@ -2545,6 +2545,15 @@ def toggle_group_tip_target(group_id: int, target_id: int):
 
 
 @db_async
+def set_group_tip_target_active(group_id: int, target_id: int, active: bool) -> bool:
+    """v30 · Fija (no alterna) el estado de un destino de propinas. Lo usa la difusión para pausar destinos rotos."""
+    with _write_transaction() as conn:
+        cur = conn.execute("UPDATE group_tip_targets SET is_active = ? WHERE id = ? AND group_id = ? AND is_active != ?",
+                           (1 if active else 0, int(target_id), int(group_id), 1 if active else 0))
+        return cur.rowcount > 0
+
+
+@db_async
 def delete_group_tip_target(group_id: int, target_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -3057,20 +3066,27 @@ def get_all_active_sessions():
 
 
 @db_async
-def revoke_owner_session(user_id: int, group_id: Optional[int] = None, reason: Optional[str] = None):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
+def revoke_owner_session(user_id: int, group_id: Optional[int] = None, reason: Optional[str] = None) -> bool:
+    """
+    v30 · Marca la sesión MTProto como 'revoked' (transacción BEGIN IMMEDIATE, compatible con WAL).
+    Devuelve True SOLO si hubo transición real (estaba en otro estado): el llamador usa ese flanco para
+    avisar al operador una única vez, aunque varios monitores / procesos detecten el fallo a la vez.
+    """
+    reason = (str(reason)[:300] if reason else None)
+    with _write_transaction() as conn:
         if group_id is not None:
-            cursor.execute(
-                "UPDATE owner_sessions SET status = 'revoked', last_error = ? WHERE user_id = ? AND group_id = ?",
+            cur = conn.execute(
+                "UPDATE owner_sessions SET status = 'revoked', last_error = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE user_id = ? AND group_id = ? AND COALESCE(status, '') != 'revoked'",
                 (reason, user_id, group_id)
             )
         else:
-            cursor.execute(
-                "UPDATE owner_sessions SET status = 'revoked', last_error = ? WHERE user_id = ?",
+            cur = conn.execute(
+                "UPDATE owner_sessions SET status = 'revoked', last_error = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE user_id = ? AND COALESCE(status, '') != 'revoked'",
                 (reason, user_id)
             )
-        conn.commit()
+        return cur.rowcount > 0
 
 
 @db_async

@@ -226,7 +226,10 @@ export const app = {
 
     init() {
         tgApp.initViewport();
-        session.purgeLegacy();   // el initData cacheado por versiones anteriores no se usa nunca más
+        // v30 · Arranque en frío: purga de credenciales y cachés legadas (initData antiguo, token web dentro de
+        // Telegram, restos de builds anteriores) y licencias SIEMPRE revalidadas contra el servidor.
+        session.coldStartPurge();
+        state.entitlements = null;
         this.initTheme();
         this.initLanguage();   // 🌐 v21 · inglés por defecto o la preferencia guardada, antes de pintar textos
         ui.ensureLiveStyles();
@@ -2501,6 +2504,7 @@ export const app = {
         const epoch = ++state.chatEpoch;
         state.selectedChatId = chatId;
         state.checkoutChatId = null;   // v29 · el checkout sigue a la comunidad abierta
+        if (!state.entitlements || String(state.entitlements.chatId) !== chatId) state.entitlements = null;   // v30
 
         document.querySelectorAll('#group-owner-select, #analytics-chat-select').forEach(sel => {
             sel.value = chatId;
@@ -3319,6 +3323,11 @@ export const app = {
         this.loadGhostPurge(id);
         this.startMicvipAudit(id);   // v22
         this.startV23Console(id);    // v23
+        // v30 · Revalidación estricta: los paneles de pago quedan «verificando» hasta que el servidor confirme la
+        // licencia de ESTA comunidad (entitlements del dashboard, 200 o 402 de cada panel). Nunca se reutiliza
+        // el resultado de otra comunidad ni de una sesión anterior.
+        if (state.entitlements && String(state.entitlements.chatId) === id) ui.applyEntitlements(state.entitlements, id);
+        else ui.markEntitlementsPending(id);
     },
 
     stopPerimeterConsole() {
@@ -3589,6 +3598,7 @@ export const app = {
             return false;
         }
         if (res?.__error) {
+            ui.releasePaywallPending('micvip_audit');   // v30 · error ≠ 402: se muestra el error, no un «verificando» eterno
             if (m.data) this.paintMicvip();
             else ui.renderMicvipAudit(null, { filter: m.filter, error: this.consoleErrorMessage(res) });
             if (manual) tgApp.hapticNotification('error');
@@ -3842,6 +3852,7 @@ export const app = {
             return false;
         }
         if (res?.__error) {
+            ui.releasePaywallPending('vip_roles');
             if (v.data) this.paintVip();
             else ui.renderVipRoles(null, { filter: v.filter, error: this.consoleErrorMessage(res) });
             return false;
@@ -3981,6 +3992,7 @@ export const app = {
             return false;
         }
         if (res?.__error) {
+            ui.releasePaywallPending('ban_appeals');
             if (a.data) this.paintAppeals();
             else ui.renderBanAppeals(null, { filter: a.filter, error: this.consoleErrorMessage(res) });
             return false;
@@ -4065,6 +4077,7 @@ export const app = {
             return false;
         }
         if (res?.__error) {
+            ui.releasePaywallPending('link_quotas');
             ui.renderAdminQuotas(q.data, { error: this.consoleErrorMessage(res) });
             return false;
         }

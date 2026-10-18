@@ -129,7 +129,27 @@ except ImportError:
     async def get_sentinel_payload_config(group_id: int) -> dict:   # misma firma que database.database
         return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
 
-FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan)
+import pyrogram.errors as _pyro_errors
+
+# v30 · Errores de autenticación MTProto definitivos. Los opcionales se resuelven por nombre: no todas las versiones
+# de Pyrogram los exponen (en todas son subclases de Unauthorized/401, así que la tupla base ya los cubre).
+_OPTIONAL_FATAL_NAMES = ("SessionRevoked", "SessionExpired", "AuthKeyInvalid", "AuthKeyPermEmpty", "UserBannedInChannel_")
+FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan) + tuple(
+    cls for cls in (getattr(_pyro_errors, n, None) for n in _OPTIONAL_FATAL_NAMES)
+    if isinstance(cls, type) and issubclass(cls, BaseException)
+)
+# Huella textual de los mismos fallos cuando llegan envueltos (OSError, RPCError genérico, ConnectionError…).
+_FATAL_SESSION_MARKERS = ("AUTH_KEY_UNREGISTERED", "AUTH_KEY_INVALID", "AUTH_KEY_PERM_EMPTY", "AUTH_KEY_DUPLICATED",
+                          "SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED", "UNAUTHORIZED")
+
+
+def is_fatal_session_error(exc: BaseException) -> bool:
+    """True si la sesión MTProto quedó inservible (revocada, caducada, cuenta borrada o clave duplicada)."""
+    if isinstance(exc, FATAL_SESSION_ERRORS):
+        # SessionPasswordNeeded también es 401, pero solo aparece al iniciar sesión: nunca invalida una sesión viva.
+        return not isinstance(exc, SessionPasswordNeeded)
+    text = f"{type(exc).__name__} {exc}".upper()
+    return any(marker in text for marker in _FATAL_SESSION_MARKERS)
 
 logger = logging.getLogger("assistant_radar")
 
@@ -2099,6 +2119,101 @@ async def _verify_active_membership(client: Client, chat_id: int) -> bool:
         return True
 
 
+# ==========================================
+# 🔒 v30 · AUTOCURACIÓN DE SESIONES MTPROTO REVOCADAS + ALERTA TEMPRANA AL OPERADOR
+# ==========================================
+_REVOKE_ALERT_COOLDOWN = 6 * 3600          # una alerta por (operador, comunidad) cada 6 h como máximo
+_revoke_alerted: dict = {}
+
+
+def _short_reason(reason) -> str:
+    text = str(reason or "").strip()
+    match = re.search(r"\[[0-9]{3}\s+([A-Z_]+)\]", text) or re.search(r"\b([A-Z][A-Z0-9_]{6,})\b", text)
+    return (match.group(1) if match else text)[:80] or "AUTH_KEY_UNREGISTERED"
+
+
+async def _alert_operator_session_revoked(user_id: int, chat_id: int, reason: str) -> bool:
+    """DM del bot maestro al operador (el Centinela jamás escribe por privado). Devuelve True si se entregó."""
+    if not _global_bot or not user_id:
+        return False
+    now = time.time()
+    key = (int(user_id), int(chat_id))
+    if now - _revoke_alerted.get(key, 0) < _REVOKE_ALERT_COOLDOWN:
+        return False
+    _revoke_alerted[key] = now
+    if len(_revoke_alerted) > 5000:
+        for k in sorted(_revoke_alerted, key=_revoke_alerted.get)[:2500]:
+            _revoke_alerted.pop(k, None)
+    title = str(chat_id)
+    try:
+        chat = await asyncio.wait_for(_global_bot.get_chat(chat_id), timeout=MTPROTO_RPC_TIMEOUT)
+        title = chat.title or title
+    except Exception:
+        pass
+    code = html.escape(_short_reason(reason))
+    text = (
+        "🔒 <b>Centinela desconectado: sesión revocada</b>\n\n"
+        f"• <b>Comunidad:</b> {html.escape(title)} (<code>{int(chat_id)}</code>)\n"
+        f"• <b>Motivo:</b> <code>{code}</code>\n\n"
+        "Telegram invalidó la sesión MTProto (cerrada desde <i>Dispositivos</i>, caducada o cuenta restringida). "
+        "La he dado de baja automáticamente para evitar reconexiones en bucle; la protección de voz de esta "
+        "comunidad queda <b>en pausa</b> hasta que vincules una sesión nueva.\n\n"
+        "<i>🔒 Session revoked by Telegram: the Sentinel was retired automatically. Link a new session to resume.</i>"
+        "\n\n🛡️ <i>Cloud Media Management</i>"
+    )
+    markup = None
+    try:
+        username = await _get_bot_username()
+        if username:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+                text="🧬 Vincular nueva sesión / Relink", url=f"https://t.me/{username}?start=gclone_{int(chat_id)}")]])
+    except Exception:
+        markup = None
+    try:
+        await asyncio.wait_for(_global_bot.send_message(chat_id=int(user_id), text=text, parse_mode="HTML",
+                                                        reply_markup=markup, disable_web_page_preview=True),
+                               timeout=MTPROTO_RPC_TIMEOUT)
+        return True
+    except Exception as e:
+        logger.warning(f"⚠️ [Perímetro] No se pudo avisar por privado a {user_id} de la sesión revocada en {chat_id}: {e}")
+        return False
+
+
+async def handle_revoked_session(user_id: int, chat_id: int, reason, client: Optional[Client] = None) -> bool:
+    """
+    Punto ÚNICO de autocuración ante AuthKeyUnregistered / SESSION_REVOKED / cuenta desactivada:
+      1. owner_sessions.status → 'revoked' (transición atómica: solo el primer detector la consigue),
+      2. registro perimetral (log del servidor + canal de registro de la comunidad, si existe),
+      3. aviso preventivo por privado al operador con botón para re-vincular,
+      4. el Centinela sale del registro en vivo y la Mini App / el bot lo ven en 🔴 al instante.
+    Nunca lanza. Devuelve True si fue la primera detección de esta revocación.
+    """
+    reason_text = str(reason or "AUTH_KEY_UNREGISTERED")
+    first = False
+    if user_id:
+        try:
+            first = bool(await revoke_owner_session(int(user_id), int(chat_id), reason=reason_text))
+        except Exception as e:
+            logger.error(f"❌ [Perímetro] No se pudo marcar como revocada la sesión de {user_id}/{chat_id}: {e}")
+            first = True   # sin confirmación de la base, se avisa igualmente (el enfriamiento evita spam)
+    logger.warning(f"🔒 [Perímetro] Sesión MTProto revocada · comunidad={chat_id} operador={user_id} "
+                   f"motivo={_short_reason(reason_text)} primera_detección={first}")
+    if client is not None:
+        current = active_sentinels.get(chat_id)
+        if current and current.get("client") is client:
+            active_sentinels.pop(chat_id, None)
+    _notify_assets_change(chat_id)
+    if first:
+        _spawn(_ghost_log_channel_post(
+            chat_id,
+            "🔒 <b>Perímetro · Centinela fuera de servicio</b>\n\n"
+            f"Telegram revocó la sesión MTProto (<code>{html.escape(_short_reason(reason_text))}</code>). "
+            "El activo pasó a <b>revocado</b> y se avisó al operador."
+        ), name=f"revoked_log:{chat_id}")
+        _spawn(_alert_operator_session_revoked(int(user_id or 0), int(chat_id), reason_text), name=f"revoked_dm:{chat_id}")
+    return first
+
+
 async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reason: Optional[str] = None, revoke: bool = False) -> None:
     """
     Retira el Centinela de un grupo cuando su monitor termina: limpia el registro
@@ -2109,11 +2224,8 @@ async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reaso
     if current and current.get("client") is client:
         active_sentinels.pop(chat_id, None)
         _notify_assets_change(chat_id)
-    if revoke and user_id:
-        try:
-            await revoke_owner_session(user_id, chat_id, reason=reason)
-        except Exception:
-            pass
+    if revoke:
+        await handle_revoked_session(user_id, chat_id, reason, client=client)
     if client is not assistant_app:
         still_used = any(info.get("client") is client for info in active_sentinels.values())
         if not still_used:
@@ -2199,8 +2311,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 await _retire_sentinel(chat_id, client, user_id, reason=str(auth_err), revoke=True)
                 return
             except Exception as e:
-                err_up = str(e).upper()
-                if any(x in err_up for x in ("AUTH_KEY", "UNAUTHORIZED", "SESSION_REVOKED", "USER_DEACTIVATED", "406")):
+                if is_fatal_session_error(e):
                     logger.error(f"🔒 [Sesión Inválida MTProto] {e}")
                     await _retire_sentinel(chat_id, client, user_id, reason=str(e), revoke=True)
                     return
@@ -2592,6 +2703,11 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
             logger.debug(f"⏱️ [Radar] RPC excedió el time-out en grupo {chat_id}; se reintenta.")
             await asyncio.sleep(5)
         except Exception as loop_err:
+            # v30 · Un 401 envuelto (OSError/RPCError genérico) ya no deja al monitor reintentando para siempre.
+            if is_fatal_session_error(loop_err):
+                logger.error(f"🔒 [Sesión Inválida en operación] Grupo {chat_id}: {loop_err}")
+                await _retire_sentinel(chat_id, client, user_id, reason=str(loop_err), revoke=True)
+                return
             logger.debug(f"Aviso en ciclo de radar del grupo {chat_id}: {loop_err}")
             await asyncio.sleep(3)
         await asyncio.sleep(3)
@@ -2905,10 +3021,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         return True
     except FATAL_SESSION_ERRORS as auth_err:
         logger.warning(f"⚠️ [Sesión Inválida] La sesión de {user_id} para {group_id} fue revocada: {auth_err}")
-        try:
-            await revoke_owner_session(user_id, group_id, reason=str(auth_err))
-        except Exception:
-            pass
+        await handle_revoked_session(user_id, group_id, str(auth_err))
         await _safe_stop_client(session_client, label=f"grupo {group_id}")
         return False
     except asyncio.TimeoutError:
@@ -2916,7 +3029,11 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         await _safe_stop_client(session_client, label=f"grupo {group_id}")
         return False
     except Exception as e:
-        logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
+        if is_fatal_session_error(e):
+            logger.warning(f"⚠️ [Sesión Inválida] Fallo de autenticación envuelto en {group_id}: {e}")
+            await handle_revoked_session(user_id, group_id, str(e))
+        else:
+            logger.error(f"⚠️ [Error al iniciar Centinela Propio] Grupo {group_id}: {e}")
         await _safe_stop_client(session_client, label=f"grupo {group_id}")
         return False
 

@@ -30,7 +30,7 @@ from aiogram.types import (
 )
 from aiogram.types.web_app_info import WebAppInfo
 from aiogram.filters import Command, CommandStart, CommandObject
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter, TelegramMigrateToChat
 from database.database import (
     get_gamification_announcement, set_gamification_announcement_field,
     set_gamification_announcement_media, clear_gamification_announcement_button,
@@ -3250,47 +3250,94 @@ def parse_tip_target_input(raw: str):
     return None
 
 
+TIPS_TARGET_CHECK_TIMEOUT = 8.0
+
+
+def _tips_member_status(member) -> str:
+    return str(getattr(getattr(member, "status", None), "value", getattr(member, "status", "")) or "").lower()
+
+
 async def validate_tip_target(bot: Bot, user_id: int, ref: str):
-    """Valida el canal destino sin bloquearse por las restricciones de Telegram en canales."""
+    """
+    v30 · Validación ESTRICTA del destino antes de insertarlo (nada se guarda si algo falla):
+      1. el chat existe y es canal / supergrupo / grupo (con time-out: Telegram lento ≠ destino inválido),
+      2. el bot es miembro y PUEDE PUBLICAR: en canales, admin con can_post_messages; en grupos, admin, o miembro
+         sin restricción de envío y con envío permitido por los permisos por defecto del grupo,
+      3. si el plan usa multimedia, que el bot pueda enviar fotos/vídeos (se avisa, no bloquea),
+      4. 👑 Regla de Oro: solo el CREADOR del destino (o un Arquitecto) puede vincularlo.
+    Devuelve (info, None) o (None, código). info.value es SIEMPRE el id numérico estable (un @alias puede cambiar
+    o liberarse y romper la difusión); info.aliases sirve para detectar duplicados guardados con formato antiguo.
+    """
+    if not ref:
+        return None, "invalid"
+    chat_ref = int(ref) if ref.lstrip("-").isdigit() else ref
     try:
-        if not ref:
-            return None, "invalid"
+        chat = await asyncio.wait_for(bot.get_chat(chat_ref), timeout=TIPS_TARGET_CHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        return None, "unreachable"
+    except TelegramForbiddenError:
+        return None, "bot_not_member"
+    except TelegramBadRequest as ex:
+        text = str(ex).lower()
+        return None, ("bot_not_member" if "kicked" in text or "forbidden" in text else "not_found")
+    except Exception as ex:
+        logging.warning("⚠️ [Tips] get_chat falló para %s: %s", ref, ex)
+        return None, "unreachable"
 
-        chat_ref = int(ref) if ref.lstrip("-").isdigit() else ref
-        try:
-            chat = await bot.get_chat(chat_ref)
-        except TelegramBadRequest:
-            return None, "not_found"
-        except TelegramForbiddenError:
-            return None, "chat"
+    chat_type = str(getattr(getattr(chat, "type", None), "value", getattr(chat, "type", "")) or "")
+    if not chat or chat_type not in ("channel", "supergroup", "group"):
+        return None, "bad_type"
+    if int(chat.id) >= 0:
+        return None, "bad_type"
 
-        if not chat or chat.type not in ("channel", "supergroup", "group"):
-            return None, "bad_type"
+    try:
+        me = await asyncio.wait_for(bot.get_me(), timeout=TIPS_TARGET_CHECK_TIMEOUT)
+        bot_member = await asyncio.wait_for(bot.get_chat_member(chat.id, me.id), timeout=TIPS_TARGET_CHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        return None, "unreachable"
+    except (TelegramForbiddenError, TelegramBadRequest):
+        return None, "bot_not_member"
+    except Exception as ex:
+        logging.warning("⚠️ [Tips] get_chat_member(bot) falló en %s: %s", chat.id, ex)
+        return None, "unreachable"
 
-        # 1. Verificar que el bot sea administrador con permiso para publicar
-        try:
-            me = await bot.get_chat_member(chat.id, (await bot.get_me()).id)
-        except Exception:
+    status = _tips_member_status(bot_member)
+    if status in ("left", "kicked", "banned"):
+        return None, "bot_not_member"
+    if chat_type == "channel":
+        if status not in ("administrator", "creator"):
             return None, "bot_not_admin"
-
-        if chat.type == "channel":
-            if me.status not in ("administrator", "creator"):
-                return None, "bot_not_admin"
-            if getattr(me, "can_post_messages", None) is False:
+        if status == "administrator" and getattr(bot_member, "can_post_messages", None) is not True:
+            return None, "bot_cannot_post"
+    else:
+        if status == "restricted" and getattr(bot_member, "can_send_messages", None) is False:
+            return None, "bot_cannot_post"
+        if status == "member":
+            perms = getattr(chat, "permissions", None)
+            if perms is not None and getattr(perms, "can_send_messages", None) is False:
                 return None, "bot_cannot_post"
 
-        # 2. 👑 Regla de Oro: solo el CREADOR del destino (o un Arquitecto) puede vincularlo. En canales la Bot API
-        # sí expone al creador y a los administradores cuando el bot es admin; si Telegram no lo confirma, se rechaza.
-        if not is_super_admin(user_id):
-            if not await is_legitimate_owner(bot, user_id, chat.id):
-                return None, "not_admin"
+    # 👑 Regla de Oro (se evalúa al final: los fallos del bot se explican aunque el usuario no sea el creador).
+    if not is_super_admin(user_id):
+        try:
+            owner_ok = await asyncio.wait_for(is_legitimate_owner(bot, user_id, chat.id), timeout=TIPS_TARGET_CHECK_TIMEOUT)
+        except asyncio.TimeoutError:
+            return None, "unreachable"
+        except Exception:
+            owner_ok = False
+        if not owner_ok:
+            return None, "not_admin"
 
-        value = f"@{chat.username}" if getattr(chat, "username", None) else str(chat.id)
-        return {"value": value, "title": chat.title or value, "chat_id": chat.id}, None
-
-    except Exception as ex:
-        logging.error("❌ [Tips] validate_tip_target failed for %s: %s", ref, ex)
-        return None, "invalid"
+    value = str(int(chat.id))
+    aliases = {value.lower()}
+    if getattr(chat, "username", None):
+        aliases.add(f"@{chat.username}".lower())
+        aliases.add(str(chat.username).lower())
+    media_ok = True
+    if status == "restricted":
+        media_ok = getattr(bot_member, "can_send_photos", True) is not False and getattr(bot_member, "can_send_videos", True) is not False
+    return {"value": value, "title": chat.title or value, "chat_id": int(chat.id), "aliases": aliases,
+            "chat_type": chat_type, "media_ok": media_ok}, None
 
 
 def tips_target_error_text(lang: str, err: str, **fmt) -> str:
@@ -3311,6 +3358,10 @@ def tips_target_error_text(lang: str, err: str, **fmt) -> str:
         "limit": ("⚠️ Límite de canales destino alcanzado para tu nivel ({n}/{limit}).",
                   "⚠️ Target channel limit reached for your tier ({n}/{limit})."),
         "save_failed": ("⚠️ No pude registrar el canal. Inténtalo de nuevo.", "⚠️ I couldn't save the channel. Please try again."),
+        "bot_not_member": ("⚠️ El bot <b>no es miembro</b> del destino (o fue expulsado). Añádelo como administrador y vuelve a intentarlo.",
+                           "⚠️ The bot is <b>not a member</b> of the target (or was removed). Add it as an administrator and try again."),
+        "unreachable": ("⏳ Telegram no respondió a tiempo al verificar el destino. No se guardó nada; inténtalo de nuevo.",
+                        "⏳ Telegram did not answer in time while checking the target. Nothing was saved; please try again."),
     }
     es, en = msgs.get(err, msgs["save_failed"])
     return tr(lang, es, en).format(**fmt) + PERIMETER_SIGNATURE
@@ -3359,13 +3410,33 @@ async def _tips_send_one(bot: Bot, chat, text: str, media_id, media_type, reply_
     await bot.send_message(chat_id=chat, text=text, reply_markup=reply_markup, parse_mode="HTML")
 
 
-async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, active_targets: list, group_id: int = 0):
-    """Despacha la publicación a los canales activos con botón inline de Stars. Devuelve (enviados:int, fallidos:list[str])."""
+_TIPS_PERMANENT_ERRORS = ("chat not found", "bot was kicked", "bot is not a member", "not enough rights",
+                          "have no rights", "chat_write_forbidden", "need administrator rights", "channel_private",
+                          "chat_admin_required", "bot was blocked", "group chat was deactivated", "peer_id_invalid")
+
+
+def _tips_is_permanent_failure(ex: BaseException) -> bool:
+    """Fallos que no se arreglan reintentando: el destino se pausa en vez de fallar en cada difusión."""
+    if isinstance(ex, TelegramForbiddenError):
+        return True
+    text = str(ex).lower()
+    return isinstance(ex, TelegramBadRequest) and any(k in text for k in _TIPS_PERMANENT_ERRORS)
+
+
+async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, active_targets: list, group_id: int = 0,
+                                  target_ids: Optional[dict] = None):
+    """
+    Despacha la publicación a los canales activos con botón inline de Stars. Devuelve (enviados:int, fallidos:list[str]).
+    v30 · Cada destino se aísla (time-out propio, ningún fallo corta el bucle) y los fallos PERMANENTES (bot expulsado,
+    sin permiso de publicar, canal inexistente) pausan el destino (is_active=0) para no repetir el error; el informe
+    los marca con ⏸️. Los destinos con valor corrupto se omiten sin llamar a Telegram.
+    """
     text, media_id, media_type = build_tips_publication(tier, cfg, lang)
-    
-    bot_info = await bot.get_me()
-    bot_username = bot_info.username or "BunkerBot"
-    
+
+    bot_username = "BunkerBot"
+    with contextlib.suppress(Exception):
+        bot_username = (await asyncio.wait_for(bot.get_me(), timeout=TIPS_TARGET_CHECK_TIMEOUT)).username or bot_username
+
     # 🌟 Construcción del botón inline interactivo para enviar la propina con Stars
     tip_btn_label = tr(lang, "⭐ Enviar Propina en Stars", "⭐ Send Stars Tip")
     tip_url = f"https://t.me/{bot_username}?start=tip_{group_id}" if group_id else f"https://t.me/{bot_username}?start=true"
@@ -3375,23 +3446,50 @@ async def dispatch_tips_broadcast(bot: Bot, tier: str, cfg: dict, lang: str, act
 
     sent, failed = 0, []
     for value in active_targets:
-        chat = int(value) if _TIPS_NUMERIC_ID_RE.match(value) else "@" + value.lstrip("@")
+        raw = str(value or "").strip()
+        if _TIPS_NUMERIC_ID_RE.match(raw):
+            chat = int(raw)
+        elif _TIPS_USERNAME_RE.match(raw.lstrip("@")):
+            chat = "@" + raw.lstrip("@")
+        else:
+            logging.warning(f"⚠️ [Tips Broadcast] Destino con formato inválido omitido: {raw!r}")
+            failed.append(raw or "?")
+            continue
         for attempt in (1, 2):
             try:
-                await _tips_send_one(bot, chat, text, media_id, media_type, reply_markup=keyboard)
+                await asyncio.wait_for(_tips_send_one(bot, chat, text, media_id, media_type, reply_markup=keyboard),
+                                       timeout=TIPS_TARGET_CHECK_TIMEOUT * 2)
                 sent += 1
                 break
             except TelegramRetryAfter as ex:
                 if attempt == 2:
-                    failed.append(value)
+                    failed.append(raw)
                     break
                 await asyncio.sleep(min(ex.retry_after, 30) + 1)
+            except TelegramMigrateToChat as ex:
+                # El grupo pasó a supergrupo: se publica en el nuevo id (el destino guardado se re-vincula a mano).
+                chat = int(ex.migrate_to_chat_id)
+                if attempt == 2:
+                    failed.append(raw)
+            except asyncio.TimeoutError:
+                if attempt == 2:
+                    logging.warning(f"⏱️ [Tips Broadcast] Time-out publicando en {raw}.")
+                    failed.append(raw)
             except Exception as ex:
-                logging.warning(f"⚠️ [Tips Broadcast] No se pudo enviar al canal {value}: {ex}")
-                failed.append(value)
+                logging.warning(f"⚠️ [Tips Broadcast] No se pudo enviar al canal {raw}: {ex}")
+                paused = False
+                target_id = (target_ids or {}).get(value)
+                if group_id and target_id is not None and _tips_is_permanent_failure(ex):
+                    try:
+                        from database.database import set_group_tip_target_active
+                        paused = await set_group_tip_target_active(int(group_id), int(target_id), False)
+                    except Exception as db_ex:
+                        logging.error(f"❌ [Tips Broadcast] No se pudo pausar el destino {raw}: {db_ex}")
+                failed.append(f"⏸️ {raw}" if paused else raw)
                 break
         await asyncio.sleep(0.05)
     return sent, failed
+
 
 def get_payment_keyboard(group_id: int, lang: str, tier_level: str = "pro", chat_type: str = "g"):
     """
@@ -4060,11 +4158,149 @@ async def cb_noop(callback: CallbackQuery):
     return
 
 
+# --------------------------------------------------------------------------
+# 📡 v30 · AUTODIAGNÓSTICO PREVENTIVO DE PERMISOS AL SINCRONIZAR CANALES
+# --------------------------------------------------------------------------
+# Un canal solo se registra si el bot tiene, EN ESTE MOMENTO, los permisos que el Estudio necesita. Antes bastaba
+# con ser administrador: un admin sin «Publicar» quedaba vinculado y luego fallaban difusiones, planes y anuncios.
+CHSYNC_CRITICAL_RIGHTS = (
+    ("can_post_messages", "📝 Publicar mensajes", "📝 Post messages"),
+    ("can_edit_messages", "✏️ Editar mensajes de otros", "✏️ Edit messages of others"),
+    ("can_delete_messages", "🗑️ Eliminar mensajes de otros", "🗑️ Delete messages of others"),
+    ("can_invite_users", "🔗 Invitar usuarios mediante enlace", "🔗 Invite users via link"),
+)
+CHSYNC_RECOMMENDED_RIGHTS = (
+    ("can_manage_video_chats", "🎙️ Gestionar transmisiones en directo", "🎙️ Manage live streams"),
+)
+CHSYNC_CHECK_TIMEOUT = 8.0
+
+
+def _chsync_status(member) -> str:
+    return str(getattr(getattr(member, "status", None), "value", getattr(member, "status", "")) or "").lower()
+
+
+async def diagnose_channel_sync(bot: Bot, user_id: int, channel_id: int) -> dict:
+    """
+    Verificación atómica (una sola pasada, en paralelo y con time-out) de: membresía y rango del bot, cada
+    permiso crítico, tipo de chat y propiedad del usuario. NO escribe nada: el registro solo ocurre si ok=True.
+    → {ok, error, title, missing: [(key, es, en)], recommended: [...]}
+    error ∈ None | 'bot_not_member' | 'bot_not_admin' | 'missing_rights' | 'not_owner' | 'not_channel' | 'unreachable'
+    """
+    result = {"ok": False, "error": None, "title": "", "missing": [], "recommended": []}
+    try:
+        me = await asyncio.wait_for(bot.get_me(), timeout=CHSYNC_CHECK_TIMEOUT)
+        owner_check = (bot.get_chat_member(chat_id=channel_id, user_id=user_id)
+                       if not is_super_admin(user_id) else asyncio.sleep(0, result=None))
+        chat_obj, bot_member, user_member = await asyncio.wait_for(asyncio.gather(
+            bot.get_chat(channel_id),
+            bot.get_chat_member(chat_id=channel_id, user_id=me.id),
+            owner_check,
+            return_exceptions=True,
+        ), timeout=CHSYNC_CHECK_TIMEOUT)
+    except Exception as ex:
+        logging.warning(f"⚠️ [Sync Canales] Diagnóstico sin respuesta de Telegram en {channel_id}: {ex}")
+        result["error"] = "unreachable"
+        return result
+
+    if not isinstance(chat_obj, Exception):
+        result["title"] = chat_obj.title or ""
+        if str(getattr(getattr(chat_obj, "type", None), "value", getattr(chat_obj, "type", ""))) != "channel":
+            result["error"] = "not_channel"
+            return result
+    if isinstance(bot_member, Exception):
+        text = str(bot_member).lower()
+        result["error"] = "bot_not_member" if any(k in text for k in ("not found", "forbidden", "not a member", "kicked")) else "unreachable"
+        return result
+    status = _chsync_status(bot_member)
+    if status in ("left", "kicked", "banned"):
+        result["error"] = "bot_not_member"
+        return result
+    if status not in ("administrator", "creator"):
+        result["error"] = "bot_not_admin"
+        return result
+    if status == "administrator":
+        result["missing"] = [r for r in CHSYNC_CRITICAL_RIGHTS if getattr(bot_member, r[0], None) is not True]
+        result["recommended"] = [r for r in CHSYNC_RECOMMENDED_RIGHTS if getattr(bot_member, r[0], None) is not True]
+    if result["missing"]:
+        result["error"] = "missing_rights"
+        return result
+    if not is_super_admin(user_id):
+        if isinstance(user_member, Exception) or _chsync_status(user_member) != "creator":
+            result["error"] = "not_owner"
+            return result
+    result["ok"] = True
+    return result
+
+
+def _chsync_report(lang: str, t: dict, diag: dict, channel_id: int, bot_username: str) -> str:
+    title = html.escape(diag.get("title") or str(channel_id))
+    err = diag.get("error")
+    if err == "missing_rights":
+        lines = "\n".join(f"  ❌ {tr(lang, es, en)}" for _, es, en in diag["missing"])
+        return tr(lang,
+                  f"🛠️ <b>Autodiagnóstico de permisos</b>\n\n<b>{title}</b> no se registró: el bot es administrador pero le faltan "
+                  f"permisos críticos:\n\n{lines}\n\nAbre <i>Administradores → @{bot_username}</i>, activa los permisos marcados "
+                  "y pulsa «🔄 Volver a verificar».",
+                  f"🛠️ <b>Permission self-check</b>\n\n<b>{title}</b> was not registered: the bot is an admin but lacks critical "
+                  f"permissions:\n\n{lines}\n\nOpen <i>Administrators → @{bot_username}</i>, enable the marked permissions "
+                  "and tap “🔄 Check again”.") + PERIMETER_SIGNATURE
+    if err == "bot_not_member":
+        return tr(lang,
+                  f"⚠️ <b>El bot no está en {title}</b>\n\nAñade a @{bot_username} como administrador del canal y pulsa «🔄 Volver a verificar».",
+                  f"⚠️ <b>The bot is not in {title}</b>\n\nAdd @{bot_username} as a channel administrator and tap “🔄 Check again”.") + PERIMETER_SIGNATURE
+    if err == "not_channel":
+        return tr(lang, "⚠️ Ese chat no es un canal. Usa el panel de grupos para vincular grupos.",
+                  "⚠️ That chat is not a channel. Use the groups panel to link groups.") + PERIMETER_SIGNATURE
+    if err == "unreachable":
+        return tr(lang, "⏳ Telegram no respondió a tiempo al verificar el canal. No se registró nada; inténtalo de nuevo en unos segundos.",
+                  "⏳ Telegram did not answer in time while checking the channel. Nothing was registered; try again in a few seconds.") + PERIMETER_SIGNATURE
+    if err == "not_owner":
+        return t["chsync_not_owner"]
+    return t["chsync_bot_not_admin"].format(title=title, bot_username=bot_username)
+
+
+async def run_channel_sync(bot: Bot, user, channel_id: int, lang: str, fallback_title: str = "") -> tuple:
+    """Diagnostica y, solo si todo está en verde, registra. → (texto, teclado, registrado:bool)."""
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    bot_username = "BunkerBot"
+    with contextlib.suppress(Exception):
+        bot_username = (await bot.get_me()).username or bot_username
+    diag = await diagnose_channel_sync(bot, user.id, channel_id)
+    title = diag.get("title") or fallback_title or str(channel_id)
+    back_rows = [
+        [InlineKeyboardButton(text=t["btn_sync_channels"], callback_data=f"menu_chsync_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")],
+    ]
+    if not diag["ok"]:
+        diag["title"] = title
+        rows = list(back_rows)
+        if diag["error"] in ("missing_rights", "bot_not_member", "bot_not_admin", "unreachable"):
+            rows.insert(0, [InlineKeyboardButton(text=tr(lang, "🔄 Volver a verificar", "🔄 Check again"),
+                                                 callback_data=f"chsyncchk_{channel_id}_{lang}")])
+        logging.info(f"⛔ [Sync Canales] user={user.id} channel={channel_id} rechazado: {diag['error']} "
+                     f"{[r[0] for r in diag['missing']]}")
+        return _chsync_report(lang, t, diag, channel_id, bot_username), InlineKeyboardMarkup(inline_keyboard=rows), False
+
+    CHAT_KIND_CACHE[channel_id] = "c"
+    CHANNEL_SYNC_CACHE.setdefault(user.id, {})[channel_id] = title
+    await registry_upsert_channel(user.id, channel_id, title)
+    logging.info(f"✅ [Sync Canales] user={user.id} sincronizó channel={channel_id} ('{title}') con permisos verificados.")
+    text = t["chsync_ok"].format(title=html.escape(title))
+    if diag["recommended"]:
+        rec = ", ".join(tr(lang, es, en) for _, es, en in diag["recommended"])
+        text += "\n\n" + tr(lang, f"💡 Recomendado (opcional): {rec}.", f"💡 Recommended (optional): {rec}.")
+    ok_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_open_studio"], callback_data=f"cpanel_{channel_id}_{lang}")],
+        *back_rows,
+    ])
+    return text, ok_kb, True
+
+
 @router.message(F.chat.type == "private", F.chat_shared)
 async def handle_channel_shared(message: Message, bot: Bot):
     """
-    Sincronización Activa de Canales: recibe el canal elegido en el selector nativo de Telegram,
-    verifica EN VIVO los permisos del bot y la propiedad del usuario, y lo registra al instante.
+    Sincronización Activa de Canales: recibe el canal elegido en el selector nativo de Telegram y, v30, ejecuta el
+    autodiagnóstico de permisos ANTES de guardar (membresía, rango, permisos críticos y propiedad del usuario).
     """
     user = message.from_user
     lang = user_lang(user)
@@ -4073,69 +4309,43 @@ async def handle_channel_shared(message: Message, bot: Bot):
 
     await _dismiss_reply_keyboard(message)
 
-    back_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_sync_channels"], callback_data=f"menu_chsync_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")]
-    ])
-
     if getattr(shared, "request_id", None) != CHANNEL_SYNC_REQUEST_ID:
+        back_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_sync_channels"], callback_data=f"menu_chsync_{lang}")],
+            [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")]
+        ])
         resp = await message.answer(t["chsync_stale"], reply_markup=back_kb, parse_mode="HTML")
         fire_and_forget_auto_delete([resp], delay=60)
         return
 
-    channel_id = shared.chat_id
-    title = getattr(shared, "title", None) or ""
-
-    bot_username = "BunkerBot"
+    status = await message.answer(tr(lang, "🛠️ <b>Verificando permisos del bot…</b>", "🛠️ <b>Checking the bot's permissions…</b>"),
+                                  parse_mode="HTML")
+    text, kb, ok = await run_channel_sync(bot, user, shared.chat_id, lang, getattr(shared, "title", None) or "")
     try:
-        me = await bot.get_me()
-        bot_username = me.username or bot_username
-        bot_member = await bot.get_chat_member(chat_id=channel_id, user_id=me.id)
-    except Exception as ex:
-        logging.warning(f"⚠️ [Sync Canales] El bot no pudo verificarse en channel={channel_id}: {ex}")
-        resp = await message.answer(
-            t["chsync_bot_not_admin"].format(title=html.escape(title or str(channel_id)), bot_username=bot_username),
-            reply_markup=back_kb, parse_mode="HTML"
-        )
-        fire_and_forget_auto_delete([resp], delay=90)
-        return
+        await status.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    if not ok:
+        fire_and_forget_auto_delete([status], delay=300)
 
-    if bot_member.status not in ("administrator", "creator"):
-        resp = await message.answer(
-            t["chsync_bot_not_admin"].format(title=html.escape(title or str(channel_id)), bot_username=bot_username),
-            reply_markup=back_kb, parse_mode="HTML"
-        )
-        fire_and_forget_auto_delete([resp], delay=90)
-        return
 
+@router.callback_query(F.data.startswith("chsyncchk_"))
+async def cb_channel_sync_recheck(callback: CallbackQuery, bot: Bot):
+    """🔄 Volver a verificar: repite el autodiagnóstico completo (incluida la propiedad) sin reabrir el selector."""
+    data = (callback.data or "").split("_")
     try:
-        chat_obj = await bot.get_chat(channel_id)
-        title = chat_obj.title or title
-    except Exception:
-        pass
-
-    if not is_super_admin(user.id):
-        try:
-            user_member = await bot.get_chat_member(chat_id=channel_id, user_id=user.id)
-            is_owner = user_member.status == "creator"
-        except Exception:
-            is_owner = False
-        if not is_owner:
-            resp = await message.answer(t["chsync_not_owner"], reply_markup=back_kb, parse_mode="HTML")
-            fire_and_forget_auto_delete([resp], delay=60)
-            return
-
-    CHAT_KIND_CACHE[channel_id] = "c"
-    CHANNEL_SYNC_CACHE.setdefault(user.id, {})[channel_id] = title
-    await registry_upsert_channel(user.id, channel_id, title)
-    logging.info(f"✅ [Sync Canales] user={user.id} sincronizó channel={channel_id} ('{title}').")
-
-    ok_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_open_studio"], callback_data=f"cpanel_{channel_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_sync_channels"], callback_data=f"menu_chsync_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back_chsettings"], callback_data=f"menu_chsettings_{lang}")]
-    ])
-    await message.answer(t["chsync_ok"].format(title=html.escape(title or str(channel_id))), reply_markup=ok_kb, parse_mode="HTML")
+        channel_id = int(data[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    lang = lang_from_callback(callback, data)
+    await callback.answer(tr(lang, "🛠️ Verificando…", "🛠️ Checking…"))
+    text, kb, _ = await run_channel_sync(bot, callback.from_user, channel_id, lang)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 # ==========================================================
 # 🎮 CONSOLA: ANUNCIOS RECURRENTES DE GAMIFICACIÓN INTERACTIVA
@@ -5697,10 +5907,10 @@ async def handle_private_inputs(message: Message, bot: Bot):
         else:
             ref = parse_tip_target_input(text_input)
             info, err = (None, "invalid") if not ref else await validate_tip_target(bot, user_id, ref)
-            known = {v.lower() for _, v, _ in targets_before}
+            known = {v.lower() for _, v, _ in targets_before} | {v.lower().lstrip("@") for _, v, _ in targets_before}
             if err or info is None:
                 await _tips_say(status, tips_target_error_text(lang, err or "invalid"), cancel_kb)
-            elif info["value"].lower() in known or str(info["chat_id"]) in known:
+            elif known & set(info.get("aliases") or {info["value"].lower(), str(info["chat_id"])}):
                 await _tips_say(status, tips_target_error_text(lang, "duplicate"), cancel_kb)
             else:
                 TIPS_TARGET_STATES.pop(tips_key, None)
@@ -5718,7 +5928,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
                            f"✅ <b>¡Canal destino añadido!</b>\n\n📢 {html.escape(info['title'])} (<code>{html.escape(info['value'])}</code>)\n"
                            f"• Canales: <code>{len(targets_before) + 1}/{limit}</code>",
                            f"✅ <b>Target channel added!</b>\n\n📢 {html.escape(info['title'])} (<code>{html.escape(info['value'])}</code>)\n"
-                           f"• Channels: <code>{len(targets_before) + 1}/{limit}</code>") + PERIMETER_SIGNATURE,
+                           f"• Channels: <code>{len(targets_before) + 1}/{limit}</code>")
+                        + ("" if info.get("media_ok", True) else "\n" + tr(lang,
+                           "⚠️ El bot no puede enviar fotos/vídeos ahí: la multimedia se publicará como texto.",
+                           "⚠️ The bot cannot send photos/videos there: media will be posted as text."))
+                        + PERIMETER_SIGNATURE,
                         status_msg=status
                     )
                     return
@@ -6531,7 +6745,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             _TIPS_LAST_BROADCAST[group_id] = time.time()
             await callback.answer(tr(lang, "📡 Publicando en los canales activos...", "📡 Broadcasting to active channels..."))
 
-            sent, failed = await dispatch_tips_broadcast(bot, tier, cfg, lang, active_targets, group_id=group_id)
+            target_ids = {v: tid for tid, v, active in await _tips_get_targets(group_id) if active}
+            sent, failed = await dispatch_tips_broadcast(bot, tier, cfg, lang, active_targets, group_id=group_id,
+                                                         target_ids=target_ids)
             if sent == 0:
                 _TIPS_LAST_BROADCAST.pop(group_id, None)
             report = tr(lang,
@@ -6544,6 +6760,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 report += "\n" + "\n".join(f"• <code>{html.escape(v)}</code>" for v in failed[:10])
                 report += tr(lang, "\n\n<i>Verifica que el bot siga siendo administrador con permiso para publicar.</i>",
                              "\n\n<i>Check that the bot is still an administrator with permission to post.</i>")
+                if any(str(v).startswith("⏸️") for v in failed):
+                    report += tr(lang, "\n<i>⏸️ = destino pausado automáticamente; reactívalo desde el panel cuando el bot recupere el acceso.</i>",
+                                 "\n<i>⏸️ = target paused automatically; re-enable it from the panel once the bot regains access.</i>")
             resp = await bot.send_message(chat_id=viewer_id, text=report + PERIMETER_SIGNATURE, reply_markup=_tips_back_kb(t, group_id, lang), parse_mode="HTML")
             fire_and_forget_auto_delete([resp], delay=60)
             return

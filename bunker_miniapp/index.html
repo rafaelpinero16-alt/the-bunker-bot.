@@ -7,11 +7,18 @@
     <title>The Bunker OS · Command Suite</title>
     <meta name="theme-color" content="#000000">
     <meta name="color-scheme" content="dark light">
+    <!-- v30 · Anti-caché: el HTML siempre se revalida; los recursos versionados (?v=) sí pueden cachearse. -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta name="bunker-build" content="30.0">
     <link rel="icon" type="image/jpeg" href="logo.jpg">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         /* Tipografía display de la Mini App: Urbanist (respaldo Outfit) para todas las utilidades font-sans */
+        /* v30 · Build desplegado: debe coincidir con los ?v= del import map y del script principal. */
+        window.BUNKER_BUILD = '30.0';
         tailwind.config = {
             theme: {
                 extend: {
@@ -22,11 +29,29 @@
             }
         };
     </script>
+    <!--
+        v30 · Control de caché de los módulos ES. app.js importa sus dependencias con rutas relativas ('./ui.js'):
+        el import map reescribe CADA una a su URL versionada, de modo que todos los módulos —incluidos los que
+        importan a otros— resuelven exactamente la misma URL (una sola instancia de state/config, sin duplicados)
+        y un despliegue nuevo en Vercel invalida la caché del WebView de Telegram. Al publicar: subir el número
+        aquí, en window.BUNKER_BUILD, en styles.css y en js/app.js.
+    -->
+    <script type="importmap">
+    {
+        "imports": {
+            "./js/api.js": "./js/api.js?v=30.0",
+            "./js/ui.js": "./js/ui.js?v=30.0",
+            "./js/config.js": "./js/config.js?v=30.0",
+            "./js/state.js": "./js/state.js?v=30.0",
+            "./js/telegram.js": "./js/telegram.js?v=30.0"
+        }
+    }
+    </script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@600;700;800;900&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=30.0">
 </head>
 <body class="min-h-screen flex flex-col justify-between p-4 max-w-md mx-auto selection:bg-[#00f3ff] selection:text-black relative pb-16">
     <div class="tron-grid"></div>
@@ -1712,6 +1737,6 @@
     <div id="toast-stack" aria-live="polite" class="fixed inset-x-0 z-[300] flex flex-col items-center gap-2 px-4 pointer-events-none" style="top: calc(env(safe-area-inset-top, 0px) + 12px)"></div>
 
     <!-- Módulo Central de Orquestación -->
-    <script type="module" src="js/app.js"></script>
+    <script type="module" src="js/app.js?v=30.0"></script>
 </body>
 </html>
