@@ -13,6 +13,8 @@ import asyncio
 import logging
 import random
 import os
+import sys
+import contextlib
 import time
 import json
 import html
@@ -2352,6 +2354,7 @@ def audio_pipeline_status() -> dict[str, Any]:
         "workers": sum(1 for t in _audio_workers if not t.done()),
         "queue": _audio_queue.qsize() if _audio_queue is not None else 0,
         "stats": dict(_audio_stats),
+        "capture": audio_capture_status(),   # v36 · pytgcalls (definido más abajo; se resuelve en tiempo de llamada)
     }
 
 
@@ -2674,6 +2677,350 @@ async def synthesize_speech_reply(chat_id: int, text: str, lang: str = "es") -> 
         return None
 
 
+# ==========================================================================
+# 🎙️ v36 · ADAPTADOR DE CAPTURA DE VOZ (pytgcalls) → submit_voice_segment
+# ==========================================================================
+# Conecta la librería de llamadas WebRTC con el pipeline de audio de la v33. Diseño:
+#   • Importación tolerante: sin pytgcalls (o con una versión sin API de grabación) el bot arranca igual; el motivo
+#     queda en el log y en audio_pipeline_status(). Fail-open: si la captura no es posible, nadie es sancionado.
+#   • Un PyTgCalls POR CLIENTE Pyrogram (Centinela propio o Maestro), creado y arrancado una sola vez.
+#   • La librería entrega tramas cortas (~10–20 ms) identificadas por SSRC. El SSRC se traduce a user_id con la lista
+#     de participantes que ya consulta el monitor (GroupCallParticipant.source); tramas de SSRC desconocidos o de la
+#     propia cuenta del Centinela se descartan.
+#   • Un acumulador por (chat, usuario) agrupa las tramas en INTERVENCIONES: se cierran tras AUDIO_SILENCE_GAP s sin
+#     voz o al llegar a AUDIO_SEGMENT_MAX_SECONDS. Los segmentos silenciosos (RMS bajo) se descartan sin coste de API.
+#   • Privacidad (Capa 0): el audio vive solo en memoria y se borra al enviarse o al detener la captura; nunca se
+#     escribe en disco. La transcripción se anonimiza en el pipeline antes de llegar a Mistral.
+#   • Coordinación con el monitor: mientras la captura está activa, el monitor NO repite su JoinGroupCall «silencioso»
+#     (dos conexiones de la misma cuenta se expulsan entre sí); al detenerla, el monitor vuelve a unirse.
+import array as _array
+from importlib import import_module as _import_module
+
+AUDIO_SAMPLE_RATE = 48000
+AUDIO_CAPTURE_CHANNELS = 1 if _env_int("AUDIO_CAPTURE_CHANNELS", 1) != 2 else 2
+AUDIO_SILENCE_GAP = _env_float("AUDIO_SILENCE_GAP", 0.9)          # s sin tramas = fin de la intervención
+AUDIO_FLUSH_INTERVAL = 0.3
+AUDIO_VAD_RMS_THRESHOLD = _env_int("AUDIO_VAD_RMS_THRESHOLD", 350)  # PCM16: por debajo = silencio / ruido de fondo
+
+
+def _tg_attr(module_paths: tuple[str, ...], name: str) -> Any:
+    """Primer atributo `name` encontrado en los módulos indicados (las rutas cambian entre versiones de pytgcalls)."""
+    for path in module_paths:
+        try:
+            value = getattr(_import_module(path), name, None)
+        except Exception:
+            continue
+        if value is not None:
+            return value
+    return None
+
+
+try:
+    from pytgcalls import PyTgCalls  # type: ignore[import-not-found]  # pyright: ignore[reportMissingImports]
+    PYTGCALLS_IMPORT_ERROR = ""
+except Exception as _tgcalls_err:   # no instalada, binario nativo (ntgcalls) ausente, etc.
+    PyTgCalls = None
+    PYTGCALLS_IMPORT_ERROR = f"{type(_tgcalls_err).__name__}: {_tgcalls_err}"
+
+_TG_TYPES = ("pytgcalls.types", "pytgcalls.types.raw", "pytgcalls.types.stream", "pytgcalls.types.input_stream")
+AudioParameters: Any = _tg_attr(_TG_TYPES, "AudioParameters") if PyTgCalls else None
+AudioPcmStream: Any = _tg_attr(_TG_TYPES, "AudioPcmStream") if PyTgCalls else None   # solo informativo
+_TgRecordStream: Any = _tg_attr(_TG_TYPES, "RecordStream") if PyTgCalls else None
+_tg_stream_frame_filter: Any = _tg_attr(("pytgcalls.filters",), "stream_frame") if PyTgCalls else None
+_TgDirection: Any = _tg_attr(_TG_TYPES, "Direction") if PyTgCalls else None
+_TgDevice: Any = _tg_attr(_TG_TYPES, "Device") if PyTgCalls else None
+
+
+def _tgcalls_flavor() -> str:
+    """
+    API de captura disponible:
+      'stream_frames' → py-tgcalls 2.x: record(chat_id, RecordStream) + on_update(filters.stream_frame(...))
+      'audio_packet'  → builds/forks que exponen @on_audio_packet() con packet.user_id / packet.pcm_data
+      ''              → sin API de captura entrante (la captura queda desactivada)
+    """
+    if PyTgCalls is None:
+        return ""
+    if _TgRecordStream is not None and _tg_stream_frame_filter is not None:
+        return "stream_frames"
+    if hasattr(PyTgCalls, "on_audio_packet"):
+        return "audio_packet"
+    return ""
+
+
+TGCALLS_FLAVOR = _tgcalls_flavor()
+
+_tgcalls_clients: dict[int, Any] = {}                 # id(cliente Pyrogram) → PyTgCalls arrancado
+_tgcalls_locks: dict[int, asyncio.Lock] = {}
+_audio_capture_active: set[int] = set()                # chats con captura en curso
+_audio_needs_rejoin: set[int] = set()                  # chats donde el monitor debe volver a unirse al terminar
+_audio_ssrc_map: dict[int, dict[int, int]] = {}        # chat_id → {ssrc: user_id}
+_audio_self_ids: dict[int, int] = {}                   # chat_id → user_id de la cuenta que captura (se excluye)
+_audio_flushers: dict[int, asyncio.Task] = {}
+
+
+class _SpeechBuffer:
+    """Acumula las tramas PCM de UN hablante hasta cerrar una intervención."""
+    __slots__ = ("pcm", "started", "last")
+
+    def __init__(self) -> None:
+        self.pcm = bytearray()
+        self.started = time.monotonic()
+        self.last = self.started
+
+
+_audio_buffers: dict[tuple[int, int], _SpeechBuffer] = {}
+_AUDIO_BYTES_PER_SECOND = AUDIO_SAMPLE_RATE * 2 * AUDIO_CAPTURE_CHANNELS
+
+
+def update_audio_ssrc_map(chat_id: int, participants: Any) -> None:
+    """SSRC (GroupCallParticipant.source) → user_id; lo alimenta el monitor en cada lectura de participantes."""
+    if chat_id not in _audio_capture_active:
+        return
+    mapping: dict[int, int] = {}
+    for p in participants or []:
+        if getattr(p, "left", False):
+            continue
+        peer_obj: Any = getattr(p, "peer", None)
+        source = getattr(p, "source", None)
+        if isinstance(peer_obj, PeerUser) and isinstance(source, int) and source:
+            mapping[source & 0xFFFFFFFF] = int(peer_obj.user_id)
+    _audio_ssrc_map[chat_id] = mapping
+
+
+def _pcm_rms(pcm: bytes) -> float:
+    """RMS aproximado de PCM16 (muestreo de 1 de cada 8 muestras; sin dependencias nativas)."""
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return 0.0
+    samples = _array.array("h")
+    samples.frombytes(bytes(pcm[:usable]))
+    if sys.byteorder != "little":
+        samples.byteswap()
+    step = samples[::8] or samples
+    return (sum(s * s for s in step) / len(step)) ** 0.5
+
+
+def _audio_ingest(chat_id: int, user_id: int, pcm: bytes) -> None:
+    """Añade una trama al acumulador del hablante (llamado desde el callback de la librería; nunca lanza)."""
+    if not pcm or chat_id not in _audio_capture_active or user_id <= 0 or user_id == _audio_self_ids.get(chat_id):
+        return
+    key = (chat_id, user_id)
+    buf = _audio_buffers.get(key)
+    if buf is None:
+        if len(_audio_buffers) >= 2000:   # tope duro de hablantes simultáneos en memoria
+            return
+        buf = _SpeechBuffer()
+        _audio_buffers[key] = buf
+    buf.pcm.extend(pcm)
+    buf.last = time.monotonic()
+    max_bytes = int(AUDIO_SEGMENT_MAX_SECONDS * _AUDIO_BYTES_PER_SECOND)
+    if len(buf.pcm) >= max_bytes:
+        _audio_close_segment(key)
+
+
+def _audio_close_segment(key: tuple[int, int]) -> None:
+    buf = _audio_buffers.pop(key, None)
+    if buf is None:
+        return
+    pcm = bytes(buf.pcm)
+    buf.pcm.clear()
+    seconds = len(pcm) / float(_AUDIO_BYTES_PER_SECOND)
+    if seconds < AUDIO_SEGMENT_MIN_SECONDS or _pcm_rms(pcm) < AUDIO_VAD_RMS_THRESHOLD:
+        return   # demasiado corto o silencio: ni se transcribe ni cuesta API
+    submit_voice_segment(VoiceSegment(chat_id=key[0], user_id=key[1], pcm=pcm, sample_rate=AUDIO_SAMPLE_RATE,
+                                      channels=AUDIO_CAPTURE_CHANNELS))
+
+
+async def _audio_flusher(chat_id: int) -> None:
+    """Cierra las intervenciones de un chat tras AUDIO_SILENCE_GAP s de silencio."""
+    try:
+        while chat_id in _audio_capture_active:
+            await asyncio.sleep(AUDIO_FLUSH_INTERVAL)
+            now = time.monotonic()
+            for key in [k for k, b in _audio_buffers.items() if k[0] == chat_id and now - b.last >= AUDIO_SILENCE_GAP]:
+                _audio_close_segment(key)
+    finally:
+        for key in [k for k in _audio_buffers if k[0] == chat_id]:
+            _audio_buffers.pop(key, None)   # al parar, el audio pendiente se descarta (nunca se envía a medias)
+
+
+def _capture_client_for(chat_id: int) -> Optional[Client]:
+    info = active_sentinels.get(chat_id)
+    client = info.get("client") if info else None
+    return client or assistant_app
+
+
+def _handle_stream_frames(update: Any) -> None:
+    """py-tgcalls 2.x · StreamFrames: update.chat_id + update.frames[i].{ssrc, frame}."""
+    chat_id = int(getattr(update, "chat_id", 0) or 0)
+    mapping = _audio_ssrc_map.get(chat_id) or {}
+    for frame in getattr(update, "frames", None) or []:
+        ssrc = getattr(frame, "ssrc", None)
+        data = getattr(frame, "frame", None) or getattr(frame, "data", None)
+        if not isinstance(ssrc, int) or not data:
+            continue
+        user_id = mapping.get(ssrc & 0xFFFFFFFF)
+        if user_id:
+            _audio_ingest(chat_id, user_id, bytes(data))
+
+
+def _handle_audio_packet(chat_id_hint: Optional[int], packet: Any) -> None:
+    """Variante @on_audio_packet: packet.user_id / packet.pcm_data (o packet.chat_id)."""
+    chat_id = int(getattr(packet, "chat_id", 0) or chat_id_hint or 0)
+    user_id = int(getattr(packet, "user_id", 0) or 0)
+    data = getattr(packet, "pcm_data", None) or getattr(packet, "data", None)
+    if chat_id and user_id and data:
+        _audio_ingest(chat_id, user_id, bytes(data))
+
+
+async def _get_tgcalls(client: Client) -> Any:
+    """PyTgCalls del cliente (uno por cuenta), arrancado y con su manejador de audio registrado una sola vez."""
+    key = id(client)
+    existing = _tgcalls_clients.get(key)
+    if existing is not None:
+        return existing
+    lock = _tgcalls_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        existing = _tgcalls_clients.get(key)
+        if existing is not None:
+            return existing
+        assert PyTgCalls is not None
+        call_client: Any = PyTgCalls(client)
+        if TGCALLS_FLAVOR == "stream_frames":
+            kwargs: dict[str, Any] = {}
+            if _TgDirection is not None and _TgDevice is not None:
+                kwargs = {"direction": getattr(_TgDirection, "INCOMING"), "device": getattr(_TgDevice, "MICROPHONE")}
+            try:
+                frame_filter = _tg_stream_frame_filter(**kwargs)
+            except TypeError:
+                frame_filter = _tg_stream_frame_filter()
+
+            @call_client.on_update(frame_filter)
+            async def _on_frames(_: Any, update: Any) -> None:
+                try:
+                    _handle_stream_frames(update)
+                except Exception as exc:
+                    logger.debug(f"[Audio IA] Trama descartada: {exc}")
+        elif TGCALLS_FLAVOR == "audio_packet":
+            @call_client.on_audio_packet()
+            async def _on_packet(*args: Any) -> None:
+                try:
+                    packet = args[-1] if args else None
+                    chat_hint = getattr(args[1], "chat_id", None) if len(args) > 2 else None
+                    _handle_audio_packet(chat_hint, packet)
+                except Exception as exc:
+                    logger.debug(f"[Audio IA] Paquete descartado: {exc}")
+        await asyncio.wait_for(call_client.start(), timeout=MTPROTO_CONNECT_TIMEOUT)
+        _tgcalls_clients[key] = call_client
+        return call_client
+
+
+def _build_record_stream() -> Any:
+    """RecordStream PCM lineal 48 kHz / 16 bits / AUDIO_CAPTURE_CHANNELS. None si la versión no lo admite."""
+    params: Any = None
+    if AudioParameters is not None:
+        for args, kwargs in (((), {"bitrate": AUDIO_SAMPLE_RATE, "channels": AUDIO_CAPTURE_CHANNELS}),
+                             ((AUDIO_SAMPLE_RATE, AUDIO_CAPTURE_CHANNELS), {})):
+            try:
+                params = AudioParameters(*args, **kwargs)
+                break
+            except TypeError:
+                continue
+    if params is None:
+        return None   # sin parámetros explícitos no sabríamos el formato real: mejor no capturar
+    for kwargs in ({"audio": True, "audio_parameters": params}, {"audio_parameters": params}):
+        try:
+            return _TgRecordStream(**kwargs)
+        except TypeError:
+            continue
+    return None
+
+
+async def bunker_audio_capture_backend(chat_id: int, start: bool) -> bool:
+    """
+    Backend de captura registrado en el pipeline (start_audio_capture / stop_audio_capture lo invocan desde el
+    monitor al detectar el inicio o el fin del videochat). Devuelve True si la captura quedó activa (start=True)
+    o se detuvo (start=False). Nunca lanza.
+    """
+    chat_id = int(chat_id)
+    if not start:
+        was_active = chat_id in _audio_capture_active
+        _audio_capture_active.discard(chat_id)
+        task = _audio_flushers.pop(chat_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        _audio_ssrc_map.pop(chat_id, None)
+        _audio_self_ids.pop(chat_id, None)
+        client = _capture_client_for(chat_id)
+        call_client = _tgcalls_clients.get(id(client)) if client is not None else None
+        if call_client is not None and was_active:
+            for method in ("leave_call", "leave_group_call"):
+                fn = getattr(call_client, method, None)
+                if callable(fn):
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(fn(chat_id), timeout=MTPROTO_RPC_TIMEOUT)
+                    break
+            _audio_needs_rejoin.add(chat_id)   # el monitor recupera su presencia «silenciosa» en la sala
+        return True
+
+    if not AUDIO_AI_ENABLED or not TGCALLS_FLAVOR or chat_id in _audio_capture_active:
+        return chat_id in _audio_capture_active
+    # Las reglas de negocio se verifican ANTES de abrir el audio: sin ULTRA PRO + Guardián no se escucha nada.
+    try:
+        if not await _chat_has_ultra_license(chat_id) or (await _get_ai_cfg_cached(chat_id)).get("guardian_status") != 1:
+            return False
+    except Exception:
+        return False
+    client = _capture_client_for(chat_id)
+    if client is None or not getattr(client, "is_connected", False):
+        return False
+    try:
+        call_client = await _get_tgcalls(client)
+        me = getattr(client, "me", None)
+        if me is not None:
+            _audio_self_ids[chat_id] = int(me.id)
+        _audio_capture_active.add(chat_id)   # antes del join: el monitor deja de enviar su JoinGroupCall
+        if TGCALLS_FLAVOR == "stream_frames":
+            stream = _build_record_stream()
+            if stream is None:
+                raise RuntimeError("RecordStream/AudioParameters no compatibles con esta versión de pytgcalls")
+            await asyncio.wait_for(call_client.record(chat_id, stream), timeout=MTPROTO_CONNECT_TIMEOUT)
+        else:
+            join = getattr(call_client, "join_group_call", None) or getattr(call_client, "play", None)
+            if not callable(join):
+                raise RuntimeError("la variante on_audio_packet no expone join_group_call/play")
+            await asyncio.wait_for(join(chat_id), timeout=MTPROTO_CONNECT_TIMEOUT)
+        _audio_flushers[chat_id] = _spawn(_audio_flusher(chat_id), name=f"audio_flush:{chat_id}")
+        logger.info(f"🎙️ [Audio IA] Captura activa en {chat_id} ({TGCALLS_FLAVOR}, {AUDIO_SAMPLE_RATE} Hz, "
+                    f"{AUDIO_CAPTURE_CHANNELS} canal(es), 16 bits).")
+        return True
+    except Exception as exc:
+        _audio_capture_active.discard(chat_id)
+        _audio_needs_rejoin.add(chat_id)
+        logger.warning(f"⚠️ [Audio IA] No se pudo iniciar la captura en {chat_id}: {type(exc).__name__}: {exc}")
+        return False
+
+
+def audio_capture_status() -> dict[str, Any]:
+    return {
+        "pytgcalls": PyTgCalls is not None,
+        "import_error": PYTGCALLS_IMPORT_ERROR or None,
+        "flavor": TGCALLS_FLAVOR or None,
+        "active_chats": len(_audio_capture_active),
+        "open_buffers": len(_audio_buffers),
+    }
+
+
+if AUDIO_AI_ENABLED:
+    if TGCALLS_FLAVOR:
+        register_audio_capture_backend(bunker_audio_capture_backend)
+    else:
+        logger.error("❌ [Audio IA] AUDIO_AI_ENABLED=1 pero no hay API de captura de voz: "
+                     + (f"pytgcalls no se pudo importar ({PYTGCALLS_IMPORT_ERROR})" if PyTgCalls is None
+                        else "la versión instalada de pytgcalls no ofrece grabación de audio entrante (RecordStream + "
+                             "filters.stream_frame). Instala py-tgcalls 2.x."))
+
+
 async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
     async def _collect() -> set:
         collected = set()
@@ -2841,6 +3188,7 @@ def _publish_voice_presence(chat_id: int, participants, users_map, state: dict) 
     Calcula el diff de la sala de audio y lo emite al radar solo si cambió algo.
     Payload compacto: n = presentes, m = micrófonos abiertos, j = altas, l = bajas.
     """
+    update_audio_ssrc_map(chat_id, participants)   # v36 · SSRC → user_id para la captura de voz
     present: set = set()
     unmuted = 0
     for p in participants or []:
@@ -3048,6 +3396,13 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     await asyncio.sleep(8)
                     continue
 
+                # v36 · Con la captura de voz activa, la conexión WebRTC de pytgcalls YA es la presencia del Centinela:
+                # un JoinGroupCall adicional de la misma cuenta la expulsaría. Al terminar la captura se vuelve a unir.
+                if chat_id in _audio_needs_rejoin:
+                    _audio_needs_rejoin.discard(chat_id)
+                    is_joined_audio = False
+                if chat_id in _audio_capture_active:
+                    is_joined_audio = True
                 if not is_joined_audio and (current_time - _last_join_attempt.get(chat_id, 0)) >= JOIN_RETRY_SECONDS:
                     _last_join_attempt[chat_id] = current_time
                     try:
@@ -3679,6 +4034,8 @@ def _purge_group_state(group_id: int) -> None:
     """
     admin_caches.pop(group_id, None)
     purge_audio_state(group_id)   # v33 · cooldowns y reincidencias del Guardián Acústico
+    if group_id in _audio_capture_active:   # v36 · el Centinela se fue: se cierra la captura y se descarta el audio
+        _spawn(bunker_audio_capture_backend(group_id, False), name=f"audio_stop:{group_id}")
     _forbidden_strikes.pop(group_id, None)
     _autolower_cooldowns.pop(group_id, None)
     _call_rights_cache.pop(group_id, None)
