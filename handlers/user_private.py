@@ -9,7 +9,7 @@ Revisión de resiliencia y blindaje:
   5. Fase 3 · Exclusividad financiera: PRO, ULTRA PRO, MicVIP y membresías se adquieren solo con
      Telegram Stars (XTR) in-app; sin pasarelas externas ni precios fiat (Telegram, Apple 3.1.1, Google Play).
 """
-from typing import Optional
+from typing import Optional, cast
 import os
 import sys
 import re
@@ -301,7 +301,7 @@ async def render_card(bot: Bot, chat_id: int, card_key: str, lang: str, keyboard
     names = CARD_IMAGES.get(card_key) or {}
     filename = names.get(lang) or names.get("es")
     path = _find_asset(filename) if filename else None
-    if not path:
+    if not path or not filename:
         logging.warning(f"⚠️ [Card] Imagen '{filename}' no encontrada en {ASSET_DIRS}; activando fallback textual.")
         return False
     if caption and len(caption) > 1024:
@@ -350,7 +350,7 @@ async def send_card_message(bot: Bot, chat_id: int, card_key: str, lang: str, ke
     names = CARD_IMAGES.get(card_key) or {}
     filename = names.get(lang) or names.get("es")
     path = _find_asset(filename) if filename else None
-    if not path or (caption and len(caption) > 1024):
+    if not path or not filename or (caption and len(caption) > 1024):
         return None
 
     for _attempt in range(2):
@@ -2295,7 +2295,7 @@ def _state_target_chat(value) -> int | None:
         for field in ("group_id", "channel_id", "chat_id"):
             raw = value.get(field)
             try:
-                chat_id = int(raw)
+                chat_id = int(raw)  # pyright: ignore[reportArgumentType]  (None → TypeError capturado)
             except (TypeError, ValueError):
                 continue
             if chat_id < 0:
@@ -3100,7 +3100,7 @@ def _tips_is_on(cfg: dict) -> bool:
 
 def _tips_amount(cfg: dict) -> int:
     try:
-        return max(1, int(_tips_cfg(cfg, "amount", "tips_amount", default=10)))
+        return max(1, int(_tips_cfg(cfg, "amount", "tips_amount", default=10)))  # pyright: ignore[reportArgumentType]
     except (TypeError, ValueError):
         return 10
 
@@ -4398,12 +4398,12 @@ def _gami_autodel_label(seconds: int, lang: str) -> str:
     return _gami_interval_label(seconds // 60, lang) if seconds % 60 == 0 else f"{seconds} s"
 
 
-def _gami_card_lang_label(card_lang: str, lang: str) -> str:
+def _gami_card_lang_label(card_lang: Optional[str], lang: str) -> str:
     gt = _gami_t(lang)
     return {"es": gt["lang_es"], "en": gt["lang_en"], "both": gt["lang_both"]}.get(card_lang or "es", gt["lang_es"])
 
 
-def _gami_cb(action: str, chat_id: int, lang: str, value=None) -> str:
+def _gami_cb(action: str, chat_id: Optional[int], lang: str, value=None) -> str:
     return f"gami_{action}_{chat_id}_{value}_{lang}" if value is not None else f"gami_{action}_{chat_id}_{lang}"
 
 
@@ -4634,7 +4634,7 @@ async def cb_gamification_console(callback: CallbackQuery, bot: Bot):
 
     if action == "setint":
         try:
-            minutes = int(value)
+            minutes = int(value)  # pyright: ignore[reportArgumentType]  (None → TypeError capturado)
         except (TypeError, ValueError):
             await callback.answer()
             return
@@ -4675,7 +4675,7 @@ async def cb_gamification_console(callback: CallbackQuery, bot: Bot):
 
     if action == "setdel":
         try:
-            seconds = int(value)
+            seconds = int(value)  # pyright: ignore[reportArgumentType]  (None → TypeError capturado)
         except (TypeError, ValueError):
             await callback.answer()
             return
@@ -5697,8 +5697,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             ref = parse_tip_target_input(text_input)
             info, err = (None, "invalid") if not ref else await validate_tip_target(bot, user_id, ref)
             known = {v.lower() for _, v, _ in targets_before}
-            if err:
-                await _tips_say(status, tips_target_error_text(lang, err), cancel_kb)
+            if err or info is None:
+                await _tips_say(status, tips_target_error_text(lang, err or "invalid"), cancel_kb)
             elif info["value"].lower() in known or str(info["chat_id"]) in known:
                 await _tips_say(status, tips_target_error_text(lang, "duplicate"), cancel_kb)
             else:
@@ -6718,9 +6718,9 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
             ])
             # Despacho de la tarjeta gráfica sin auto-borrado restrictivo para no apresurar al operador
-            await send_card_message(bot, callback.from_user.id, "sentinel_info", lang, cancel_kb,
-                                    caption=t["sentinel_phone_guide"]) \
-                or await callback.message.answer(t["sentinel_phone_guide"], reply_markup=cancel_kb, parse_mode="HTML")
+            if not await send_card_message(bot, callback.from_user.id, "sentinel_info", lang, cancel_kb,
+                                           caption=t["sentinel_phone_guide"]):
+                await callback.message.answer(t["sentinel_phone_guide"], reply_markup=cancel_kb, parse_mode="HTML")
             return
         elif sub == "cancel":
             for d in [CLONE_STATES, SENTINEL_PHONE_STATES, SENTINEL_CODE_STATES, SENTINEL_2FA_STATES]:
@@ -7433,7 +7433,7 @@ def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: 
         "copilot": "📝 Copiloto Ejecutivo" if lang == "es" else "📝 Executive Copilot",
         "pr": "🤝 Anfitrión / PR" if lang == "es" else "🤝 Host / PR"
     }
-    tone_str = tones_labels.get(ai_cfg.get("personality_tone"), tones_labels["guardian"])
+    tone_str = tones_labels.get(ai_cfg.get("personality_tone") or "", tones_labels["guardian"])
 
     # Mapeo de modos de respuesta
     modes_labels = {
@@ -7441,7 +7441,7 @@ def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: 
         "chance": f"🎲 Probabilidad ({ai_cfg.get('response_chance', 15)}%)",
         "always": "⚡ Siempre Activo" if lang == "es" else "⚡ Always Active"
     }
-    mode_str = modes_labels.get(ai_cfg.get("response_mode"), modes_labels["mention_only"])
+    mode_str = modes_labels.get(ai_cfg.get("response_mode") or "", modes_labels["mention_only"])
 
     back_btn = ultra_back_button(chat_type, group_id, lang)
 
@@ -7550,7 +7550,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             elif sub == "cycletone":
                 ai_cfg = await get_ai_sentinel_config(group_id)
                 tone_cycle = {"guardian": "copilot", "copilot": "pr", "pr": "guardian"}
-                next_tone = tone_cycle.get(ai_cfg.get("personality_tone"), "guardian")
+                next_tone = tone_cycle.get(ai_cfg.get("personality_tone") or "", "guardian")
                 await set_ai_sentinel_config(group_id, "ai_personality_tone", next_tone)
                 _ai_settings_changed(group_id, ["ai_personality_tone"])
                 await callback.answer(f"Personalidad: {next_tone.upper()}")
@@ -7564,7 +7564,7 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             elif sub == "cyclemode":
                 ai_cfg = await get_ai_sentinel_config(group_id)
                 mode_cycle = {"mention_only": "chance", "chance": "always", "always": "mention_only"}
-                next_mode = mode_cycle.get(ai_cfg.get("response_mode"), "mention_only")
+                next_mode = mode_cycle.get(ai_cfg.get("response_mode") or "", "mention_only")
                 await set_ai_sentinel_config(group_id, "ai_response_mode", next_mode)
                 _ai_settings_changed(group_id, ["ai_response_mode"])
                 await callback.answer(f"Modo: {next_mode.upper()}")
@@ -8062,9 +8062,9 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         emit_settings_updated_bg(group_id, "bot_console", [key_cfg] + (["vc_join_enabled"] if target_msg == "vc" else []))
 
         msg_alert = (
-            tr(lang, f"🟢 {target_msg.upper()}: Servicio activado.", f"🟢 {target_msg.upper()}: Service enabled.")
+            tr(lang, f"🟢 {(target_msg or "").upper()}: Servicio activado.", f"🟢 {(target_msg or "").upper()}: Service enabled.")
             if new_st == 1 else
-            tr(lang, f"🔴 {target_msg.upper()}: Servicio desactivado (en edición).", f"🔴 {target_msg.upper()}: Service disabled (editing).")
+            tr(lang, f"🔴 {(target_msg or "").upper()}: Servicio desactivado (en edición).", f"🔴 {(target_msg or "").upper()}: Service disabled (editing).")
         )
         await callback.answer(msg_alert)
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
@@ -8080,7 +8080,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
             "sched": "vc_sched_start",
             "vcwelcome": "vc_welcome"
         }
-        p = prefix_map.get(target_msg, "vc_join")
+        p = prefix_map.get(target_msg or "", "vc_join")
 
         # Columnas exactas de base de datos
         await set_sentinel_service_message(group_id, f"{p}_custom_text", None)
@@ -8094,7 +8094,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         await set_sentinel_service_message(group_id, f"{p}_enabled", 1)   # vc_join_enabled → escribe también vc_enabled
         emit_settings_updated_bg(group_id, "bot_console", [f"{p}_enabled"])
 
-        await callback.answer(tr(lang, f"🗑️ Módulo {target_msg.upper()} restablecido por defecto.", f"🗑️ Module {target_msg.upper()} restored to default."), show_alert=True)
+        await callback.answer(tr(lang, f"🗑️ Módulo {(target_msg or "").upper()} restablecido por defecto.", f"🗑️ Module {(target_msg or "").upper()} restored to default."), show_alert=True)
         text, kb = await _render_sentinel_cfg_menu(bot, group_id, lang)
         await safe_edit_text(callback, text, reply_markup=kb, parse_mode="HTML")
 
@@ -8136,7 +8136,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         autodel_label = f"{autodel} " + tr(lang, "segundos", "seconds") if autodel > 0 else tr(lang, "Permanente (sin auto-borrado)", "Permanent (no auto-delete)")
 
         preview_text = (
-            f"👁️ <b>{tr(lang, 'Vista Previa', 'Preview')} ({target_msg.upper()}):</b>\n\n"
+            f"👁️ <b>{tr(lang, 'Vista Previa', 'Preview')} ({(target_msg or "").upper()}):</b>\n\n"
             f"{content}\n\n"
             f"• <b>{tr(lang, 'Estado del Servicio', 'Service Status')}:</b> <code>{st_label}</code>\n"
             f"• <b>{tr(lang, 'Texto del Botón', 'Button Label')}:</b> <code>{btn}</code>\n"
@@ -8180,13 +8180,13 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
 
         if field_name == "autodel":
             prompt_txt = (
-                f"⏱️️ <b>{tr(lang, 'Tiempo de Auto-Borrado', 'Auto-Delete Timer')} ({target_msg.upper()}):</b>\n\n"
+                f"⏱️️ <b>{tr(lang, 'Tiempo de Auto-Borrado', 'Auto-Delete Timer')} ({(target_msg or "").upper()}):</b>\n\n"
                 f"{tr(lang, 'Envía un número entero en segundos (0 para no borrar automáticamente):', 'Send an integer in seconds (0 to keep permanently):')}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
         elif field_name == "btn":
             prompt_txt = (
-                f"🏷️ <b>{tr(lang, 'Nombre del Botón y Enlace', 'Button Label and URL')} ({target_msg.upper()}):</b>\n\n"
+                f"🏷️ <b>{tr(lang, 'Nombre del Botón y Enlace', 'Button Label and URL')} ({(target_msg or "").upper()}):</b>\n\n"
                 f"{tr(lang, 'Envía el texto del botón, o usa la sintaxis:', 'Send the button text, or use the syntax:')}\n"
                 f"<code>Texto del Botón | https://t.me/tu_enlace</code>\n\n"
                 f"{tr(lang, 'El texto cubrirá el enlace al 100% sin exponer URLs en el mensaje.', 'The button text will seamlessly embed the link without exposing URLs.')}\n\n"
@@ -8195,7 +8195,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
         else:
             ultra_note = tr(lang, "<i>(Nivel ULTRA PRO: puedes adjuntar Foto, Video o GIF junto al mensaje)</i>", "<i>(ULTRA PRO tier: you may attach Photo, Video or GIF with your message)</i>")
             prompt_txt = (
-                f"✍️ <b>{tr(lang, 'Editor de Mensaje', 'Notice Editor')} ({target_msg.upper()}):</b>\n\n"
+                f"✍️ <b>{tr(lang, 'Editor de Mensaje', 'Notice Editor')} ({(target_msg or "").upper()}):</b>\n\n"
                 f"{tr(lang, 'Envía el texto del aviso.', 'Send the notice template.')} "
                 f"{ultra_note if tier == 'ultra_pro' else ''}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
@@ -8318,12 +8318,12 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     # 2. Activar / pausar plan de membresía
     elif sub == "toggle":
-        plan = await get_channel_plan(plan_id)
+        plan = await get_channel_plan(cast(int, plan_id))
         if not plan:
             await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
             return
 
-        new_status = await toggle_channel_plan_status(plan_id)
+        new_status = await toggle_channel_plan_status(cast(int, plan_id))
         # El pre-checkout valida contra caché en memoria: un plan pausado debe dejar de cobrarse ya.
         invalidate_channel_plan_cache(plan_id)
         status_label = tr(lang, "🟢 Plan activado.", "🟢 Plan activated.") if new_status == "active" else tr(lang, "🔴 Plan pausado.", "🔴 Plan paused.")
@@ -8335,7 +8335,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     # 3. Vista previa comercial limpia (el enlace VIP va sólo en botón inline)
     elif sub == "view":
-        plan = await get_channel_plan(plan_id)
+        plan = await get_channel_plan(cast(int, plan_id))
         if not plan:
             await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
             return
@@ -8381,7 +8381,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     # 4. Menú para compartir / difundir en canales o grupos administrados
     elif sub == "share":
-        plan = await get_channel_plan(plan_id)
+        plan = await get_channel_plan(cast(int, plan_id))
         if not plan:
             await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
             return
@@ -8412,7 +8412,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     # 5. Ejecutar la publicación en el destino seleccionado
     elif sub == "postto":
-        plan = await get_channel_plan(plan_id)
+        plan = await get_channel_plan(cast(int, plan_id))
         if not plan or not target_chat_id:
             await callback.answer(tr(lang, "⚠️ Error en la publicación.", "⚠️ Broadcast error."), show_alert=True)
             return
@@ -8580,7 +8580,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
     # 7c. Editor del programador recurrente de un plan existente
     elif sub in ("sched", "setsched"):
-        plan = await get_channel_plan(plan_id)
+        plan = await get_channel_plan(cast(int, plan_id))
         if not plan or int(plan.get("channel_id") or 0) != channel_id:
             await callback.answer(tr(lang, "⚠️ Plan no encontrado.", "⚠️ Plan not found."), show_alert=True)
             return
@@ -8592,7 +8592,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
                 await callback.answer(tr(lang, "⚠️ Activa el plan antes de programar su difusión.",
                                          "⚠️ Activate the plan before scheduling its broadcast."), show_alert=True)
                 return
-            ok = await set_channel_plan_broadcast_config(plan_id, channel_id, recur_hours, lang)
+            ok = await set_channel_plan_broadcast_config(cast(int, plan_id), channel_id, recur_hours, lang)
             if not ok:
                 await callback.answer(tr(lang, "⚠️ No se pudo aplicar el intervalo.", "⚠️ Could not apply the interval."), show_alert=True)
                 return
@@ -8631,7 +8631,7 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
     elif sub == "del":
         plans = await get_channel_plans(channel_id, only_active=False)
         if plan_id in {p[0] for p in plans}:
-            await delete_channel_plan(plan_id)
+            await delete_channel_plan(cast(int, plan_id))
             invalidate_channel_plan_cache(plan_id)
             await callback.answer(tr(lang, "🗑️ Plan eliminado.", "🗑️ Plan deleted."))
 
@@ -8683,7 +8683,7 @@ async def _perimeter_status_for(bot: Bot, group_id: int) -> dict:
     try:
         import assistant as _assistant_mod
         snapshot = getattr(_assistant_mod, "get_sentinel_runtime_snapshot", None)
-        sentinel = snapshot(group_id) if callable(snapshot) else {}
+        sentinel = cast(dict, snapshot(group_id)) if callable(snapshot) else {}
     except Exception:
         sentinel = {}
     try:
@@ -8748,7 +8748,7 @@ async def _logch_view(bot: Bot, group_id: int, lang: str) -> tuple:
         "on": "🟢 " + ("Activo: el bot publica correctamente" if lang == "es" else "Active: the bot can post"),
         "fault": "🔴 " + ("Configurado, pero el bot NO puede publicar" if lang == "es" else "Configured, but the bot can NOT post"),
         "off": "⚪ " + ("Sin configurar" if lang == "es" else "Not configured"),
-    }.get(item.get("state"), "⚪ —")
+    }.get(item.get("state") or "", "⚪ —")
     master = f"@{MASTER_BOT_USERNAME}" if MASTER_BOT_USERNAME else ("el bot" if lang == "es" else "the bot")
     if lang == "es":
         text = (f"🧾 <b>Canal de Registro</b>\n\n• Canal: <code>{log_id or '—'}</code>\n• Estado: {state_txt}\n\n"

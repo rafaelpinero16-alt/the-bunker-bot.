@@ -210,6 +210,35 @@ def _ensure_columns(cursor, table: str, columns) -> None:
                     raise
 
 
+def _ensure_micvip_tag_schema(cursor) -> None:
+    """
+    v28 · El pase MicVIP usa la ETIQUETA NATIVA de miembro (setChatMemberTag) en lugar de ascender al comprador a
+    administrador. micvip_tags guarda la etiqueta de cada pase y su vencimiento para retirarla a tiempo.
+    vip_badge_promotions (v19–v26) se mantiene solo como cola de migración: cada fila es un comprador al que ESTE bot
+    ascendió por el título; el barrido lo degrada y le pone la etiqueta nativa.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS micvip_tags (
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            tag TEXT NOT NULL DEFAULT '',
+            expires_at INTEGER,
+            tag_status TEXT NOT NULL DEFAULT 'pending',
+            tag_error TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER,
+            PRIMARY KEY (group_id, user_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_micvip_tags_due ON micvip_tags (tag_status, expires_at)")
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS vip_badge_promotions ("
+        "group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+        "promoted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (group_id, user_id))"
+    )
+    _ensure_columns(cursor, "vip_badge_promotions", [("attempts", "INTEGER DEFAULT 0")])
+
+
 def _ensure_v24_schema(cursor) -> None:
     """
     v24 · Esquema ADITIVO de apelaciones de baneo: columnas con DEFAULT en group_settings y la tabla ban_appeals
@@ -638,6 +667,8 @@ def init_db():
         _ensure_v23_schema(cursor)
         # v24 · Apelación de baneos por Telegram Stars (columnas aditivas + tabla ban_appeals).
         _ensure_v24_schema(cursor)
+        # v28 · MicVIP con etiqueta nativa (sin ascenso a administrador) + cola de migración de ascensos antiguos.
+        _ensure_micvip_tag_schema(cursor)
         cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
         cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")
@@ -6631,6 +6662,110 @@ def vip_role_pending_tags(limit: int = 50) -> list:
         except sqlite3.OperationalError:
             return []
     return [(int(r[0]), int(r[1]), r[2]) for r in rows]
+
+
+# ==========================================================================================
+# 🎙️ v28 · MICVIP CON ETIQUETA NATIVA (sin ascenso a administrador)
+# ==========================================================================================
+MICVIP_TAG_MAX_ATTEMPTS = 12      # reintentos de etiqueta (uno por barrido) antes de dejarla en 'failed'
+MICVIP_LEGACY_MAX_ATTEMPTS = 24   # reintentos de degradación de un ascenso antiguo antes de abandonarlo
+
+
+@db_async
+def micvip_tag_upsert(group_id: int, user_id: int, tag: str, expires_at: Optional[int]) -> dict:
+    """Registra la etiqueta del pase. Nunca acorta un vencimiento mayor (renovaciones)."""
+    now = _now_ts()
+    with _write_transaction() as conn:
+        conn.execute("""
+            INSERT INTO micvip_tags (group_id, user_id, tag, expires_at, tag_status, tag_error, attempts, updated_at)
+            VALUES (?, ?, ?, ?, 'pending', NULL, 0, ?)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                tag = excluded.tag,
+                expires_at = CASE WHEN micvip_tags.expires_at IS NOT NULL AND micvip_tags.expires_at > excluded.expires_at
+                                  THEN micvip_tags.expires_at ELSE excluded.expires_at END,
+                tag_status = CASE WHEN micvip_tags.tag_status = 'applied' AND micvip_tags.tag = excluded.tag
+                                   AND micvip_tags.expires_at > ? THEN 'applied' ELSE 'pending' END,
+                attempts = 0,
+                updated_at = excluded.updated_at
+        """, (int(group_id), int(user_id), str(tag or "")[:VIP_TAG_MAX], expires_at, now, now))
+        row = conn.execute("SELECT tag, expires_at, tag_status FROM micvip_tags WHERE group_id = ? AND user_id = ?",
+                           (int(group_id), int(user_id))).fetchone()
+    return {"tag": row[0], "expires_at": row[1], "tag_status": row[2]} if row else {}
+
+
+@db_async
+def micvip_tag_set_status(group_id: int, user_id: int, status: str, error: Optional[str] = None) -> None:
+    with _write_transaction() as conn:
+        conn.execute("UPDATE micvip_tags SET tag_status = ?, tag_error = ?, attempts = attempts + ?, updated_at = ? "
+                     "WHERE group_id = ? AND user_id = ?",
+                     (str(status)[:16], (error or None) and str(error)[:200], 0 if status == "applied" else 1,
+                      _now_ts(), int(group_id), int(user_id)))
+
+
+@db_async
+def micvip_tag_get(group_id: int, user_id: int):
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute("SELECT tag, expires_at, tag_status, tag_error FROM micvip_tags WHERE group_id = ? AND user_id = ?",
+                               (int(group_id), int(user_id))).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return {"tag": row[0], "expires_at": row[1], "tag_status": row[2], "tag_error": row[3]} if row else None
+
+
+@db_async
+def micvip_tag_expire_due(limit: int = 200) -> list:
+    """Marca 'expired' las etiquetas de pases vencidos → [(group_id, user_id, tag_status_previo)]."""
+    now = _now_ts()
+    with _write_transaction() as conn:
+        try:
+            rows = conn.execute("SELECT group_id, user_id, tag_status FROM micvip_tags WHERE tag_status NOT IN ('expired') "
+                                "AND expires_at IS NOT NULL AND expires_at <= ? LIMIT ?", (now, int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        for gid, uid, _st in rows:
+            conn.execute("UPDATE micvip_tags SET tag_status = 'expired', updated_at = ? WHERE group_id = ? AND user_id = ?",
+                         (now, gid, uid))
+        # Retención acotada: las filas vencidas hace más de 30 días ya no aportan nada.
+        conn.execute("DELETE FROM micvip_tags WHERE tag_status = 'expired' AND expires_at < ?", (now - 30 * 86400,))
+    return [(int(r[0]), int(r[1]), r[2]) for r in rows]
+
+
+@db_async
+def micvip_tag_pending(limit: int = 20) -> list:
+    """Pases vigentes con la etiqueta aún sin aplicar → [(group_id, user_id, tag)]."""
+    now = _now_ts()
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute("SELECT group_id, user_id, tag FROM micvip_tags WHERE tag_status IN ('pending', 'failed', 'no_right') "
+                                "AND (expires_at IS NULL OR expires_at > ?) AND attempts < ? ORDER BY updated_at LIMIT ?",
+                                (now, MICVIP_TAG_MAX_ATTEMPTS, int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [(int(r[0]), int(r[1]), r[2]) for r in rows]
+
+
+@db_async
+def micvip_legacy_promotions(limit: int = 20) -> list:
+    """Compradores ascendidos a admin por versiones anteriores, pendientes de migrar → [(group_id, user_id)]."""
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute("SELECT group_id, user_id FROM vip_badge_promotions WHERE COALESCE(attempts, 0) < ? "
+                                "ORDER BY promoted_at LIMIT ?", (MICVIP_LEGACY_MAX_ATTEMPTS, int(limit))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [(int(r[0]), int(r[1])) for r in rows]
+
+
+@db_async
+def micvip_legacy_resolve(group_id: int, user_id: int, done: bool) -> None:
+    """done=True borra la fila (migrada o ya no aplica); done=False suma un intento para reintentar más tarde."""
+    with _write_transaction() as conn:
+        if done:
+            conn.execute("DELETE FROM vip_badge_promotions WHERE group_id = ? AND user_id = ?", (int(group_id), int(user_id)))
+        else:
+            conn.execute("UPDATE vip_badge_promotions SET attempts = COALESCE(attempts, 0) + 1 WHERE group_id = ? AND user_id = ?",
+                         (int(group_id), int(user_id)))
 
 
 # ==========================================================================================

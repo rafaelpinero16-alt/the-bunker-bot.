@@ -8,7 +8,7 @@ Fase 6: Blindaje técnico y legal — Token-Bucket MTProto (anti-FloodWait), Cap
         antes de Mistral AI y Centinela restringido a escritura exclusiva en grupos (sin DMs).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
-from typing import Awaitable, Optional, cast
+from typing import Any, Optional
 import asyncio
 import logging
 import random
@@ -20,9 +20,8 @@ import re
 import weakref
 from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram import filters
-from pyrogram.client import Client
-from pyrogram.handlers.message_handler import MessageHandler
+from pyrogram import Client, filters
+from pyrogram.handlers import MessageHandler
 from pyrogram.enums import ChatMembersFilter, ChatType, ChatAction, ParseMode
 from pyrogram.errors import (
     FloodWait, RPCError, Unauthorized,
@@ -31,19 +30,19 @@ from pyrogram.errors import (
     PasswordHashInvalid, PeerIdInvalid,
     AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan
 )
-from pyrogram.raw.types.input_peer_chat import InputPeerChat
-from pyrogram.raw.types.input_peer_channel import InputPeerChannel
-from pyrogram.raw.types.input_channel import InputChannel
-from pyrogram.raw.base.input_channel import InputChannel as BaseInputChannel
-from pyrogram.raw.types.input_group_call import InputGroupCall
-from pyrogram.raw.types.peer_user import PeerUser
-from pyrogram.raw.functions.channels.get_full_channel import GetFullChannel
-from pyrogram.raw.functions.messages.get_full_chat import GetFullChat
-from pyrogram.raw.functions.phone.join_group_call import JoinGroupCall
-from pyrogram.raw.functions.phone.create_group_call import CreateGroupCall
-from pyrogram.raw.functions.phone.discard_group_call import DiscardGroupCall
-from pyrogram.raw.functions.phone.get_group_participants import GetGroupParticipants
-from pyrogram.raw.functions.phone.edit_group_call_participant import EditGroupCallParticipant
+from pyrogram.raw.types import (
+    PeerUser, InputPeerUser, InputGroupCall, DataJSON,
+    InputChannel, InputPeerChannel, InputPeerChat
+)
+from pyrogram.raw.functions.channels import GetFullChannel
+from pyrogram.raw.functions.messages import GetFullChat
+from pyrogram.raw.functions.phone import (
+    EditGroupCallParticipant,
+    GetGroupParticipants,
+    JoinGroupCall,
+    CreateGroupCall,
+    DiscardGroupCall
+)
 from database.database import (
     is_vip_mic_active, is_group_approved, approve_group,
     get_autolower_status, is_whitelisted,
@@ -323,8 +322,7 @@ try:
     _rpc_buckets = weakref.WeakKeyDictionary()
 except Exception:  # pragma: no cover
     _rpc_buckets = {}
-
-_fallback_bucket: Optional[MTProtoTokenBucket] = None
+_fallback_bucket: Optional[MTProtoTokenBucket] = None   # bucket compartido de respaldo (se crea al primer uso)
 
 
 def _bucket_for(client: Client) -> MTProtoTokenBucket:
@@ -575,10 +573,8 @@ def get_assistant_bot_id() -> int:
     global _default_my_id
     if _default_my_id:
         return _default_my_id
-
-    me = getattr(assistant_app, "me", None)
-    if me is not None:
-        _default_my_id = me.id
+    if assistant_app and getattr(assistant_app, "me", None):
+        _default_my_id = assistant_app.me.id
         return _default_my_id
     return 0
 
@@ -673,16 +669,14 @@ def get_sentinel_runtime_snapshot(chat_id: int) -> dict:
     age = (time.monotonic() - last_ok) if last_ok else None
     fresh = age is not None and age <= SENTINEL_HEARTBEAT_STALE_S
     me = getattr(client, "me", None)
-    account = None
-    if me is not None:
-        account = f"@{me.username}" if getattr(me, "username", None) else None
+    me_username = getattr(me, "username", None)
     return {
         "active": bool(running and (connected or fresh)),
         "running": running,
         "mode": "own" if entry.get("user_id") else "master",
         "connected": connected,
         "last_ok_seconds": int(age) if age is not None else None,
-        "account": account,
+        "account": (f"@{me_username}" if me_username else None),
     }
 
 
@@ -716,8 +710,7 @@ async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
     if cached and (now - cached[1]) < CALL_RIGHTS_TTL_SECONDS:
         return cached[0]
     try:
-        client_me = getattr(client, "me", None)
-        user_target = client_me.id if client_me is not None else "me"
+        user_target = client.me.id if getattr(client, "me", None) else "me"
         me = await asyncio.wait_for(client.get_chat_member(chat_id, user_target), timeout=MTPROTO_RPC_TIMEOUT)
         status_val = str(getattr(me.status, "value", me.status)).lower()
         if status_val in ("owner", "creator"):
@@ -792,7 +785,7 @@ async def _ensure_connected(client: Client, retries: int = 2, delay: float = 1.0
             if client.is_connected:
                 return True
             await asyncio.sleep(delay)
-    return bool(client.is_connected)
+    return client.is_connected
 
 
 def _register_forbidden_strike(chat_id: int, action_label: str) -> int:
@@ -1239,10 +1232,11 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
         if sent:
             # Se fija con el bot que publicó el aviso (maestro o clon); sin permisos se omite en silencio.
             pinned = False
-            pin_method = getattr(sent, "pin", None)
+            pin_method: Any = getattr(sent, "pin", None)
             if callable(pin_method):
                 try:
-                    await asyncio.wait_for(pin_method(disable_notification=True), timeout=MTPROTO_RPC_TIMEOUT)  # type: ignore[arg-type]
+                    pin_call: Any = pin_method(disable_notification=True)
+                    await asyncio.wait_for(pin_call, timeout=MTPROTO_RPC_TIMEOUT)
                     pinned = True
                 except Exception:
                     pinned = False
@@ -1305,7 +1299,7 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None, raise_err
         raw_call = None
         if isinstance(peer, (InputPeerChannel, InputChannel)):
             full_chat_res = await _invoke(client,
-                GetFullChannel(channel=cast(BaseInputChannel, InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash)))
+                GetFullChannel(channel=InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash))
             )
             raw_call = getattr(full_chat_res.full_chat, "call", None)
         elif isinstance(peer, InputPeerChat):
@@ -1315,7 +1309,7 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None, raise_err
             resolved = await client.resolve_peer(chat_id)
             if isinstance(resolved, (InputPeerChannel, InputChannel)):
                 full_chat_res = await _invoke(client,
-                    GetFullChannel(channel=cast(BaseInputChannel, InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash)))
+                    GetFullChannel(channel=InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash))
                 )
                 raw_call = getattr(full_chat_res.full_chat, "call", None)
             elif isinstance(resolved, InputPeerChat):
@@ -1561,8 +1555,6 @@ async def _detect_copilot_trigger(client: Client, message, me_id: int, usernames
                 reply = await asyncio.wait_for(client.get_messages(message.chat.id, reply_id), timeout=5.0)
             except Exception:
                 reply = None
-    if isinstance(reply, list):
-        reply = reply[0] if reply else None
     if reply is not None and getattr(reply, "from_user", None) is not None:
         replied_to_me = bool(getattr(reply.from_user, "is_self", False) or (me_id and reply.from_user.id == me_id))
 
@@ -1619,12 +1611,14 @@ async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **req
     if not _mistral_available():
         raise RuntimeError("Disyuntor de Mistral abierto")
 
-    async_complete = getattr(mistral_client.chat, "complete_async", None)
+    client = mistral_client   # referencia ya comprobada (no None) para el cierre de _call_once
+    async_complete: Any = getattr(client.chat, "complete_async", None)
 
     async def _call_once():
         if callable(async_complete):
-            return await cast(Awaitable[object], async_complete(**request_kwargs))
-        return await asyncio.to_thread(mistral_client.chat.complete, **request_kwargs)
+            pending: Any = async_complete(**request_kwargs)
+            return await pending
+        return await asyncio.to_thread(client.chat.complete, **request_kwargs)
 
     async def _run():
         async with _MISTRAL_SEMAPHORE:
@@ -2147,7 +2141,7 @@ def _publish_voice_presence(chat_id: int, participants, users_map, state: dict) 
     for p in participants or []:
         if getattr(p, "left", False):
             continue
-        peer_obj = getattr(p, "peer", None)
+        peer_obj: Any = getattr(p, "peer", None)
         if not isinstance(peer_obj, PeerUser):
             continue
         present.add(peer_obj.user_id)

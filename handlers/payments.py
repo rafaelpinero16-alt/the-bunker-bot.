@@ -64,6 +64,8 @@ from aiogram.types import (
 )
 from aiogram.filters import Command, CommandObject
 
+import vip_roles   # v28 · etiqueta nativa del pase MicVIP (sin ascenso a administrador)
+
 # ==========================================
 # 🧠 ESTADOS Y CONFIGURACIÓN BASE
 # ==========================================
@@ -393,25 +395,6 @@ async def compute_license_grant(chat_id: int, purchased_tier: str, base_days: in
     if current_tier == "ultra_pro" and purchased_tier == "pro":
         return "ultra_pro", remaining + base_days // 2
     return purchased_tier, base_days
-
-
-def _sync_record_vip_badge(chat_id: int, user_id: int) -> None:
-    """Registra que ESTE bot promovió al usuario solo por el título VIP (para revertirlo al expirar)."""
-    db_module = _get_db_module()
-    with db_module.get_db_connection() as conn:
-        if not conn.in_transaction:
-            conn.execute("BEGIN IMMEDIATE")   # toma el lock de escritura de entrada (WAL + busy_timeout)
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS vip_badge_promotions ("
-            "group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
-            "promoted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (group_id, user_id))"
-        )
-        conn.execute(
-            "INSERT INTO vip_badge_promotions (group_id, user_id, promoted_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(group_id, user_id) DO UPDATE SET promoted_at = CURRENT_TIMESTAMP",
-            (chat_id, user_id)
-        )
-        conn.commit()
 
 
 async def get_speaker_price(chat_id: int) -> int | None:
@@ -1779,13 +1762,9 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 async def process_successful_payment(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
-    successful_payment = message.successful_payment
-    if successful_payment is None:
-        return
-
-    payload = successful_payment.invoice_payload
+    payload = message.successful_payment.invoice_payload
     user_id = message.from_user.id
-    charge_id = successful_payment.telegram_payment_charge_id
+    charge_id = message.successful_payment.telegram_payment_charge_id
 
     # 🛡️ Blindaje de Idempotencia: evita pagos duplicados ante reintentos de red o reinicios
     if not await mark_payment_processed(charge_id, user_id, payload):
@@ -1796,7 +1775,7 @@ async def process_successful_payment(message: Message, bot: Bot):
     await record_star_payment(message)
     logger.info(
         f"💳 [Pago Stars] charge_id={charge_id} user_id={user_id} "
-        f"chat_id={_payload_chat_id(payload)} stars={successful_payment.total_amount} payload={payload!r}"
+        f"chat_id={_payload_chat_id(payload)} stars={message.successful_payment.total_amount} payload={payload!r}"
     )
 
     # CASO 0: ⚖️ v25 · APELACIÓN DE BANEO — claim atómico por charge_id, desbaneo, marca global, strikes y enlace de
@@ -1873,7 +1852,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             channel_id = int(parts[2])
             plan_id = int(parts[3])
             duration_days = int(parts[4])
-            stars_paid = successful_payment.total_amount
+            stars_paid = message.successful_payment.total_amount
 
             target_plan = await get_channel_plan(plan_id)
             if not target_plan or target_plan.get("channel_id") != channel_id:
@@ -1969,33 +1948,17 @@ async def process_successful_payment(message: Message, bot: Bot):
                 custom_cfg = await get_mic_vip_custom_config(chat_id)
                 badge_title = custom_cfg.get("tag") or await get_vip_badge_title(chat_id)
 
-                # Un administrador real NO se re-promueve: promote_chat_member con todos los
-                # permisos en False le quitaría sus facultades reales de moderación.
-                current_status = None
-                try:
-                    current_member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-                    current_status = current_member.status
-                except Exception:
-                    pass
-
-                if current_status not in ("creator", "administrator"):
-                    await bot.promote_chat_member(
-                        chat_id=chat_id, user_id=user_id,
-                        can_manage_chat=True, can_change_info=False, can_delete_messages=False,
-                        can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
-                        can_promote_members=False, can_manage_video_chats=False
-                    )
-                    await bot.set_chat_administrator_custom_title(
-                        chat_id=chat_id, user_id=user_id, custom_title=badge_title[:16]
-                    )
-                    try:
-                        await asyncio.to_thread(_sync_record_vip_badge, chat_id, user_id)
-                    except Exception as rec_err:
-                        logger.warning(f"Aviso registrando insignia VIP temporal ({chat_id}/{user_id}): {rec_err}")
-            except TelegramBadRequest as admin_err:
-                logger.warning(f"Aviso al asignar título VIP: {admin_err}")
-            except Exception as admin_err:
-                logger.warning(f"Error general al asignar título VIP de micrófono: {admin_err}")
+                # v28 · Etiqueta NATIVA de miembro (setChatMemberTag): el comprador ya NO se asciende a administrador.
+                # Un admin real conserva su título (Telegram responde 'admin' y no se toca nada). El vencimiento del
+                # pase retira la etiqueta en el barrido de vip_roles; si la comunidad tiene Roles VIP para MicVIP,
+                # el rol aplica su propia etiqueta con la misma expiración.
+                tag_status = await asyncio.wait_for(
+                    vip_roles.grant_micvip_tag(chat_id, user_id, badge_title, bot=bot), timeout=20
+                )
+                if tag_status not in ("applied", "role", "admin"):
+                    logger.warning(f"Etiqueta del pase VIP en {chat_id}/{user_id}: {tag_status} (se reintenta en el barrido).")
+            except Exception as tag_err:
+                logger.warning(f"Error general al asignar la etiqueta del pase VIP de micrófono: {tag_err}")
 
             kb_rows = []
             try:
@@ -2024,7 +1987,7 @@ async def process_successful_payment(message: Message, bot: Bot):
         benefit_granted = False
         try:
             chat_id = int(payload.split("_")[1])
-            stars_paid = successful_payment.total_amount
+            stars_paid = message.successful_payment.total_amount
             full_name = message.from_user.full_name or "Usuario"
             username = message.from_user.username or ""
 
@@ -2061,7 +2024,7 @@ async def process_successful_payment(message: Message, bot: Bot):
         try:
             parts = payload.split("_")
             chat_id = int(parts[1])
-            stars_paid = successful_payment.total_amount
+            stars_paid = message.successful_payment.total_amount
 
             await record_group_tip(chat_id, user_id, stars_paid)
             benefit_granted = True

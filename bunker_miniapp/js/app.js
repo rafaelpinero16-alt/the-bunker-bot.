@@ -191,6 +191,7 @@ export const app = {
     _shield: { chatId: null, data: null, busy: false, seq: 0 },
     _vip: { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: 0, timer: null },
     _alq: { chatId: null, data: null, busy: false, seq: 0, timer: null },
+    _apl: { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: 0, timer: null },   // v24
     validatePlanForm,
     validateConfigSection,
 
@@ -1017,6 +1018,7 @@ export const app = {
         if (this._shield?.chatId) ui.renderShield(this._shield.data, { busy: this._shield.busy });   // v23
         if (this._vip?.chatId) this.paintVip();
         if (this._alq?.chatId) ui.renderAdminQuotas(this._alq.data, { busy: this._alq.busy });
+        if (this._apl?.chatId) this.paintAppeals();   // v24
 
         if (state.selectedChatId && state.data.currentChatDashboard) {
             this.loadChatDashboard(state.selectedChatId);
@@ -2555,6 +2557,7 @@ export const app = {
         client.on('stars_payment', (data) => { if (isCurrent()) this.onStarsPayment(data); });
         client.on('vip_role', () => { if (isCurrent()) this.scheduleV23Reload('vip'); });       // v23
         client.on('link_quota', () => { if (isCurrent()) this.scheduleV23Reload('alq'); });     // v23
+        client.on('ban_appeal', () => { if (isCurrent()) this.scheduleV23Reload('apl'); });     // v24
         client.on('security_block', (data) => { if (isCurrent()) this.onSecurityBlock(data); });
         client.on('raid_shield', (data) => { if (isCurrent()) this.onRaidShield(data); });
         client.on('settings_updated', (data) => {
@@ -3348,6 +3351,7 @@ export const app = {
         if (changed.some(f => f.startsWith('shield_'))) this.loadShield();
         if (changed.some(f => f.startsWith('vip_'))) this.scheduleV23Reload('vip');
         if (changed.some(f => f.startsWith('alq_'))) this.scheduleV23Reload('alq');
+        if (changed.some(f => f.startsWith('appeal_'))) this.scheduleV23Reload('apl');   // v24
         this.schedulePerimeterRefresh(chatId);
     },
 
@@ -3629,12 +3633,15 @@ export const app = {
         Object.assign(this._shield, { chatId: id, data: null, busy: false });
         Object.assign(this._vip, { chatId: id, data: null, records: [], filter: 'all', loading: false, busy: false });
         Object.assign(this._alq, { chatId: id, data: null, busy: false });
+        Object.assign(this._apl, { chatId: id, data: null, records: [], filter: 'all', loading: false, busy: false });
         ui.renderShield(null, { busy: true });
         ui.renderVipRoles(null, { loading: true });
         ui.renderAdminQuotas(null, { busy: true });
         this.loadShield();
         this.loadVipRoles({ reset: true });
         this.loadAdminQuotas();
+        ui.renderBanAppeals(null, { loading: true });
+        this.loadBanAppeals({ reset: true });
     },
 
     stopV23Console() {
@@ -3643,6 +3650,9 @@ export const app = {
         this._shield = { chatId: null, data: null, busy: false, seq: this._shield.seq + 1 };
         this._vip = { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: this._vip.seq + 1, timer: null };
         this._alq = { chatId: null, data: null, busy: false, seq: this._alq.seq + 1, timer: null };
+        clearTimeout(this._apl.timer);
+        this._apl = { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: this._apl.seq + 1, timer: null };
+        ui.renderBanAppeals(null, { idle: true });
         ui.renderShield(null, { idle: true });
         ui.renderVipRoles(null, { idle: true });
         ui.renderAdminQuotas(null, { idle: true });
@@ -3667,16 +3677,18 @@ export const app = {
         tgApp.hapticImpact('light');
         if (kind === 'shield') return this.loadShield();
         if (kind === 'vip') return this.loadVipRoles({ reset: true });
+        if (kind === 'apl') return this.loadBanAppeals({ reset: true });
         return this.loadAdminQuotas();
     },
 
     /** Agrupa ráfagas de eventos (pago → rol, varios enlaces seguidos) en una sola relectura. */
     scheduleV23Reload(kind) {
-        const target = kind === 'vip' ? this._vip : this._alq;
+        const target = kind === 'vip' ? this._vip : (kind === 'apl' ? this._apl : this._alq);
         if (!target.chatId) return;
         clearTimeout(target.timer);
-        target.timer = setTimeout(() => (kind === 'vip' ? this.loadVipRoles({ reset: true }) : this.loadAdminQuotas()),
-            CONFIG.V23?.LIVE_RELOAD_MS || 2500);
+        const run = { vip: () => this.loadVipRoles({ reset: true }), apl: () => this.loadBanAppeals({ reset: true }) }[kind]
+            || (() => this.loadAdminQuotas());
+        target.timer = setTimeout(run, CONFIG.V23?.LIVE_RELOAD_MS || 2500);
     },
 
     // --- 🛡️ Refuerzo perimetral ---
@@ -3875,6 +3887,94 @@ export const app = {
     vipRetag(userId) {
         tgApp.hapticImpact('light');
         return this.vipMember('retag', userId, 0, '');
+    },
+
+    // --- ⚖️ v24 · Apelación de baneos ---
+    paintAppeals() {
+        const a = this._apl;
+        ui.renderBanAppeals(a.data, { records: a.records, filter: a.filter, loading: a.loading, busy: a.busy,
+            hasMore: Boolean(a.data && a.records.length < (a.data.total || 0)) });
+    },
+
+    async loadBanAppeals({ reset = false } = {}) {
+        const a = this._apl;
+        const chatId = a.chatId;
+        if (!chatId || (a.loading && !reset)) return false;
+        const seq = ++a.seq;
+        const epoch = session.epoch;
+        a.loading = true;
+        const res = await api.fetchBanAppeals(chatId, { status: a.filter, limit: CONFIG.V23?.APL_PAGE_SIZE || 20,
+            offset: reset ? 0 : a.records.length });
+        if (seq !== a.seq || epoch !== session.epoch || res?.__stale || a.chatId !== chatId) return false;
+        a.loading = false;
+        if (res?.__error) {
+            if (a.data) this.paintAppeals();
+            else ui.renderBanAppeals(null, { filter: a.filter, error: this.consoleErrorMessage(res) });
+            return false;
+        }
+        a.data = res;
+        a.records = reset ? (res.records || []) : a.records.concat(res.records || []);
+        this.paintAppeals();
+        return true;
+    },
+
+    loadMoreAppeals() {
+        tgApp.hapticImpact('light');
+        return this.loadBanAppeals({ reset: false });
+    },
+
+    setAppealFilter(filter) {
+        const a = this._apl;
+        if (!a.chatId || a.filter === filter) return false;
+        tgApp.hapticSelection?.();
+        a.filter = filter;
+        a.records = [];
+        return this.loadBanAppeals({ reset: true });
+    },
+
+    async saveBanAppeals(patch) {
+        const a = this._apl;
+        const chatId = a.chatId;
+        if (!chatId || a.busy || !a.data) return false;
+        a.busy = true;
+        this.paintAppeals();
+        const res = await api.updateBanAppeals(chatId, patch);
+        a.busy = false;
+        if (a.chatId !== chatId) return false;
+        const ok = this.v23Result(res, ui.t('v23_saved'));
+        if (ok && res.ban_appeals) a.data = { ...a.data, ban_appeals: { ...a.data.ban_appeals, ...res.ban_appeals } };
+        this.paintAppeals();
+        return ok;
+    },
+
+    toggleAppeals() {
+        const cfg = this._apl.data?.ban_appeals;
+        if (!cfg) return this._apl.chatId ? false : this.consolePickFirst();
+        tgApp.hapticSelection?.();
+        return this.saveBanAppeals({ enabled: !cfg.enabled });
+    },
+
+    setAppealField(field, value) {
+        const cfg = this._apl.data?.ban_appeals;
+        if (!cfg || Number(cfg[field]) === Number(value)) return false;
+        return this.saveBanAppeals({ [field]: Number(value) });
+    },
+
+    saveAppealPrice() {
+        const cfg = this._apl.data?.ban_appeals;
+        const input = document.getElementById('apl-price-input');
+        if (!cfg || !input) return false;
+        const c = CONFIG.V23 || {};
+        const min = c.APL_PRICE_MIN || 1, max = c.APL_PRICE_MAX || 10000;
+        const value = Number(String(input.value || '').trim());
+        if (!Number.isInteger(value) || value < min || value > max) {
+            this.consoleToast('error', '⚠️', ui.tf('apl_price_invalid', { min, max }));
+            tgApp.hapticNotification('error');
+            return false;
+        }
+        if (value === Number(cfg.price_stars)) return false;
+        input.blur();
+        return this.saveBanAppeals({ price_stars: value });
     },
 
     // --- 🔗 Cuotas de enlaces de administradores ---

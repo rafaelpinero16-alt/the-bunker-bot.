@@ -423,6 +423,23 @@ export const api = {
         return await this.post(`/chat/${chat}/admin-link-quotas`, { admin_link_quotas: patch }, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
     },
 
+    // --- v24 · Apelación de baneos por Telegram Stars ---
+
+    /** GET /api/chat/{id}/ban-appeals?status=all|open|paid|closed → { ban_appeals, records[], total, summary } */
+    async fetchBanAppeals(chatId, { status = 'all', limit = 20, offset = 0 } = {}) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        const q = `status=${encodeURIComponent(status)}&limit=${Number(limit) || 20}&offset=${Number(offset) || 0}&_=${Date.now()}`;
+        return await this.get(`/chat/${chat}/ban-appeals?${q}`, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/ban-appeals — { enabled?, price_stars?, link_ttl_min?, window_days?, max_per_user? }. Solo el dueño. */
+    async updateBanAppeals(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/ban-appeals`, { ban_appeals: patch }, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
+    },
+
     // --- v21 · Idioma del operador (compartido con el bot: users.lang) ---
 
     /** GET /api/user/language → { lang, chosen, default, supported } */
@@ -676,7 +693,8 @@ export const api = {
 const LIVE_EVENTS = new Set([
     'message', 'level_up', 'voice_call_started', 'voice_call_ended',
     'voice_presence', 'stars_payment', 'settings_updated', 'security_block', 'raid_shield',
-    'assets_status', 'vip_role', 'link_quota'   // v23
+    'assets_status', 'vip_role', 'link_quota',  // v23
+    'ban_appeal'                                // v24
 ]);
 const SNAPSHOT_EVENTS = new Set(['analytics_snapshot', 'initial_state', 'state_refresh']);
 const AUTH_CLOSE_CODES = new Set([4401, 4403, 1008]);

@@ -1856,6 +1856,84 @@ export const ui = {
         if (more) { more.classList.toggle('hidden', !hasMore); more.disabled = Boolean(loading); }
     },
 
+    /** ⚖️ v24 · Apelación de baneos. data = GET /ban-appeals; records = acumulados (paginación). */
+    renderBanAppeals(data, { records = [], filter = 'all', loading = false, idle = false, busy = false, hasMore = false, error = '' } = {}) {
+        const c = CONFIG.V23 || {};
+        const cfg = data?.ban_appeals || null;
+        const disabled = Boolean(idle || busy || !cfg);
+        const btn = byId('apl-enabled-btn');
+        if (btn) {
+            btn.disabled = disabled;
+            btn.textContent = cfg ? this.t(cfg.enabled ? 'apl_on' : 'apl_off') : '—';
+            btn.className = `h-8 px-2.5 rounded-lg border text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50 ${cfg?.enabled
+                ? 'bg-emerald-400/15 border-emerald-400/60 text-emerald-200' : 'bg-black/40 border-neutral-800 text-neutral-400'}`;
+        }
+        const refresh = byId('apl-refresh-btn');
+        if (refresh) refresh.disabled = Boolean(idle || loading);
+        const price = byId('apl-price-input');
+        if (price) {
+            price.disabled = disabled;
+            if (cfg && document.activeElement !== price) price.value = String(cfg.price_stars);
+        }
+        const save = byId('apl-price-save');
+        if (save) save.disabled = disabled;
+        const fill = (id, values, current, label) => {
+            const sel = byId(id);
+            if (!sel) return;
+            sel.disabled = disabled;
+            sel.innerHTML = values.map(v => `<option value="${Number(v)}"${cfg && Number(current) === Number(v) ? ' selected' : ''}>${this.escapeHtml(label(Number(v)))}</option>`).join('');
+        };
+        fill('apl-ttl', c.APL_TTL || [10, 30, 60, 1440], cfg?.link_ttl_min, v => (v >= 60 ? this.tf('apl_hours', { n: v / 60 }) : this.tf('apl_minutes', { n: v })));
+        fill('apl-window', c.APL_WINDOW || [1, 3, 7, 14, 30], cfg?.window_days, v => this.tf('apl_days', { n: v }));
+        fill('apl-max', c.APL_MAX || [0, 1, 3, 5, 10], cfg?.max_per_user, v => (v === 0 ? this.t('apl_unlimited') : String(v)));
+        document.querySelectorAll('[data-apl-filter]').forEach(el => {
+            const on = el.getAttribute('data-apl-filter') === filter;
+            el.disabled = Boolean(idle);
+            el.setAttribute('aria-checked', on ? 'true' : 'false');
+            el.className = `py-1.5 rounded-lg border text-[10px] font-extrabold transition ${on
+                ? 'bg-emerald-400/15 border-emerald-400/60 text-emerald-200' : 'bg-black/40 border-neutral-800 text-neutral-400'}`;
+        });
+        const summaryEl = byId('apl-summary');
+        const more = byId('apl-more-btn');
+        if (idle) {
+            this._v23Message('apl-list', this.t('v23_pick'));
+            if (summaryEl) summaryEl.innerHTML = '';
+            if (more) more.classList.add('hidden');
+            return;
+        }
+        if (!data) {
+            if (error) this._v23Message('apl-list', this.tf('v23_error', { error }), 'error');
+            return;
+        }
+        const s = data.summary || {};
+        if (summaryEl) {
+            summaryEl.innerHTML = [['apl_s_appeals', s.appeals], ['apl_s_paid', s.paid], ['apl_s_stars', s.stars], ['apl_s_refunded', s.refunded]]
+                .map(([k, v]) => `<div class="rounded-lg border border-neutral-800 bg-black/40 px-1.5 py-1.5 text-center">
+                    <p class="text-sm font-extrabold text-white">${this.escapeHtml(this.fmtNum(v || 0))}</p>
+                    <p class="text-[8px] uppercase tracking-wide text-neutral-500">${this.escapeHtml(this.t(k))}</p></div>`).join('');
+        }
+        const list = byId('apl-list');
+        if (list) {
+            list.innerHTML = records.length ? records.map(r => {
+                const who = r.full_name || (r.username ? `@${r.username}` : String(r.user_id));
+                const reason = (state.currentLang === 'es' ? r.reason_es : r.reason_en) || r.reason_key || '';
+                const ok = ['reinstated', 'rejoined'].includes(r.status);
+                const bad = ['failed', 'refunded'].includes(r.status);
+                return `
+                <div class="rounded-xl border px-2.5 py-2 space-y-0.5 ${ok ? 'border-emerald-400/40 bg-emerald-400/5' : bad ? 'border-rose-500/50 bg-rose-500/5' : 'border-neutral-800 bg-black/40'}">
+                    <div class="flex items-center justify-between gap-2">
+                        <p class="text-[11px] font-bold text-theme-main truncate">${this.escapeHtml(who)} <span class="font-mono text-neutral-500">${this.escapeHtml(String(r.user_id))}</span></p>
+                        <span class="shrink-0 text-[10px] font-mono text-amber-300">${this.escapeHtml(String(r.price_stars))} ⭐</span>
+                    </div>
+                    <p class="text-[10px] text-neutral-300">${this.escapeHtml(this.t(`apl_st_${r.status}`))}</p>
+                    <p class="text-[10px] text-neutral-500 truncate">${this.escapeHtml(reason)}</p>
+                    <p class="text-[9px] text-neutral-500 font-mono">${this.escapeHtml(this.t('apl_banned_at'))}: ${this.escapeHtml(this.fmtDateTime(r.created_at))}${r.paid_at ? ` · ${this.escapeHtml(this.t('apl_paid_at'))}: ${this.escapeHtml(this.fmtDateTime(r.paid_at))}` : ''}</p>
+                </div>`;
+            }).join('') : `<p class="text-center text-[11px] text-neutral-500 font-mono py-2">${this.escapeHtml(this.t(filter === 'all' ? 'apl_empty' : 'apl_empty_filter'))}</p>`;
+        }
+        if (more) { more.classList.toggle('hidden', !hasMore); more.disabled = Boolean(loading); }
+    },
+
     fmtRemaining(seconds) {
         const s = Math.max(60, Number(seconds) || 0);
         const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);

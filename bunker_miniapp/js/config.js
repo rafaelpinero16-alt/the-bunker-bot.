@@ -126,7 +126,10 @@ export const CONFIG = {
         TIMEOUT_MS: 12000, LIVE_RELOAD_MS: 2500, VIP_PAGE_SIZE: 20,
         BURST_LIMITS: [0, 3, 5, 8], BURST_WINDOWS: [30, 60, 300], AUTHORIZED_BOTS_MAX: 25,
         VIP_MIN_STARS: [1, 25, 50, 100, 250, 500, 1000], VIP_DAYS: [0, 7, 30, 90, 365], VIP_FLOOD: [1, 2, 3, 4, 5],
-        VIP_GRANT_DAYS: [30, 7, 90, 365, 0], VIP_TAG_MAX: 16, ALQ_MIN: 0, ALQ_MAX: 100
+        VIP_GRANT_DAYS: [30, 7, 90, 365, 0], VIP_TAG_MAX: 16, ALQ_MIN: 0, ALQ_MAX: 100,
+        // v24 · Apelación de baneos (mismos valores que database.APPEAL_*)
+        APL_PRICE_MIN: 1, APL_PRICE_MAX: 10000, APL_TTL: [10, 30, 60, 1440], APL_WINDOW: [1, 3, 7, 14, 30],
+        APL_MAX: [0, 1, 3, 5, 10], APL_PAGE_SIZE: 20
     },
 
     // 🎛️ Consola de programación 1:1 (v8.3) — mismos rangos que database.validate_chat_configuration
@@ -880,6 +883,20 @@ export const translations = {
         alq_reset_in: "libre en {time}", alq_blocked: "🚫 {n} bloqueadas", alq_not_listed: "ya no es administrador",
         alq_empty: "No hay administradores (además del dueño) o no se pudo leer la lista.",
         alq_owner_note: "El dueño nunca se limita. Solo él puede cambiar las cuotas.",
+        // ⚖️ v24 · Apelación de baneos
+        apl_title: "Apelación de Baneos",
+        apl_desc: "Cuando un miembro es baneado automáticamente por completar el límite de advertencias, el bot le envía por privado el motivo y la opción de apelar pagando Telegram Stars. Al pagar se le desbanea y recibe un enlace de reingreso de un solo uso.",
+        apl_on: "🟢 Activa", apl_off: "🔴 Inactiva",
+        apl_price: "💫 Precio (Stars)", apl_ttl: "🔗 Vigencia del enlace", apl_window: "⏳ Oferta válida", apl_max: "🔁 Máx. por usuario (90 días)",
+        apl_minutes: "{n} min", apl_hours: "{n} h", apl_days: "{n} días", apl_unlimited: "♾️ Sin tope",
+        apl_f_all: "Todas", apl_f_open: "Abiertas", apl_f_paid: "Pagadas", apl_f_closed: "Cerradas",
+        apl_s_appeals: "Apelaciones", apl_s_paid: "Pagadas", apl_s_stars: "Stars", apl_s_refunded: "Reembolsos",
+        apl_st_offered: "📨 Ofrecida", apl_st_dm_failed: "📭 Sin entregar (espera /start)", apl_st_paid: "💳 Pagada",
+        apl_st_reinstated: "✅ Desbaneado", apl_st_rejoined: "🚪 Reingresó", apl_st_refunded: "↩️ Reembolsada",
+        apl_st_failed: "🚨 Error", apl_st_expired: "⌛ Caducada", apl_st_superseded: "🔁 Sustituida",
+        apl_banned_at: "Baneo", apl_paid_at: "Pago", apl_empty: "Aún no hay apelaciones en esta comunidad.",
+        apl_empty_filter: "No hay apelaciones con este filtro.", apl_price_invalid: "El precio debe estar entre {min} y {max} Stars.",
+        apl_hint: "Solo los baneos automáticos por límite de advertencias son apelables. El bot necesita permisos para banear e invitar; si no puede desbanear, el pago se reembolsa solo.",
         // 🛰️ v20 · Perímetro
         perim_title: "Estado del Perímetro",
         perim_pick: "Selecciona una comunidad para ver su perímetro.",
@@ -1630,6 +1647,19 @@ export const translations = {
         alq_reset_in: "free in {time}", alq_blocked: "🚫 {n} blocked", alq_not_listed: "no longer an admin",
         alq_empty: "No admins (besides the owner) or the list could not be read.",
         alq_owner_note: "The owner is never limited. Only the owner can change quotas.",
+        apl_title: "Ban Appeals",
+        apl_desc: "When a member is banned automatically for reaching the warn limit, the bot privately sends the reason and an offer to appeal by paying Telegram Stars. On payment they are unbanned and get a single-use rejoin link.",
+        apl_on: "🟢 On", apl_off: "🔴 Off",
+        apl_price: "💫 Price (Stars)", apl_ttl: "🔗 Rejoin link lifetime", apl_window: "⏳ Offer valid for", apl_max: "🔁 Max per user (90 days)",
+        apl_minutes: "{n} min", apl_hours: "{n} h", apl_days: "{n} days", apl_unlimited: "♾️ No cap",
+        apl_f_all: "All", apl_f_open: "Open", apl_f_paid: "Paid", apl_f_closed: "Closed",
+        apl_s_appeals: "Appeals", apl_s_paid: "Paid", apl_s_stars: "Stars", apl_s_refunded: "Refunds",
+        apl_st_offered: "📨 Offered", apl_st_dm_failed: "📭 Undelivered (awaits /start)", apl_st_paid: "💳 Paid",
+        apl_st_reinstated: "✅ Unbanned", apl_st_rejoined: "🚪 Rejoined", apl_st_refunded: "↩️ Refunded",
+        apl_st_failed: "🚨 Error", apl_st_expired: "⌛ Expired", apl_st_superseded: "🔁 Superseded",
+        apl_banned_at: "Banned", apl_paid_at: "Paid", apl_empty: "No appeals in this community yet.",
+        apl_empty_filter: "No appeals match this filter.", apl_price_invalid: "The price must be between {min} and {max} Stars.",
+        apl_hint: "Only automatic warn-limit bans are appealable. The bot needs ban and invite rights; if it cannot unban, the payment is refunded automatically.",
         perim_title: "Perimeter Status",
         perim_pick: "Select a community to see its perimeter.",
         perim_summary: "{n}/{t} active",
