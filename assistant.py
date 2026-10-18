@@ -3689,11 +3689,34 @@ async def init_assistant_master():
     await load_all_sentinels()
 
 
+async def mistral_startup_probe(delay: float = 5.0) -> bool:
+    """
+    v32 · Prueba real de Mistral al arrancar (una petición mínima de 5 tokens). Deja en el log de Railway una línea
+    inequívoca: «✅ [Mistral] Verificado…» o «❌ [Mistral] La API rechazó…» con el código HTTP y la causa probable,
+    sin esperar a que un usuario pregunte al Soporte IA. Nunca lanza.
+    """
+    if mistral_client is None:
+        return False
+    await asyncio.sleep(delay)
+    started = time.monotonic()
+    try:
+        response = await _mistral_complete("diagnostic", timeout=30.0, model=MISTRAL_MODEL,
+                                           messages=[{"role": "user", "content": "Reply only: OK"}],
+                                           max_tokens=5, temperature=0)
+        logger.info(f"✅ [Mistral] Verificado: la API responde ({int((time.monotonic() - started) * 1000)} ms, "
+                    f"modelo={MISTRAL_MODEL}, muestra={_extract_mistral_text(response)[:12]!r}).")
+        return True
+    except Exception as exc:
+        logger.error(f"❌ [Mistral] La API rechazó la prueba de arranque: {describe_mistral_error(exc)}")
+        return False
+
+
 def start_voice_radar(bot):
     global _global_bot, _bot_username_cache
     _global_bot = bot
     _bot_username_cache = ""
     _spawn(init_assistant_master(), name="init_assistant_master")
+    _spawn(mistral_startup_probe(), name="mistral_startup_probe")   # v32 · diagnóstico visible en Railway
 
 
 async def close_all_sentinels():

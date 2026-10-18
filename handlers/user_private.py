@@ -4132,6 +4132,46 @@ async def cb_set_language(callback: CallbackQuery, bot: Bot):
                                       parse_mode="HTML")
 
 
+@router.message(Command("aidiag"), F.chat.type == "private")
+async def cmd_support_ai_diagnostics(message: Message):
+    """
+    🩺 v32 · Diagnóstico del Soporte IA (solo Arquitectos): SDK, cliente, modelo, disyuntores abiertos y una llamada real
+    mínima a Mistral. Explica en una línea por qué el asistente estaría usando el respondedor local. Nunca muestra la key.
+    """
+    if not is_super_admin(message.from_user.id):
+        return
+    wait = await message.answer("🩺 <i>Probando Mistral AI…</i>", parse_mode="HTML")
+    try:
+        diag = await perimeter_ops.support_ai_diagnostics(run_probe=True)
+    except Exception as ex:
+        diag = {"ok": False, "stage": "internal", "detail": f"{type(ex).__name__}: {ex}"}
+    st = diag.get("status") or {}
+    lines = [
+        "🩺 <b>Diagnóstico del Soporte IA</b>", "",
+        f"• Resultado: <b>{'🟢 Mistral responde' if diag.get('ok') else '🔴 Mistral NO responde'}</b>",
+        f"• Etapa: <code>{html.escape(str(diag.get('stage')))}</code>",
+        f"• SDK mistralai: <code>{html.escape(str(st.get('sdk_version') or '—'))}</code>",
+        f"• Cliente: {'🟢 listo' if st.get('client_ready') else '🔴 no inicializado'} · API key: "
+        f"{'presente' if st.get('key_present') else 'AUSENTE'}",
+        f"• Modelo: <code>{html.escape(str(st.get('model') or '—'))}</code>",
+    ]
+    if st.get("init_error"):
+        lines.append(f"• Error de arranque: <code>{html.escape(str(st['init_error'])[:300])}</code>")
+    if st.get("open_breakers"):
+        lines.append(f"• Disyuntores abiertos (s): <code>{html.escape(str(st['open_breakers']))}</code>")
+    if diag.get("latency_ms") is not None:
+        lines.append(f"• Latencia: <b>{diag['latency_ms']} ms</b> · muestra: <code>{html.escape(str(diag.get('sample')))}</code>")
+    if diag.get("detail"):
+        lines.append(f"• Detalle: <code>{html.escape(str(diag['detail'])[:400])}</code>")
+    if diag.get("kb_chars"):
+        lines.append(f"• Base de conocimientos: <b>{diag['kb_chars']}</b> caracteres")
+    text = "\n".join(lines) + PERIMETER_SIGNATURE
+    try:
+        await wait.edit_text(text, parse_mode="HTML")
+    except TelegramBadRequest:
+        await message.answer(text, parse_mode="HTML")
+
+
 @router.message(Command("supportkb"), F.chat.type == "private")
 async def cmd_support_directives(message: Message, command: CommandObject):
     """
