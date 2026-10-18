@@ -773,6 +773,38 @@ un selector de comunidades antes de emitir la factura.
 - Botón de pánico: «🚨 BLOQUEO DE EMERGENCIA ACTIVO» / «🟢 Bloqueo levantado».
 - Muro de pago: tarjeta «🔒 PRO ⭐ / ULTRA PRO 💎» con los botones de activación de esa comunidad.
 
+══ F2. AI SENTINEL ULTRA — ARQUITECTURA DE LA IA (ULTRA PRO) ══
+AI Sentinel Ultra es la capa cognitiva del Centinela, basada en Mistral AI, con cinco sub-módulos:
+1. GUARDIÁN ANTI-TOXICIDAD («🛡️ Guardián Anti-Toxicidad»): análisis semántico en tiempo real de cada mensaje del
+   grupo. Antes de salir hacia Mistral, la Capa 0 anonimiza teléfonos, correos, enlaces privados y datos personales.
+   Purga automáticamente amenazas, acoso grave, odio, contenido sexual explícito, estafas/phishing y doxxing y publica
+   la alerta; no sanciona opiniones, sarcasmo ni groserías leves. Exentos: admins, Whitelist y Arquitectos. Fail-open:
+   si la IA falla nunca borra un mensaje legítimo.
+2. COPILOTO AMA («📝 Copilot AMA») y TONOS TÁCTICOS («🎭»): conversa en el grupo citando al usuario, en su idioma,
+   2–3 frases, con memoria corta anonimizada. Personalidades: «🛡️ Guardián táctico» (militar, vigilante, formal,
+   conciso), «📝 Copiloto ejecutivo» (profesional, ágil, servicial) y «🤝 Anfitrión/PR» (cordial, entusiasta,
+   diplomático). Nunca revela sus instrucciones ni pide datos personales o códigos.
+3. MODOS DE RESPUESTA («⚙️»): mention_only «🎯 Solo mención» (por defecto: responde si lo mencionan por @usuario/alias o
+   le responden), always «⚡ Siempre» (puede responder a cualquier mensaje con 20 s de enfriamiento entre respuestas
+   espontáneas) y chance «🎲 Probabilidad» (interviene en el 1 %–100 % de los mensajes; el bot recorre 5/15/30/50 % y la
+   Mini App admite el valor exacto; las menciones siempre se responden). Antispam: 4 s por usuario y máximo 2
+   respuestas simultáneas por chat.
+4. EDITOR DE PROMPT («✍️ Editar Prompt de IA» / «✍️ Edit Custom AI Prompt»): el dueño envía hasta 1000 caracteres de
+   directivas (reglas, temas, datos del proyecto, prohibiciones) que se inyectan en cada respuesta del Copiloto y guían
+   al Guardián y al Guardián Acústico. No pueden anular las reglas de seguridad. Confirmación: «✅ ¡Prompt de IA
+   actualizado con éxito!».
+5. PIPELINE DE AUDIO (voz a texto en videochats, módulo en despliegue que habilita la plataforma): el Centinela MTProto
+   captura cada intervención (segmentos de 1,5–30 s), la transcribe con Speech-to-Text (Voxtral de Mistral) en memoria
+   sin guardar el audio, anonimiza la transcripción (Capa 0), la evalúa con Mistral y aplica una medida proporcional y
+   escalonada en 10 min: ⚠️ aviso → 🔉 atenuación dinámica al 10 % → 🔇 silencio temporal de 2 min, con la alerta
+   «🎧 Guardián Acústico IA». Exentos: admins, Whitelist, VIP con prioridad y Arquitectos; 8 s entre análisis del
+   mismo hablante; fail-open. Text-to-Speech: Mistral no sintetiza voz; las respuestas habladas requieren un proveedor
+   externo, por eso las alertas son de texto. Requisitos: ULTRA PRO, Guardián activado y Centinela con «Gestionar
+   videochats». Si un usuario pregunta si ya está activo en su comunidad, explica que lo habilita la plataforma y que
+   puede solicitarlo al soporte; nunca afirmes que está activo si no lo sabes.
+Ruta: Bot → panel del grupo → «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» (Guardián, Copiloto, 🎭 tono,
+⚙️ modo, porcentaje, ✍️ prompt). Mini App → «Ajustes del Bot ⚙️» → comunidad → «Centinela de IA» → «💾 Guardar».
+
 ══ G. PROBLEMAS FRECUENTES Y SOLUCIONES ══
 - «Solo el propietario…» / acceso denegado: solo el creador real (o un delegado del Arquitecto) puede configurar.
 - Función con 🔒 o tarjeta de mejora: falta el plan requerido o la licencia caducó; renueva desde el panel.
@@ -842,7 +874,7 @@ _INTENT_CONCEPT_RE = re.compile(
     r"|\bmeaning of\b|\bdefine\b|\bdefinition\b"
 )
 _INTENT_FUNCTIONS_RE = re.compile(
-    r"\bfunciones\b|\bfuncionalidades\b|\bque hace\b|\bque hacen\b|\bcomo funciona\b|\bcomo funcionan\b|\bcomo opera\b"
+    r"\bfunciones\b|\bfuncionalidades\b|\bcuales son (los|las|sus)\b|\bque hace\b|\bque hacen\b|\bcomo funciona\b|\bcomo funcionan\b|\bcomo opera\b"
     r"|\bpara que sirve\b|\bpara que sirven\b|\bque controla\b|\bque bloquea\b|\bque incluye\b|\bque puede hacer\b"
     r"|\bcapacidades\b|\bcaracteristicas\b|\bque detecta\b|\bque protege\b"
     r"|\bwhat does\b.*\bdo\b|\bwhat do(es)?\b.*\bdo\b|\bhow does\b.*\bwork\b|\bhow do\b.*\bwork\b|\bhow it works\b"
@@ -927,7 +959,22 @@ _LOCAL_TOPICS = (
     ("clone", (r"\bclon", r"\bclone", r"botfather", r"\btoken")),
     ("sentinel", (r"centinela", r"sentinel", r"telefono", r"\bphone", r"sesion", r"session", r"mtproto", r"\b2fa\b",
                   r"userbot")),
-    ("ai", (r"\bia\b", r"\bai\b", r"guardian", r"copiloto", r"copilot", r"mistral", r"toxic")),
+    ("audio_ai", (r"voz a texto", r"voice[- ]to[- ]text", r"speech[- ]to[- ]text", r"text[- ]to[- ]speech", r"\bstt\b",
+                  r"\btts\b", r"transcri", r"pipeline de audio", r"audio pipeline", r"guardian acustico",
+                  r"acoustic guardian", r"moderacion (de|por) voz", r"voice moderation", r"voxtral", r"audio ia",
+                  r"ai audio", r"analiza(r)? (la )?voz", r"moderar (la )?voz")),
+    ("ai_prompt", (r"prompt", r"directivas? (de|para) (la )?ia", r"ai directives?", r"instrucciones (de|para) (la )?ia",
+                   r"edit custom ai", r"editar prompt")),
+    ("ai_modes", (r"mention[ _]only", r"solo mencion", r"chance mode", r"modo (de )?probabilidad", r"\bchance\b",
+                  r"probabilidad", r"modo siempre", r"always mode", r"modos? de respuesta", r"response modes?",
+                  r"cuando responde la ia", r"when does the ai (reply|answer)")),
+    ("ai_copilot", (r"copiloto", r"copilot", r"\bama\b", r"tonos?", r"\btones?\b", r"personalidad", r"personality",
+                    r"guardian tactico", r"tactical guardian", r"anfitrion", r"\bhost\b", r"copiloto ejecutivo",
+                    r"executive copilot")),
+    ("ai_guardian", (r"anti-?toxic", r"antitoxic", r"toxicidad", r"toxicity", r"guardian anti", r"guardian ia",
+                     r"ai guardian", r"phishing", r"doxx", r"capa 0", r"layer 0", r"\bpii\b")),
+    ("ai", (r"\bia\b", r"\bai\b", r"guardian", r"copiloto", r"copilot", r"mistral", r"toxic", r"ai sentinel",
+            r"sentinel ultra", r"centinela (de )?ia", r"inteligencia artificial", r"artificial intelligence")),
     ("ghost", (r"ghost", r"purge", r"purga", r"fantasma", r"cuentas eliminadas", r"deleted accounts")),
     ("captcha", (r"captcha", r"aduana", r"bienvenida", r"welcome", r"verificac", r"soy humano", r"i.?m human")),
     ("antiflood", (r"flood", r"inundac")),
@@ -957,7 +1004,7 @@ _LOCAL_TOPICS = (
 _KB_MODULE_ORDER = (
     "bot_overview", "start", "plans", "sentinel", "captcha", "locks", "antispam", "antiflood", "warns", "delmsgs",
     "appeals", "autolower", "micvip", "micvip_audit", "podcast", "screen", "vcsched", "payload", "clone", "vip_roles",
-    "link_quotas", "channel_plans", "tips", "ai", "ghost", "night", "panic", "gamification", "log", "backup", "human",
+    "link_quotas", "channel_plans", "tips", "ai", "ai_guardian", "ai_copilot", "ai_modes", "ai_prompt", "audio_ai", "ghost", "night", "panic", "gamification", "log", "backup", "human",
 )
 
 # ---- Catálogo de 4 dimensiones por módulo (ES, EN) -------------------------------------------------------------
@@ -1848,35 +1895,265 @@ _LOCAL_GUIDES = {
         ),
     },
     "ai": {
-        "title": ("🤖 Centinela de IA (Guardián + Copiloto)", "🤖 AI Sentinel (Guardian + Copilot)"),
+        "title": ("🤖 AI Sentinel Ultra — Centinela de IA (visión general)", "🤖 AI Sentinel Ultra — overview"),
         "what_is": (
-            "🤖 El Centinela de IA lleva Mistral AI al chat de texto de tu grupo: un Guardián que elimina contenido "
-            "dañino y un Copiloto que conversa con los miembros.",
-            "🤖 The AI Sentinel brings Mistral AI to your group's text chat: a Guardian that removes harmful content "
-            "and a Copilot that chats with members.",
+            "🤖 AI Sentinel Ultra es la capa de inteligencia artificial del Centinela: lleva Mistral AI a tu comunidad "
+            "con cinco sub-módulos: 1) Guardián Anti-Toxicidad, 2) Copiloto AMA con tonos tácticos, 3) Modos de "
+            "respuesta (Solo mención / Siempre / Probabilidad), 4) Editor de Prompt personalizado y 5) Pipeline de "
+            "Audio (voz a texto) para moderar el videochat. Todo texto pasa antes por la Capa 0, que anonimiza los "
+            "datos personales.",
+            "🤖 AI Sentinel Ultra is the Sentinel's artificial-intelligence layer: it brings Mistral AI to your "
+            "community through five sub-modules: 1) Anti-Toxicity Guardian, 2) AMA Copilot with tactical tones, 3) "
+            "Response modes (Mention only / Always / Chance), 4) Custom Prompt editor and 5) the Audio pipeline "
+            "(voice-to-text) to moderate the video chat. All text goes through Layer 0 first, which anonymizes "
+            "personal data.",
         ),
         "functions": (
-            "• Guardián anti-toxicidad: analiza los mensajes en segundo plano (tras anonimizar datos personales) y purga "
-            "amenazas, acoso grave, estafas, phishing o doxxing.\n"
-            "• Copiloto: responde en modo «🎯 Solo mención», «🎲 Probabilidad» (1–100 %) o «⚡ Siempre», con "
-            "personalidad «🛡️ Guardián táctico», «📝 Copiloto ejecutivo» o «🤝 Anfitrión/PR» y directivas propias de "
-            "hasta 1000 caracteres.\n• Necesita un Centinela activo en el grupo.",
-            "• Anti-toxicity Guardian: scans messages in the background (after anonymizing personal data) and purges "
-            "threats, severe harassment, scams, phishing or doxxing.\n"
-            "• Copilot: replies in “🎯 Mention only”, “🎲 Chance” (1–100%) or “⚡ Always” mode, with a “🛡️ Tactical "
-            "guardian”, “📝 Executive copilot” or “🤝 Host/PR” personality and custom directives of up to 1000 "
-            "characters.\n• Needs an active Sentinel in the group.",
+            "1. 🛡️ Guardián Anti-Toxicidad: analiza cada mensaje en segundo plano y purga amenazas, acoso grave, odio, "
+            "contenido sexual explícito, estafas/phishing y doxxing; publica la alerta y suma la incidencia al radar.\n"
+            "2. 📝 Copiloto AMA: conversa en el grupo citando al usuario, con personalidad «🛡️ Guardián táctico», "
+            "«📝 Copiloto ejecutivo» o «🤝 Anfitrión/PR»; respuestas breves (2–3 frases) y con memoria corta del chat.\n"
+            "3. ⚙️ Modos: «🎯 Solo mención» (responde si lo mencionan o le responden), «⚡ Siempre» o «🎲 Probabilidad» "
+            "(1 %–100 %), con antispam: 4 s por usuario, 20 s entre respuestas espontáneas y máx. 2 en paralelo por chat.\n"
+            "4. ✍️ Prompt personalizado: tus directivas (hasta 1000 caracteres) se inyectan en cada respuesta.\n"
+            "5. 🎧 Pipeline de audio: transcribe intervenciones del videochat (Voxtral de Mistral), las evalúa y aplica "
+            "aviso, atenuación o silencio temporal. Módulo en despliegue: lo habilita la plataforma.\n"
+            "• Necesita un Centinela activo en el grupo y la API de Mistral operativa.",
+            "1. 🛡️ Anti-Toxicity Guardian: scans every message in the background and purges threats, severe "
+            "harassment, hate, explicit sexual content, scams/phishing and doxxing; posts the alert and logs it on the "
+            "radar.\n"
+            "2. 📝 AMA Copilot: chats in the group quoting the user, with a “🛡️ Tactical guardian”, “📝 Executive "
+            "copilot” or “🤝 Host/PR” personality; short replies (2–3 sentences) with short chat memory.\n"
+            "3. ⚙️ Modes: “🎯 Mention only” (replies when mentioned or replied to), “⚡ Always” or “🎲 Chance” "
+            "(1%–100%), with anti-spam: 4 s per user, 20 s between spontaneous replies and max 2 in parallel per chat.\n"
+            "4. ✍️ Custom prompt: your directives (up to 1000 characters) are injected into every reply.\n"
+            "5. 🎧 Audio pipeline: transcribes video chat speech (Mistral Voxtral), evaluates it and applies a warning, "
+            "volume ducking or a temporary mute. Rolling out: enabled by the platform.\n"
+            "• Needs an active Sentinel in the group and a working Mistral API.",
         ),
         "benefits": (
-            "ULTRA PRO ({ultra} ⭐). Beneficio: moderación inteligente 24/7 y una comunidad atendida en todo momento.",
-            "ULTRA PRO ({ultra} ⭐). Benefit: smart 24/7 moderation and a community that is always attended.",
+            "ULTRA PRO ({ultra} ⭐). Beneficio: moderación inteligente 24/7 en texto (y voz cuando se habilite) y una "
+            "comunidad atendida en todo momento con la voz de tu marca.",
+            "ULTRA PRO ({ultra} ⭐). Benefit: smart 24/7 moderation in text (and voice once enabled) and a community "
+            "attended at all times in your brand's voice.",
         ),
         "setup": (
-            "Bot: panel del grupo → «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» → «🛡️ Guardián Anti-Toxicidad» "
-            "y Copiloto, modo, probabilidad, tono y directivas. Mini App: «Ajustes del Bot ⚙️» → comunidad → «Centinela "
-            "de IA».",
-            "Bot: group panel → “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)” → “🛡️ Anti-Toxicity Guardian” and "
-            "Copilot, mode, chance, tone and directives. Mini App: “Bot Settings ⚙️” → community → “AI Sentinel”.",
+            "Bot: panel del grupo → «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)»:\n"
+            "1. «🛡️ Guardián Anti-Toxicidad» 🟢.\n2. «📝 Copilot AMA» 🟢.\n3. «🎭» cambia la personalidad.\n"
+            "4. «⚙️» cambia el modo; con Probabilidad, el botón de porcentaje recorre 5 %, 15 %, 30 % y 50 %.\n"
+            "5. «✍️ Editar Prompt de IA» y envía tus directivas.\n"
+            "Mini App: «Ajustes del Bot ⚙️» → comunidad → «Centinela de IA» → interruptores, modo, probabilidad exacta "
+            "(1–100 %), tono y directivas → «💾 Guardar».",
+            "Bot: group panel → “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)”:\n"
+            "1. “🛡️ Anti-Toxicity Guardian” 🟢.\n2. “📝 Copilot AMA” 🟢.\n3. “🎭” switches the personality.\n"
+            "4. “⚙️” switches the mode; with Chance, the percentage button cycles 5%, 15%, 30% and 50%.\n"
+            "5. “✍️ Edit Custom AI Prompt” and send your directives.\n"
+            "Mini App: “Bot Settings ⚙️” → community → “AI Sentinel” → switches, mode, exact chance (1–100%), tone and "
+            "directives → “💾 Save”.",
+        ),
+    },
+    "ai_guardian": {
+        "title": ("🛡️ Guardián Anti-Toxicidad (AI Sentinel Ultra)", "🛡️ Anti-Toxicity Guardian (AI Sentinel Ultra)"),
+        "what_is": (
+            "🛡️ El Guardián Anti-Toxicidad es un moderador de IA que lee cada mensaje del grupo en tiempo real y elimina "
+            "el contenido dañino antes de que se propague.",
+            "🛡️ The Anti-Toxicity Guardian is an AI moderator that reads every group message in real time and removes "
+            "harmful content before it spreads.",
+        ),
+        "functions": (
+            "• Capa 0: antes de enviar el texto a Mistral se sustituyen teléfonos, correos, enlaces privados y datos "
+            "personales por marcadores; el texto original nunca sale del servidor.\n"
+            "• Análisis semántico (no por palabras sueltas): marca amenazas de violencia, acoso o insultos graves "
+            "dirigidos, discurso de odio, contenido sexual explícito, estafas/phishing y doxxing. Opiniones fuertes, "
+            "sarcasmo o groserías leves no se sancionan.\n"
+            "• Purga automática del mensaje y alerta «Mensaje de … purgado preventivamente»; si no puede borrarlo lo "
+            "marca para revisión.\n"
+            "• Administradores, Whitelist y Arquitectos están exentos. Fail-open: si la IA falla, nunca borra un "
+            "mensaje legítimo.\n• Respeta tus directivas del prompt personalizado.",
+            "• Layer 0: before the text is sent to Mistral, phones, emails, private links and personal data are replaced "
+            "by placeholders; the original text never leaves the server.\n"
+            "• Semantic analysis (not keyword lists): flags threats of violence, targeted severe harassment or insults, "
+            "hate speech, explicit sexual content, scams/phishing and doxxing. Strong opinions, sarcasm or mild "
+            "swearing are not punished.\n"
+            "• Automatic message purge and an alert “Message from … preventively purged”; if it cannot delete it, it "
+            "flags it for review.\n"
+            "• Admins, Whitelist and Architects are exempt. Fail-open: if the AI fails it never deletes a legitimate "
+            "message.\n• Follows your custom-prompt directives.",
+        ),
+        "benefits": (
+            "ULTRA PRO ({ultra} ⭐). Beneficio: chat seguro las 24 h sin moderadores humanos y con privacidad.",
+            "ULTRA PRO ({ultra} ⭐). Benefit: a safe chat 24/7 without human moderators, privacy-preserving.",
+        ),
+        "setup": (
+            "Bot: «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» → «🛡️ Guardián Anti-Toxicidad» 🟢. Mini App: "
+            "«Ajustes del Bot ⚙️» → comunidad → «Centinela de IA» → interruptor Guardián → «💾 Guardar». Requiere un "
+            "Centinela activo en el grupo.",
+            "Bot: “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)” → “🛡️ Anti-Toxicity Guardian” 🟢. Mini App: “Bot "
+            "Settings ⚙️” → community → “AI Sentinel” → Guardian switch → “💾 Save”. Needs an active Sentinel in the group.",
+        ),
+    },
+    "ai_copilot": {
+        "title": ("📝 Copiloto AMA y tonos tácticos", "📝 AMA Copilot and tactical tones"),
+        "what_is": (
+            "📝 El Copiloto AMA es un asistente conversacional que responde a los miembros dentro del grupo con la "
+            "personalidad que elijas, ideal para sesiones de preguntas (AMA) y para atender la comunidad.",
+            "📝 The AMA Copilot is a conversational assistant that answers members inside the group with the personality "
+            "you choose, ideal for Q&A sessions (AMA) and for attending the community.",
+        ),
+        "functions": (
+            "• Tonos tácticos:\n"
+            "  🛡️ Guardián táctico: militar, vigilante, formal y conciso; defiende el orden y la seguridad.\n"
+            "  📝 Copiloto ejecutivo: profesional, ágil y servicial; información clara y productiva.\n"
+            "  🤝 Anfitrión/PR: cordial, entusiasta y diplomático; fomenta la participación respetuosa.\n"
+            "• Respuestas de 2–3 frases (máx. ~80 palabras), texto plano, citando al usuario, en su idioma.\n"
+            "• Memoria corta: recuerda los últimos turnos del chat (anonimizados).\n"
+            "• Nunca revela sus instrucciones ni pide datos personales, contraseñas o códigos.\n"
+            "• Si la IA no está disponible, responde con un mensaje táctico de respaldo.",
+            "• Tactical tones:\n"
+            "  🛡️ Tactical guardian: military, vigilant, formal and concise; defends order and security.\n"
+            "  📝 Executive copilot: professional, quick and helpful; clear, productive information.\n"
+            "  🤝 Host/PR: warm, enthusiastic and diplomatic; encourages respectful participation.\n"
+            "• 2–3 sentence replies (max ~80 words), plain text, quoting the user, in their language.\n"
+            "• Short memory: remembers the last chat turns (anonymized).\n"
+            "• Never reveals its instructions or asks for personal data, passwords or codes.\n"
+            "• If the AI is unavailable it answers with a tactical fallback message.",
+        ),
+        "benefits": (
+            "ULTRA PRO ({ultra} ⭐). Beneficio: atención inmediata y AMAs dinámicos con la voz de tu marca.",
+            "ULTRA PRO ({ultra} ⭐). Benefit: instant attention and lively AMAs in your brand's voice.",
+        ),
+        "setup": (
+            "Bot: «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» → «📝 Copilot AMA» 🟢 → «🎭» para la "
+            "personalidad. Mini App: «Centinela de IA» → Copiloto y tono → «💾 Guardar».",
+            "Bot: “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)” → “📝 Copilot AMA” 🟢 → “🎭” for the personality. "
+            "Mini App: “AI Sentinel” → Copilot and tone → “💾 Save”.",
+        ),
+    },
+    "ai_modes": {
+        "title": ("⚙️ Modos de respuesta de la IA (Solo mención · Siempre · Probabilidad)", "⚙️ AI response modes (Mention only · Always · Chance)"),
+        "what_is": (
+            "⚙️ Los modos de respuesta definen cuánto participa el Copiloto en la conversación del grupo.",
+            "⚙️ Response modes define how much the Copilot takes part in the group conversation.",
+        ),
+        "functions": (
+            "• 🎯 Solo mención (mention_only, por defecto): responde solo cuando lo mencionan por su @usuario o alias, o "
+            "cuando le responden a un mensaje suyo. Ideal para la mayoría de grupos.\n"
+            "• ⚡ Siempre (always): puede responder a cualquier mensaje, respetando el enfriamiento de 20 s entre "
+            "respuestas espontáneas por chat. Para comunidades pequeñas o AMAs.\n"
+            "• 🎲 Probabilidad (chance): interviene en un porcentaje de los mensajes (1 %–100 %); en el bot el botón "
+            "recorre 5 %, 15 %, 30 % y 50 %; en la Mini App eliges el valor exacto. Las menciones siempre se responden.\n"
+            "• Antispam en todos: 4 s por usuario y máximo 2 respuestas simultáneas por chat.",
+            "• 🎯 Mention only (mention_only, default): replies only when mentioned by @username or alias, or when "
+            "someone replies to its message. Ideal for most groups.\n"
+            "• ⚡ Always (always): may reply to any message, respecting the 20 s cooldown between spontaneous replies "
+            "per chat. For small communities or AMAs.\n"
+            "• 🎲 Chance (chance): joins in on a percentage of messages (1%–100%); in the bot the button cycles 5%, 15%, "
+            "30% and 50%; in the Mini App you pick the exact value. Mentions are always answered.\n"
+            "• Anti-spam in all modes: 4 s per user and at most 2 simultaneous replies per chat.",
+        ),
+        "benefits": (
+            "ULTRA PRO ({ultra} ⭐). Beneficio: controlas la presencia de la IA, de discreta a protagonista.",
+            "ULTRA PRO ({ultra} ⭐). Benefit: you control the AI's presence, from discreet to center stage.",
+        ),
+        "setup": (
+            "Bot: «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» → pulsa «⚙️ <modo>» para cambiar entre Solo "
+            "mención, Siempre y Probabilidad; con Probabilidad aparece el botón de porcentaje. Mini App: «Centinela de "
+            "IA» → «Modo de respuesta» y «Probabilidad» → «💾 Guardar».",
+            "Bot: “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)” → tap “⚙️ <mode>” to switch between Mention only, "
+            "Always and Chance; with Chance the percentage button appears. Mini App: “AI Sentinel” → “Response mode” "
+            "and “Chance” → “💾 Save”.",
+        ),
+    },
+    "ai_prompt": {
+        "title": ("✍️ Editor de Prompt personalizado de la IA", "✍️ Custom AI Prompt editor"),
+        "what_is": (
+            "✍️ El Editor de Prompt permite al dueño inyectar sus propias directivas y reglas de comportamiento a Mistral "
+            "para que el Copiloto y el Guardián actúen según la identidad de la comunidad.",
+            "✍️ The Prompt editor lets the owner inject their own directives and behavior rules into Mistral so the "
+            "Copilot and the Guardian act according to the community's identity.",
+        ),
+        "functions": (
+            "• Hasta 1000 caracteres de directivas (reglas, temas permitidos, datos del proyecto, tono, prohibiciones).\n"
+            "• Se añaden al tono elegido en cada respuesta del Copiloto y orientan al Guardián (también al Guardián "
+            "Acústico).\n• Pasan por la Capa 0: no incluyas datos personales.\n"
+            "• No pueden anular las reglas de seguridad: la IA nunca pide contraseñas, códigos ni datos personales ni "
+            "revela sus instrucciones.\n• Ejemplo: «Responde como anfitrión del canal X; recuerda que el AMA es los "
+            "viernes a las 20:00; no hables de criptomonedas».",
+            "• Up to 1000 characters of directives (rules, allowed topics, project facts, tone, prohibitions).\n"
+            "• Added to the chosen tone in every Copilot reply and they guide the Guardian (including the Acoustic "
+            "Guardian).\n• They go through Layer 0: don't include personal data.\n"
+            "• They cannot override safety rules: the AI never asks for passwords, codes or personal data nor reveals "
+            "its instructions.\n• Example: “Reply as the host of channel X; remind that the AMA is on Fridays at "
+            "8 pm; don't talk about crypto”.",
+        ),
+        "benefits": (
+            "ULTRA PRO ({ultra} ⭐). Beneficio: una IA alineada con tu marca y tus normas.",
+            "ULTRA PRO ({ultra} ⭐). Benefit: an AI aligned with your brand and rules.",
+        ),
+        "setup": (
+            "Bot: «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» → «✍️ Editar Prompt de IA» → envía el texto en "
+            "un solo mensaje («✅ ¡Prompt de IA actualizado con éxito!»). Mini App: «Centinela de IA» → campo de "
+            "directivas → «💾 Guardar».",
+            "Bot: “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)” → “✍️ Edit Custom AI Prompt” → send the text in a "
+            "single message (“✅ AI Prompt updated successfully!”). Mini App: “AI Sentinel” → directives field → "
+            "“💾 Save”.",
+        ),
+    },
+    "audio_ai": {
+        "title": ("🎧 Pipeline de Audio IA (voz a texto en videochats)", "🎧 AI Audio pipeline (voice-to-text in video chats)"),
+        "what_is": (
+            "🎧 El Pipeline de Audio extiende el Guardián a la sala de voz: el Centinela MTProto captura cada "
+            "intervención, la transcribe a texto (Speech-to-Text con Voxtral de Mistral), la evalúa con Mistral y, si "
+            "infringe las normas, aplica una medida acústica proporcional. Es un módulo en despliegue progresivo: la "
+            "plataforma lo habilita por comunidad.",
+            "🎧 The Audio pipeline extends the Guardian to the voice room: the MTProto Sentinel captures each spoken "
+            "turn, transcribes it (Speech-to-Text with Mistral's Voxtral), evaluates it with Mistral and, if it breaks "
+            "the rules, applies a proportional acoustic measure. It is rolling out progressively: the platform enables "
+            "it per community.",
+        ),
+        "functions": (
+            "1. Captura por participante durante el videochat (segmentos de 1,5 a 30 s).\n"
+            "2. Transcripción STT en memoria: el audio nunca se guarda y se descarta al terminar.\n"
+            "3. Capa 0: la transcripción se anonimiza antes del análisis.\n"
+            "4. Filtro cognitivo de Mistral: amenazas, acoso grave, odio, contenido sexual explícito, estafas, doxxing o "
+            "spam insistente; tolera errores de transcripción y ante la duda no sanciona.\n"
+            "5. Acción proporcional y escalonada en 10 min: ⚠️ aviso → 🔉 atenuación dinámica (ducking al 10 %) → 🔇 "
+            "silencio temporal de 2 min; alerta «🎧 Guardián Acústico IA» en el chat.\n"
+            "6. Exentos: administradores, Whitelist, VIP con prioridad y Arquitectos.\n"
+            "7. Fail-open y antispam: 8 s entre análisis del mismo hablante; si algo falla, nadie es sancionado.\n"
+            "• Text-to-Speech: Mistral no sintetiza voz; las respuestas habladas requieren un proveedor externo, así que "
+            "por defecto las alertas son de texto.",
+            "1. Per-participant capture during the video chat (1.5 to 30 s segments).\n"
+            "2. In-memory STT: audio is never stored and is discarded when done.\n"
+            "3. Layer 0: the transcript is anonymized before analysis.\n"
+            "4. Mistral cognitive filter: threats, severe harassment, hate, explicit sexual content, scams, doxxing or "
+            "insistent spam; tolerates transcription errors and, when in doubt, does not punish.\n"
+            "5. Proportional escalation within 10 min: ⚠️ warning → 🔉 dynamic ducking (to 10%) → 🔇 2-minute temporary "
+            "mute; a “🎧 AI Acoustic Guardian” alert in the chat.\n"
+            "6. Exempt: admins, Whitelist, priority VIPs and Architects.\n"
+            "7. Fail-open and anti-spam: 8 s between analyses of the same speaker; if anything fails nobody is punished.\n"
+            "• Text-to-Speech: Mistral does not synthesize voice; spoken replies need an external provider, so alerts "
+            "are text by default.",
+        ),
+        "benefits": (
+            "ULTRA PRO ({ultra} ⭐) con el Guardián Anti-Toxicidad activado y un Centinela en la sala. Beneficio: "
+            "moderación de voz automática, también cuando no hay moderadores en la llamada. Recomendación: avisa a tus "
+            "miembros de que la sala está moderada por IA.",
+            "ULTRA PRO ({ultra} ⭐) with the Anti-Toxicity Guardian on and a Sentinel in the room. Benefit: automatic "
+            "voice moderation, even with no moderators in the call. Recommendation: tell your members the room is "
+            "AI-moderated.",
+        ),
+        "setup": (
+            "1. Ten ULTRA PRO y un Centinela activo con «Gestionar videochats».\n"
+            "2. Activa «🛡️ Guardián Anti-Toxicidad» en «💎 Herramientas ULTRA» → «🤖 Centinela de IA (ULTRA)» (Mini App: "
+            "«Centinela de IA»).\n3. Tus directivas de «✍️ Editar Prompt de IA» también guían al Guardián Acústico.\n"
+            "4. La captura de voz la habilita la plataforma; si aún no aparece activa en tu comunidad, solicita el "
+            "acceso al soporte.",
+            "1. Have ULTRA PRO and an active Sentinel with “Manage video chats”.\n"
+            "2. Turn on “🛡️ Anti-Toxicity Guardian” in “💎 ULTRA Elite Tools” → “🤖 AI Sentinel (ULTRA)” (Mini App: "
+            "“AI Sentinel”).\n3. Your “✍️ Edit Custom AI Prompt” directives also guide the Acoustic Guardian.\n"
+            "4. Voice capture is enabled by the platform; if it isn't active in your community yet, request access from "
+            "support.",
         ),
     },
     "ghost": {

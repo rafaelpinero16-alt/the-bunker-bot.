@@ -1727,6 +1727,7 @@ def mistral_status() -> dict:
         "model": MISTRAL_MODEL,
         "key_present": bool(MISTRAL_API_KEY),
         "open_breakers": {k: round(v["open_until"] - now) for k, v in _mistral_breakers.items() if v["open_until"] > now},
+        "audio": audio_pipeline_status(),   # v33 · pipeline STT (definido más abajo; se resuelve en tiempo de llamada)
     }
 
 
@@ -1924,13 +1925,13 @@ async def generate_sentinel_ai_response(
 
     try:
         context_history = await get_ai_chat_context(chat_id, limit=6)
-        messages = [{"role": "system", "content": system_instruction}]
+        messages: list[dict[str, str]] = [{"role": "system", "content": system_instruction}]
         for item in context_history or []:
             role = item.get("role")
             content = item.get("content")
             if role in ("user", "assistant") and content:
                 # El historial previo a la Fase 6 pudo guardarse sin minimizar: se sanea al leerlo.
-                messages.append({"role": role, "content": sanitize_pii_for_ai(str(content))[:1500]})
+                messages.append({"role": str(role), "content": sanitize_pii_for_ai(str(content))[:1500]})
         user_turn = f"{user_name}: {prompt_text}"[:4000]
         messages.append({"role": "user", "content": user_turn})
 
@@ -2219,6 +2220,460 @@ async def _sentinel_incoming_message_dispatcher(client: Client, message):
     )
 
 
+# ==========================================================================
+# 🎧 v33 · PIPELINE DE AUDIO INTELIGENTE (STT → filtro cognitivo Mistral → moderación acústica)
+# ==========================================================================
+# Estado: INFRAESTRUCTURA LISTA, CAPTURA DESACTIVADA POR DEFECTO.
+#   • Pyrogram NO entrega el audio de los videochats: hace falta un backend de captura (p. ej. pytgcalls/ntgcalls)
+#     que entregue segmentos PCM por participante. Ese backend se conecta con register_audio_capture_backend() y
+#     publica cada intervención con submit_voice_segment(). Sin backend, nada de este bloque se ejecuta.
+#   • Activación global: AUDIO_AI_ENABLED=1. Por comunidad: licencia ULTRA PRO + Guardián IA activado.
+#   • Privacidad: el audio se procesa en memoria y se descarta al terminar; JAMÁS se guarda en disco ni en base de
+#     datos. Solo se conserva un veredicto mínimo (sin transcripción completa) para el registro de moderación. La
+#     transcripción pasa por la Capa 0 (sanitize_pii_for_ai) antes de llegar al modelo de texto. Avisa a tus miembros
+#     de que la sala está moderada por IA antes de activarlo (obligación legal en muchas jurisdicciones).
+#   • Fail-open: ante cualquier fallo (STT, red, Mistral, JSON inválido) NO se sanciona a nadie.
+#   • TTS: Mistral no ofrece síntesis de voz; las respuestas habladas quedan como gancho (register_tts_backend) para
+#     un proveedor externo. Por defecto las alertas se publican como texto en el chat.
+import io as _io
+import wave as _wave
+from collections import deque as _deque
+from dataclasses import dataclass as _dataclass, field as _dc_field
+from typing import Awaitable as _Awaitable, Callable as _Callable, Literal as _Literal
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on", "si", "sí")
+
+
+AUDIO_AI_ENABLED = _env_flag("AUDIO_AI_ENABLED", False)
+MISTRAL_STT_MODEL = _clean_env_secret(os.getenv("MISTRAL_STT_MODEL", "voxtral-mini-latest")) or "voxtral-mini-latest"
+AUDIO_SEGMENT_MIN_SECONDS = _env_float("AUDIO_SEGMENT_MIN_SECONDS", 1.5)
+AUDIO_SEGMENT_MAX_SECONDS = _env_float("AUDIO_SEGMENT_MAX_SECONDS", 30.0)
+AUDIO_QUEUE_MAX = _env_int("AUDIO_QUEUE_MAX", 200)
+AUDIO_WORKERS = max(1, min(8, _env_int("AUDIO_WORKERS", 2)))
+AUDIO_USER_COOLDOWN = _env_float("AUDIO_USER_COOLDOWN", 8.0)           # s entre análisis del mismo hablante
+AUDIO_STT_TIMEOUT = _env_float("AUDIO_STT_TIMEOUT", 25.0)
+AUDIO_EVAL_TIMEOUT = min(MISTRAL_TIMEOUT_SECONDS, _env_float("AUDIO_EVAL_TIMEOUT", 12.0))
+AUDIO_STRIKE_WINDOW = _env_float("AUDIO_STRIKE_WINDOW", 600.0)         # ventana de reincidencia (10 min)
+AUDIO_MUTE_HOLD_SECONDS = _env_float("AUDIO_MUTE_HOLD_SECONDS", 120.0)
+AUDIO_DUCK_PCT = max(1, min(90, _env_int("AUDIO_DUCK_PCT", 10)))
+AUDIO_MIN_CONFIDENCE = max(0.0, min(1.0, _env_float("AUDIO_MIN_CONFIDENCE", 0.7)))
+
+AudioAction = _Literal["none", "warn", "duck", "mute"]
+_AUDIO_ACTIONS: tuple[str, ...] = ("none", "warn", "duck", "mute")
+_AUDIO_SEVERITY_RANK: dict[str, int] = {"none": 0, "low": 1, "medium": 2, "high": 3}
+_AUDIO_CATEGORIES: tuple[str, ...] = ("threat", "harassment", "hate", "sexual", "scam", "doxxing", "spam", "other")
+
+
+@_dataclass(slots=True)
+class VoiceSegment:
+    """Una intervención de voz de UN participante, tal como la entrega el backend de captura."""
+    chat_id: int
+    user_id: int
+    pcm: bytes                     # PCM lineal 16-bit little-endian
+    sample_rate: int = 48000
+    channels: int = 1
+    user_name: str = ""
+    lang_hint: Optional[str] = None   # 'es' / 'en' si el backend lo conoce
+    captured_at: float = _dc_field(default_factory=time.time)
+
+    @property
+    def duration(self) -> float:
+        frame_bytes = 2 * max(1, int(self.channels))
+        return len(self.pcm) / float(frame_bytes * max(1, int(self.sample_rate)))
+
+
+@_dataclass(slots=True)
+class TranscriptResult:
+    chat_id: int
+    user_id: int
+    text: str
+    language: Optional[str]
+    duration: float
+    model: str
+
+
+@_dataclass(slots=True)
+class AudioVerdict:
+    flagged: bool
+    action: str = "none"           # uno de _AUDIO_ACTIONS
+    severity: str = "none"         # none | low | medium | high
+    category: str = "other"
+    confidence: float = 0.0
+    reason: str = ""
+
+    def as_log(self) -> dict[str, Any]:
+        return {"flagged": self.flagged, "action": self.action, "severity": self.severity,
+                "category": self.category, "confidence": round(self.confidence, 2), "reason": self.reason[:160]}
+
+
+SAFE_AUDIO_VERDICT = AudioVerdict(flagged=False)
+
+# Backends opcionales: captura (arranca/detiene la escucha por comunidad) y TTS (síntesis de respuestas habladas).
+CaptureBackend = _Callable[[int, bool], _Awaitable[bool]]          # (chat_id, start) -> ok
+TTSBackend = _Callable[[int, str, str], _Awaitable[Optional[bytes]]]   # (chat_id, text, lang) -> audio | None
+_audio_capture_backend: Optional[CaptureBackend] = None
+_tts_backend: Optional[TTSBackend] = None
+_audio_queue: Optional[asyncio.Queue] = None
+_audio_workers: list[asyncio.Task] = []
+_audio_last_eval: dict[tuple[int, int], float] = {}
+_audio_strikes: dict[tuple[int, int], _deque] = {}
+_audio_stats: dict[str, int] = {"submitted": 0, "dropped": 0, "transcribed": 0, "flagged": 0, "actions": 0, "errors": 0}
+_audio_stt_warned = {"v": False}
+_AUDIO_STATE_CAP = 20000
+
+
+def register_audio_capture_backend(backend: Optional[CaptureBackend]) -> None:
+    """Conecta el backend de captura de voz (o None para desconectarlo)."""
+    global _audio_capture_backend
+    _audio_capture_backend = backend
+    logger.info(f"🎧 [Audio IA] Backend de captura {'registrado' if backend else 'retirado'}.")
+
+
+def register_tts_backend(backend: Optional[TTSBackend]) -> None:
+    """Conecta un proveedor externo de Text-to-Speech (Mistral no ofrece TTS)."""
+    global _tts_backend
+    _tts_backend = backend
+    logger.info(f"🔈 [Audio IA] Backend TTS {'registrado' if backend else 'retirado'}.")
+
+
+def audio_pipeline_status() -> dict[str, Any]:
+    """Estado sin datos personales (Perímetro, /aidiag, base de conocimientos)."""
+    return {
+        "enabled": AUDIO_AI_ENABLED,
+        "capture_backend": _audio_capture_backend is not None,
+        "tts_backend": _tts_backend is not None,
+        "stt_model": MISTRAL_STT_MODEL,
+        "stt_supported": _stt_api() is not None,
+        "workers": sum(1 for t in _audio_workers if not t.done()),
+        "queue": _audio_queue.qsize() if _audio_queue is not None else 0,
+        "stats": dict(_audio_stats),
+    }
+
+
+def _bounded_set(store: dict, key, value) -> None:
+    if len(store) >= _AUDIO_STATE_CAP:
+        for old in list(store)[: _AUDIO_STATE_CAP // 2]:
+            store.pop(old, None)
+    store[key] = value
+
+
+def purge_audio_state(chat_id: int) -> None:
+    """Olvida cooldowns y reincidencias de una comunidad (al desconectar el Centinela)."""
+    for store in (_audio_last_eval, _audio_strikes):
+        for key in [k for k in store if k[0] == chat_id]:
+            store.pop(key, None)
+
+
+def _pcm_to_wav(segment: VoiceSegment) -> bytes:
+    """Envuelve el PCM en un WAV en memoria (formato que acepta la API de transcripción)."""
+    buffer = _io.BytesIO()
+    with _wave.open(buffer, "wb") as wav:
+        wav.setnchannels(max(1, int(segment.channels)))
+        wav.setsampwidth(2)
+        wav.setframerate(max(8000, int(segment.sample_rate)))
+        wav.writeframes(segment.pcm)
+    return buffer.getvalue()
+
+
+def _stt_api():
+    """client.audio.transcriptions del SDK mistralai (≥ 1.9, modelos Voxtral) o None si la versión no lo trae."""
+    if mistral_client is None:
+        return None
+    audio = getattr(mistral_client, "audio", None)
+    return getattr(audio, "transcriptions", None) if audio is not None else None
+
+
+async def transcribe_voice_stream(segment: VoiceSegment) -> Optional[TranscriptResult]:
+    """
+    STT de una intervención con Mistral (Voxtral). Devuelve None si el segmento es demasiado corto, si el SDK no
+    soporta audio o si la API falla (fail-open). El audio nunca sale de memoria salvo hacia la API.
+    """
+    duration = segment.duration
+    if duration < AUDIO_SEGMENT_MIN_SECONDS or not segment.pcm:
+        return None
+    if duration > AUDIO_SEGMENT_MAX_SECONDS:
+        frame_bytes = 2 * max(1, int(segment.channels))
+        keep = int(AUDIO_SEGMENT_MAX_SECONDS * segment.sample_rate) * frame_bytes
+        segment.pcm = segment.pcm[-keep:]   # lo más reciente es lo relevante para moderar
+        duration = segment.duration
+    api = _stt_api()
+    if api is None:
+        if not _audio_stt_warned["v"]:
+            _audio_stt_warned["v"] = True
+            logger.error("❌ [Audio IA] El SDK de Mistral instalado no expone audio.transcriptions "
+                         f"(SDK={MISTRAL_SDK_VERSION or '?'}). Actualiza mistralai para usar {MISTRAL_STT_MODEL}.")
+        return None
+    if not _mistral_available("audio_stt"):
+        return None
+    file_payload: dict[str, Any] = {"content": _pcm_to_wav(segment), "file_name": f"vc_{segment.chat_id}.wav"}
+    kwargs: dict[str, Any] = {"model": MISTRAL_STT_MODEL, "file": file_payload}
+    if segment.lang_hint in ("es", "en"):
+        kwargs["language"] = segment.lang_hint
+    complete_async = getattr(api, "complete_async", None)
+    complete_sync = getattr(api, "complete", None)
+    try:
+        async with _MISTRAL_SEMAPHORE:
+            if callable(complete_async):
+                result: Any = await asyncio.wait_for(complete_async(**kwargs), timeout=AUDIO_STT_TIMEOUT)
+            elif callable(complete_sync):
+                result = await asyncio.wait_for(asyncio.to_thread(complete_sync, **kwargs), timeout=AUDIO_STT_TIMEOUT)
+            else:
+                return None
+        _register_mistral_result(True, "audio_stt")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _register_mistral_result(False, "audio_stt")
+        _audio_stats["errors"] += 1
+        logger.warning(f"⚠️ [Audio IA] Transcripción fallida en {segment.chat_id}: {describe_mistral_error(exc)}")
+        return None
+    text = str(getattr(result, "text", None) or (result.get("text") if isinstance(result, dict) else "") or "").strip()
+    if not text:
+        return None
+    _audio_stats["transcribed"] += 1
+    language = getattr(result, "language", None) or (result.get("language") if isinstance(result, dict) else None)
+    return TranscriptResult(chat_id=segment.chat_id, user_id=segment.user_id, text=text[:4000],
+                            language=str(language) if language else segment.lang_hint, duration=duration,
+                            model=MISTRAL_STT_MODEL)
+
+
+def _parse_audio_verdict(raw: str) -> AudioVerdict:
+    """JSON del modelo → AudioVerdict validado. Cualquier rareza → veredicto seguro (no sancionar)."""
+    try:
+        data = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return SAFE_AUDIO_VERDICT
+    if not isinstance(data, dict):
+        return SAFE_AUDIO_VERDICT
+    action = str(data.get("action") or "none").strip().lower()
+    severity = str(data.get("severity") or "none").strip().lower()
+    category = str(data.get("category") or "other").strip().lower()
+    try:
+        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    flagged = bool(data.get("flagged")) and action in _AUDIO_ACTIONS and action != "none"
+    if not flagged or confidence < AUDIO_MIN_CONFIDENCE:
+        return AudioVerdict(flagged=False, confidence=confidence)
+    return AudioVerdict(flagged=True, action=action,
+                        severity=severity if severity in _AUDIO_SEVERITY_RANK else "medium",
+                        category=category if category in _AUDIO_CATEGORIES else "other",
+                        confidence=confidence, reason=str(data.get("reason") or "")[:200])
+
+
+async def evaluate_audio_transcript_with_mistral(transcript: TranscriptResult, ai_cfg: Optional[dict] = None) -> AudioVerdict:
+    """
+    Filtro cognitivo: la transcripción (ya minimizada por la Capa 0) se evalúa con Mistral y devuelve una acción
+    propuesta: none | warn | duck (atenuación dinámica) | mute (silencio temporal). Fail-open ante cualquier error.
+    """
+    if not transcript.text or len(transcript.text.strip()) < 6 or not _mistral_available("audio_guardian"):
+        return SAFE_AUDIO_VERDICT
+    cfg = ai_cfg or {}
+    safe_text = sanitize_pii_for_ai(transcript.text)
+    custom = sanitize_pii_for_ai(str(cfg.get("custom_prompt") or ""))[:1000]
+    system_prompt = (
+        "Eres el Guardián Acústico de The Bunker OS. Recibes la TRANSCRIPCIÓN automática (puede contener errores de "
+        "reconocimiento) de lo que un participante acaba de decir en el videochat de una comunidad de Telegram. "
+        "Decide si requiere moderación. Marca flagged=true SOLO ante: amenazas de violencia, acoso o insultos graves "
+        "dirigidos a alguien, discurso de odio contra grupos protegidos, contenido sexual explícito, estafas o "
+        "fraudes, divulgación de datos personales (doxxing) o spam/publicidad insistente. Sarcasmo, groserías leves, "
+        "opiniones fuertes y debate NO se sancionan. Ante la duda: flagged=false.\n"
+        "Acción proporcional: 'warn' (aviso), 'duck' (bajar su volumen), 'mute' (silencio temporal, solo gravedad alta).\n"
+        f"{PII_PLACEHOLDER_NOTE}\n"
+        + (f"Directivas del Creador: {custom}\n" if custom else "")
+        + 'Responde SOLO con JSON: {"flagged": bool, "action": "none|warn|duck|mute", "severity": "none|low|medium|high", '
+          '"category": "threat|harassment|hate|sexual|scam|doxxing|spam|other", "confidence": 0.0-1.0, "reason": "≤20 palabras"}'
+    )
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Idioma detectado: {transcript.language or 'desconocido'}\nTranscripción: {safe_text}"},
+    ]
+    try:
+        response = await _mistral_complete("audio_guardian", timeout=AUDIO_EVAL_TIMEOUT, model=MISTRAL_MODEL,
+                                           messages=messages, max_tokens=120, temperature=0,
+                                           response_format={"type": "json_object"})
+    except Exception:
+        return SAFE_AUDIO_VERDICT   # _mistral_complete ya registró el motivo
+    return _parse_audio_verdict(_extract_mistral_text(response))
+
+
+async def _audio_user_is_exempt(chat_id: int, user_id: int) -> bool:
+    """Arquitectos, cuentas de servicio, administradores, Whitelist y VIP con prioridad nunca se moderan por voz."""
+    if is_super_admin(user_id) or user_id in SERVICE_ACCOUNT_IDS or _is_chat_admin_cached(chat_id, user_id):
+        return True
+    try:
+        if await is_whitelisted(user_id):
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(await _vip_role_priority(chat_id, user_id))
+    except Exception:
+        return False
+
+
+def _escalate_audio_action(chat_id: int, user_id: int, proposed: str) -> str:
+    """Reincidencia en la ventana: el 2.º aviso pasa a duck y el 3.º a mute (nunca baja de lo propuesto)."""
+    now = time.time()
+    history = _audio_strikes.get((chat_id, user_id))
+    if history is None:
+        history = _deque(maxlen=10)
+        _bounded_set(_audio_strikes, (chat_id, user_id), history)
+    while history and now - history[0] > AUDIO_STRIKE_WINDOW:
+        history.popleft()
+    history.append(now)
+    ladder = ("warn", "duck", "mute")
+    escalated = ladder[min(len(history), len(ladder)) - 1]
+    rank = {"none": 0, "warn": 1, "duck": 2, "mute": 3}
+    return escalated if rank[escalated] > rank.get(proposed, 0) else proposed
+
+
+async def _apply_audio_verdict(segment: VoiceSegment, verdict: AudioVerdict) -> str:
+    """Ejecuta la acción en la llamada (vía Centinela) y publica el aviso. Devuelve la acción aplicada."""
+    action = _escalate_audio_action(segment.chat_id, segment.user_id, verdict.action)
+    who = html.escape(segment.user_name or str(segment.user_id))
+    applied = "none"
+    if action == "mute":
+        if await set_participant_mic(segment.chat_id, segment.user_id, muted=True):
+            applied = "mute"
+
+            async def _release() -> None:
+                await asyncio.sleep(AUDIO_MUTE_HOLD_SECONDS)
+                await set_participant_mic(segment.chat_id, segment.user_id, muted=False, volume=AUDIO_DUCK_PCT * 100)
+
+            _spawn(_release(), name=f"audio_unmute:{segment.chat_id}:{segment.user_id}")
+    elif action == "duck":
+        if await set_participant_mic(segment.chat_id, segment.user_id, muted=False, volume=AUDIO_DUCK_PCT * 100):
+            applied = "duck"
+    elif action == "warn":
+        applied = "warn"
+    if applied == "none":
+        return applied
+    labels = {"warn": "⚠️ Aviso", "duck": f"🔉 Volumen reducido al {AUDIO_DUCK_PCT}%",
+              "mute": f"🔇 Silencio temporal ({int(AUDIO_MUTE_HOLD_SECONDS)} s)"}
+    text = (f"🎧 <b>Guardián Acústico IA</b>\n\n{labels[applied]} para <b>{who}</b> por una intervención de voz que "
+            f"infringe las normas de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>")
+    _spawn(_dispatch_radar_notice(segment.chat_id, text, auto_delete_after=60), name=f"audio_notice:{segment.chat_id}")
+    _audio_stats["actions"] += 1
+    logger.info(f"🎧 [Audio IA] {applied} en {segment.chat_id} para {segment.user_id} · {verdict.as_log()}")
+    return applied
+
+
+async def process_voice_segment(segment: VoiceSegment) -> AudioVerdict:
+    """
+    Recorrido completo de UNA intervención: reglas ULTRA PRO → exenciones → STT → filtro Mistral → acción.
+    Pensado para el worker de la cola, pero puede llamarse directamente (pruebas / backends síncronos).
+    """
+    if not AUDIO_AI_ENABLED or mistral_client is None:
+        return SAFE_AUDIO_VERDICT
+    chat_id, user_id = int(segment.chat_id), int(segment.user_id)
+    if not _is_group_chat_id(chat_id) or user_id <= 0:
+        return SAFE_AUDIO_VERDICT
+    if not await _chat_has_ultra_license(chat_id):
+        return SAFE_AUDIO_VERDICT
+    ai_cfg = await _get_ai_cfg_cached(chat_id)
+    if ai_cfg.get("guardian_status") != 1:
+        return SAFE_AUDIO_VERDICT
+    if await _audio_user_is_exempt(chat_id, user_id):
+        return SAFE_AUDIO_VERDICT
+    now = time.monotonic()
+    if now - _audio_last_eval.get((chat_id, user_id), 0.0) < AUDIO_USER_COOLDOWN:
+        return SAFE_AUDIO_VERDICT
+    _bounded_set(_audio_last_eval, (chat_id, user_id), now)
+    transcript = await transcribe_voice_stream(segment)
+    if transcript is None:
+        return SAFE_AUDIO_VERDICT
+    verdict = await evaluate_audio_transcript_with_mistral(transcript, ai_cfg)
+    if verdict.flagged:
+        _audio_stats["flagged"] += 1
+        await _apply_audio_verdict(segment, verdict)
+    return verdict
+
+
+async def _audio_worker(index: int) -> None:
+    queue = _audio_queue
+    if queue is None:
+        return
+    while True:
+        segment: VoiceSegment = await queue.get()
+        try:
+            await process_voice_segment(segment)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _audio_stats["errors"] += 1
+            logger.warning(f"⚠️ [Audio IA] Worker {index}: fallo procesando {segment.chat_id}: {exc}")
+        finally:
+            segment.pcm = b""   # el audio se descarta siempre
+            queue.task_done()
+
+
+def _ensure_audio_workers() -> None:
+    global _audio_queue
+    if _audio_queue is None:
+        _audio_queue = asyncio.Queue(maxsize=max(10, AUDIO_QUEUE_MAX))
+    alive = [t for t in _audio_workers if not t.done()]
+    _audio_workers[:] = alive
+    for i in range(len(alive), AUDIO_WORKERS):
+        _audio_workers.append(_spawn(_audio_worker(i), name=f"audio_worker:{i}"))
+
+
+def submit_voice_segment(segment: VoiceSegment) -> bool:
+    """
+    Punto de entrada del backend de captura (no bloquea). Devuelve False si el pipeline está apagado o la cola está
+    llena: en ese caso el segmento se descarta (nunca se acumula audio en memoria).
+    """
+    if not AUDIO_AI_ENABLED or mistral_client is None:
+        return False
+    _ensure_audio_workers()
+    queue = _audio_queue
+    if queue is None:
+        return False
+    try:
+        queue.put_nowait(segment)
+    except asyncio.QueueFull:
+        _audio_stats["dropped"] += 1
+        return False
+    _audio_stats["submitted"] += 1
+    return True
+
+
+async def start_audio_capture(chat_id: int) -> bool:
+    """Pide al backend que escuche la llamada de la comunidad (lo invoca el monitor al detectar un videochat)."""
+    if not AUDIO_AI_ENABLED or _audio_capture_backend is None:
+        return False
+    try:
+        return bool(await _audio_capture_backend(int(chat_id), True))
+    except Exception as exc:
+        logger.warning(f"⚠️ [Audio IA] El backend no pudo iniciar la captura en {chat_id}: {exc}")
+        return False
+
+
+async def stop_audio_capture(chat_id: int) -> None:
+    if _audio_capture_backend is None:
+        return
+    try:
+        await _audio_capture_backend(int(chat_id), False)
+    except Exception as exc:
+        logger.debug(f"[Audio IA] Fallo deteniendo la captura en {chat_id}: {exc}")
+
+
+async def synthesize_speech_reply(chat_id: int, text: str, lang: str = "es") -> Optional[bytes]:
+    """TTS mediante el backend externo registrado; None si no hay (Mistral no sintetiza voz)."""
+    if _tts_backend is None or not text:
+        return None
+    try:
+        return await _tts_backend(int(chat_id), text[:600], "en" if lang == "en" else "es")
+    except Exception as exc:
+        logger.warning(f"⚠️ [Audio IA] TTS fallido en {chat_id}: {exc}")
+        return None
+
+
 async def _refresh_admin_cache(client: Client, chat_id: int, bot_client_id: int):
     async def _collect() -> set:
         collected = set()
@@ -2483,8 +2938,11 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             "call": announced_call_id,
                             "reason": "replaced" if raw_call_id else "ended",
                         })
+                        _spawn(stop_audio_capture(chat_id), name=f"audio_stop:{chat_id}")   # v33
                     if raw_call_id is not None:
                         publish_radar_event(chat_id, "voice_call_started", {"call": raw_call_id})
+                        # v33 · Pipeline de audio (inactivo sin AUDIO_AI_ENABLED y sin backend de captura).
+                        _spawn(start_audio_capture(chat_id), name=f"audio_start:{chat_id}")
                     announced_call_id = raw_call_id
                     voice_state = {"present": set(), "unmuted": -1, "last_fetch": 0.0}
                     _reset_call_moderation_state(chat_id)
@@ -3220,6 +3678,7 @@ def _purge_group_state(group_id: int) -> None:
     (puede estar retenido por quien llama): esos locks los poda el janitor cuando están libres.
     """
     admin_caches.pop(group_id, None)
+    purge_audio_state(group_id)   # v33 · cooldowns y reincidencias del Guardián Acústico
     _forbidden_strikes.pop(group_id, None)
     _autolower_cooldowns.pop(group_id, None)
     _call_rights_cache.pop(group_id, None)
