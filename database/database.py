@@ -25,9 +25,11 @@ import re
 import secrets
 import sqlite3
 import threading
+import types
 import urllib.parse
 from html.parser import HTMLParser
 from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, Optional, ParamSpec, Protocol, TypeVar, cast
 from database.vault import encrypt_secret, decrypt_secret
 
 logger = logging.getLogger("database")
@@ -156,13 +158,30 @@ def close_thread_connection() -> None:
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def db_async(fn):
-    """Ejecuta la función SQLite síncrona en un hilo. La versión síncrona queda en `fn.sync` para usos internos."""
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+class AsyncDBFunction(Protocol[_P, _R]):
+    """Función de base de datos expuesta como corrutina; `.sync` conserva la versión síncrona original."""
+    sync: Callable[_P, _R]
+
+    # CoroutineType (no Awaitable): así es asignable a los respaldos `async def` que algunos módulos declaran
+    # cuando la importación falla (mismo tipo que produce una corrutina real).
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> "types.CoroutineType[Any, Any, _R]": ...
+
+
+def db_async(fn: Callable[_P, _R]) -> AsyncDBFunction[_P, _R]:
+    """
+    Ejecuta la función SQLite síncrona en un hilo. La versión síncrona queda en `fn.sync` para usos internos.
+    v26 · Tipado con ParamSpec: Pylance / Pyright ven la firma real y un resultado AWAITABLE (antes cada
+    `await get_x(...)` se marcaba como "is not awaitable"). Comportamiento en tiempo de ejecución idéntico.
+    """
     @functools.wraps(fn)
-    async def wrapper(*args, **kwargs):
+    async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         return await asyncio.to_thread(fn, *args, **kwargs)
-    wrapper.sync = fn
-    return wrapper
+    setattr(wrapper, "sync", fn)
+    return cast(AsyncDBFunction[_P, _R], wrapper)
 
 
 def _ident(name: str) -> str:
@@ -358,7 +377,7 @@ def _upsert_setting(group_id: int, column: str, value) -> None:
         conn.commit()
 
 
-def _get_setting(group_id: int, column: str, default=0):
+def _get_setting(group_id: int, column: str, default: Any = 0) -> Any:
     column = _ident(column)
     with get_db_connection() as conn:
         try:
@@ -803,7 +822,7 @@ DEFAULT_LANG = "en" if str(os.getenv("BUNKER_DEFAULT_LANG", "en")).strip().lower
 SUPPORTED_LANGS = ("en", "es")
 
 
-def normalize_lang(value, default: str = None):
+def normalize_lang(value, default: Optional[str] = None):
     """'EN', 'es-419', 'es_CO', 'English' → 'en' / 'es'. Desconocido → default (None si no se indica)."""
     raw = str(value or "").strip().lower().replace("_", "-")
     if raw.startswith("en") or raw == "english":
@@ -825,7 +844,7 @@ def get_user_lang(user_id: int):
 
 
 @db_async
-def set_user_lang(user_id: int, lang: str, username: str = None, full_name: str = None) -> str:
+def set_user_lang(user_id: int, lang: str, username: Optional[str] = None, full_name: Optional[str] = None) -> str:
     """
     Guarda la preferencia. Si el usuario aún no existe, crea su fila con username / nombre (los mismos campos
     que get_or_create_user, para no dejar perfiles incompletos). Devuelve el idioma normalizado.
@@ -838,7 +857,7 @@ def set_user_lang(user_id: int, lang: str, username: str = None, full_name: str 
         )
         conn.execute("UPDATE users SET lang = ?, lang_updated_at = ? WHERE user_id = ?",
                      (clean, int(datetime.now(timezone.utc).timestamp()), int(user_id)))
-    return clean
+    return cast(str, clean)   # normalize_lang(…, DEFAULT_LANG) nunca devuelve None
 
 
 @db_async
@@ -1260,7 +1279,7 @@ def add_to_speaker_queue(group_id: int, user_id: int, full_name: str, username: 
             VALUES (?, ?, ?, ?, ?, 'waiting')
         """, (group_id, user_id, full_name, username, stars_paid))
         conn.commit()
-        return cursor.lastrowid
+        return cast(int, cursor.lastrowid)   # tipado: el valor (y su veracidad) no cambia
 
 
 @db_async
@@ -1352,7 +1371,7 @@ def create_web_session(user_id: int) -> str:
 
 
 @db_async
-def get_user_by_web_session(token: str) -> int:
+def get_user_by_web_session(token: str) -> Optional[int]:
     if not token:
         return None
     with get_db_connection() as conn:
@@ -2110,7 +2129,7 @@ def get_kv_setting(key: str, default=None):
 
 
 @db_async
-def set_kv_setting(key: str, value, updated_by: int = None) -> None:
+def set_kv_setting(key: str, value, updated_by: Optional[int] = None) -> None:
     with _write_transaction() as conn:
         conn.execute(
             "INSERT INTO bunker_kv (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?) "
@@ -2287,7 +2306,7 @@ def _parse_utc_offset(tz_label):
     return timezone(sign * timedelta(hours=hours, minutes=minutes))
 
 
-def is_night_mode_time(start_str: str, end_str: str, tz_label: str = None) -> bool:
+def is_night_mode_time(start_str: str, end_str: str, tz_label: Optional[str] = None) -> bool:
     """
     Indica si la hora actual cae dentro de la ventana [start, end].
     `tz_label` es opcional (p. ej. "Bogota (UTC-05)", el formato de la columna
@@ -2700,8 +2719,8 @@ def get_vip_mic_expiry_ts(user_id: int, group_id: int):
 @db_async
 def micvip_audit_record_purchase(charge_id: str, group_id: int, user_id: int, purchased_at: int, *,
                                  amount_stars: int = 0, currency: str = "XTR", payload: str = "",
-                                 username: str = None, full_name: str = None, source: str = "live",
-                                 expires_at: int = None, grant_status: str = "pending") -> bool:
+                                 username: Optional[str] = None, full_name: Optional[str] = None, source: str = "live",
+                                 expires_at: Optional[int] = None, grant_status: str = "pending") -> bool:
     """Inserta la compra (idempotente por charge_id). Devuelve True si es nueva."""
     if not charge_id:
         return False
@@ -2717,7 +2736,7 @@ def micvip_audit_record_purchase(charge_id: str, group_id: int, user_id: int, pu
 
 
 @db_async
-def micvip_audit_set_grant(charge_id: str, grant_status: str, expires_at: int = None) -> None:
+def micvip_audit_set_grant(charge_id: str, grant_status: str, expires_at: Optional[int] = None) -> None:
     status = grant_status if grant_status in MICVIP_GRANT_STATUSES else "pending"
     with _write_transaction() as conn:
         conn.execute("UPDATE micvip_audit SET grant_status = ?, expires_at = COALESCE(?, expires_at), verified_at = ? "
@@ -2913,7 +2932,7 @@ def _decrypt_api_hash(stored):
 
 
 @db_async
-def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: str = None, api_id: int = None, api_hash: str = None):
+def save_owner_session(user_id: int, group_id: int, session_string: str, phone_number: Optional[str] = None, api_id: Optional[int] = None, api_hash: Optional[str] = None):
     # Ciframos la cadena de sesión con AES-256 antes de guardarla en la base de datos.
     # v16: también el api_hash (credencial MTProto de la aplicación); la lectura lo descifra de forma
     # transparente y los registros antiguos en claro siguen funcionando (decrypt_secret los devuelve tal cual).
@@ -2937,7 +2956,7 @@ def save_owner_session(user_id: int, group_id: int, session_string: str, phone_n
 
 
 @db_async
-def get_owner_session(user_id: int, group_id: int = None):
+def get_owner_session(user_id: int, group_id: Optional[int] = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if group_id is not None:
@@ -2998,7 +3017,7 @@ def get_all_active_sessions():
 
 
 @db_async
-def revoke_owner_session(user_id: int, group_id: int = None, reason: str = None):
+def revoke_owner_session(user_id: int, group_id: Optional[int] = None, reason: Optional[str] = None):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if group_id is not None:
@@ -3103,7 +3122,7 @@ def set_podcast_status(group_id: int, status: int):
 
 
 @db_async
-def activate_panic(group_id: int, activated_by: int, chat_permissions_json: str = None) -> bool:
+def activate_panic(group_id: int, activated_by: int, chat_permissions_json: Optional[str] = None) -> bool:
     with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT panic_active FROM group_settings WHERE group_id = ?", (group_id,))
@@ -3369,7 +3388,7 @@ def set_channel_settings(channel_id: int, field: str, value):
         conn.commit()
 
 
-def _sanitize_target_link(target_link: str = None) -> str:
+def _sanitize_target_link(target_link: Optional[str] = None) -> Optional[str]:
     if target_link is None:
         return None
     clean = str(target_link).strip()
@@ -3389,10 +3408,10 @@ def create_channel_plan(
     plan_name: str,
     duration_days: int,
     stars_price: int,
-    promo_text: str = None,
-    media_id: str = None,
-    media_type: str = None,
-    target_link: str = None
+    promo_text: Optional[str] = None,
+    media_id: Optional[str] = None,
+    media_type: Optional[str] = None,
+    target_link: Optional[str] = None
 ) -> int:
     """
     Inserta un plan en `channel_plans` con status='active' dentro de BEGIN IMMEDIATE.
@@ -3431,11 +3450,11 @@ def create_channel_plan(
             int(channel_id), name, days, price,
             promo, media_id, media_type, _sanitize_target_link(target_link)
         ))
-        return cursor.lastrowid
+        return cast(int, cursor.lastrowid)   # tipado: el valor (y su veracidad) no cambia
 
 
 @db_async
-def get_channel_plan(plan_id: int) -> dict:
+def get_channel_plan(plan_id: int) -> Optional[dict]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3550,7 +3569,7 @@ def _clean_broadcast_lang(lang) -> str:
 
 
 @db_async
-def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int, lang: str = None) -> bool:
+def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours: int, lang: Optional[str] = None) -> bool:
     """
     Activa (o cambia) la difusión recurrente del plan. interval_hours ∈ PLAN_BROADCAST_INTERVALS; 0 la
     desactiva conservando el historial. Si el plan ya se difundió alguna vez, el próximo envío se ancla a
@@ -3680,7 +3699,7 @@ def get_due_channel_plan_broadcasts(limit: int = 25) -> list:
 
 
 @db_async
-def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, stars_paid: int, duration_days: int, invite_link: str = None):
+def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, stars_paid: int, duration_days: int, invite_link: Optional[str] = None):
     modifier = _sql_modifier(duration_days, "days")
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -3705,7 +3724,7 @@ def record_channel_subscription(channel_id: int, user_id: int, plan_id: int, sta
 
 
 @db_async
-def get_channel_subscription(channel_id: int, user_id: int) -> dict:
+def get_channel_subscription(channel_id: int, user_id: int) -> Optional[dict]:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3939,7 +3958,7 @@ def get_top_reputation(group_id: int, limit: int = 10) -> list:
 
 
 @db_async
-def record_hourly_chat_activity(group_id: int, dt: datetime = None):
+def record_hourly_chat_activity(group_id: int, dt: Optional[datetime] = None):
     now = dt or datetime.now()
     day_of_week = now.isoweekday()
     hour_of_day = now.hour
@@ -4530,7 +4549,7 @@ def get_chat_full_configuration(chat_id: int) -> dict:
 
 
 @db_async
-def update_chat_full_configuration(chat_id: int, config_dict: dict, updated_by: int = None) -> dict:
+def update_chat_full_configuration(chat_id: int, config_dict: dict, updated_by: Optional[int] = None) -> dict:
     """
     Valida y persiste en lote dentro de UNA transacción BEGIN IMMEDIATE (todo o nada) y devuelve el
     árbol resultante. El precio de MicVIP se escribe también en mic_vip_custom_price, igual que
@@ -5458,7 +5477,7 @@ def validate_log_report_payload(payload) -> dict:
 
 
 @db_async
-def save_log_report_config(group_id: int, payload: dict, updated_by: int = None) -> dict:
+def save_log_report_config(group_id: int, payload: dict, updated_by: Optional[int] = None) -> dict:
     """
     Persiste la configuración (BEGIN IMMEDIATE). Activar por primera vez ancla el reloj en "ahora": el
     primer informe sale tras un intervalo completo (para uno inmediato está "Enviar ahora"). Cambiar el
@@ -5741,8 +5760,8 @@ _DELEGATE_SELECT = "SELECT chat_id, user_id, user_name, " + ", ".join(DELEGATE_P
 
 # ---------- 🛡️ Administradores delegados ----------
 @db_async
-def upsert_architect_delegate(chat_id: int, user_id: int, user_name: str = "", granted_by: int = None,
-                              permissions: dict = None) -> dict:
+def upsert_architect_delegate(chat_id: int, user_id: int, user_name: str = "", granted_by: Optional[int] = None,
+                              permissions: Optional[dict] = None) -> dict:
     """Crea (todo en 🔴) o actualiza un delegado. Devuelve el registro resultante."""
     now = _now_ts()
     with _write_transaction() as conn:
@@ -5851,7 +5870,7 @@ def has_delegate_permission(chat_id: int, user_id: int, perm: str = "any") -> bo
 # ---------- 💎 Licencias concedidas por el Arquitecto ----------
 def _grant_row_to_dict(row) -> dict:
     keys = ("id", "scope", "target_id", "tier", "status", "granted_by", "granted_at", "expires_at", "ended_at", "ended_by", "note")
-    data = dict(zip(keys, row))
+    data: Dict[str, Any] = dict(zip(keys, row))
     data["permanent"] = data["expires_at"] is None
     return data
 
@@ -5890,7 +5909,7 @@ def _max_tier(*tiers) -> str:
 
 @db_async
 def grant_architect_license(scope: str, target_id: int, tier: str, duration_days: int, granted_by: int,
-                            note: str = None) -> dict:
+                            note: Optional[str] = None) -> dict:
     """
     Concede (o reemplaza) la licencia del objetivo. duration_days=0 → permanente.
     La concesión activa previa del mismo objetivo pasa a 'replaced' en la misma transacción.
@@ -6051,8 +6070,8 @@ def architect_grant_xp(group_id: int, user_id: int, full_name: str = "", usernam
 
 @db_async
 def record_architect_award(chat_id: int, user_id: int, user_name: str, award_type: str, amount: int,
-                           detail: str = "", granted_by: int = None, expires_at: int = None,
-                           tag_applied: bool = False, tag_title: str = None) -> int:
+                           detail: str = "", granted_by: Optional[int] = None, expires_at: Optional[int] = None,
+                           tag_applied: bool = False, tag_title: Optional[str] = None) -> int:
     if award_type not in ARCHITECT_AWARD_TYPES:
         raise ValueError(f"award_type no permitido: {award_type!r}")
     with _write_transaction() as conn:
@@ -6063,7 +6082,7 @@ def record_architect_award(chat_id: int, user_id: int, user_name: str, award_typ
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (int(chat_id), int(user_id), (user_name or "")[:64], award_type, int(amount), (detail or "")[:300],
               granted_by, _now_ts(), expires_at, 1 if tag_applied else 0, tag_title))
-        return int(cur.lastrowid)
+        return int(cast(int, cur.lastrowid))
 
 
 @db_async
@@ -6147,7 +6166,7 @@ def find_known_user(query: str) -> dict | None:
 
 
 @db_async
-def record_architect_audit(actor_id: int, action: str, chat_id: int = None, target_id: int = None, detail: str = "") -> None:
+def record_architect_audit(actor_id: int, action: str, chat_id: Optional[int] = None, target_id: Optional[int] = None, detail: str = "") -> None:
     with _write_transaction() as conn:
         _ensure_architect_schema(conn)
         cur = conn.execute("""
@@ -6258,7 +6277,7 @@ def set_fwd_burst(group_id: int, limit=None, window=None) -> dict:
 
 
 @db_async
-def add_authorized_bot(group_id: int, username: str, bot_id: int = None, added_by: int = None) -> list:
+def add_authorized_bot(group_id: int, username: str, bot_id: Optional[int] = None, added_by: Optional[int] = None) -> list:
     clean = normalize_bot_username(username)
     if not clean:
         raise BunkerValidationError({"username": "alias de bot inválido (debe terminar en 'bot')."})
@@ -6403,7 +6422,7 @@ def validate_vip_role_patch(patch) -> dict:
 
 
 @db_async
-def update_vip_role_config(group_id: int, patch: dict, updated_by: int = None) -> dict:
+def update_vip_role_config(group_id: int, patch: dict, updated_by: Optional[int] = None) -> dict:
     clean = validate_vip_role_patch(patch)
     clean["updated_at"] = _now_ts()
     clean["updated_by"] = updated_by
@@ -6420,20 +6439,22 @@ _VIP_MEMBER_COLS = ("group_id", "user_id", "username", "full_name", "source", "s
                     "total_stars", "tag_status", "tag_error", "updated_at")
 
 
-def _vip_member_row(conn, group_id: int, user_id: int):
+def _vip_member_row(conn, group_id: int, user_id: int) -> Optional[Dict[str, Any]]:
     row = conn.execute(f"SELECT {', '.join(_VIP_MEMBER_COLS)} FROM vip_role_members WHERE group_id = ? AND user_id = ?",
                        (int(group_id), int(user_id))).fetchone()
     return dict(zip(_VIP_MEMBER_COLS, row)) if row else None
 
 
-def _vip_is_active(member: dict, now: int) -> bool:
-    return bool(member) and member.get("status") == "active" and (member.get("expires_at") is None or int(member["expires_at"]) > now)
+def _vip_is_active(member: Optional[Dict[str, Any]], now: int) -> bool:
+    if not member:
+        return False
+    return member.get("status") == "active" and (member.get("expires_at") is None or int(member["expires_at"]) > now)
 
 
 @db_async
-def vip_role_grant(group_id: int, user_id: int, source: str, *, stars: int = 0, charge_id: str = None,
-                   days: int = None, expires_at: int = None, username: str = None, full_name: str = None,
-                   actor_id: int = None) -> dict:
+def vip_role_grant(group_id: int, user_id: int, source: str, *, stars: int = 0, charge_id: Optional[str] = None,
+                   days: Optional[int] = None, expires_at: Optional[int] = None, username: Optional[str] = None, full_name: Optional[str] = None,
+                   actor_id: Optional[int] = None) -> dict:
     """
     Concede o extiende el rol VIP (BEGIN IMMEDIATE, idempotente por charge_id). Reglas:
       • donation: suma las donaciones del periodo (donor_days; 0 = histórico). Si alcanza donor_min_stars, el rol
@@ -6452,6 +6473,7 @@ def vip_role_grant(group_id: int, user_id: int, source: str, *, stars: int = 0, 
                     "member": _vip_member_row(conn, group_id, user_id), "config": cfg}
         current = _vip_member_row(conn, group_id, user_id)
         was_active = _vip_is_active(current, now)
+        cur_exp = current.get("expires_at") if current else None   # was_active ⇒ current existe
         qualified, new_exp, permanent = False, None, False
 
         if source == "donation":
@@ -6464,21 +6486,21 @@ def vip_role_grant(group_id: int, user_id: int, source: str, *, stars: int = 0, 
                 if cfg["donor_days"] == 0:
                     permanent = True
                 else:
-                    base = max(now, int(current["expires_at"])) if (was_active and current["expires_at"]) else now
+                    base = max(now, int(cur_exp)) if (was_active and cur_exp) else now
                     new_exp = base + cfg["donor_days"] * 86400
         elif source == "micvip":
-            qualified = cfg["enabled"] and cfg["micvip_role"] and bool(expires_at) and int(expires_at) > now
-            new_exp = int(expires_at) if qualified else None
+            qualified = cfg["enabled"] and cfg["micvip_role"] and bool(expires_at) and int(expires_at or 0) > now
+            new_exp = int(expires_at or 0) if qualified else None
         else:  # manual
             qualified = True
             d = max(0, _as_int(days, 30))
             permanent = d == 0
             new_exp = None if permanent else now + d * 86400
 
-        if qualified and was_active and current["expires_at"] is None:
+        if qualified and was_active and cur_exp is None:
             permanent = True                                  # un rol permanente nunca pasa a temporal
-        if qualified and not permanent and was_active and current["expires_at"]:
-            new_exp = max(int(new_exp), int(current["expires_at"]))
+        if qualified and not permanent and was_active and cur_exp:
+            new_exp = max(int(new_exp or 0), int(cur_exp))
 
         conn.execute("INSERT INTO vip_role_events (group_id, user_id, source, charge_id, stars, qualified, created_at, "
                      "expires_at, actor_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -6513,7 +6535,7 @@ def vip_role_grant(group_id: int, user_id: int, source: str, *, stars: int = 0, 
 
 
 @db_async
-def vip_role_revoke(group_id: int, user_id: int, actor_id: int = None) -> dict:
+def vip_role_revoke(group_id: int, user_id: int, actor_id: Optional[int] = None) -> dict:
     now = _now_ts()
     with _write_transaction() as conn:
         current = _vip_member_row(conn, group_id, user_id)
@@ -6523,7 +6545,7 @@ def vip_role_revoke(group_id: int, user_id: int, actor_id: int = None) -> dict:
                      "WHERE group_id = ? AND user_id = ?", (now, now, int(group_id), int(user_id)))
         conn.execute("INSERT INTO vip_role_events (group_id, user_id, source, stars, qualified, created_at, actor_id) "
                      "VALUES (?, ?, 'manual', 0, 0, ?, ?)", (int(group_id), int(user_id), now, actor_id))
-        return _vip_member_row(conn, group_id, user_id)
+        return _vip_member_row(conn, group_id, user_id) or {}
 
 
 @db_async
@@ -6538,7 +6560,7 @@ def vip_role_member_get(group_id: int, user_id: int):
 
 
 @db_async
-def vip_role_set_tag_status(group_id: int, user_id: int, status: str, error: str = None) -> None:
+def vip_role_set_tag_status(group_id: int, user_id: int, status: str, error: Optional[str] = None) -> None:
     with _write_transaction() as conn:
         conn.execute("UPDATE vip_role_members SET tag_status = ?, tag_error = ?, updated_at = ? WHERE group_id = ? AND user_id = ?",
                      (str(status)[:16], (error or None) and str(error)[:200], _now_ts(), int(group_id), int(user_id)))
@@ -6572,7 +6594,7 @@ def vip_role_list(group_id: int, status: str = "all", limit: int = 20, offset: i
             return {"records": [], "total": 0, "summary": {"members": 0, "active": 0, "stars": 0, "tagged": 0}}
     records = []
     for r in rows:
-        rec = dict(zip(_VIP_MEMBER_COLS, r))
+        rec: Dict[str, Any] = dict(zip(_VIP_MEMBER_COLS, r))
         rec["active"] = _vip_is_active(rec, now)
         records.append(rec)
     return {"records": records, "total": int(total),
@@ -6646,7 +6668,7 @@ def get_admin_link_quota_config(group_id: int) -> dict:
 
 
 @db_async
-def update_admin_link_quota_config(group_id: int, patch: dict, updated_by: int = None) -> dict:
+def update_admin_link_quota_config(group_id: int, patch: dict, updated_by: Optional[int] = None) -> dict:
     """
     {enabled?, default_limit?, count_forwards?, overrides?: {admin_id: límite | -1 (sin límite) | null (borrar)}}.
     Todo o nada (BEGIN IMMEDIATE). Lanza BunkerValidationError con "campo: motivo".
@@ -6707,7 +6729,7 @@ def update_admin_link_quota_config(group_id: int, patch: dict, updated_by: int =
 
 
 @db_async
-def admin_link_quota_consume(group_id: int, admin_id: int, message_id: int = None, kind: str = "link", now: int = None) -> dict:
+def admin_link_quota_consume(group_id: int, admin_id: int, message_id: Optional[int] = None, kind: str = "link", now: Optional[int] = None) -> dict:
     """
     Consume UNA publicación promocional del administrador (atómico, BEGIN IMMEDIATE).
     → {"enabled", "allowed", "used", "limit", "unlimited", "reset_at", "remaining"}. Los intentos rechazados quedan
@@ -6782,7 +6804,7 @@ _APPEAL_MUTABLE = frozenset({"status", "dm_bot_id", "dm_message_id", "reinstated
                              "link_message_id", "link_bot_id", "rejoined_at", "error"})
 
 
-def _appeal_row(row):
+def _appeal_row(row) -> Optional[Dict[str, Any]]:
     return dict(zip(_APPEAL_COLS, row)) if row else None
 
 
@@ -6927,7 +6949,7 @@ def appeal_cancel_open(group_id: int, user_id: int) -> int:
 
 @db_async
 def appeal_create(group_id: int, user_id: int, *, reason_key: str, reason_es: str, reason_en: str, strikes: int,
-                  warn_limit: int, prior_global_ban: bool, username: str = None, full_name: str = None) -> dict:
+                  warn_limit: int, prior_global_ban: bool, username: Optional[str] = None, full_name: Optional[str] = None) -> dict:
     """
     Registra una apelación para un baneo recién aplicado (BEGIN IMMEDIATE). Precio y vigencia se FIJAN aquí: cambiar
     la configuración después no altera una oferta ya enviada. → {"created": bool, "reason": str, "appeal": dict|None}
@@ -7008,7 +7030,7 @@ def appeal_update(appeal_id: int, **fields) -> None:
 
 
 @db_async
-def appeal_claim_payment(appeal_id: int, user_id: int, charge_id: str, amount: int, bot_id: int = None) -> tuple:
+def appeal_claim_payment(appeal_id: int, user_id: int, charge_id: str, amount: int, bot_id: Optional[int] = None) -> tuple:
     """
     Reclama el cobro para la apelación (BEGIN IMMEDIATE, idempotente). → (resultado, apelación):
       'ok'        — primera vez: la apelación pasa a 'paid' con este charge_id.
@@ -7105,7 +7127,7 @@ def appeal_list(group_id: int, status: str = "all", limit: int = 20, offset: int
             return {"records": [], "total": 0, "summary": {}}
     records = []
     for r in rows:
-        rec = _appeal_row(r)
+        rec = dict(_appeal_row(r) or {})
         rec.pop("invite_link", None)      # el enlace de reingreso es personal: nunca sale por la API
         records.append(rec)
     return {"records": records, "total": int(total),

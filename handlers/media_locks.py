@@ -468,7 +468,7 @@ async def apply_sanction(bot: Bot, chat_id: int, user, verdict: dict, message: O
     Ejecuta la decisión: borra si procede y aplica Warn (escalera de strikes), Kick, Mute (chat + llamada de voz)
     o Ban. Registra el bloqueo en la analítica de seguridad. Nunca lanza.
     """
-    from . import groups as g   # importación diferida (groups importa este módulo)
+    from handlers import groups as g   # importación diferida (groups importa este módulo)
 
     user_id = user.id
     username = getattr(user, "username", "") or ""
@@ -702,7 +702,7 @@ async def inspect_sender_chat(bot: Bot, message: Message, *, is_edit: bool = Fal
     verdict = evaluate_message(message, state, is_edit=is_edit, bot_id=bot.id, authorized_bots=shield["authorized_set"])
     if verdict is None:
         return False
-    from . import groups as g
+    from handlers import groups as g
     with contextlib.suppress(Exception):
         await asyncio.wait_for(message.delete(), timeout=8)
         g.track_security(chat_id, sender.id, "antispam", "delete", True)
@@ -721,7 +721,7 @@ async def handle_bot_added(bot: Bot, message: Message, adder, new_bot) -> bool:
     Vector 29 · bot_added. Si un miembro SIN privilegios añade un bot y la regla no es Off: el bot invasor se
     expulsa (ban) y quien lo invitó recibe la sanción configurada. Devuelve True si el bot fue retirado.
     """
-    from . import groups as g
+    from handlers import groups as g
 
     chat_id = message.chat.id
     if adder is None or adder.id == new_bot.id or adder.id == bot.id:
@@ -930,12 +930,12 @@ _INT = re.compile(r"^-?\d{1,20}$")
 
 def _emit_change(group_id: int, changed: list) -> None:
     with contextlib.suppress(Exception):
-        from .user_private import emit_settings_updated_bg
+        from handlers.user_private import emit_settings_updated_bg
         emit_settings_updated_bg(group_id, "bot_console", changed)
 
 
 async def _show(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup) -> None:
-    from .user_private import safe_edit_text
+    from handlers.user_private import safe_edit_text
     try:
         await safe_edit_text(callback, text, reply_markup=keyboard, parse_mode="HTML")
     except TelegramBadRequest as ex:
@@ -953,7 +953,7 @@ async def open_media_locks_panel(callback: CallbackQuery, bot: Bot, group_id: in
 
 @router.callback_query(F.data.startswith("mlk_"))
 async def media_locks_callbacks(callback: CallbackQuery, bot: Bot):
-    from .user_private import clear_user_states, verify_admin_privileges
+    from handlers.user_private import clear_user_states, verify_admin_privileges
 
     parts = (callback.data or "").split("_")
     if len(parts) < 4 or not _INT.match(parts[2]):

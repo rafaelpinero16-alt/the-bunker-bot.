@@ -12,6 +12,7 @@ Cadena de evidencia por cada compra en Telegram Stars (XTR):
 No depende de handlers/payments.py: detecta MicVIP por el payload de la factura (MICVIP_PAYLOAD_MARKERS).
 Ningún diccionario en memoria crece sin límite. The Bunker Command OS © 2026 — Cloud Media Management
 """
+from typing import Optional
 import asyncio
 import html
 import logging
@@ -52,7 +53,7 @@ def _db():
     return db
 
 
-def _spawn(coro, name: str = None):
+def _spawn(coro, name: Optional[str] = None):
     try:
         task = asyncio.get_running_loop().create_task(coro, name=name)
     except RuntimeError:
@@ -80,8 +81,8 @@ def group_from_payload(payload):
 # 1 + 2 · Cobro y verificación del pase
 # --------------------------------------------------------------------------
 async def record_purchase(*, group_id: int, user_id: int, charge_id: str, amount: int = 0, payload: str = "",
-                          currency: str = "XTR", username: str = None, full_name: str = None,
-                          purchased_at: int = None, verify: bool = True) -> bool:
+                          currency: str = "XTR", username: Optional[str] = None, full_name: Optional[str] = None,
+                          purchased_at: Optional[int] = None, verify: bool = True) -> bool:
     """Registra la compra y programa la verificación del pase. Devuelve True si el cobro es nuevo."""
     if not (group_id and user_id and charge_id):
         return False

@@ -1,0 +1,21 @@
+{
+  "include": [
+    "main.py",
+    "handlers",
+    "vip_roles.py",
+    "link_quotas.py",
+    "micvip_audit.py",
+    "middlewares",
+    "database",
+    "assistant.py",
+    "perimeter_ops.py"
+  ],
+  "exclude": [
+    "**/__pycache__"
+  ],
+  "typeCheckingMode": "off",
+  "pythonVersion": "3.12",
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none",
+  "reportGeneralTypeIssues": "none"
+}

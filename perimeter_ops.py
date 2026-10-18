@@ -261,7 +261,7 @@ def _bot_can_post(member, chat_kind: str) -> bool:
 
 
 async def resolve_log_channel(bot, user_id: int, chat_id: int, raw: Any, *,
-                              is_creator: Callable[[int, int], Awaitable[bool]] = None,
+                              is_creator: Optional[Callable[[int, int], Awaitable[bool]]] = None,
                               timeout: float = 6.0) -> str:
     """
     Normaliza y verifica el canal de registro ANTES de guardarlo (misma regla en la Mini App y en el bot):
@@ -431,7 +431,7 @@ def invalidate_ai_runtime(group_id: int) -> None:
             logger.debug(f"[IA] No se pudo invalidar la caché del Centinela ({group_id}): {ex}")
 
 
-async def apply_ai_sentinel_patch(group_id: int, patch: dict) -> dict:
+async def apply_ai_sentinel_patch(group_id: int, patch: Any) -> dict:   # validate_ai_sentinel_patch rechaza lo que no sea dict
     """Valida, persiste e invalida la caché del Centinela. Devuelve la configuración pública resultante."""
     columns = validate_ai_sentinel_patch(patch)
     db = _db()
@@ -452,7 +452,7 @@ def _is_ultra(tier) -> bool:
     return normalized in ULTRA_TIERS or "ultra" in normalized
 
 
-def _item(key: str, enabled: bool, state: str, detail: str = None, **extra) -> dict:
+def _item(key: str, enabled: bool, state: str, detail: Optional[str] = None, **extra) -> dict:
     return {"key": key, "enabled": bool(enabled), "effective": state in ("on", "alert"), "state": state,
             "detail": detail, **extra}
 
@@ -465,8 +465,8 @@ async def _safe(coro, default):
         return default
 
 
-async def build_perimeter_status(chat_id: int, *, sentinel: dict = None, raid: dict = None, tier: str = None,
-                                 log_health: dict = None, ai_online: bool = None) -> dict:
+async def build_perimeter_status(chat_id: int, *, sentinel: Optional[dict] = None, raid: Optional[dict] = None, tier: Optional[str] = None,
+                                 log_health: Optional[dict] = None, ai_online: Optional[bool] = None) -> dict:
     """
     Estado REAL del perímetro para la primera vista de la Mini App y la consola del bot. Distingue lo que está
     configurado (`enabled`) de lo que de verdad se está aplicando (`effective`): p. ej. AutoLower activado sin
@@ -636,7 +636,7 @@ async def get_support_directives(force: bool = False) -> str:
     return text
 
 
-async def set_support_directives(text: str, updated_by: int = None) -> str:
+async def set_support_directives(text: str, updated_by: Optional[int] = None) -> str:
     clean = _CONTROL_CHARS_RE.sub("", str(text or "")).strip()[:SUPPORT_DIRECTIVES_MAX]
     await _db().set_kv_setting(SUPPORT_DIRECTIVES_KEY, clean, updated_by=updated_by)
     _directives_cache["v"] = (clean, time.monotonic())

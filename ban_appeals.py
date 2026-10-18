@@ -27,7 +27,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import html
-import importlib
 import logging
 import os
 import re
@@ -194,10 +193,8 @@ def _offer_text(appeal: dict, title: str, lang: str) -> str:
 def _payments():
     """handlers.payments (o None): reutiliza su emisión de facturas, su libro mayor y sus reembolsos."""
     with contextlib.suppress(Exception):
-        if __package__:
-            return importlib.import_module(".payments", package=__package__)
-    with contextlib.suppress(Exception):
-        return importlib.import_module("handlers.payments")
+        from handlers import payments as _p
+        return _p
     return None
 
 

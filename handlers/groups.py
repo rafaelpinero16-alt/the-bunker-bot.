@@ -64,9 +64,22 @@ import raid_shield
 import assistant as _assistant_module
 import vip_roles     # 👑 v23 · Roles y etiquetas VIP automáticos (exenciones parciales, flood y prioridad acústica)
 import link_quotas   # 🔗 v23 · Cuota diaria de enlaces / promociones por administrador
-from . import media_locks   # 🔒 v15 · Matriz granular de bloqueo multimedia (30 vectores)
-from . import ban_appeals   # ⚖️ v24 · Apelación de baneos por Telegram Stars
+from handlers import media_locks   # 🔒 v15 · Matriz granular de bloqueo multimedia (30 vectores)
+import importlib
+import importlib.util
 from assistant import active_sentinels, set_participant_mic, execute_ghost_purge
+
+
+def _ban_appeals_module():
+    """
+    v26 · Módulo de apelaciones: ubicación oficial handlers/ban_appeals.py; se tolera ban_appeals.py en la raíz.
+    find_spec decide la ruta ANTES de importar: un ImportError real dentro del módulo nunca queda enmascarado.
+    """
+    name = "handlers.ban_appeals" if importlib.util.find_spec("handlers.ban_appeals") is not None else "ban_appeals"
+    return importlib.import_module(name)
+
+
+ban_appeals = _ban_appeals_module()   # ⚖️ v24 · Apelación de baneos por Telegram Stars
 
 try:
     from radar_bus import publish_radar_event  # type: ignore[import-not-found]
@@ -222,7 +235,7 @@ async def _is_community_owner(bot: Bot, chat_id: int, user_id: int) -> bool:
     if is_super_admin(user_id):
         return True
     try:
-        from .user_private import is_legitimate_owner  # import diferido (evita el ciclo de importación)
+        from handlers.user_private import is_legitimate_owner  # import diferido (evita el ciclo de importación)
     except Exception:
         is_legitimate_owner = None
     if is_legitimate_owner is not None:
@@ -273,7 +286,7 @@ def _sync_miniapp(group_id: int, changed, source: str = "group_command") -> None
     Import diferido: user_private importa este módulo.
     """
     try:
-        from .user_private import emit_settings_updated_bg
+        from handlers.user_private import emit_settings_updated_bg
     except Exception as ex:
         logger.debug(f"[Radar] Emisor de ajustes no disponible: {ex}")
         return
@@ -727,13 +740,13 @@ async def _send_raid_shield_alert(bot: Bot, group_id: int, verdict: dict) -> Non
     text = (
         f"🚨 <b>Escudo Anti-Raid activado — {html.escape(title)}</b>\n\n"
         f"• <b>Nivel:</b> {'CRÍTICO 🔴' if level >= 2 else 'ELEVADO 🟠'}\n"
-        f"• <b>Señales:</b> {html.escape(', '.join(reasons_es.get(r, r) for r in rs) or '—')}\n"
+        f"• <b>Señales:</b> {html.escape(', '.join(str(reasons_es.get(r, r)) for r in rs) or '—')}\n"
         f"• <b>Ingresos en {raid_shield.RAID_WINDOW_SECONDS}s:</b> {int(verdict.get('joins') or 0)} "
         f"({int(verdict.get('new_joins') or 0)} cuentas nuevas)\n"
         f"• <b>Duración:</b> {minutes} min (se prolonga si el ataque continúa)\n\n"
         "Medidas: Captcha Pro obligatorio por código, avisos públicos silenciados y difusiones pausadas.\n\n"
         f"🇺🇸 <i>Anti-Raid Shield engaged ({'CRITICAL' if level >= 2 else 'ELEVATED'}): "
-        f"{html.escape(', '.join(reasons_en.get(r, r) for r in rs) or '—')}. Mandatory code Captcha Pro, public notices "
+        f"{html.escape(', '.join(str(reasons_en.get(r, r)) for r in rs) or '—')}. Mandatory code Captcha Pro, public notices "
         "muted and broadcasts paused.</i>\n\n"
         "🛡️ <i>Cloud Media Management</i>"
     )
@@ -838,7 +851,7 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
 
     custom_intro = cfg["text"] if cfg["text"] else f"¡Hola, {mention}! Para proteger la comunidad, requerimos una breve verificación."
 
-    session_data = {"is_join_req": is_join_req, "is_bot": bool(is_bot)}
+    session_data: dict = {"is_join_req": is_join_req, "is_bot": bool(is_bot)}
     if overrides:
         session_data["action_override"] = overrides["action"]
         session_data["source"] = "raid_shield" if overrides.get("isolated") else "captcha"
@@ -1046,7 +1059,7 @@ async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
     # 👑 Cambio de rango (ascenso, degradación, transferencia de propiedad): la caché de dueño se invalida al
     # instante para que un administrador degradado o un ex-creador pierdan el acceso sin esperar a que caduque.
     try:
-        from .user_private import invalidate_owner_status
+        from handlers.user_private import invalidate_owner_status
         invalidate_owner_status(group_id, user.id)
     except Exception:
         pass
@@ -1115,7 +1128,8 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
     cfg = await get_captcha_config(group_id)
 
     try:
-        await callback.message.delete()
+        if callback.message is not None:
+            await callback.message.delete()
     except Exception:
         pass
 
@@ -1340,6 +1354,8 @@ async def _inspect_member(bot: Bot, group_id: int, user_id: int) -> str:
             return "invalid"
         return "unverified"
     except Exception:
+        return "unverified"
+    if member is None:   # _call_with_retry con attempts < 1 no consulta nada
         return "unverified"
 
     status = member.status

@@ -26,9 +26,11 @@ import asyncio
 import contextlib
 import html
 import importlib
+import importlib.util
 import logging
 import re
 import time
+from typing import Any, cast
 from aiogram import Router, F, Bot
 try:
     from telegram_html import normalize_telegram_html, telegram_html_to_plain  # type: ignore[import-not-found]
@@ -138,6 +140,15 @@ DEFAULT_TIP_AMOUNT = 10        # Tarifa sugerida de propina
 ASSISTANT_INVITE_URL = "https://t.me/Alphacentinel?startgroup=true"
 
 
+def _ban_appeals_module():  # noqa: E302
+    """
+    v26 · Módulo de apelaciones: ubicación oficial handlers/ban_appeals.py; se tolera ban_appeals.py en la raíz.
+    find_spec decide la ruta ANTES de importar: un ImportError real dentro del módulo nunca queda enmascarado.
+    """
+    name = "handlers.ban_appeals" if importlib.util.find_spec("handlers.ban_appeals") is not None else "ban_appeals"
+    return importlib.import_module(name)
+
+
 def get_lang(lang_code: str) -> str:
     """Detecta el idioma del operador para renderizar la facturación en Stars."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
@@ -154,7 +165,7 @@ def _master_bot_id() -> int:
         resolver = getattr(up_mod, "_resolve_master_bot_id", None)
         if callable(resolver):
             try:
-                resolved = int(resolver() or 0)
+                resolved = int(cast(Any, resolver()) or 0)
                 if resolved:
                     return resolved
             except Exception:
@@ -187,7 +198,7 @@ def get_master_bot_username() -> str | None:
         getter = getattr(up_mod, "get_master_bot_username", None)
         if callable(getter):
             try:
-                runtime_username = (getter() or "").strip().lstrip("@")
+                runtime_username = str(cast(Any, getter()) or "").strip().lstrip("@")
                 if runtime_username:
                     return runtime_username
             except Exception:
@@ -318,7 +329,7 @@ async def mark_payment_processed(charge_id: str, user_id: int, payload: str) -> 
 
     _SEEN_PAYMENTS[key] = time.time()
     if len(_SEEN_PAYMENTS) > _SEEN_PAYMENTS_MAX:
-        for old_key in sorted(_SEEN_PAYMENTS, key=_SEEN_PAYMENTS.get)[: _SEEN_PAYMENTS_MAX // 2]:
+        for old_key in sorted(_SEEN_PAYMENTS, key=lambda k: _SEEN_PAYMENTS.get(k, 0.0))[: _SEEN_PAYMENTS_MAX // 2]:
             _SEEN_PAYMENTS.pop(old_key, None)
     return True
 
@@ -567,7 +578,7 @@ async def resolve_chat_return_link(bot: Bot, chat_id: int, chat=None) -> tuple[s
     if username:
         url = f"https://t.me/{username}"
     elif getattr(chat, "invite_link", None):
-        url = chat.invite_link
+        url = getattr(chat, "invite_link", None)
     else:
         cfg = await get_tips_config(chat_id)
         url = cfg.get("tips_return_link") or None
@@ -1248,10 +1259,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     # 0. ⚖️ v25 · APELACIÓN DE BANEO: reenvía al usuario baneado la factura de SU apelación abierta.
     if args.startswith("appeal_"):
         try:
-            handle_deeplink = importlib.import_module(
-                ".ban_appeals", package=__package__
-            ).handle_deeplink
-            if not await handle_deeplink(message, bot):
+            if not await _ban_appeals_module().handle_deeplink(message, bot):
                 await message.answer(t["err_link"], parse_mode="HTML")
         except Exception as e:
             logger.error(f"Error abriendo la apelación de baneo de {message.from_user.id}: {e}")
@@ -1728,10 +1736,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     # mensaje de rechazo explícito. Lecturas de base de datos + comprobaciones externas en paralelo acotadas a 1,5 s.
     if payload.startswith("appeal_"):
         try:
-            appeal_pre_checkout = importlib.import_module(
-                ".ban_appeals", package=__package__
-            ).appeal_pre_checkout
-            await asyncio.wait_for(appeal_pre_checkout(pre_checkout_query), timeout=8)
+            await asyncio.wait_for(_ban_appeals_module().appeal_pre_checkout(pre_checkout_query), timeout=8)
         except Exception as ex:
             logger.warning(f"⚠️ [Pre-Checkout] Apelación no validada {payload!r}: {ex}")
             with contextlib.suppress(Exception):
@@ -1774,9 +1779,13 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 async def process_successful_payment(message: Message, bot: Bot):
     lang = get_lang(message.from_user.language_code)
     t = TEXTS[lang]
-    payload = message.successful_payment.invoice_payload
+    successful_payment = message.successful_payment
+    if successful_payment is None:
+        return
+
+    payload = successful_payment.invoice_payload
     user_id = message.from_user.id
-    charge_id = message.successful_payment.telegram_payment_charge_id
+    charge_id = successful_payment.telegram_payment_charge_id
 
     # 🛡️ Blindaje de Idempotencia: evita pagos duplicados ante reintentos de red o reinicios
     if not await mark_payment_processed(charge_id, user_id, payload):
@@ -1787,17 +1796,14 @@ async def process_successful_payment(message: Message, bot: Bot):
     await record_star_payment(message)
     logger.info(
         f"💳 [Pago Stars] charge_id={charge_id} user_id={user_id} "
-        f"chat_id={_payload_chat_id(payload)} stars={message.successful_payment.total_amount} payload={payload!r}"
+        f"chat_id={_payload_chat_id(payload)} stars={successful_payment.total_amount} payload={payload!r}"
     )
 
     # CASO 0: ⚖️ v25 · APELACIÓN DE BANEO — claim atómico por charge_id, desbaneo, marca global, strikes y enlace de
     # un solo uso; si el desbaneo no es posible, reembolso vía process_star_refund (queda en el libro mayor).
     if payload.startswith("appeal_"):
         try:
-            process_appeal_payment = importlib.import_module(
-                ".ban_appeals", package=__package__
-            ).process_payment
-            await process_appeal_payment(bot, message)
+            await _ban_appeals_module().process_payment(bot, message)
         except Exception as e:
             logger.error(f"Error procesando la apelación {payload!r} (reembolso automático): {e}")
             refunded = await process_star_refund(bot, user_id, charge_id, reason=f"Apelación de baneo fallida: {e}")
@@ -1867,7 +1873,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             channel_id = int(parts[2])
             plan_id = int(parts[3])
             duration_days = int(parts[4])
-            stars_paid = message.successful_payment.total_amount
+            stars_paid = successful_payment.total_amount
 
             target_plan = await get_channel_plan(plan_id)
             if not target_plan or target_plan.get("channel_id") != channel_id:
@@ -2018,7 +2024,7 @@ async def process_successful_payment(message: Message, bot: Bot):
         benefit_granted = False
         try:
             chat_id = int(payload.split("_")[1])
-            stars_paid = message.successful_payment.total_amount
+            stars_paid = successful_payment.total_amount
             full_name = message.from_user.full_name or "Usuario"
             username = message.from_user.username or ""
 
@@ -2055,7 +2061,7 @@ async def process_successful_payment(message: Message, bot: Bot):
         try:
             parts = payload.split("_")
             chat_id = int(parts[1])
-            stars_paid = message.successful_payment.total_amount
+            stars_paid = successful_payment.total_amount
 
             await record_group_tip(chat_id, user_id, stars_paid)
             benefit_granted = True

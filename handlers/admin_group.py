@@ -356,7 +356,8 @@ async def cmd_export_settings(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang_code = message.from_user.language_code if message.from_user and message.from_user.language_code else "es"
+    lang = get_lang(lang_code)
     t = TEXTS[lang]
 
     if not await is_user_creator(bot, chat_id, user_id):
@@ -441,6 +442,8 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
         try:
             file_obj = await bot.get_file(doc.file_id)
             downloaded = await bot.download_file(file_obj.file_path)
+            if downloaded is None:
+                raise ValueError("La descarga del archivo no devolvió datos")
             json_content = downloaded.read().decode("utf-8")
         except Exception as dl_err:
             logger.error(f"Error descargando archivo de backup: {dl_err}")

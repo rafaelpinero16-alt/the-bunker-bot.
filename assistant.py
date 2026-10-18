@@ -8,6 +8,7 @@ Fase 6: Blindaje técnico y legal — Token-Bucket MTProto (anti-FloodWait), Cap
         antes de Mistral AI y Centinela restringido a escritura exclusiva en grupos (sin DMs).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
+from typing import Awaitable, Optional, cast
 import asyncio
 import logging
 import random
@@ -19,8 +20,9 @@ import re
 import weakref
 from datetime import datetime
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler
+from pyrogram import filters
+from pyrogram.client import Client
+from pyrogram.handlers.message_handler import MessageHandler
 from pyrogram.enums import ChatMembersFilter, ChatType, ChatAction, ParseMode
 from pyrogram.errors import (
     FloodWait, RPCError, Unauthorized,
@@ -29,19 +31,19 @@ from pyrogram.errors import (
     PasswordHashInvalid, PeerIdInvalid,
     AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan
 )
-from pyrogram.raw.types import (
-    PeerUser, InputPeerUser, InputGroupCall, DataJSON,
-    InputChannel, InputPeerChannel, InputPeerChat
-)
-from pyrogram.raw.functions.channels import GetFullChannel
-from pyrogram.raw.functions.messages import GetFullChat
-from pyrogram.raw.functions.phone import (
-    EditGroupCallParticipant,
-    GetGroupParticipants,
-    JoinGroupCall,
-    CreateGroupCall,
-    DiscardGroupCall
-)
+from pyrogram.raw.types.input_peer_chat import InputPeerChat
+from pyrogram.raw.types.input_peer_channel import InputPeerChannel
+from pyrogram.raw.types.input_channel import InputChannel
+from pyrogram.raw.base.input_channel import InputChannel as BaseInputChannel
+from pyrogram.raw.types.input_group_call import InputGroupCall
+from pyrogram.raw.types.peer_user import PeerUser
+from pyrogram.raw.functions.channels.get_full_channel import GetFullChannel
+from pyrogram.raw.functions.messages.get_full_chat import GetFullChat
+from pyrogram.raw.functions.phone.join_group_call import JoinGroupCall
+from pyrogram.raw.functions.phone.create_group_call import CreateGroupCall
+from pyrogram.raw.functions.phone.discard_group_call import DiscardGroupCall
+from pyrogram.raw.functions.phone.get_group_participants import GetGroupParticipants
+from pyrogram.raw.functions.phone.edit_group_call_participant import EditGroupCallParticipant
 from database.database import (
     is_vip_mic_active, is_group_approved, approve_group,
     get_autolower_status, is_whitelisted,
@@ -125,7 +127,7 @@ AUTH_DISCONNECT_TIMEOUT = _env_float("AUTH_DISCONNECT_TIMEOUT", 5.0)
 try:
     from database.database import get_sentinel_payload_config
 except ImportError:
-    async def get_sentinel_payload_config(chat_id: int) -> dict:
+    async def get_sentinel_payload_config(group_id: int) -> dict:   # misma firma que database.database
         return {"enabled": 0, "text": None, "media_id": None, "media_type": None, "auto_delete_after": None}
 
 FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan)
@@ -230,7 +232,7 @@ def _log_task_exception(task: asyncio.Task) -> None:
         logger.error(f"❌ [Tarea Radar] {task.get_name()} terminó con error: {exc!r}", exc_info=exc)
 
 
-def _spawn(coro, name: str = None) -> asyncio.Task:
+def _spawn(coro, name: Optional[str] = None) -> asyncio.Task:
     task = asyncio.create_task(coro, name=name)
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
@@ -296,7 +298,7 @@ class MTProtoTokenBucket:
     def blocked_for(self) -> float:
         return max(0.0, self._blocked_until - time.monotonic())
 
-    async def acquire(self, max_wait: float = None) -> None:
+    async def acquire(self, max_wait: Optional[float] = None) -> None:
         if max_wait is not None and self.blocked_for > max_wait:
             raise MTProtoRateLimited(self.blocked_for)
         async with self._lock:
@@ -322,6 +324,8 @@ try:
 except Exception:  # pragma: no cover
     _rpc_buckets = {}
 
+_fallback_bucket: Optional[MTProtoTokenBucket] = None
+
 
 def _bucket_for(client: Client) -> MTProtoTokenBucket:
     """Un bucket por cuenta: el límite de Telegram es por sesión, no global."""
@@ -334,11 +338,9 @@ def _bucket_for(client: Client) -> MTProtoTokenBucket:
     except TypeError:
         # Objeto no referenciable débilmente: bucket compartido de respaldo.
         global _fallback_bucket
-        try:
-            return _fallback_bucket
-        except NameError:
+        if _fallback_bucket is None:
             _fallback_bucket = MTProtoTokenBucket()
-            return _fallback_bucket
+        return _fallback_bucket
 
 
 _FLOOD_SECONDS_RE = re.compile(r"(\d+)")
@@ -364,7 +366,7 @@ def _flood_wait_seconds(exc: Exception):
     return max(1, int(match.group(1))) if match else 5
 
 
-async def _invoke(client: Client, query, timeout: float = None):
+async def _invoke(client: Client, query, timeout: Optional[float] = None):
     """
     client.invoke con time-out asíncrono y paso obligatorio por el Token-Bucket de la cuenta.
     Sin reintentos: los llamadores conservan su manejo propio de FloodWait.
@@ -373,7 +375,7 @@ async def _invoke(client: Client, query, timeout: float = None):
     return await asyncio.wait_for(client.invoke(query), timeout=timeout or MTPROTO_RPC_TIMEOUT)
 
 
-async def _invoke_safe_rpc(client: Client, query, timeout: float = None,
+async def _invoke_safe_rpc(client: Client, query, timeout: Optional[float] = None,
                            retries: int = MTPROTO_FLOOD_RETRIES,
                            max_flood_wait: float = MTPROTO_FLOOD_MAX_INLINE_WAIT):
     """
@@ -573,8 +575,10 @@ def get_assistant_bot_id() -> int:
     global _default_my_id
     if _default_my_id:
         return _default_my_id
-    if assistant_app and getattr(assistant_app, "me", None):
-        _default_my_id = assistant_app.me.id
+
+    me = getattr(assistant_app, "me", None)
+    if me is not None:
+        _default_my_id = me.id
         return _default_my_id
     return 0
 
@@ -669,13 +673,16 @@ def get_sentinel_runtime_snapshot(chat_id: int) -> dict:
     age = (time.monotonic() - last_ok) if last_ok else None
     fresh = age is not None and age <= SENTINEL_HEARTBEAT_STALE_S
     me = getattr(client, "me", None)
+    account = None
+    if me is not None:
+        account = f"@{me.username}" if getattr(me, "username", None) else None
     return {
         "active": bool(running and (connected or fresh)),
         "running": running,
         "mode": "own" if entry.get("user_id") else "master",
         "connected": connected,
         "last_ok_seconds": int(age) if age is not None else None,
-        "account": (f"@{me.username}" if getattr(me, "username", None) else None),
+        "account": account,
     }
 
 
@@ -709,7 +716,8 @@ async def _has_manage_calls_right(client: Client, chat_id: int) -> bool:
     if cached and (now - cached[1]) < CALL_RIGHTS_TTL_SECONDS:
         return cached[0]
     try:
-        user_target = client.me.id if getattr(client, "me", None) else "me"
+        client_me = getattr(client, "me", None)
+        user_target = client_me.id if client_me is not None else "me"
         me = await asyncio.wait_for(client.get_chat_member(chat_id, user_target), timeout=MTPROTO_RPC_TIMEOUT)
         status_val = str(getattr(me.status, "value", me.status)).lower()
         if status_val in ("owner", "creator"):
@@ -762,7 +770,7 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
     return lock
 
 
-def _get_group_now(tz_name: str = None) -> datetime:
+def _get_group_now(tz_name: Optional[str] = None) -> datetime:
     tz_str = tz_name or os.getenv("BOT_TIMEZONE", "America/Bogota")
     try:
         from zoneinfo import ZoneInfo
@@ -771,7 +779,7 @@ def _get_group_now(tz_name: str = None) -> datetime:
         return datetime.now()
 
 
-async def _ensure_connected(client: Client, retries: int = 2, delay: float = 1.0, timeout: float = None) -> bool:
+async def _ensure_connected(client: Client, retries: int = 2, delay: float = 1.0, timeout: Optional[float] = None) -> bool:
     connect_timeout = timeout or min(MTPROTO_CONNECT_TIMEOUT, 15.0)
     for attempt in range(retries):
         if client.is_connected:
@@ -784,7 +792,7 @@ async def _ensure_connected(client: Client, retries: int = 2, delay: float = 1.0
             if client.is_connected:
                 return True
             await asyncio.sleep(delay)
-    return client.is_connected
+    return bool(client.is_connected)
 
 
 def _register_forbidden_strike(chat_id: int, action_label: str) -> int:
@@ -847,7 +855,7 @@ def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
         return current_hm >= start_hm or current_hm < end_hm
 
 
-def _extract_urls_to_markup(text: str, custom_btn_text: str = None, custom_btn_url: str = None):
+def _extract_urls_to_markup(text: str, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None):
     buttons = []
     if custom_btn_url:
         label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
@@ -868,7 +876,7 @@ def _extract_urls_to_markup(text: str, custom_btn_text: str = None, custom_btn_u
     return cleaned_text, markup
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_btn_text: str = None, custom_btn_url: str = None):
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None):
     """
     Botón de llamada a la acción de los avisos de voz. v14: si el operador no configuró texto ni URL propios se
     construye SIEMPRE el botón por defecto (deep-link de MicVIP hacia el bot maestro), para que el aviso nunca
@@ -956,8 +964,8 @@ async def _send_text_notice(bot, chat_id: int, text: str, reply_markup):
         return await bot.send_message(chat_id=chat_id, text=_html_to_plain(text)[:4000], reply_markup=reply_markup)
 
 
-async def _send_notice_with(bot, chat_id: int, text: str, media_id: str = None, media_type: str = None,
-                            reply_markup: InlineKeyboardMarkup = None, allow_media: bool = True):
+async def _send_notice_with(bot, chat_id: int, text: str, media_id: Optional[str] = None, media_type: Optional[str] = None,
+                            reply_markup: Optional[InlineKeyboardMarkup] = None, allow_media: bool = True):
     """
     Publica el aviso con un bot concreto. Si el envío multimedia falla (file_id expirado o de otro bot, medio
     restringido en el grupo…), NO se aborta: se registra y se envía de inmediato como texto con su botón.
@@ -976,7 +984,7 @@ async def _send_notice_with(bot, chat_id: int, text: str, media_id: str = None, 
     return await _send_text_notice(bot, chat_id, text, reply_markup)
 
 
-async def _dispatch_radar_notice(chat_id: int, text: str, media_id: str = None, media_type: str = None, auto_delete_after: int = None, reply_markup: InlineKeyboardMarkup = None):
+async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str] = None, media_type: Optional[str] = None, auto_delete_after: Optional[int] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
     """
     Publica un aviso del radar en la comunidad. Cadena de resiliencia (v15):
       1. Bot maestro con multimedia → si el medio falla, el mismo bot lo envía como texto con su botón.
@@ -1234,7 +1242,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
             pin_method = getattr(sent, "pin", None)
             if callable(pin_method):
                 try:
-                    await asyncio.wait_for(pin_method(disable_notification=True), timeout=MTPROTO_RPC_TIMEOUT)
+                    await asyncio.wait_for(pin_method(disable_notification=True), timeout=MTPROTO_RPC_TIMEOUT)  # type: ignore[arg-type]
                     pinned = True
                 except Exception:
                     pinned = False
@@ -1297,7 +1305,7 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None, raise_err
         raw_call = None
         if isinstance(peer, (InputPeerChannel, InputChannel)):
             full_chat_res = await _invoke(client,
-                GetFullChannel(channel=InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash))
+                GetFullChannel(channel=cast(BaseInputChannel, InputChannel(channel_id=peer.channel_id, access_hash=peer.access_hash)))
             )
             raw_call = getattr(full_chat_res.full_chat, "call", None)
         elif isinstance(peer, InputPeerChat):
@@ -1307,7 +1315,7 @@ async def _get_raw_group_call(client: Client, chat_id: int, peer=None, raise_err
             resolved = await client.resolve_peer(chat_id)
             if isinstance(resolved, (InputPeerChannel, InputChannel)):
                 full_chat_res = await _invoke(client,
-                    GetFullChannel(channel=InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash))
+                    GetFullChannel(channel=cast(BaseInputChannel, InputChannel(channel_id=resolved.channel_id, access_hash=resolved.access_hash)))
                 )
                 raw_call = getattr(full_chat_res.full_chat, "call", None)
             elif isinstance(resolved, InputPeerChat):
@@ -1553,6 +1561,8 @@ async def _detect_copilot_trigger(client: Client, message, me_id: int, usernames
                 reply = await asyncio.wait_for(client.get_messages(message.chat.id, reply_id), timeout=5.0)
             except Exception:
                 reply = None
+    if isinstance(reply, list):
+        reply = reply[0] if reply else None
     if reply is not None and getattr(reply, "from_user", None) is not None:
         replied_to_me = bool(getattr(reply.from_user, "is_self", False) or (me_id and reply.from_user.id == me_id))
 
@@ -1594,7 +1604,7 @@ def _register_mistral_result(success: bool) -> None:
         )
 
 
-async def _mistral_complete(purpose: str, timeout: float = None, **request_kwargs):
+async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **request_kwargs):
     """
     Ejecuta chat.complete con:
       • Presupuesto total `timeout` (por defecto MISTRAL_TIMEOUT_SECONDS), incluida la espera del
@@ -1613,7 +1623,7 @@ async def _mistral_complete(purpose: str, timeout: float = None, **request_kwarg
 
     async def _call_once():
         if callable(async_complete):
-            return await async_complete(**request_kwargs)
+            return await cast(Awaitable[object], async_complete(**request_kwargs))
         return await asyncio.to_thread(mistral_client.chat.complete, **request_kwargs)
 
     async def _run():
@@ -2095,7 +2105,7 @@ async def _verify_active_membership(client: Client, chat_id: int) -> bool:
         return True
 
 
-async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reason: str = None, revoke: bool = False) -> None:
+async def _retire_sentinel(chat_id: int, client: Client, user_id: int = 0, reason: Optional[str] = None, revoke: bool = False) -> None:
     """
     Retira el Centinela de un grupo cuando su monitor termina: limpia el registro
     (solo si sigue apuntando a ESTE cliente, para no borrar uno más nuevo), revoca
@@ -2851,7 +2861,7 @@ def _make_sentinel_cleanup(group_id: int):
     return _cleanup
 
 
-async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
+async def launch_sentinel_instance(user_id: int, group_id: int, session_string: str, api_id: Optional[int] = None, api_hash: Optional[str] = None):
     if not session_string:
         logger.warning(f"⚠️ [Centinela Propio] Sesión vacía para grupo {group_id}.")
         return False
@@ -2917,7 +2927,7 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         return False
 
 
-async def register_or_update_sentinel(user_id: int, group_id: int, session_string: str, api_id: int = None, api_hash: str = None):
+async def register_or_update_sentinel(user_id: int, group_id: int, session_string: str, api_id: Optional[int] = None, api_hash: Optional[str] = None):
     lock = _get_launch_lock(group_id)
     async with lock:
         await _disconnect_sentinel_unlocked(group_id)
@@ -3002,7 +3012,7 @@ def _purge_expired(store: dict, ttl: float, now: float, ts_of=lambda value: valu
     return len(expired)
 
 
-def _enforce_cap(store: dict, cap: int = None) -> int:
+def _enforce_cap(store: dict, cap: Optional[int] = None) -> int:
     """Tope duro de tamaño: descarta las entradas más antiguas por orden de inserción (FIFO)."""
     cap = cap or STATE_MAX_ENTRIES
     overflow = len(store) - cap
@@ -3085,7 +3095,7 @@ def _sweep_global_state() -> int:
 
     # 6c. v23 · Cachés acotadas de roles VIP, refuerzo perimetral (huellas / ráfagas) y cuotas de enlaces.
     for _mod_name, _fn_name in (("vip_roles", "purge_caches"), ("handlers.media_locks", "purge_v23_state"),
-                                ("link_quotas", "purge_state")):
+                                ("link_quotas", "purge_state"), ("handlers.ban_appeals", "purge_state")):
         try:
             import importlib
             _mod = importlib.import_module(_mod_name)
@@ -3716,7 +3726,7 @@ async def _collect_ghost_candidates(chat_id: int, client, criteria, flagged: set
     return {"candidates": candidates, "scanned": scanned, "truncated": truncated, "via": via}
 
 
-async def execute_ghost_purge(chat_id: int, action: str = None, criteria=None, origin: str = "manual",
+async def execute_ghost_purge(chat_id: int, action: Optional[str] = None, criteria=None, origin: str = "manual",
                               lang: str = "es", notify: bool = True) -> dict:
     """
     Ghost Purge v2 (estilo «Remove Deleted Accounts» / Shieldy). Firma retrocompatible: execute_ghost_purge(chat_id,

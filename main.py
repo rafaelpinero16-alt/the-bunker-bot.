@@ -16,6 +16,8 @@ from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import html
+import importlib
+import importlib.util
 import json
 import logging
 import os
@@ -23,7 +25,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Optional, Set, Dict
+from typing import Any, Dict, Optional, Set, cast
 import urllib.parse
 from dotenv import load_dotenv
 
@@ -39,8 +41,10 @@ load_dotenv()
 # Aunque PYTHONUNBUFFERED=1 no esté definido, se fuerza el vaciado por línea
 # para que los logs aparezcan en tiempo real en la consola de Railway.
 for _stream in (sys.stdout, sys.stderr):
-    with contextlib.suppress(AttributeError, ValueError):
-        _stream.reconfigure(line_buffering=True)
+    _reconfigure = getattr(_stream, "reconfigure", None)   # TextIOWrapper lo tiene; TextIO genérico (tipado) no
+    if callable(_reconfigure):
+        with contextlib.suppress(AttributeError, ValueError):
+            _reconfigure(line_buffering=True)
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
 logging.basicConfig(
@@ -74,6 +78,7 @@ except ImportError:
     class _APIRouterStub:
         def __init__(self, *args, **kwargs): pass
         def add_api_route(self, *args, **kwargs): pass
+        def include_router(self, *args, **kwargs): pass
         def get(self, *args, **kwargs): return lambda f: f
         def post(self, *args, **kwargs): return lambda f: f
         def websocket(self, *args, **kwargs): return lambda f: f
@@ -85,10 +90,15 @@ except ImportError:
             self.detail = detail
 
     class WebSocket:  # type: ignore[no-redef]
+        headers: Dict[str, str] = {}
+        query_params: Dict[str, str] = {}
+
         async def accept(self): pass
         async def send_json(self, data): pass
+        async def send_text(self, data): pass
+        async def receive(self) -> Dict[str, Any]: return {"type": "websocket.disconnect"}
         async def receive_text(self): return ""
-        async def close(self, code=1000): pass
+        async def close(self, code: int = 1000, reason: Optional[str] = None): pass
 
     class WebSocketDisconnect(Exception): pass  # type: ignore[no-redef]
 
@@ -97,12 +107,22 @@ except ImportError:
 
     FastAPI = _FastAPIStub  # type: ignore[misc]
     APIRouter = _APIRouterStub  # type: ignore[misc]
-    Header = lambda *args, **kwargs: None  # type: ignore[assignment]
-    Body = lambda *args, **kwargs: None  # type: ignore[assignment]
-    Query = lambda *args, **kwargs: None  # type: ignore[assignment]
+    # v26 · Stubs tipados como Any (igual que los de FastAPI): con lambdas devolviendo None, Pylance infería cada
+    #       `param: str = Header(None)` como "None no asignable a str" en TODAS las rutas.
+    def Header(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        return None
+
+    def Body(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        return None
+
+    def Query(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        return None
+
+    def JSONResponse(content: Any = None, status_code: int = 200, headers: Any = None, **kwargs: Any) -> Any:  # type: ignore[no-redef]
+        return content
+
     HTTPException = _HTTPExceptionStub  # type: ignore[misc]
     CORSMiddleware = _CORSMiddlewareStub  # type: ignore[misc]
-    JSONResponse = lambda content=None, status_code=200, headers=None, **kwargs: content  # type: ignore[assignment, misc]
 
 try:
     import uvicorn  # type: ignore[import-not-found]
@@ -217,7 +237,14 @@ try:
         stop_analytics_flusher,
     )
 except ImportError:  # pragma: no cover - se usa en entornos minimalistas o con módulos ausentes.
-    analytics_buffer = None
+    # v26 · Los respaldos respetan la naturaleza de las funciones reales: las que main.py usa con `await` son
+    #       corrutinas. Antes eran síncronas y, sin database/analytics.py, `await record_stars_payment(...)` o
+    #       `await stop_analytics_flusher()` lanzaban TypeError (NoneType can't be used in 'await' expression).
+    class _NullAnalyticsBuffer:
+        def record(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    analytics_buffer = _NullAnalyticsBuffer()
 
     def classify_message(*args, **kwargs):
         return None
@@ -225,17 +252,55 @@ except ImportError:  # pragma: no cover - se usa en entornos minimalistas o con 
     def extract_group_id_from_payload(*args, **kwargs):
         return None
 
-    def get_community_full_analytics(*args, **kwargs):
+    async def get_community_full_analytics(*args, **kwargs) -> dict:
         return {}
 
-    def record_stars_payment(*args, **kwargs):
+    async def record_stars_payment(*args, **kwargs):
         return None
 
     def start_analytics_flusher(*args, **kwargs):
         return None
 
-    def stop_analytics_flusher(*args, **kwargs):
+    async def stop_analytics_flusher(*args, **kwargs):
         return None
+
+class _NullRadarHub:
+    """
+    v26 · Sustituto inerte de radar_bus.radar_hub con los mismos métodos que usa main.py. Solo se activa si radar_bus
+    no está desplegado: /health sigue respondiendo 200 y /ws/radar rechaza con un motivo claro ("radar_unavailable")
+    en lugar de lanzar AttributeError sobre None. Con radar_bus presente no interviene.
+    """
+
+    def total_connections(self) -> int:
+        return 0
+
+    def listener_count(self, chat_id: int) -> int:
+        return 0
+
+    def current_seq(self, chat_id: int) -> int:
+        return 0
+
+    def has_listeners(self, chat_id: int) -> bool:
+        return False
+
+    def can_accept(self, chat_id: int, user_id: int) -> Optional[str]:
+        return "radar_unavailable"
+
+    async def connect(self, chat_id: int, websocket: Any, user_id: int = 0, accept: bool = False) -> Any:
+        return None
+
+    def send_to(self, client: Any, payload: Any) -> None:
+        return None
+
+    def set_filter(self, client: Any, events: Any) -> None:
+        return None
+
+    async def disconnect(self, chat_id: int, websocket: Any) -> None:
+        return None
+
+    async def close_all(self) -> None:
+        return None
+
 
 try:
     from radar_bus import publish_radar_event, radar_hub  # type: ignore[import-not-found]
@@ -243,7 +308,7 @@ except ImportError:  # pragma: no cover - módulo opcional disponible solo en al
     def publish_radar_event(*args, **kwargs):
         return None
 
-    radar_hub = None
+    radar_hub = _NullRadarHub()
 
 from handlers import (
     admin_group,
@@ -251,13 +316,24 @@ from handlers import (
     ecosystem,
     groups,
     media_locks,
-    ban_appeals,
     moderation,
     payments,
     user_private,
     vc_manager
 )
 from handlers import metrics as community_metrics
+
+
+def _ban_appeals_module():
+    """
+    v26 · Módulo de apelaciones: ubicación oficial handlers/ban_appeals.py; se tolera ban_appeals.py en la raíz.
+    find_spec decide la ruta ANTES de importar: un ImportError real dentro del módulo nunca queda enmascarado.
+    """
+    name = "handlers.ban_appeals" if importlib.util.find_spec("handlers.ban_appeals") is not None else "ban_appeals"
+    return importlib.import_module(name)
+
+
+ban_appeals = _ban_appeals_module()   # ⚖️ v24/v25 · apelaciones (registro del bot maestro y barrido)
 from handlers.user_private import (
     get_active_user_channels,
     get_active_user_groups,
@@ -335,7 +411,7 @@ def _spawn(coro, name: Optional[str] = None) -> asyncio.Task:
 ws_manager = radar_hub
 
 
-async def emit_radar_event(chat_id: int, event_type: str, data: dict = None):
+async def emit_radar_event(chat_id: int, event_type: str, data: Optional[dict] = None):
     """Emite un evento reactivo a todos los clientes de la sala (encolado, no bloqueante)."""
     try:
         publish_radar_event(int(chat_id), event_type, data or {})
@@ -360,7 +436,7 @@ async def build_settings_snapshot(chat_id: int) -> Dict[str, Any]:
         return {}
 
 
-async def emit_settings_updated(chat_id: int, source: str, changed, extra: Dict[str, Any] = None) -> None:
+async def emit_settings_updated(chat_id: int, source: str, changed, extra: Optional[Dict[str, Any]] = None) -> None:
     """
     v14 · Emite 'settings_updated' a /ws/radar/{chat_id} con el estado REAL ya guardado. `extra` conserva las
     claves que ya enviaba cada emisor (compatibilidad con clientes que leen el payload plano).
@@ -381,8 +457,49 @@ async def emit_settings_updated(chat_id: int, source: str, changed, extra: Dict[
 # ==========================================
 # 🌐 SERVIDOR WEB API (FASTAPI)
 # ==========================================
+# ==========================================
+# 🚦 v26 · ARRANQUE RÁPIDO PARA EL HEALTHCHECK DE RAILWAY
+# ==========================================
+# uvicorn se levanta al INICIO de main(), antes de esperar el candado de instancia única: /health responde 200 al
+# instante aunque la réplica anterior siga viva durante un redeploy (si la nueva esperaba el candado antes de abrir el
+# puerto, ninguna de las dos avanzaba y Railway daba el despliegue por fallido). Hasta que esta instancia tiene el
+# candado y la base de datos lista (mark_startup_ready), el resto de la API responde 503 + Retry-After y los WebSockets
+# se cierran con 1013 ("try again later"): se conserva la regla de UN solo proceso escritor sobre SQLite.
+_STARTUP_READY = False
+HEALTH_PATHS = frozenset({"/", "/health", "/api/health"})
+
+
+def mark_startup_ready() -> None:
+    global _STARTUP_READY
+    _STARTUP_READY = True
+
+
+class StartupGateMiddleware:
+    """Middleware ASGI puro (HTTP y WebSocket): solo deja pasar el healthcheck hasta que la instancia esté lista."""
+
+    def __init__(self, app_: Any) -> None:
+        self.app = app_
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        kind = scope.get("type")
+        if _STARTUP_READY or kind not in ("http", "websocket") or scope.get("path") in HEALTH_PATHS:
+            await self.app(scope, receive, send)
+            return
+        if kind == "websocket":
+            await send({"type": "websocket.close", "code": 1013, "reason": "starting"})
+            return
+        body = json.dumps({"detail": "Servicio iniciando, reintenta en unos segundos."}).encode("utf-8")
+        await send({"type": "http.response.start", "status": 503,
+                    "headers": [(b"content-type", b"application/json"), (b"retry-after", b"5"),
+                                (b"content-length", str(len(body)).encode("ascii"))]})
+        await send({"type": "http.response.body", "body": body})
+
+
 app = FastAPI(title="The Bunker OS Backend API", version="2.0")
 
+# Orden: en Starlette el ÚLTIMO middleware añadido es el más externo. La compuerta se añade ANTES que CORS para que
+# CORS la envuelva y también firme las respuestas 503 del arranque (la Mini App ve "iniciando", no un error CORS).
+app.add_middleware(StartupGateMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -398,12 +515,18 @@ api_router = APIRouter()
 @app.get("/health")
 @app.get("/api/health")
 async def health_check():
+    """Siempre 200 y sin E/S: Railway lo consulta durante el despliegue (también antes de que el bot esté listo)."""
+    try:
+        clients = int(ws_manager.total_connections())
+    except Exception:
+        clients = 0
     return {
         "status": "online",
+        "ready": _STARTUP_READY,
         "service": "The Bunker Command OS API",
         "bot_connected": master_bot_instance is not None,
         "active_clones": len(active_clone_tasks),
-        "websocket_clients": ws_manager.total_connections()
+        "websocket_clients": clients
     }
 
 
@@ -497,7 +620,7 @@ def verify_telegram_widget_login(data: dict) -> bool:
     return True
 
 
-def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None) -> int:
+def resolve_user_id(x_telegram_init_data: Optional[str] = None, authorization: Optional[str] = None) -> int:
     """
     Resuelve el user_id SOLO a partir de credenciales firmadas (initData HMAC o
     token de sesión firmado). Devuelve 0 si no hay credenciales válidas.
@@ -533,7 +656,7 @@ def resolve_user_id(x_telegram_init_data: str = None, authorization: str = None)
     return 0
 
 
-def require_authenticated_user(x_telegram_init_data: str = None, authorization: str = None) -> int:
+def require_authenticated_user(x_telegram_init_data: Optional[str] = None, authorization: Optional[str] = None) -> int:
     uid = resolve_user_id(x_telegram_init_data, authorization)
     if not uid:
         raise HTTPException(status_code=401, detail="Autenticación requerida: initData o sesión inválida.")
@@ -1120,7 +1243,7 @@ async def api_chat_dashboard(
             logger.debug(f"[Perímetro] Estado no disponible para {numeric_id}: {ex}")
 
         # v8.2: difusión personalizada del Estudio (chat destino, intervalo, texto promocional).
-        if load_broadcast_config is not None:
+        if load_broadcast_config is not None and public_broadcast_config is not None:
             try:
                 data.update(public_broadcast_config(await load_broadcast_config(numeric_id, _plan_deps())))
             except Exception as ex:
@@ -1258,7 +1381,7 @@ async def api_update_ai_sentinel(
         cfg = await perimeter_ops.apply_ai_sentinel_patch(numeric_id, patch)
     except perimeter_ops.AISettingsError as err:
         raise HTTPException(status_code=422, detail=f"{err.field}: {err.message}")
-    _spawn(emit_settings_updated(numeric_id, "settings", [f"ai_{k}" for k in patch]), name=f"ai_sync:{numeric_id}")
+    _spawn(emit_settings_updated(numeric_id, "settings", [f"ai_{k}" for k in (patch or {})]), name=f"ai_sync:{numeric_id}")
     return {"status": "success", "ai_sentinel": cfg}
 
 
@@ -1490,7 +1613,7 @@ async def api_vip_role_member(
     await assert_chat_ownership(user_id, numeric_id)
     action = str((payload or {}).get("action") or "")
     try:
-        target = int((payload or {}).get("user_id"))
+        target = int(cast(Any, (payload or {}).get("user_id")))   # None / texto → TypeError / ValueError (422)
     except (TypeError, ValueError):
         raise HTTPException(status_code=422, detail="user_id: se esperaba un id numérico.")
     if target <= 0:
@@ -1878,6 +2001,8 @@ _PLAN_DEPS_CACHE: Dict[str, Any] = {}
 
 def _plan_deps():
     if "deps" not in _PLAN_DEPS_CACHE:
+        if _load_plan_deps is None:   # módulo de planes ausente: los llamadores ya lo comprueban antes
+            raise RuntimeError("channel_plans_api no disponible")
         _PLAN_DEPS_CACHE["deps"] = _load_plan_deps()
     return _PLAN_DEPS_CACHE["deps"]
 
@@ -2641,7 +2766,7 @@ async def run_fastapi_server():
         )
     port = _resolve_port()
     config = uvicorn.Config(
-        app,
+        cast(Any, app),   # app puede ser el stub sin FastAPI: Pylance no lo acepta como ASGIApplication
         host=os.getenv("HOST", "0.0.0.0"),
         port=port,
         log_level=os.getenv("UVICORN_LOG_LEVEL", "info").lower(),
@@ -2733,7 +2858,7 @@ async def _resolve_creator_id(bot: Optional[Bot], chat_id: int) -> Optional[int]
     return None
 
 
-async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Bot = None):
+async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Optional[Bot] = None):
     """
     👑 v12 · Registro de propiedad estricto: al añadir/promover el bot SOLO se vincula al CREADOR real del chat.
     Antes se vinculaba también a quien lo añadió (aunque fuera un administrador común), lo que le daba acceso a
@@ -2987,12 +3112,13 @@ class SettingsSyncMiddleware(BaseMiddleware):
             return await handler(event, data)
         finally:
             for cid in chat_ids:
-                if before.get(cid) is None:
+                previous = before.get(cid)
+                if previous is None:
                     continue
                 after = await _settings_state(cid)
-                if after is None or after == before[cid]:
+                if after is None or after == previous:
                     continue
-                changed = _settings_changed_fields(before[cid], after)
+                changed = _settings_changed_fields(previous, after)
                 logger.info(f"🔄 [Sync] Consola del bot cambió {cid}: {', '.join(changed)}")
                 _spawn(emit_settings_updated(cid, "bot_console", changed), name=f"settings_sync:{cid}")
                 if any(f.startswith(("clone_", "sentinel_")) for f in changed):
@@ -3048,7 +3174,7 @@ async def _dispatch_clone_update_limited(semaphore: asyncio.Semaphore, clone_bot
 CLONE_HEALTHY_WINDOW_S = 90.0   # un long-poll dura 15 s: sin respuesta correcta en 90 s el clon no está conectado
 
 
-def _clone_health(token: str, state: str, username: str = None, ok: bool = False) -> None:
+def _clone_health(token: str, state: str, username: Optional[str] = None, ok: bool = False) -> None:
     """v17 · Estado real del worker del clon (lo lee la supervisión de la Mini App)."""
     entry = active_clone_tasks.get(token)
     if entry is None:
@@ -3083,7 +3209,7 @@ def _sentinel_runtime(chat_id: int) -> dict:
     snapshot = getattr(_assistant_runtime, "get_sentinel_runtime_snapshot", None)
     if callable(snapshot):
         try:
-            return snapshot(int(chat_id))
+            return cast(Dict[str, Any], snapshot(int(chat_id)))
         except Exception as ex:
             logger.debug(f"[Activos] Instantánea del Centinela no disponible para {chat_id}: {ex}")
     entry = getattr(_assistant_runtime, "active_sentinels", {}).get(int(chat_id))
@@ -3563,7 +3689,7 @@ def _instance_lock_path() -> str:
     return os.path.join(base, ".bunker_instance.lock")
 
 
-async def _enforce_single_instance(timeout_s: float = None) -> None:
+async def _enforce_single_instance(timeout_s: Optional[float] = None) -> None:
     """
     Candado exclusivo (fcntl.flock) junto a la base de datos. Durante un redeploy la instancia nueva
     ESPERA a que la vieja libere el candado (hasta INSTANCE_LOCK_WAIT_S, 90 s por defecto) en vez de
@@ -3621,6 +3747,11 @@ def _verify_sqlite_wal() -> None:
 async def main():
     global master_bot_instance
 
+    # 🚦 v26 · Puerto abierto de inmediato: /health responde 200 mientras se espera el candado de instancia única (el
+    #    resto de la API queda en 503 hasta mark_startup_ready). Es la MISMA tarea fastapi_server, solo que antes.
+    fastapi_task = _spawn(run_fastapi_server(), name="fastapi_server")
+    await asyncio.sleep(0)   # cede el loop una vez para que uvicorn empiece a enlazar el puerto
+
     # 0. Base de datos primero: todo lo demás depende del esquema.
     await _enforce_single_instance()
     init_db()
@@ -3639,8 +3770,9 @@ async def main():
     if ALLOW_INSECURE_AUTH_FALLBACK:
         logger.warning("🚨 [Seguridad] ALLOW_INSECURE_AUTH_FALLBACK=1: la API acepta peticiones sin firma. NO usar en producción.")
 
-    # 1. API + WebSockets en el mismo event loop (Railway enruta el tráfico a $PORT)
-    fastapi_task = _spawn(run_fastapi_server(), name="fastapi_server")
+    # 1. API + WebSockets en el mismo event loop (Railway enruta el tráfico a $PORT): el servidor ya escucha desde el
+    #    inicio de main(); a partir de aquí la API completa queda habilitada (mismo punto que en v25).
+    mark_startup_ready()
 
     master_bot = Bot(
         token=BOT_TOKEN,

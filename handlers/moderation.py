@@ -21,6 +21,7 @@ import contextlib
 import time
 import html
 import logging
+from typing import Any, Optional, Tuple
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup,
@@ -377,7 +378,7 @@ async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKey
         _spawn(auto_delete_pair(message, warn, delay=10))
 
 
-async def validate_moderation_target(message: Message, command: CommandObject, bot: Bot, cmd_name: str):
+async def validate_moderation_target(message: Message, command: CommandObject, bot: Bot, cmd_name: str) -> Tuple[Any, Any, Any]:
     """Función unificada para validar permisos, extraer el objetivo y aplicar filtros de protección."""
     if message.chat.type == "private":
         return None, None, None

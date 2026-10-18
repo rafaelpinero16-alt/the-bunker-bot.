@@ -274,13 +274,13 @@ async def _delete_later(bot, chat_id: int, message_id: int, delay: int) -> None:
         await asyncio.wait_for(bot.delete_message(chat_id=chat_id, message_id=message_id), timeout=TG_TIMEOUT_S)
 
 
-def _mention(user_id: int, full_name: str = None, username: str = None) -> str:
+def _mention(user_id: int, full_name: Optional[str] = None, username: Optional[str] = None) -> str:
     name = html.escape((full_name or (f"@{username}" if username else "") or str(user_id))[:64])
     return f"<a href='tg://user?id={int(user_id)}'>{name}</a>"
 
 
 async def on_payment(*, group_id: int, user_id: int, charge_id: str, amount: int, payload: str,
-                     username: str = None, full_name: str = None, bot=None) -> Optional[dict]:
+                     username: Optional[str] = None, full_name: Optional[str] = None, bot=None) -> Optional[dict]:
     """Gancho de main._record_payment. Solo procesa DONACIONES (MicVIP llega verificado por on_micvip_granted)."""
     if not group_id or not user_id or not is_donation_payload(payload):
         return None
@@ -310,7 +310,7 @@ async def on_micvip_granted(group_id: int, user_id: int, charge_id: str, expires
 
 
 async def grant_manual(group_id: int, user_id: int, days: int, actor_id: int, bot=None,
-                       username: str = None, full_name: str = None) -> dict:
+                       username: Optional[str] = None, full_name: Optional[str] = None) -> dict:
     result = await _db().vip_role_grant(int(group_id), int(user_id), "manual", days=int(days), actor_id=actor_id,
                                         username=username, full_name=full_name)
     return await _after_grant(result, int(group_id), int(user_id), "manual", _mention(user_id, full_name, username), bot=bot)
@@ -331,7 +331,7 @@ async def retag(group_id: int, user_id: int, bot=None) -> str:
     return await apply_tag(group_id, user_id, cfg.get("tag_text") or None, bot=bot)
 
 
-async def update_config(group_id: int, patch: dict, updated_by: int = None) -> dict:
+async def update_config(group_id: int, patch: dict, updated_by: Optional[int] = None) -> dict:
     """Guarda la configuración; si cambia la etiqueta, la re-aplica en segundo plano a los VIP vigentes."""
     before = await _db().get_vip_role_config(int(group_id))
     cfg = await _db().update_vip_role_config(int(group_id), patch, updated_by=updated_by)

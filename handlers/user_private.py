@@ -9,11 +9,14 @@ Revisión de resiliencia y blindaje:
   5. Fase 3 · Exclusividad financiera: PRO, ULTRA PRO, MicVIP y membresías se adquieren solo con
      Telegram Stars (XTR) in-app; sin pasarelas externas ni precios fiat (Telegram, Apple 3.1.1, Google Play).
 """
+from typing import Optional
 import os
 import sys
 import re
 import time
 import html
+import importlib
+import importlib.util
 import json
 import asyncio
 import logging
@@ -101,7 +104,7 @@ import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purg
 import micvip_audit    # 🎟️ v22 · auditoría MicVIP compartida con la Mini App
 import vip_roles       # 👑 v23 · roles y etiquetas VIP automáticos (compartido con la Mini App)
 import link_quotas     # 🔗 v23 · cuota diaria de enlaces por administrador (compartido con la Mini App)
-from .groups import (
+from handlers.groups import (
     execute_raid_lockdown, lift_raid_lockdown,
     clear_speaker_queue, get_speaker_queue
 )
@@ -110,7 +113,7 @@ from .groups import (
 # Los precios provienen de handlers/payments.py (única fuente de verdad); payments.py no
 # importa este módulo en tiempo de carga, por lo que no hay importación circular.
 try:
-    from .payments import PRICE_PRO_STARS, PRICE_ULTRAPRO_STARS, invalidate_channel_plan_cache
+    from handlers.payments import PRICE_PRO_STARS, PRICE_ULTRAPRO_STARS, invalidate_channel_plan_cache
 except Exception:  # pragma: no cover - respaldo si payments no está disponible
     PRICE_PRO_STARS, PRICE_ULTRAPRO_STARS = 300, 600
 
@@ -288,7 +291,7 @@ def _remember_card(bot: Bot, filename: str, msg) -> None:
 
 
 async def render_card(bot: Bot, chat_id: int, card_key: str, lang: str, keyboard=None,
-                      caption: str = None, old_message=None) -> bool:
+                      caption: Optional[str] = None, old_message=None) -> bool:
     """
     Renderiza la tarjeta visual HUD asociada a `card_key` en el idioma `lang`:
     - Si el mensaje anterior ya contiene foto, realiza un `edit_media` fluido sin parpadeos.
@@ -342,7 +345,7 @@ async def render_card(bot: Bot, chat_id: int, card_key: str, lang: str, keyboard
     return False
 
 
-async def send_card_message(bot: Bot, chat_id: int, card_key: str, lang: str, keyboard=None, caption: str = None):
+async def send_card_message(bot: Bot, chat_id: int, card_key: str, lang: str, keyboard=None, caption: Optional[str] = None):
     """Despacha una tarjeta gráfica como mensaje nuevo e independiente (Message)."""
     names = CARD_IMAGES.get(card_key) or {}
     filename = names.get(lang) or names.get("es")
@@ -614,6 +617,7 @@ GAMI_STATES = {}          # 🎮 Edición del anuncio recurrente de gamificació
 LOG_CHANNEL_STATES = {}   # 🧾 v20 · Vinculación del canal de registro desde el bot
 SUPPORT_AI_STATES = {}    # 🤖 v20 · Conversación con el Asistente de Soporte IA
 VIP_ROLE_STATES = {}      # 👑 v23 · Etiqueta VIP y concesión manual de roles desde el bot
+APPEAL_PRICE_STATES = {}  # ⚖️ v24 · Precio personalizado de la apelación de baneos
 
 # 🧯 Registro central de TODOS los estados conversacionales: permite liberarlos en bloque (navegación, /start,
 # /cancel) y garantiza que ningún menú privado quede bloqueado por una conversación huérfana.
@@ -625,9 +629,18 @@ ALL_STATE_DICTS = (
     SENTINEL_PAYLOAD_TEXT_STATES, SENTINEL_PAYLOAD_MEDIA_STATES, SENTINEL_PAYLOAD_AUTODEL_STATES,
     CHAN_PLAN_STATES, AI_PROMPT_STATES, WARN_CUSTOM_TEXT_STATES, WARN_CUSTOM_MEDIA_STATES, MIC_VIP_TEXT_STATES,
     SENTINEL_CFG_STATES, BACKUP_IMPORT_STATES, REP_MULTIPLIER_STATES, GAMI_STATES,
-    LOG_CHANNEL_STATES, SUPPORT_AI_STATES, VIP_ROLE_STATES
+    LOG_CHANNEL_STATES, SUPPORT_AI_STATES, VIP_ROLE_STATES, APPEAL_PRICE_STATES
 )
 
+
+
+def _ban_appeals_module():
+    """
+    v26 · Módulo de apelaciones: ubicación oficial handlers/ban_appeals.py; se tolera ban_appeals.py en la raíz.
+    find_spec decide la ruta ANTES de importar: un ImportError real dentro del módulo nunca queda enmascarado.
+    """
+    name = "handlers.ban_appeals" if importlib.util.find_spec("handlers.ban_appeals") is not None else "ban_appeals"
+    return importlib.import_module(name)
 
 
 def register_external_state_store(store: dict) -> None:
@@ -1689,10 +1702,10 @@ try:
 except ImportError:  # pragma: no cover - base de datos anterior a v21: sin persistencia, inglés por defecto
     _DB_DEFAULT_LANG = "en"
 
-    async def get_user_lang(user_id):
+    async def get_user_lang(user_id: int) -> Optional[str]:   # misma firma que database.database
         return None
 
-    async def set_user_lang(user_id, lang, username=None, full_name=None):
+    async def set_user_lang(user_id: int, lang: str, username: Optional[str] = None, full_name: Optional[str] = None) -> str:
         return "es" if str(lang).lower().startswith("es") else "en"
 
     def normalize_lang(value, default=None):
@@ -1791,7 +1804,7 @@ router.message.middleware(LangPreferenceMiddleware())
 router.callback_query.middleware(LangPreferenceMiddleware())
 
 
-def language_selector_keyboard(current: str, back_callback: str = None) -> InlineKeyboardMarkup:
+def language_selector_keyboard(current: str, back_callback: Optional[str] = None) -> InlineKeyboardMarkup:
     """Selector 🇺🇸 EN / 🇪🇸 ES con la opción vigente marcada."""
     rows = [[
         InlineKeyboardButton(text=("✅ " if current == "en" else "") + "🇺🇸 English", callback_data="setlang_en"),
@@ -2073,7 +2086,7 @@ def _merge_chat_lists(primary: list, extra: list) -> list:
     return list(primary) + [row for row in extra if int(row[0]) not in seen]
 
 
-async def get_active_user_groups(bot: Bot, user_id: int, include_delegated: str = None) -> list:
+async def get_active_user_groups(bot: Bot, user_id: int, include_delegated: Optional[str] = None) -> list:
     """
     Grupos que el usuario puede operar: los que POSEE (creador en vivo) y, si include_delegated se indica,
     también aquellos donde el Arquitecto lo designó delegado con ese permiso ('any' = cualquiera).
@@ -2102,7 +2115,7 @@ async def get_active_user_groups(bot: Bot, user_id: int, include_delegated: str 
     return _merge_chat_lists([res for res in results if res is not None], delegated)
 
 
-async def get_active_user_channels(bot: Bot, user_id: int, include_delegated: str = None) -> list:
+async def get_active_user_channels(bot: Bot, user_id: int, include_delegated: Optional[str] = None) -> list:
     owned = await _get_owned_user_channels(bot, user_id)
     if not include_delegated:
         return owned
@@ -2334,7 +2347,7 @@ def required_delegate_permission(callback_data: str):
     return None
 
 
-async def is_authorized_operator(bot: Bot, user_id: int, chat_id: int, perm: str = None) -> bool:
+async def is_authorized_operator(bot: Bot, user_id: int, chat_id: int, perm: Optional[str] = None) -> bool:
     """
     Dueño legítimo / Arquitecto → siempre. Delegado → solo si el Arquitecto le activó `perm` en esa comunidad
     ('any' = al menos un permiso) y no salió ni fue expulsado del chat. perm=None → exclusivo del Dueño.
@@ -2411,7 +2424,7 @@ async def verify_admin_privileges(callback: CallbackQuery, bot: Bot, group_id: i
     return False
 
 
-async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int, perm: str = None) -> bool:
+async def verify_admin_privileges_msg(message: Message, bot: Bot, group_id: int, perm: Optional[str] = None) -> bool:
     """Igual que verify_admin_privileges para mensajes; perm=None → exclusivo del Dueño / Arquitecto."""
     lang = user_lang(message.from_user)
     t = TEXTS[lang]
@@ -2430,8 +2443,8 @@ async def _reply_plan_state_lost(message: Message, lang: str, channel_id=None) -
 
 async def _finalize_and_preview_channel_plan(
     bot: Bot, chat_id: int, channel_id: int, lang: str, name: str,
-    days: int, price: int, promo_text: str, media_id: str = None,
-    media_type: str = None, target_link: str = None, recurrence_hours: int = 0
+    days: int, price: int, promo_text: str, media_id: Optional[str] = None,
+    media_type: Optional[str] = None, target_link: Optional[str] = None, recurrence_hours: int = 0
 ) -> None:
     """Guarda el plan del canal y envía una vista previa donde el enlace VIP es un botón inline."""
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
@@ -2622,7 +2635,7 @@ async def _tips_refresh_panel(bot: Bot, state: dict, group_id: int, lang: str, v
         logging.error(f"❌ [Tips] No se pudo refrescar el panel de group={group_id}: {ex}")
 
 
-async def _tips_finish(bot: Bot, message: Message, state: dict, group_id: int, lang: str, notice_text: str, status_msg: Message = None) -> None:
+async def _tips_finish(bot: Bot, message: Message, state: dict, group_id: int, lang: str, notice_text: str, status_msg: Optional[Message] = None) -> None:
     """Cierre de un flujo exitoso: limpia el prompt, refresca el panel en vivo y deja un aviso temporal."""
     try:
         await bot.delete_message(message.chat.id, state["prompt_id"])
@@ -2741,7 +2754,7 @@ async def _send_welcome_video(bot: Bot, chat_id: int, caption: str, keyboard) ->
         return False
 
 
-async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: str = None) -> None:
+async def send_official_welcome(bot: Bot, chat_id: int, user, bot_username: Optional[str] = None) -> None:
     if not bot_username:
         bot_username = (await bot.get_me()).username or "BunkerBot"
     lang = user_lang(user) if user else DEFAULT_LANG
@@ -2846,7 +2859,7 @@ def _plan_step_keyboard(t: dict, channel_id: int, lang: str) -> InlineKeyboardMa
 PLAN_RECURRENCE_CHOICES = (6, 12, 24, 48)
 
 
-def _plan_recurrence_keyboard(t: dict, channel_id: int, lang: str, plan_id: int = None, current: int = None) -> InlineKeyboardMarkup:
+def _plan_recurrence_keyboard(t: dict, channel_id: int, lang: str, plan_id: Optional[int] = None, current: Optional[int] = None) -> InlineKeyboardMarkup:
     """
     Intervalos de difusión recurrente (6/12/24/48 h o desactivada). Sin plan_id → paso final del asistente
     (chplans_recur_*); con plan_id → editor de un plan existente (chplans_setsched_*).
@@ -2894,6 +2907,8 @@ def get_group_panel_keyboard(group_id: int, lang: str):
             InlineKeyboardButton(text="👑 " + ("Roles VIP" if lang == "es" else "VIP Roles"), callback_data=f"vipr_m_{group_id}_{lang}"),
             InlineKeyboardButton(text="🔗 " + ("Cuotas de enlaces" if lang == "es" else "Link quotas"), callback_data=f"alq_m_{group_id}_{lang}"),
         ],
+        # ⚖️ v24 · Apelación de baneos por Telegram Stars (solo el Dueño)
+        [InlineKeyboardButton(text="⚖️ " + ("Apelaciones de baneo" if lang == "es" else "Ban appeals"), callback_data=f"apl_m_{group_id}_all_{lang}")],
         [InlineKeyboardButton(text=t["btn_ultra_tools"], callback_data=f"menu_ultra_{group_id}_{lang}")],
         [
             InlineKeyboardButton(text="🇺🇸 English" if lang == "es" else "🇪🇸 Español", callback_data=f"langpanel_{group_id}_{toggle_lang}"),
@@ -3138,7 +3153,7 @@ def build_tips_panel_text(lang: str, cfg: dict, tier: str, total_stars: int, tar
     )
 
 
-async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g", viewer_id: int = 0, targets: list = None):
+async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str = "g", viewer_id: int = 0, targets: Optional[list] = None):
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     tier = _tips_tier(await get_effective_group_tier(group_id, viewer_id))
     limit = _tips_limit(tier)
@@ -3209,7 +3224,7 @@ async def get_tips_keyboard(group_id: int, lang: str, cfg: dict, chat_type: str 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def build_tips_panel(group_id: int, lang: str, chat_kind: str, viewer_id: int, bot: Bot = None):
+async def build_tips_panel(group_id: int, lang: str, chat_kind: str, viewer_id: int, bot: Optional[Bot] = None):
     cfg = await get_tips_config(group_id) or {}
     tier = _tips_tier(await get_effective_group_tier(group_id, viewer_id))
     targets = await _tips_get_targets(group_id)
@@ -3837,7 +3852,7 @@ async def _dismiss_reply_keyboard(message: Message) -> None:
 
 
 # raidv_: puerta del Escudo Anti-Raid (handlers/groups.py) — se cede igual que los enlaces de cobro.
-_PAYMENT_ROUTES_RE = re.compile(r"^/(start\s+(sub_|vipmic_|chanplan_|speaker_|tip_|raidv_)|(pro|ultra)(@\w+)?(\s|$))")
+_PAYMENT_ROUTES_RE = re.compile(r"^/(start\s+(sub_|vipmic_|chanplan_|speaker_|tip_|raidv_|appeal_)|(pro|ultra)(@\w+)?(\s|$))")
 
 
 def _not_payments_route(message: Message) -> bool:
@@ -3875,6 +3890,15 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
             await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
         except Exception as db_ex:
             logging.error(f"❌ [cmd_start DB Error]: {db_ex}")
+
+        # ⚖️ v24 · Apelaciones de baneo que no pudieron entregarse por privado (el usuario aún no había abierto el bot).
+        try:
+            _deliver_pending_appeals = _ban_appeals_module().deliver_pending
+            _appeal_task = asyncio.create_task(_deliver_pending_appeals(bot, message.from_user))
+            _SETTINGS_EMIT_TASKS.add(_appeal_task)
+            _appeal_task.add_done_callback(_SETTINGS_EMIT_TASKS.discard)
+        except Exception as appeal_ex:
+            logging.debug(f"[Apelaciones] Entrega diferida no lanzada: {appeal_ex}")
 
         # 🎮 Deep link desde /gamification en el grupo: abre el panel del anuncio recurrente.
         if command.args and command.args.startswith("gami_"):
@@ -4546,7 +4570,7 @@ async def cb_gamification_console(callback: CallbackQuery, bot: Bot):
         await safe_edit_text(callback, text, reply_markup=keyboard)
         return
 
-    async def _refresh(alert: str = None, show_alert: bool = False):
+    async def _refresh(alert: Optional[str] = None, show_alert: bool = False):
         text, keyboard = await _gami_build_panel(bot, chat_id, user_id, lang)
         await safe_edit_text(callback, text, reply_markup=keyboard)
         try:
@@ -4704,7 +4728,7 @@ async def cb_gamification_console(callback: CallbackQuery, bot: Bot):
         cfg = await get_gamification_announcement(chat_id)
         card = _gami_compose_for_tier(cfg, tier_key)
         try:
-            from .ecosystem import send_gamification_card
+            from handlers.ecosystem import send_gamification_card
             await send_gamification_card(bot, user_id, card)
             await callback.answer(gt["preview_sent"])
         except Exception as ex:
@@ -4917,6 +4941,11 @@ async def handle_private_inputs(message: Message, bot: Bot):
         await _handle_log_channel_input(message, bot, LOG_CHANNEL_STATES.pop((bot.id, user_id)), text_input)
         return
 
+    # ⚖️ v24 · APELACIONES: precio personalizado en Stars
+    if (bot.id, user_id) in APPEAL_PRICE_STATES:
+        await _handle_appeal_price_input(message, bot, APPEAL_PRICE_STATES.pop((bot.id, user_id)), text_input)
+        return
+
     # 👑 v23 · ROLES VIP: etiqueta personalizada o concesión manual («id [días]» o un mensaje reenviado del usuario)
     if (bot.id, user_id) in VIP_ROLE_STATES:
         await _handle_vip_role_input(message, bot, VIP_ROLE_STATES.pop((bot.id, user_id)), text_input)
@@ -4924,7 +4953,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
 
     # 🛡️ v23 · MATRIZ: «➕ Autorizar bot» (@alias o mensaje reenviado del bot)
     if (bot.id, user_id) in _v23_auth_bot_states():
-        from .media_locks import handle_authorized_bot_input
+        from handlers.media_locks import handle_authorized_bot_input
         await handle_authorized_bot_input(message, bot, _v23_auth_bot_states().pop((bot.id, user_id)), text_input)
         return
 
@@ -7040,7 +7069,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         elif module == "locks":
             # 🔒 v15 · Matriz granular de 30 vectores en 3 páginas (estilo Group Help), en handlers/media_locks.py.
             # get_locks_keyboard (4 cerraduras binarias) se conserva por compatibilidad, pero ya no es la entrada.
-            from .media_locks import open_media_locks_panel
+            from handlers.media_locks import open_media_locks_panel
             await open_media_locks_panel(callback, bot, group_id, lang, page=1)
         elif module == "warns":
             cfg = await get_warns_config(group_id)
@@ -7165,7 +7194,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         await set_lock_status(group_id, lock_key, 0 if current == 1 else 1)
         emit_settings_updated_bg(group_id, "bot_console", ["media_locks", lock_key] + (["linklock_enabled"] if lock_key == "lock_links" else []))
         try:
-            from .media_locks import open_media_locks_panel
+            from handlers.media_locks import open_media_locks_panel
             await open_media_locks_panel(callback, bot, group_id, lang, page=1)
         except TelegramBadRequest:
             pass
@@ -8618,7 +8647,7 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
     Compatibilidad: la lógica vive en handlers/payments.py (fuente única). Un solo mensaje privado,
     texto personalizable para PRO / ULTRA PRO y un único botón de retorno a la comunidad.
     """
-    from .payments import send_tip_thanks as _payments_send_tip_thanks
+    from handlers.payments import send_tip_thanks as _payments_send_tip_thanks
     return await _payments_send_tip_thanks(bot, user_id, stars, group_id, lang, full_name=full_name)
 
 # ==========================================================================
@@ -8986,7 +9015,7 @@ async def cb_micvip_audit(callback: CallbackQuery, bot: Bot):
 # ==========================================================================
 def _v23_auth_bot_states() -> dict:
     """Almacén del asistente «➕ Autorizar bot» (vive en media_locks); se registra para /start, /cancel y la navegación."""
-    from . import media_locks as _ml
+    from handlers import media_locks as _ml
     register_external_state_store(_ml.AUTH_BOT_STATES)
     return _ml.AUTH_BOT_STATES
 
@@ -9046,7 +9075,7 @@ def _vip_main_view(group_id: int, cfg: dict, summary: dict, lang: str) -> tuple:
 
 
 def _vip_exempt_view(group_id: int, cfg: dict, lang: str) -> tuple:
-    from .media_locks import label as _ml_label
+    from handlers.media_locks import label as _ml_label
     from database.database import VIP_EXEMPTIBLE_VECTORS
     chosen = set(cfg.get("exempt_vectors") or [])
     text = (f"🛡️ <b>{tr(lang, 'Exenciones parciales VIP', 'VIP partial exemptions')}</b>\n\n"
@@ -9261,7 +9290,7 @@ async def _handle_vip_role_input(message: Message, bot: Bot, st: dict, text_inpu
                                           username=getattr(sender, "username", None), full_name=getattr(sender, "full_name", None))
     _vip_changed(group_id, ["members"])
     member = result.get("member") or {}
-    tag = vip_roles.TAG_STATUS_LABELS.get(result.get("tag_status") or member.get("tag_status"), ("", ""))[0 if lang == "es" else 1]
+    tag = vip_roles.TAG_STATUS_LABELS.get(str(result.get("tag_status") or member.get("tag_status") or ""), ("", ""))[0 if lang == "es" else 1]
     await message.answer(tr(lang, f"✅ <code>{target}</code> es VIP · ⏳ {vip_roles.fmt_expiry(member.get('expires_at'), lang)}\n{tag}",
                             f"✅ <code>{target}</code> is now VIP · ⏳ {vip_roles.fmt_expiry(member.get('expires_at'), lang)}\n{tag}")
                          + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
@@ -9395,3 +9424,142 @@ async def cb_admin_link_quotas(callback: CallbackQuery, bot: Bot):
     text, kb = (_alq_admin_view(group_id, overview, admin_view, lang) if admin_view else _alq_main_view(group_id, overview, lang))
     await _safe_edit(callback, text, kb)
     await callback.answer()
+
+
+
+# ==========================================================================
+# ⚖️ v24 · APELACIÓN DE BANEOS POR TELEGRAM STARS — apl_{sub}_{group_id}_…_{lang} (solo el Dueño / Arquitecto)
+# ==========================================================================
+APL_PER_PAGE = 6
+APL_FILTERS = ("all", "open", "paid", "closed")
+
+
+def _apl_main_view(group_id: int, cfg: dict, data: dict, flt: str, lang: str) -> tuple:
+    STATUS_LABELS = _ban_appeals_module().STATUS_LABELS
+    s = data.get("summary") or {}
+    lines = []
+    for rec in data.get("records") or []:
+        who = html.escape(rec.get("full_name") or (f"@{rec['username']}" if rec.get("username") else str(rec["user_id"])))
+        state = STATUS_LABELS.get(rec.get("status"), (rec.get("status"), rec.get("status")))[0 if lang == "es" else 1]
+        when = time.strftime("%d/%m %H:%M", time.gmtime(int(rec.get("created_at") or 0)))
+        reason = html.escape(((rec.get("reason_es") if lang == "es" else rec.get("reason_en")) or rec.get("reason_key") or "")[:60])
+        lines.append(f"• <b>{who}</b> <code>{rec['user_id']}</code> · {when} UTC\n   {state} · {rec.get('price_stars')} ⭐\n   <i>{reason}</i>")
+    flt_name = {"all": tr(lang, "Todas", "All"), "open": tr(lang, "Abiertas", "Open"), "paid": tr(lang, "Pagadas", "Paid"),
+                "closed": tr(lang, "Cerradas", "Closed")}
+    text = (
+        f"⚖️ <b>{tr(lang, 'Apelación de baneos', 'Ban appeals')}</b>\n\n"
+        f"• {tr(lang, 'Estado', 'Status')}: <b>{tr(lang, '🟢 Activa', '🟢 On') if cfg['enabled'] else tr(lang, '🔴 Inactiva', '🔴 Off')}</b>\n"
+        f"• 💫 {tr(lang, 'Precio', 'Price')}: <b>{cfg['price_stars']} ⭐</b> · 🔗 {tr(lang, 'Enlace', 'Link')}: <b>{cfg['link_ttl_min']} min</b>"
+        f" · ⏳ {tr(lang, 'Oferta', 'Offer')}: <b>{cfg['window_days']} {tr(lang, 'días', 'days')}</b>\n"
+        f"• 🔁 {tr(lang, 'Máx. por usuario (90 días)', 'Max per user (90 days)')}: <b>{cfg['max_per_user'] or '♾️'}</b>\n\n"
+        f"📊 {tr(lang, 'Apelaciones', 'Appeals')}: <b>{s.get('appeals', 0)}</b> · {tr(lang, 'pagadas', 'paid')}: <b>{s.get('paid', 0)}</b>"
+        f" · ⭐ <b>{s.get('stars', 0)}</b> · ↩️ {s.get('refunded', 0)} · 📭 {s.get('undelivered', 0)}\n\n"
+        f"<b>{flt_name.get(flt, flt)}</b>\n" + ("\n".join(lines) if lines else tr(lang, "<i>Sin registros.</i>", "<i>No records.</i>"))
+        + "\n\n" + tr(lang,
+                      "<i>Solo los baneos AUTOMÁTICOS por límite de advertencias son apelables. El usuario recibe el motivo y la "
+                      "factura por privado; al pagar se le desbanea y recibe un enlace de un solo uso. Si el bot no puede "
+                      "desbanear, el pago se reembolsa solo.</i>",
+                      "<i>Only AUTOMATIC bans from the warn limit are appealable. The user gets the reason and the invoice in "
+                      "private; on payment they are unbanned and receive a single-use link. If the bot cannot unban, the "
+                      "payment is refunded automatically.</i>")
+        + PERIMETER_SIGNATURE
+    )
+    g = group_id
+    rows = [
+        [InlineKeyboardButton(text=(tr(lang, "🟢 Activada", "🟢 Enabled") if cfg["enabled"] else tr(lang, "🔴 Desactivada", "🔴 Disabled")),
+                              callback_data=f"apl_t_{g}_{flt}_{lang}"),
+         InlineKeyboardButton(text=f"💫 {cfg['price_stars']} ⭐", callback_data=f"apl_p_{g}_{flt}_{lang}"),
+         InlineKeyboardButton(text="✏️ ⭐", callback_data=f"apl_e_{g}_{flt}_{lang}")],
+        [InlineKeyboardButton(text=f"🔗 {cfg['link_ttl_min']} min", callback_data=f"apl_l_{g}_{flt}_{lang}"),
+         InlineKeyboardButton(text=f"⏳ {cfg['window_days']} d", callback_data=f"apl_w_{g}_{flt}_{lang}"),
+         InlineKeyboardButton(text=f"🔁 {cfg['max_per_user'] or '♾️'}", callback_data=f"apl_x_{g}_{flt}_{lang}")],
+        [InlineKeyboardButton(text=("✓ " if f == flt else "") + flt_name[f], callback_data=f"apl_m_{g}_{f}_{lang}") for f in APL_FILTERS],
+        [InlineKeyboardButton(text="🔄 " + tr(lang, "Actualizar", "Refresh"), callback_data=f"apl_m_{g}_{flt}_{lang}")],
+        _v23_back(g, lang),
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _apl_render(group_id: int, flt: str, lang: str) -> tuple:
+    from database.database import appeal_list, get_appeal_config
+    cfg = await get_appeal_config(group_id)
+    data = await appeal_list(group_id, status=flt, limit=APL_PER_PAGE)
+    return _apl_main_view(group_id, cfg, data, flt, lang)
+
+
+@router.callback_query(F.data.startswith("apl_"))
+async def cb_ban_appeals(callback: CallbackQuery, bot: Bot):
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        sub, group_id = data[1], int(data[2])
+        flt = data[3] if data[3] in APL_FILTERS else "all"
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    uid = callback.from_user.id
+    clear_user_states(bot.id, uid)
+    from database.database import (APPEAL_LINK_TTL_CHOICES, APPEAL_MAX_CHOICES, APPEAL_PRICE_CHOICES, BunkerValidationError,
+                                   get_appeal_config, update_appeal_config)
+    cfg = await get_appeal_config(group_id)
+
+    def nxt(seq, cur):
+        return seq[(seq.index(cur) + 1) % len(seq)] if cur in seq else seq[0]
+
+    patch = None
+    if sub == "t":
+        patch = {"enabled": not cfg["enabled"]}
+    elif sub == "p":
+        patch = {"price_stars": nxt(APPEAL_PRICE_CHOICES, cfg["price_stars"])}
+    elif sub == "l":
+        patch = {"link_ttl_min": nxt(APPEAL_LINK_TTL_CHOICES, cfg["link_ttl_min"])}
+    elif sub == "w":
+        patch = {"window_days": nxt((1, 3, 7, 14, 30), cfg["window_days"])}
+    elif sub == "x":
+        patch = {"max_per_user": nxt(APPEAL_MAX_CHOICES, cfg["max_per_user"])}
+    elif sub == "e":
+        APPEAL_PRICE_STATES[(bot.id, uid)] = {"group_id": group_id, "lang": lang, "flt": flt, "ts": time.time()}
+        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+        msg = await callback.message.answer(
+            tr(lang, "💫 Escribe el precio de la apelación en Stars (1-10000).", "💫 Type the appeal price in Stars (1-10000).")
+            + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"apl_m_{group_id}_{flt}_{lang}"), parse_mode="HTML")
+        fire_and_forget_auto_delete([msg], delay=120)
+        await callback.answer()
+        return
+    if patch is not None:
+        try:
+            await update_appeal_config(group_id, patch)
+        except BunkerValidationError as err:
+            await callback.answer("⚠️ " + "; ".join(err.errors.values())[:180], show_alert=True)
+            return
+        emit_settings_updated_bg(group_id, "bot_console", [f"appeal_{k}" for k in patch])
+        await callback.answer("✅")
+    else:
+        await callback.answer()
+    text, kb = await _apl_render(group_id, flt, lang)
+    await _safe_edit(callback, text, kb)
+
+
+async def _handle_appeal_price_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
+    group_id, lang, flt = int(st["group_id"]), st.get("lang", DEFAULT_LANG), st.get("flt", "all")
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="⬅️ " + tr(lang, "Apelaciones de baneo", "Ban appeals"), callback_data=f"apl_m_{group_id}_{flt}_{lang}")]])
+    if time.time() - st.get("ts", 0) > STATE_TTL_SECONDS:
+        await message.answer(tr(lang, "⌛ La edición caducó; vuelve a abrir el menú.", "⌛ This edit expired; reopen the menu.")
+                             + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        return
+    from database.database import BunkerValidationError, update_appeal_config
+    raw = (text_input or "").strip().replace("⭐", "").strip()
+    try:
+        if not raw.isdigit():
+            raise BunkerValidationError({"price_stars": tr(lang, "escribe solo un número entero.", "type a whole number only.")})
+        cfg = await update_appeal_config(group_id, {"price_stars": int(raw)})
+    except BunkerValidationError as err:
+        await message.answer("❌ " + html.escape("; ".join(err.errors.values())) + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        return
+    emit_settings_updated_bg(group_id, "bot_console", ["appeal_price_stars"])
+    await message.answer(tr(lang, f"✅ Precio de apelación: <b>{cfg['price_stars']} ⭐</b>. Aplica a los próximos baneos.",
+                            f"✅ Appeal price: <b>{cfg['price_stars']} ⭐</b>. Applies to future bans.")
+                         + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
