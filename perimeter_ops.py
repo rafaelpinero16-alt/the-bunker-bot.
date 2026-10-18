@@ -654,7 +654,8 @@ BASE DE CONOCIMIENTOS OFICIAL — The Bunker Command OS v30 (Cloud Media Managem
 Todo lo que sigue es verificado contra el código del bot. Úsalo para explicar QUÉ es cada módulo, CUÁLES son sus
 funciones y CÓMO opera, QUÉ PLAN requiere y QUÉ beneficios aporta, y CÓMO se configura paso a paso en el Bot (chat
 privado) y en la Mini App (Command Center). La parte «ENCICLOPEDIA DE MÓDULOS» documenta cada módulo en 4 bloques:
-[QUÉ ES / DEFINICIÓN] · [FUNCIONES Y CÓMO OPERA] · [PLAN Y BENEFICIOS] · [CÓMO SE CONFIGURA EN BOT Y MINI APP].
+[QUÉ ES] · [FUNCIONES OPERATIVAS] · [PLAN Y BENEFICIOS (Free vs PRO vs ULTRA PRO)] · [CONFIGURACIÓN PASO A PASO
+(Bot y Mini App)].
 
 ══ A. ARQUITECTURA GENERAL ══
 The Bunker Command OS es un sistema de seguridad, control acústico, monetización y analítica para comunidades de
@@ -829,14 +830,15 @@ def support_knowledge_base() -> str:
     """
     pro, ultra = _plan_prices()
     head = _SUPPORT_KB_TEMPLATE.format(pro=pro, ultra=ultra, human=SUPPORT_HUMAN_CONTACT)
-    blocks = ["", "══ H. ENCICLOPEDIA DE MÓDULOS (4 bloques por módulo) ══"]
+    blocks: list[str] = ["", "══ H. ENCICLOPEDIA DE MÓDULOS (4 bloques por módulo) ══"]
     for topic in _KB_MODULE_ORDER:
         guide = _LOCAL_GUIDES.get(topic)
         if not guide:
             continue
         blocks.append(f"\n▶ {guide['title'][0]}")
         for section, label in _KB_SECTION_LABELS:
-            blocks.append(f"[{label}]\n{_render_guide_text(guide[section][0], pro, ultra)}")
+            heading = _render_guide_text(label, pro, ultra)
+            blocks.append(f"[{heading}]\n{_render_guide_text(guide[section][0], pro, ultra)}")
     return head + "\n".join(blocks)
 
 
@@ -918,7 +920,7 @@ def detect_query_intent(query: str) -> str:
 
 
 # Secciones que ensambla el respondedor local según la intención.
-_INTENT_SECTIONS = {
+_INTENT_SECTIONS: dict[str, tuple[str, ...]] = {
     "concept": ("what_is", "benefits"),
     "functions": ("functions", "benefits"),
     "concept_and_functions": ("what_is", "functions", "benefits"),
@@ -926,15 +928,15 @@ _INTENT_SECTIONS = {
     "setup": ("what_is_short", "setup"),
     "full": ("what_is", "functions", "setup"),
 }
-_KB_SECTION_LABELS = (
-    ("what_is", "QUÉ ES / DEFINICIÓN"),
-    ("functions", "FUNCIONES Y CÓMO OPERA"),
-    ("benefits", "PLAN Y BENEFICIOS"),
-    ("setup", "CÓMO SE CONFIGURA EN BOT Y MINI APP"),
+_KB_SECTION_LABELS: tuple[tuple[str, str], ...] = (
+    ("what_is", "QUÉ ES"),
+    ("functions", "FUNCIONES OPERATIVAS"),
+    ("benefits", "PLAN Y BENEFICIOS (Free 0 ⭐ vs PRO {pro} ⭐ vs ULTRA PRO {ultra} ⭐)"),
+    ("setup", "CONFIGURACIÓN PASO A PASO (Bot y Mini App)"),
 )
 
 # (tema, patrones regex sobre texto plegado). El orden desempata: va primero lo más específico.
-_LOCAL_TOPICS = (
+_LOCAL_TOPICS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("human", (r"hablar con (un |una )?(humano|persona|agente|asesor)", r"soporte humano", r"talk to (a )?(human|person|agent)",
                r"real person", r"human support", r"no se acredit", r"no me lleg", r"not credited", r"cobro duplicado",
                r"charged twice", r"reembolso", r"refund")),
@@ -1010,7 +1012,7 @@ _KB_MODULE_ORDER = (
 # ---- Catálogo de 4 dimensiones por módulo (ES, EN) -------------------------------------------------------------
 # Cada tema: title · what_is · functions · benefits · setup. Es la fuente de la ENCICLOPEDIA DE MÓDULOS que recibe
 # Mistral y del respondedor local. {pro} / {ultra} se sustituyen por los precios vigentes.
-_LOCAL_GUIDES = {
+_LOCAL_GUIDES: dict[str, dict[str, tuple[str, str]]] = {
     "bot_overview": {
         "title": ("🛡️ The Bunker Command OS — visión general", "🛡️ The Bunker Command OS — overview"),
         "what_is": (
@@ -2344,7 +2346,7 @@ _LOCAL_GUIDES = {
     },
 }
 
-_SECTION_HEADERS = {
+_SECTION_HEADERS: dict[str, tuple[str, str]] = {
     "what_is": ("📘 Qué es", "📘 What it is"),
     "functions": ("⚙️ Funciones y cómo opera", "⚙️ Functions and how it works"),
     "benefits": ("⭐ Plan y beneficios", "⭐ Plan and benefits"),
@@ -2384,7 +2386,7 @@ def local_knowledge_fallback(query: str, lang: str) -> Optional[str]:
     if best == "human":
         intent = "functions"   # contacto directo, sin secciones de producto
     pro, ultra = _plan_prices()
-    parts = []
+    parts: list[str] = []
     for section in _INTENT_SECTIONS.get(intent, _INTENT_SECTIONS["full"]):
         if section == "what_is_short":
             parts.append(_first_sentence(guide["what_is"][idx]))
@@ -2457,7 +2459,7 @@ def _support_check_rate(user_id: int, lang: str = "es") -> None:
     _bounded_put(_support_rate, user_id, history, SUPPORT_RATE_CACHE_MAX)
 
 
-_INTENT_GUIDANCE = {
+_INTENT_GUIDANCE: dict[str, str] = {
     "concept": "El usuario pregunta QUÉ ES. Explica qué es el módulo, su propósito en The Bunker OS y qué problema "
                "resuelve; menciona en qué plan está. NO des pasos de instalación salvo una línea final ofreciéndolos.",
     "functions": "El usuario pregunta por las FUNCIONES / qué hace / cómo funciona. Enumera y explica TODAS las funciones "
@@ -2618,8 +2620,8 @@ async def support_ai_diagnostics(run_probe: bool = True) -> dict:
     if assistant is None:
         return {"ok": False, "stage": "import", "detail": "assistant.py no se pudo importar"}
     status_fn = getattr(assistant, "mistral_status", None)
-    status = status_fn() if callable(status_fn) else {"client_ready": getattr(assistant, "mistral_client", None) is not None}
-    out = {"ok": bool(status.get("client_ready")), "stage": "client", "status": status,
+    status: dict[str, Any] = status_fn() if callable(status_fn) else {"client_ready": getattr(assistant, "mistral_client", None) is not None}
+    out: dict[str, Any] = {"ok": bool(status.get("client_ready")), "stage": "client", "status": status,
            "kb_chars": len(support_knowledge_base())}
     if not out["ok"] or not run_probe:
         return out
