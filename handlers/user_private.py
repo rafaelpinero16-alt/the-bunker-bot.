@@ -20,6 +20,7 @@ import importlib.util
 import json
 import asyncio
 import logging
+import contextlib
 from aiogram import Router, F, Bot, BaseMiddleware
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -8958,6 +8959,98 @@ async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
 # ==========================================================================
 # 🎟️ v22 · AUDITORÍA MICVIP EN LA CONSOLA DEL BOT (dueño, Arquitecto y delegados con can_view_analytics)
 # ==========================================================================
+# --------------------------------------------------------------------------
+# 🔐 v29 · MURO DE PAGO POR NIVEL (paridad 1:1 con la Mini App y los 402 de la API)
+# --------------------------------------------------------------------------
+# Fuente única: database.FEATURE_MIN_TIER. Se evalúa con get_effective_group_tier (licencia VIGENTE con
+# caducidad y concesiones del Arquitecto; el Arquitecto siempre pasa). Una comunidad Free nunca ve las
+# tablas ni puede escribir: recibe la tarjeta de conversión PRO ⭐ / ULTRA PRO 💎.
+_TIER_RANK_BOT = {"free": 0, "pro": 1, "ultra_pro": 2}
+_PAYWALL_COPY = {
+    "micvip_audit": ("🎟️", "Auditoría MicVIP", "MicVIP Audit",
+                     "Registro auditable de cada pase: comprador, expiración real, estado y evidencia del Centinela.",
+                     "Auditable log of every pass: buyer, real expiry, status and Sentinel evidence."),
+    "ban_appeals": ("⚖️", "Apelación de baneos", "Ban appeals",
+                    "Convierte los baneos automáticos en ingresos: el usuario paga en Stars y recibe un enlace de un solo uso.",
+                    "Turn automatic bans into revenue: the user pays in Stars and gets a single-use rejoin link."),
+    "vip_roles": ("👑", "Roles y etiquetas VIP", "VIP roles & tags",
+                  "Rol VIP automático tras donar o comprar MicVIP, con etiqueta nativa de Telegram y exenciones parciales.",
+                  "Automatic VIP role after a donation or MicVIP purchase, with Telegram's native tag and partial exemptions."),
+    "link_quotas": ("🔗", "Cuotas de enlaces de administradores", "Admin link quotas",
+                    "Límite diario de enlaces por administrador con excepciones individuales y aviso automático.",
+                    "Daily link limit per admin with individual exceptions and automatic notices."),
+}
+
+
+def _feature_required_tier(feature: str) -> str:
+    try:
+        from database.database import FEATURE_MIN_TIER
+        return FEATURE_MIN_TIER.get(feature, "pro")
+    except Exception:
+        return "pro"
+
+
+async def feature_unlocked(group_id: int, user_id: int, feature: str) -> bool:
+    try:
+        tier = await get_effective_group_tier(int(group_id), int(user_id))
+    except Exception as ex:
+        logging.warning(f"⚠️ [Paywall] No se pudo leer la licencia de {group_id}: {ex}")
+        tier = "free"   # fallo cerrado: sin licencia verificable no se abre una función de pago
+    tier = str(tier or "free").lower()
+    return _TIER_RANK_BOT.get(tier, 0) >= _TIER_RANK_BOT[_feature_required_tier(feature)]
+
+
+def build_paywall_card(group_id: int, feature: str, lang: str) -> tuple:
+    """Tarjeta de conversión (texto + teclado) para una función bloqueada por nivel."""
+    icon, name_es, name_en, pitch_es, pitch_en = _PAYWALL_COPY.get(feature, ("🔒", feature, feature, "", ""))
+    required = _feature_required_tier(feature)
+    req_label = "ULTRA PRO 💎" if required == "ultra_pro" else "PRO ⭐"
+    text = (
+        f"{icon} <b>{tr(lang, name_es, name_en)}</b> · 🔒 <b>{req_label}</b>\n\n"
+        f"{tr(lang, pitch_es, pitch_en)}\n\n"
+        + tr(lang,
+             f"Tu comunidad está en el plan <b>Free</b>. Actívala con <b>{req_label}</b> para desbloquear esta función "
+             "al instante: la licencia queda vinculada a esta comunidad.",
+             f"Your community is on the <b>Free</b> plan. Activate <b>{req_label}</b> to unlock this feature instantly: "
+             "the license is bound to this community.")
+        + PERIMETER_SIGNATURE
+    )
+    rows = []
+    if required == "pro":
+        rows.append([InlineKeyboardButton(text=tr(lang, "⭐ Activar PRO", "⭐ Get PRO"), callback_data=f"pay_pro_{group_id}_{lang}")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "💎 Activar ULTRA PRO", "💎 Get ULTRA PRO"), callback_data=f"pay_ultra_{group_id}_{lang}")])
+    rows.append(_v23_back(group_id, lang) if "_v23_back" in globals() else
+                [InlineKeyboardButton(text="⬅️ " + tr(lang, "Panel del grupo", "Group panel"), callback_data=f"gpanel_{group_id}_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def enforce_feature_tier(callback: CallbackQuery, bot: Bot, group_id: int, feature: str, lang: str) -> bool:
+    """True si puede continuar; si no, pinta la tarjeta de conversión y responde el callback."""
+    if await feature_unlocked(group_id, callback.from_user.id, feature):
+        return True
+    clear_user_states(bot.id, callback.from_user.id)
+    text, kb = build_paywall_card(group_id, feature, lang)
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "not modified" not in str(e).lower():
+            with contextlib.suppress(Exception):
+                await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    with contextlib.suppress(Exception):
+        await callback.answer("🔒 " + tr(lang, "Función de pago", "Paid feature"))
+    logging.info(f"🔒 [Paywall] {feature} bloqueado en {group_id} para {callback.from_user.id} (sin licencia suficiente).")
+    return False
+
+
+async def enforce_feature_tier_msg(message: Message, group_id: int, feature: str, lang: str) -> bool:
+    """Variante para entradas conversacionales: la licencia pudo caducar entre la apertura y la respuesta."""
+    if await feature_unlocked(group_id, message.from_user.id, feature):
+        return True
+    text, kb = build_paywall_card(group_id, feature, lang)
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    return False
+
+
 MVAUDIT_PER_PAGE = 8
 MVAUDIT_FILTERS = ("all", "active", "expired", "issues")
 
@@ -8991,6 +9084,8 @@ async def cb_micvip_audit(callback: CallbackQuery, bot: Bot):
     lang = lang_from_callback(callback, data)
     flt = flt if flt in MVAUDIT_FILTERS else "all"
     if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    if not await enforce_feature_tier(callback, bot, group_id, "micvip_audit", lang):
         return
     try:
         audit = await micvip_audit.get_audit(group_id, status=flt, limit=MVAUDIT_PER_PAGE, offset=(page - 1) * MVAUDIT_PER_PAGE)
@@ -9155,6 +9250,8 @@ async def cb_vip_roles(callback: CallbackQuery, bot: Bot):
         return
     if not await verify_admin_privileges(callback, bot, group_id):
         return
+    if not await enforce_feature_tier(callback, bot, group_id, "vip_roles", lang):
+        return
     uid = callback.from_user.id
     clear_user_states(bot.id, uid)
     from database.database import (BunkerValidationError, VIP_DAYS_CHOICES, VIP_EXEMPTIBLE_VECTORS, VIP_FLOOD_BONUS_RANGE,
@@ -9255,6 +9352,8 @@ async def _handle_vip_role_input(message: Message, bot: Bot, st: dict, text_inpu
     if time.time() - st.get("ts", 0) > STATE_TTL_SECONDS:
         await message.answer(tr(lang, "⌛ La edición caducó; vuelve a abrir el menú.", "⌛ This edit expired; reopen the menu.") + PERIMETER_SIGNATURE,
                              reply_markup=back_kb, parse_mode="HTML")
+        return
+    if not await enforce_feature_tier_msg(message, group_id, "vip_roles", lang):
         return
     from database.database import BunkerValidationError
     raw = (text_input or "").strip()
@@ -9379,6 +9478,8 @@ async def cb_admin_link_quotas(callback: CallbackQuery, bot: Bot):
         return
     if not await verify_admin_privileges(callback, bot, group_id):
         return
+    if not await enforce_feature_tier(callback, bot, group_id, "link_quotas", lang):
+        return
     uid = callback.from_user.id
     clear_user_states(bot.id, uid)
     from database.database import ALQ_LIMIT_RANGE, BunkerValidationError, get_admin_link_quota_config, update_admin_link_quota_config
@@ -9499,6 +9600,8 @@ async def cb_ban_appeals(callback: CallbackQuery, bot: Bot):
         return
     if not await verify_admin_privileges(callback, bot, group_id):
         return
+    if not await enforce_feature_tier(callback, bot, group_id, "ban_appeals", lang):
+        return
     uid = callback.from_user.id
     clear_user_states(bot.id, uid)
     from database.database import (APPEAL_LINK_TTL_CHOICES, APPEAL_MAX_CHOICES, APPEAL_PRICE_CHOICES, BunkerValidationError,
@@ -9549,6 +9652,8 @@ async def _handle_appeal_price_input(message: Message, bot: Bot, st: dict, text_
     if time.time() - st.get("ts", 0) > STATE_TTL_SECONDS:
         await message.answer(tr(lang, "⌛ La edición caducó; vuelve a abrir el menú.", "⌛ This edit expired; reopen the menu.")
                              + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        return
+    if not await enforce_feature_tier_msg(message, group_id, "ban_appeals", lang):
         return
     from database.database import BunkerValidationError, update_appeal_config
     raw = (text_input or "").strip().replace("⭐", "").strip()

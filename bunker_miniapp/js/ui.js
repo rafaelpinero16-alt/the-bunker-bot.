@@ -80,6 +80,47 @@ function clampPct(value) {
     return Math.max(0, Math.min(100, n));
 }
 
+// 🔐 v29 · Muro de pago por nivel: textos propios (no dependen de config.js) y panel de cada función.
+const PAYWALL_PANELS = {
+    micvip_audit: 'micvip-audit-panel',
+    vip_roles: 'vip-panel',
+    ban_appeals: 'apl-panel',
+    link_quotas: 'alq-panel',
+};
+const PAYWALL_I18N = {
+    es: {
+        badge: 'Función de pago',
+        title: { micvip_audit: 'Auditoría MicVIP', vip_roles: 'Roles y etiquetas VIP', ban_appeals: 'Apelación de baneos', link_quotas: 'Cuotas de enlaces de administradores' },
+        pitch: {
+            micvip_audit: 'Registro auditable de cada pase: comprador, expiración real, estado y evidencia del Centinela, con exportación CSV.',
+            vip_roles: 'Rol VIP automático tras donar o comprar MicVIP, con etiqueta nativa de Telegram, exenciones parciales y bonus anti-flood.',
+            ban_appeals: 'Convierte los baneos automáticos en ingresos: el usuario paga en Stars y recibe un enlace de reingreso de un solo uso.',
+            link_quotas: 'Límite diario de enlaces por administrador, excepciones individuales y aviso automático con el tiempo restante.',
+        },
+        free: 'Esta comunidad está en el plan Free. Actívala con {tier} para desbloquearla al instante; la licencia queda vinculada a esta comunidad.',
+        get_pro: 'Activar PRO ⭐',
+        get_ultra: 'Activar ULTRA PRO 💎',
+        compare: 'Comparar planes',
+        toast: 'Requiere {tier} en esta comunidad.',
+    },
+    en: {
+        badge: 'Paid feature',
+        title: { micvip_audit: 'MicVIP Audit', vip_roles: 'VIP Roles & Tags', ban_appeals: 'Ban Appeals', link_quotas: 'Admin Link Quotas' },
+        pitch: {
+            micvip_audit: 'Auditable log of every pass: buyer, real expiry, status and Sentinel evidence, with CSV export.',
+            vip_roles: 'Automatic VIP role after a donation or MicVIP purchase, with Telegram native tags, partial exemptions and anti-flood bonus.',
+            ban_appeals: 'Turn automatic bans into revenue: the user pays in Stars and receives a single-use rejoin link.',
+            link_quotas: 'Daily link limit per admin, individual exceptions and an automatic notice with the time left.',
+        },
+        free: 'This community is on the Free plan. Activate {tier} to unlock it instantly; the license is bound to this community.',
+        get_pro: 'Get PRO ⭐',
+        get_ultra: 'Get ULTRA PRO 💎',
+        compare: 'Compare plans',
+        toast: 'Requires {tier} in this community.',
+    },
+};
+const PAYWALL_TIER_LABEL = { pro: 'PRO ⭐', ultra_pro: 'ULTRA PRO 💎' };
+
 export const ui = {
     /** 🌐 v21 · Respaldo: idioma activo → idioma por defecto (inglés) → español → la propia clave. */
     t(key) {
@@ -1688,6 +1729,101 @@ export const ui = {
             magenta: 'bg-[#ff00ff]/15 border-[#ff00ff]/60 text-[#ffc8ff]'
         };
         return on ? tones[tone] : 'bg-black/40 border-neutral-800 text-neutral-400';
+    },
+
+    /** 🔐 v29 · Textos del muro de pago en el idioma activo. */
+    paywallText(key) {
+        return (PAYWALL_I18N[state.currentLang] || PAYWALL_I18N.en)[key];
+    },
+
+    /** Aviso corto para un 402 en una escritura: "Requiere PRO ⭐ en esta comunidad." */
+    paywallToast(info) {
+        const tier = PAYWALL_TIER_LABEL[info?.required_tier] || PAYWALL_TIER_LABEL.pro;
+        return String(this.paywallText('toast')).replace('{tier}', tier);
+    },
+
+    /**
+     * 🔐 v29 · Bloquea (info = { required_tier, … }) o desbloquea (info = null) el panel de una función.
+     * Bloqueado: se ocultan tablas, filtros y controles y se muestra la tarjeta de conversión con los botones
+     * PRO ⭐ / ULTRA PRO 💎, que abren el checkout de ESTA comunidad (`sub_{plan}_{chat_id}`).
+     */
+    renderPaywall(feature, info, chatId) {
+        const panel = byId(PAYWALL_PANELS[feature]);
+        if (!panel) return;
+        const header = panel.firstElementChild;
+        const headerActions = header && header.children.length > 1 ? header.lastElementChild : null;
+        let card = panel.querySelector(':scope > .bunker-paywall-card');
+        if (!info) {
+            if (panel.getAttribute('data-locked') !== '1') return;
+            panel.removeAttribute('data-locked');
+            if (card) card.remove();
+            Array.from(panel.children).forEach(el => {
+                if (el.getAttribute('data-paywall-hidden') === '1') { el.classList.remove('hidden'); el.removeAttribute('data-paywall-hidden'); }
+            });
+            if (headerActions && headerActions.getAttribute('data-paywall-hidden') === '1') {
+                headerActions.classList.remove('hidden'); headerActions.removeAttribute('data-paywall-hidden');
+            }
+            return;
+        }
+        const required = info.required_tier === 'ultra_pro' ? 'ultra_pro' : 'pro';
+        const target = String(chatId || info.chat_id || '');
+        const safeChat = /^-\d+$/.test(target) ? target : '';
+        panel.setAttribute('data-locked', '1');
+        Array.from(panel.children).forEach(el => {
+            if (el === header || el.classList.contains('bunker-paywall-card') || el.classList.contains('hidden')) return;
+            el.classList.add('hidden'); el.setAttribute('data-paywall-hidden', '1');
+        });
+        if (headerActions && !headerActions.classList.contains('hidden')) {
+            headerActions.classList.add('hidden'); headerActions.setAttribute('data-paywall-hidden', '1');
+        }
+        const tx = PAYWALL_I18N[state.currentLang] || PAYWALL_I18N.en;
+        const tierLabel = PAYWALL_TIER_LABEL[required];
+        const isUltra = required === 'ultra_pro';
+        const accent = isUltra ? '#ff00ff' : '#00f3ff';
+        const chatArg = safeChat ? `, '${safeChat}'` : '';
+        const proBtn = isUltra ? '' : `
+            <button type="button" onclick="app.pagarPlan('pro'${chatArg})"
+                class="w-full py-2.5 rounded-xl bg-[#00f3ff]/10 border border-[#00f3ff]/50 text-[#00f3ff] text-[11px] font-extrabold uppercase tracking-wide active:scale-95 transition shadow-[0_0_14px_rgba(0,243,255,0.25)]">
+                <i class="fa-solid fa-star mr-1"></i>${this.escapeHtml(tx.get_pro)}</button>`;
+        const html = `
+            <div class="flex items-center gap-2">
+                <span class="w-8 h-8 rounded-lg flex items-center justify-center border" style="border-color:${accent}66;background:${accent}14;color:${accent};box-shadow:0 0 14px ${accent}40">
+                    <i class="fa-solid fa-lock text-[12px]"></i></span>
+                <div class="min-w-0">
+                    <p class="text-[9px] uppercase tracking-widest font-extrabold" style="color:${accent}">${this.escapeHtml(tx.badge)} · ${this.escapeHtml(tierLabel)}</p>
+                    <p class="text-[12px] font-extrabold text-white truncate">${this.escapeHtml(tx.title[feature] || feature)}</p>
+                </div>
+            </div>
+            <p class="text-[11px] text-neutral-300 leading-snug">${this.escapeHtml(tx.pitch[feature] || '')}</p>
+            <p class="text-[10px] text-neutral-500 leading-snug">${this.escapeHtml(String(tx.free).replace('{tier}', tierLabel))}</p>
+            <div class="grid ${isUltra ? 'grid-cols-1' : 'grid-cols-2'} gap-1.5">${proBtn}
+                <button type="button" onclick="app.pagarPlan('ultra'${chatArg})"
+                    class="w-full py-2.5 rounded-xl bg-[#ff00ff]/10 border border-[#ff00ff]/50 text-[#ff00ff] text-[11px] font-extrabold uppercase tracking-wide active:scale-95 transition shadow-[0_0_14px_rgba(255,0,255,0.25)]">
+                    <i class="fa-solid fa-gem mr-1"></i>${this.escapeHtml(tx.get_ultra)}</button>
+            </div>
+            <button type="button" onclick="app.renewLicense(${safeChat ? `'${safeChat}'` : 'null'})"
+                class="w-full text-center text-[10px] text-neutral-400 underline underline-offset-2">${this.escapeHtml(tx.compare)}</button>`;
+        if (!card) {
+            card = document.createElement('div');
+            card.className = 'bunker-paywall-card space-y-2.5 rounded-xl border bg-black/70 p-3';
+            if (header) header.insertAdjacentElement('afterend', card); else panel.prepend(card);
+        }
+        card.style.borderColor = `${accent}55`;
+        card.style.boxShadow = `0 0 22px ${accent}1f, inset 0 0 18px ${accent}0d`;
+        card.setAttribute('data-feature', feature);
+        card.setAttribute('data-required', required);
+        card.innerHTML = html;
+    },
+
+    /** Aplica el bloque `entitlements` del dashboard a los cuatro paneles (sin esperar a cada 402). */
+    applyEntitlements(entitlements, chatId) {
+        const features = entitlements && entitlements.features;
+        if (!features) return;
+        Object.keys(PAYWALL_PANELS).forEach(name => {
+            const f = features[name];
+            if (!f) return;
+            this.renderPaywall(name, f.allowed ? null : { required_tier: f.required, chat_id: chatId }, chatId);
+        });
     },
 
     _v23Message(id, text, tone = 'muted') {

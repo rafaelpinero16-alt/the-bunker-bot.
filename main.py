@@ -1233,6 +1233,8 @@ async def api_chat_dashboard(
         # Si la comunidad no tiene licencia propia se muestra la licencia VIGENTE del operador (PRO ⭐ /
         # ULTRA PRO 💎, source="operator") en lugar de un plan vacío.
         data["plan"] = await _resolve_dashboard_plan(user_id, data.get("plan"))
+        # v29 · Derechos por función (muro de pago): la Mini App bloquea paneles sin adivinar el nivel.
+        data["entitlements"] = await _v29_entitlements(numeric_id, user_id)
         data["raid_shield"] = raid_shield.status_payload(numeric_id)
         # v17 · Supervisión del Bot Clon y del Centinela (estado en vivo; jamás credenciales).
         data.update(await build_assets_status(numeric_id))
@@ -1329,6 +1331,76 @@ async def _require_ultra_for_ai(user_id: int, chat_id: int) -> None:
         tier = "free"
     if not perimeter_ops._is_ultra(tier):
         raise HTTPException(status_code=402, detail="El Centinela de IA requiere licencia ULTRA PRO.")
+
+
+# ==========================================
+# 🔐 v29 · MURO DE PAGO POR NIVEL EN LA API (402 Payment Required)
+# ==========================================
+# Orden de defensa en cada endpoint: 401 (sesión) → 403 (Regla de Oro: assert_chat_ownership/assert_chat_access)
+# → 402 (licencia). Así un tercero nunca descubre el plan de una comunidad ajena y una comunidad Free nunca
+# lee ni escribe datos de funciones de pago, aunque llame a la API a mano. El `detail` es un objeto estable que
+# la Mini App usa para pintar la tarjeta de conversión (PRO ⭐ / ULTRA PRO 💎) con el chat_id correcto.
+_V29_TIER_RANK = {"free": 0, "pro": 1, "ultra_pro": 2}
+_V29_TIER_LABELS = {"free": "Free", "pro": "PRO ⭐", "ultra_pro": "ULTRA PRO 💎"}
+
+
+def _v29_norm_tier(tier) -> str:
+    value = str(tier or "free").strip().lower().replace("-", "_").replace(" ", "_")
+    if value in ("ultra_pro", "ultrapro", "ultra"):
+        return "ultra_pro"
+    return "pro" if value == "pro" else "free"
+
+
+def _v29_required_tier(feature: str) -> str:
+    try:
+        from database.database import FEATURE_MIN_TIER
+        return FEATURE_MIN_TIER.get(feature, "pro")
+    except Exception:
+        return "pro"
+
+
+async def require_chat_feature(user_id: int, chat_id: int, feature: str) -> str:
+    """Lanza 402 si la licencia VIGENTE de la comunidad no alcanza el nivel de `feature`. Devuelve el nivel."""
+    if is_super_admin(user_id):
+        return "ultra_pro"
+    try:
+        tier = _v29_norm_tier(await get_group_tier(int(chat_id)))
+    except Exception as ex:
+        logger.warning(f"⚠️ [Paywall] Licencia ilegible para {chat_id}: {ex}")
+        tier = "free"   # fallo cerrado
+    required = _v29_required_tier(feature)
+    if _V29_TIER_RANK[tier] >= _V29_TIER_RANK[required]:
+        return tier
+    raise HTTPException(status_code=402, detail={
+        "code": "tier_required",
+        "feature": feature,
+        "required_tier": required,
+        "current_tier": tier,
+        "chat_id": str(chat_id),
+        "message": f"Esta función requiere licencia {_V29_TIER_LABELS[required]} en esta comunidad.",
+    })
+
+
+async def _v29_entitlements(chat_id: int, user_id: int) -> dict:
+    """Bloque `entitlements` del dashboard (misma regla que require_chat_feature)."""
+    try:
+        from database.database import FEATURE_LABELS, FEATURE_MIN_TIER
+    except Exception:
+        FEATURE_MIN_TIER, FEATURE_LABELS = {}, {}
+    if is_super_admin(user_id):
+        tier = "ultra_pro"
+    else:
+        try:
+            tier = _v29_norm_tier(await get_group_tier(int(chat_id)))
+        except Exception:
+            tier = "free"
+    return {
+        "tier": tier,
+        "label": _V29_TIER_LABELS[tier],
+        "features": {name: {"allowed": _V29_TIER_RANK[tier] >= _V29_TIER_RANK[_v29_norm_tier(req)],
+                            "required": _v29_norm_tier(req), "label": FEATURE_LABELS.get(name, name)}
+                     for name, req in FEATURE_MIN_TIER.items()},
+    }
 
 
 @api_router.get("/chat/{chat_id}/perimeter-status")
@@ -1468,6 +1540,7 @@ async def api_chat_micvip_audit(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_access(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "micvip_audit")
     status = status if status in ("all", "active", "expired", "issues") else "all"
     data = await micvip_audit.get_audit(numeric_id, status=status, limit=limit, offset=offset)
     # Sin AutoLower nadie queda atenuado: el pase no tiene restricción que levantar (la interfaz lo explica).
@@ -1570,6 +1643,7 @@ async def api_get_vip_roles(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_access(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "vip_roles")
     from database.database import get_vip_role_config, vip_role_list
     status = status if status in ("all", "active", "expired") else "all"
     config = await get_vip_role_config(numeric_id)
@@ -1589,6 +1663,7 @@ async def api_update_vip_roles(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "vip_roles")
     from database.database import BunkerValidationError
     patch = payload.get("vip_roles", payload) if isinstance(payload, dict) else {}
     try:
@@ -1611,6 +1686,7 @@ async def api_vip_role_member(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "vip_roles")
     action = str((payload or {}).get("action") or "")
     try:
         target = int(cast(Any, (payload or {}).get("user_id")))   # None / texto → TypeError / ValueError (422)
@@ -1652,6 +1728,7 @@ async def api_get_admin_link_quotas(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_access(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "link_quotas")
     if master_bot_instance is None:
         raise HTTPException(status_code=503, detail="Bot no disponible todavía.")
     overview = await link_quotas.get_overview(master_bot_instance, numeric_id)
@@ -1670,6 +1747,7 @@ async def api_update_admin_link_quotas(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "link_quotas")
     from database.database import BunkerValidationError, update_admin_link_quota_config
     patch = payload.get("admin_link_quotas", payload) if isinstance(payload, dict) else {}
     try:
@@ -1700,6 +1778,7 @@ async def api_get_ban_appeals(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_access(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "ban_appeals")
     from database.database import appeal_list, get_appeal_config
     status = status if status in ("all", "open", "paid", "closed") else "all"
     config = await get_appeal_config(numeric_id)
@@ -1719,6 +1798,7 @@ async def api_update_ban_appeals(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "ban_appeals")
     from database.database import BunkerValidationError, update_appeal_config
     patch = payload.get("ban_appeals", payload) if isinstance(payload, dict) else {}
     try:
@@ -3626,7 +3706,14 @@ class ActivityTrackerMiddleware(BaseMiddleware):
                     logger.error(f"❌ [MicVIP Audit] No se pudo registrar el cobro {payment.telegram_payment_charge_id}: {audit_ex}")
             # 👑 v23 · Donación → rol / etiqueta VIP automáticos (idempotente por charge_id; nunca bloquea la analítica).
             try:
+                # v29 · El rol VIP es una función ULTRA PRO: en comunidades sin licencia (o caducada) no se concede.
+                vip_allowed = False
                 if vip_roles.is_donation_payload(payment.invoice_payload):
+                    from database.database import feature_allowed
+                    vip_allowed = await feature_allowed(group_id, "vip_roles")
+                    if not vip_allowed:
+                        logger.info(f"🔒 [VIP Roles] {group_id} sin licencia suficiente: donación sin rol VIP.")
+                if vip_allowed:
                     _spawn(vip_roles.on_payment(
                         group_id=group_id, user_id=payer_id, charge_id=payment.telegram_payment_charge_id,
                         amount=payment.total_amount, payload=payment.invoice_payload or "",

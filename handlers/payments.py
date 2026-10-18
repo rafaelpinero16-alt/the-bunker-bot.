@@ -151,7 +151,7 @@ def _ban_appeals_module():  # noqa: E302
     return importlib.import_module(name)
 
 
-def get_lang(lang_code: str) -> str:
+def get_lang(lang_code: str | None) -> str:
     """Detecta el idioma del operador para renderizar la facturación en Stars."""
     return "es" if lang_code and lang_code.startswith("es") else "en"
 
@@ -255,6 +255,14 @@ def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
     master_username = get_master_bot_username()
     if not master_username:
         return None, None
+    plan = "pro" if str(plan).lower().startswith("pro") else "ultra"
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        chat_id = 0
+    # v29: sin comunidad válida el enlace del Maestro iría vacío (`sub_pro_0`) y terminaría en "enlace no
+    # válido". Se envía `sub_{plan}` a secas: el Maestro muestra el selector de comunidades del comprador.
+    start_param = f"sub_{plan}_{chat_id}" if chat_id < 0 else f"sub_{plan}"
 
     text = (
         "⭐ <b>Suscripción Oficial — Cloud Media Management</b>\n\n"
@@ -270,10 +278,76 @@ def _clone_subscription_redirect(lang: str, plan: str, chat_id: int):
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="⭐ Pagar en el Bot Maestro" if lang == "es" else "⭐ Pay via Master Bot",
-            url=f"https://t.me/{master_username}?start=sub_{plan}_{chat_id}"
+            url=f"https://t.me/{master_username}?start={start_param}"
         )]
     ])
     return text, markup
+
+
+_PLAN_LABELS = {"pro": "PRO ⭐", "ultra": "ULTRA PRO 💎"}
+
+
+def parse_subscription_start(args: str):
+    """
+    v29 · `sub_pro_-100123` / `sub_ultra_-100123` / `sub_pro` → ("pro"|"ultra", chat_id|0).
+    Devuelve (None, 0) si no es un parámetro de licencia. chat_id 0 = sin comunidad (mostrar selector).
+    """
+    parts = (args or "").strip().split("_")
+    if len(parts) < 2 or parts[0] != "sub":
+        return None, 0
+    plan = {"pro": "pro", "ultra": "ultra", "ultrapro": "ultra"}.get(parts[1].lower())
+    if plan is None:
+        return None, 0
+    chat_id = 0
+    if len(parts) > 2:
+        try:
+            chat_id = int(parts[2])
+        except ValueError:
+            chat_id = 0
+    return plan, (chat_id if chat_id < 0 else 0)
+
+
+async def build_subscription_picker(user_id: int, plan: str, lang: str):
+    """
+    v29 · Selector de comunidad cuando el enlace llega sin entorno (`sub_pro`, `sub_pro_0`, Mini App sin
+    comunidad activa). Solo lista comunidades registradas por el propio usuario: el botón usa el callback
+    `inv_{plan}_{chat_id}_{lang}`, que además pasa por OwnerCallbackGuardMiddleware (Regla de Oro).
+    """
+    plan = "ultra" if plan == "ultra" else "pro"
+    rows = []
+    seen = set()
+    for fn in ("get_user_groups", "get_user_channels"):
+        try:
+            for gid, gname in (await _call_db_fn(fn, user_id) or []):
+                gid = int(gid)
+                if gid >= 0 or gid in seen:
+                    continue
+                seen.add(gid)
+                icon = "📢" if fn == "get_user_channels" else "👥"
+                label = f"{icon} {(gname or str(gid))[:40]}"
+                rows.append([InlineKeyboardButton(text=label, callback_data=f"inv_{plan}_{gid}_{lang}")])
+        except Exception as ex:
+            logger.warning(f"⚠️ [Pagos] No se pudieron listar comunidades ({fn}) de {user_id}: {ex}")
+    plan_label = _PLAN_LABELS[plan]
+    if not rows:
+        text = (
+            f"🏷️ <b>Licencia {plan_label}</b>\n\n"
+            "No encontré comunidades registradas a tu nombre. Añade el bot como administrador en tu grupo o canal "
+            "y vuelve a abrir la compra desde el panel de esa comunidad."
+        ) if lang == "es" else (
+            f"🏷️ <b>{plan_label} License</b>\n\n"
+            "I couldn't find any community registered to you. Add the bot as an admin to your group or channel "
+            "and open the purchase again from that community's panel."
+        )
+        return text, None
+    text = (
+        f"🏷️ <b>Licencia {plan_label}</b>\n\n"
+        "¿Para qué comunidad es la licencia? Elige una: la factura se emitirá vinculada a ella."
+    ) if lang == "es" else (
+        f"🏷️ <b>{plan_label} License</b>\n\n"
+        "Which community is this license for? Pick one and the invoice will be bound to it."
+    )
+    return text, InlineKeyboardMarkup(inline_keyboard=rows[:20])
 
 
 # ==========================================
@@ -876,12 +950,20 @@ async def record_star_payment(message: Message) -> bool:
     Telegram, user_id, chat_id de la comunidad e importe en Stars. Idempotente por charge_id.
     """
     sp = message.successful_payment
+    if sp is None:
+        return False
+
+    from_user = message.from_user
+    if from_user is None:
+        logger.warning("⚠️ [Ledger Stars] No se pudo registrar el cargo %s: message.from_user es None", sp.telegram_payment_charge_id)
+        return False
+
     try:
         return await asyncio.to_thread(
             _sync_ledger_record,
             sp.telegram_payment_charge_id,
             getattr(sp, "provider_payment_charge_id", "") or "",
-            message.from_user.id,
+            from_user.id,
             _payload_chat_id(sp.invoice_payload or ""),
             int(sp.total_amount),
             sp.currency,
@@ -1235,7 +1317,11 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     if message.chat.type != "private":
         return
 
-    lang = get_lang(message.from_user.language_code)
+    user = message.from_user
+    if user is None:
+        return
+
+    lang = get_lang(user.language_code)
     t = TEXTS[lang]
     args = command.args or ""
 
@@ -1245,53 +1331,45 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
             if not await _ban_appeals_module().handle_deeplink(message, bot):
                 await message.answer(t["err_link"], parse_mode="HTML")
         except Exception as e:
-            logger.error(f"Error abriendo la apelación de baneo de {message.from_user.id}: {e}")
+            logger.error(f"Error abriendo la apelación de baneo de {user.id}: {e}")
             await message.answer(t["err_link"], parse_mode="HTML")
         return
 
-    # 1. SUSCRIPCIONES DE COMUNIDAD
+    # 1. SUSCRIPCIONES DE COMUNIDAD — v29: el parámetro SIEMPRE se normaliza a sub_{plan}_{chat_id}.
     if args.startswith("sub_"):
-        if is_clone_bot(bot) and (args.startswith("sub_pro") or args.startswith("sub_ultra")):
-            redirect_plan = "pro" if args.startswith("sub_pro") else "ultra"
-            redirect_chat_id = 0
-            redirect_parts = args.split("_")
-            if len(redirect_parts) > 2:
-                try:
-                    redirect_chat_id = int(redirect_parts[2])
-                except ValueError:
-                    redirect_chat_id = 0
-            redirect_text, redirect_markup = _clone_subscription_redirect(lang, redirect_plan, redirect_chat_id)
+        plan, chat_id_target = parse_subscription_start(args)
+        if plan is None:
+            await message.answer(t["err_link"], parse_mode="HTML")
+            return
+
+        if is_clone_bot(bot):
+            redirect_text, redirect_markup = _clone_subscription_redirect(lang, plan, chat_id_target)
             if redirect_text:
-                try:
+                with contextlib.suppress(Exception):
                     await message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
-                except Exception:
-                    pass
                 return
 
-        try:
-            chat_id_target = 0
-            if args.startswith("sub_pro"):
-                parts = args.split("_")
-                if len(parts) > 2:
-                    chat_id_target = int(parts[2])
-                price = PRICE_PRO_STARS
-                title = t["inv_pro_t"]
-                desc = t["inv_pro_d"]
-                payload = f"sub_pro_{chat_id_target}"
-            elif args.startswith("sub_ultra"):
-                parts = args.split("_")
-                if len(parts) > 2:
-                    chat_id_target = int(parts[2])
-                price = PRICE_ULTRAPRO_STARS
-                title = t["inv_ultra_t"]
-                desc = t["inv_ultra_d"]
-                payload = f"sub_ultra_{chat_id_target}"
-            else:
-                return
-
-            if chat_id_target >= 0:
+        # Enlace sin comunidad (Mini App sin selección, enlaces antiguos `sub_pro`): en vez de rechazarlo con
+        # "enlace no válido sin entorno asociado", se pide la comunidad y la factura sale ya vinculada.
+        if chat_id_target >= 0:
+            user = message.from_user
+            if user is None:
                 await message.answer(t["err_link"], parse_mode="HTML")
                 return
+            try:
+                picker_text, picker_markup = await build_subscription_picker(user.id, plan, lang)
+                await message.answer(picker_text, reply_markup=picker_markup, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"Error mostrando el selector de comunidad para la licencia: {e}")
+                await message.answer(t["err_link"], parse_mode="HTML")
+            return
+
+        try:
+            if plan == "pro":
+                price, title, desc = PRICE_PRO_STARS, t["inv_pro_t"], t["inv_pro_d"]
+            else:
+                price, title, desc = PRICE_ULTRAPRO_STARS, t["inv_ultra_t"], t["inv_ultra_d"]
+            payload = f"sub_{plan}_{chat_id_target}"
 
             _, back_cb = await resolve_chat_context(bot, chat_id_target)
             back_btn = InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")
@@ -1464,23 +1542,39 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
 @router.callback_query(F.data.startswith("inv_"))
 async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
     await callback.answer()
+    if not callback.data:
+        return
+
+    message = callback.message
+    if message is None:
+        return
+
     lang = get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
     parts = callback.data.split("_")
 
     if len(parts) >= 3:
         plan = parts[1]
-        chat_id = int(parts[2])
+        try:
+            chat_id = int(parts[2])
+        except ValueError:
+            chat_id = 0
 
         if chat_id >= 0:
-            await callback.message.answer(t["err_link"], parse_mode="HTML")
+            # v29: licencia sin comunidad → selector (nunca "enlace sin entorno asociado").
+            if plan in ("pro", "ultra"):
+                with contextlib.suppress(Exception):
+                    picker_text, picker_markup = await build_subscription_picker(callback.from_user.id, plan, lang)
+                    await message.answer(picker_text, reply_markup=picker_markup, parse_mode="HTML")
+                    return
+            await message.answer(t["err_link"], parse_mode="HTML")
             return
 
         if is_clone_bot(bot):
             redirect_text, redirect_markup = _clone_subscription_redirect(lang, plan, chat_id)
             if redirect_text:
                 try:
-                    await callback.message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
+                    await message.answer(redirect_text, reply_markup=redirect_markup, parse_mode="HTML")
                 except Exception:
                     pass
                 return
@@ -1510,10 +1604,10 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
         ])
 
         try:
-            await send_stars_invoice(bot, callback.message.chat.id, title, desc, payload, int(price), reply_markup=markup)
+            await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(price), reply_markup=markup)
         except Exception as e:
             logger.error(f"Error despachando factura mediante callback: {e}")
-            await callback.message.answer(t["err_inv"], parse_mode="HTML")
+            await message.answer(t["err_inv"], parse_mode="HTML")
 
 
 # ==========================================

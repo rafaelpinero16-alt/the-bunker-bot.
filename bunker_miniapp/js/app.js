@@ -421,6 +421,7 @@ export const app = {
         tgApp.hapticImpact('light');
         // v17 · Al abrir la consola, el estado del Clon / Centinela se comprueba al momento.
         if (tabId === 'bot-settings' && this._assets.chatId) this.loadAssetsStatus(this._assets.chatId);
+        if (tabId === 'plans') this.paintCheckoutTarget();   // v29 · comunidad destino de la licencia
     },
 
     switchContext(val) {
@@ -2454,7 +2455,35 @@ export const app = {
     },
 
     renewLicense(chatId) {
+        // v29 · «Renovar» / «Comprar» recuerda la comunidad: los botones de Planes pagan ESA licencia.
+        const target = this.resolveCheckoutChat(chatId);
+        state.checkoutChatId = target;
         this.switchTab('plans');
+        this.paintCheckoutTarget();
+    },
+
+    /** v29 · Botón «Comprar» del panel de la comunidad abierta. */
+    renewSelectedLicense() {
+        return this.renewLicense(state.selectedChatId);
+    },
+
+    /** v29 · Rótulo de la vista Planes: para qué comunidad se emitirá la factura. */
+    paintCheckoutTarget() {
+        const el = document.getElementById('plans-target-chat');
+        if (!el) return;
+        const target = this.resolveCheckoutChat(null);
+        if (!target) {
+            el.classList.add('hidden');
+            el.textContent = '';
+            return;
+        }
+        const all = [].concat(state.data.groups || [], state.data.channels || []);
+        const chat = all.find(c => String(c.id) === String(target));
+        const name = (chat && (chat.title || chat.name)) || (String(state.data.currentChatDashboard?.chat_id || '') === target
+            ? state.data.currentChatDashboard?.title : '') || target;
+        const label = state.currentLang === 'es' ? 'Licencia para' : 'License for';
+        el.textContent = `🎯 ${label}: ${name}`;
+        el.classList.remove('hidden');
     },
 
     /**
@@ -2471,6 +2500,7 @@ export const app = {
 
         const epoch = ++state.chatEpoch;
         state.selectedChatId = chatId;
+        state.checkoutChatId = null;   // v29 · el checkout sigue a la comunidad abierta
 
         document.querySelectorAll('#group-owner-select, #analytics-chat-select').forEach(sel => {
             sel.value = chatId;
@@ -2875,6 +2905,11 @@ export const app = {
         if (chatEpoch !== state.chatEpoch) return;
 
         state.data.currentChatDashboard = data;
+        // v29 · Muro de pago: los paneles de funciones de pago se bloquean ANTES de pedir sus tablas.
+        if (data.entitlements) {
+            state.entitlements = { chatId: String(chatId), ...data.entitlements };
+            ui.applyEntitlements(data.entitlements, String(chatId));
+        }
         if (data.title && state.wsClient && String(state.wsClient.chatId) === String(chatId)) {
             ui.setRadarTarget(data.title);
         }
@@ -3501,6 +3536,19 @@ export const app = {
         return this.saveGhostPurge({ action });
     },
 
+    // --- 🔐 v29 · Muro de pago por nivel ---
+    /**
+     * Si `res` es un 402 del servidor, bloquea el panel de `feature` con la tarjeta de conversión de ESTA
+     * comunidad y devuelve true (el llamador no debe pintar tablas). opts.toast añade un aviso flotante.
+     */
+    handlePaywall(feature, res, chatId, opts = {}) {
+        if (!res || res.__status !== 402) return false;
+        const info = { feature, required_tier: 'pro', ...(res.__paywall || {}) };
+        ui.renderPaywall(feature, info, chatId || info.chat_id);
+        if (opts.toast) this.consoleToast('error', '🔒', ui.paywallToast(info));
+        return true;
+    },
+
     // --- 🎟️ v22 · Auditoría MicVIP ---
     startMicvipAudit(chatId) {
         const m = this._micvip;
@@ -3514,6 +3562,7 @@ export const app = {
         const m = this._micvip;
         clearTimeout(m.timer);
         Object.assign(m, { chatId: null, filter: 'all', records: [], data: null, loading: false, seq: m.seq + 1, timer: null });
+        ui.renderPaywall('micvip_audit', null);
         ui.renderMicvipAudit(null, { idle: true });
     },
 
@@ -3535,12 +3584,17 @@ export const app = {
         const res = await api.fetchMicvipAudit(chatId, { status: m.filter, limit: page, offset: reset ? 0 : m.records.length });
         if (seq !== m.seq || epoch !== session.epoch || res?.__stale || m.chatId !== chatId) return false;
         m.loading = false;
+        if (this.handlePaywall('micvip_audit', res, chatId)) {
+            m.data = null; m.records = [];
+            return false;
+        }
         if (res?.__error) {
             if (m.data) this.paintMicvip();
             else ui.renderMicvipAudit(null, { filter: m.filter, error: this.consoleErrorMessage(res) });
             if (manual) tgApp.hapticNotification('error');
             return false;
         }
+        ui.renderPaywall('micvip_audit', null, chatId);
         m.data = res;
         m.records = reset ? (res.records || []) : m.records.concat(res.records || []);
         this.paintMicvip();
@@ -3587,6 +3641,7 @@ export const app = {
         while (rows.length < max) {
             const res = await api.fetchMicvipAudit(chatId, { status: m.filter, limit: 200, offset: rows.length });
             if (epoch !== session.epoch || res?.__stale) return false;
+            if (this.handlePaywall('micvip_audit', res, chatId, { toast: true })) return false;
             if (res?.__error) {
                 this.consoleToast('error', '⚠️', ui.tf('mva_export_error', { error: this.consoleErrorMessage(res) }));
                 return false;
@@ -3652,6 +3707,7 @@ export const app = {
         this._alq = { chatId: null, data: null, busy: false, seq: this._alq.seq + 1, timer: null };
         clearTimeout(this._apl.timer);
         this._apl = { chatId: null, data: null, records: [], filter: 'all', loading: false, busy: false, seq: this._apl.seq + 1, timer: null };
+        ['vip_roles', 'ban_appeals', 'link_quotas'].forEach(f => ui.renderPaywall(f, null));   // v29
         ui.renderBanAppeals(null, { idle: true });
         ui.renderShield(null, { idle: true });
         ui.renderVipRoles(null, { idle: true });
@@ -3661,6 +3717,14 @@ export const app = {
     /** Respuesta de escritura: aviso de error (403 = solo el dueño) y háptica. Devuelve true si fue bien. */
     v23Result(res, okText) {
         if (res?.__stale) return false;
+        // v29 · 402: la licencia caducó o nunca existió → tarjeta de conversión en el panel + aviso.
+        if (res?.__status === 402) {
+            const info = res.__paywall || {};
+            if (info.feature) ui.renderPaywall(info.feature, info, info.chat_id || state.selectedChatId);
+            this.consoleToast('error', '🔒', ui.paywallToast(info));
+            tgApp.hapticNotification('error');
+            return false;
+        }
         if (res?.__error) {
             const msg = res.__status === 403 ? ui.t('v23_owner_only') : this.consoleErrorMessage(res);
             this.consoleToast('error', '⚠️', ui.tf('v23_error', { error: msg }));
@@ -3773,11 +3837,16 @@ export const app = {
             offset: reset ? 0 : v.records.length });
         if (seq !== v.seq || epoch !== session.epoch || res?.__stale || v.chatId !== chatId) return false;
         v.loading = false;
+        if (this.handlePaywall('vip_roles', res, chatId)) {
+            v.data = null; v.records = [];
+            return false;
+        }
         if (res?.__error) {
             if (v.data) this.paintVip();
             else ui.renderVipRoles(null, { filter: v.filter, error: this.consoleErrorMessage(res) });
             return false;
         }
+        ui.renderPaywall('vip_roles', null, chatId);
         v.data = res;
         v.records = reset ? (res.records || []) : v.records.concat(res.records || []);
         this.paintVip();
@@ -3907,11 +3976,16 @@ export const app = {
             offset: reset ? 0 : a.records.length });
         if (seq !== a.seq || epoch !== session.epoch || res?.__stale || a.chatId !== chatId) return false;
         a.loading = false;
+        if (this.handlePaywall('ban_appeals', res, chatId)) {
+            a.data = null; a.records = [];
+            return false;
+        }
         if (res?.__error) {
             if (a.data) this.paintAppeals();
             else ui.renderBanAppeals(null, { filter: a.filter, error: this.consoleErrorMessage(res) });
             return false;
         }
+        ui.renderPaywall('ban_appeals', null, chatId);
         a.data = res;
         a.records = reset ? (res.records || []) : a.records.concat(res.records || []);
         this.paintAppeals();
@@ -3986,10 +4060,15 @@ export const app = {
         const epoch = session.epoch;
         const res = await api.fetchAdminQuotas(chatId);
         if (seq !== q.seq || epoch !== session.epoch || res?.__stale || q.chatId !== chatId) return false;
+        if (this.handlePaywall('link_quotas', res, chatId)) {
+            q.data = null;
+            return false;
+        }
         if (res?.__error) {
             ui.renderAdminQuotas(q.data, { error: this.consoleErrorMessage(res) });
             return false;
         }
+        ui.renderPaywall('link_quotas', null, chatId);
         q.data = res.admin_link_quotas || null;
         ui.renderAdminQuotas(q.data, { busy: q.busy });
         return true;
@@ -4099,15 +4178,26 @@ export const app = {
      * factura se paga dentro de Telegram. Un segundo argumento heredado (HTML en caché) se ignora: la
      * plataforma no cobra por ningún otro medio.
      */
-    pagarPlan(plan) {
-        if (!CONFIG.PRICES[plan]) return;
+    pagarPlan(plan, chatId) {
+        // v29 · La licencia SIEMPRE viaja con su comunidad: `sub_pro_{chat_id}` / `sub_ultra_{chat_id}`.
+        // Prioridad del destino: argumento explícito (Renovar / tarjeta de conversión) → comunidad elegida al
+        // pulsar «Renovar» → comunidad abierta en la consola. Sin ninguna, el bot muestra el selector de
+        // comunidades del operador (antes: "enlace de facturación no válido, sin entorno asociado").
+        plan = plan === 'ultra' || plan === 'ultra_pro' ? 'ultra' : (plan === 'pro' ? 'pro' : '');
+        if (!plan || !CONFIG.PRICES[plan]) return;
         state.selectedPlan = plan;
         tgApp.hapticImpact('medium');   // confirmación táctil antes de pasar al checkout de Stars en el bot
 
-        const targetChat = state.selectedChatId ? `_${state.selectedChatId}` : '';
-        const param = plan === 'pro' ? `sub_pro${targetChat}` : `sub_ultra${targetChat}`;
+        const target = this.resolveCheckoutChat(chatId);
+        const param = target ? `sub_${plan}_${target}` : `sub_${plan}`;
         tgApp.openTelegramLink(`https://t.me/${CONFIG.BOT_USERNAME}?start=${param}`);
         setTimeout(() => tgApp.closeApp(), 300);
+    },
+
+    /** v29 · Comunidad destino del checkout: solo ids de comunidad válidos (negativos); si no, null. */
+    resolveCheckoutChat(chatId) {
+        const valid = v => (v !== undefined && v !== null && /^-\d{5,20}$/.test(String(v).trim())) ? String(v).trim() : null;
+        return valid(chatId) || valid(state.checkoutChatId) || valid(state.selectedChatId) || null;
     },
 
     /**

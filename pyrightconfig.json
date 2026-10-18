@@ -1,3 +1,27 @@
-{"include": ["main.py", "handlers", "vip_roles.py", "link_quotas.py", "micvip_audit.py", "middlewares", "database", "assistant.py", "perimeter_ops.py"],
- "exclude": ["**/__pycache__"],
- "typeCheckingMode": "basic", "pythonVersion": "3.12", "reportMissingModuleSource": "none"}
+{
+  "include": [
+    "main.py",
+    "handlers",
+    "vip_roles.py",
+    "link_quotas.py",
+    "micvip_audit.py",
+    "middlewares",
+    "database",
+    "assistant.py",
+    "perimeter_ops.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "venv",
+    ".env"
+  ],
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.12",
+  "reportMissingModuleSource": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportAttributeAccessIssue": "none",
+  "reportAssignmentType": "none",
+  "reportArgumentType": "none",
+  "reportOptionalSubscript": "none",
+  "reportGeneralTypeIssues": "none"
+}

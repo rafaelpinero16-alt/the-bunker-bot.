@@ -2578,6 +2578,15 @@ def is_whitelisted(user_id: int) -> bool:
 
 @db_async
 def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
+    # v29: una licencia SIEMPRE pertenece a una comunidad real (ids negativos). Un chat_id 0/positivo
+    # (privado del comprador o payload sin entorno) jamás debe crear filas huérfanas en approved_groups.
+    try:
+        group_id = int(group_id)
+    except (TypeError, ValueError):
+        raise ValueError("approve_group: chat_id inválido")
+    if group_id >= 0:
+        raise ValueError(f"approve_group: {group_id} no es una comunidad (se requiere chat_id negativo)")
+    tier = normalize_tier(tier)
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if tier in ["pro", "ultra_pro"]:
@@ -7268,6 +7277,57 @@ def appeal_list(group_id: int, status: str = "all", limit: int = 20, offset: int
     return {"records": records, "total": int(total),
             "summary": {"appeals": int(s[0]), "open": int(s[1]), "paid": int(s[2]), "reinstated": int(s[3]),
                         "stars": int(s[4]), "refunded": int(s[5]), "undelivered": int(s[6])}}
+
+
+# ==========================================
+# 🔐 v29 · MURO DE PAGO POR NIVEL (fuente única de verdad)
+# ==========================================
+# Nivel mínimo por función avanzada. Lo consumen main.py (API → 402), user_private.py (bot → tarjeta de
+# conversión) y el dashboard (`entitlements`) para que la Mini App pinte el mismo muro sin adivinar.
+FEATURE_MIN_TIER = {
+    "micvip_audit": "pro",
+    "ban_appeals": "pro",
+    "link_quotas": "pro",
+    "vip_roles": "ultra_pro",
+}
+
+FEATURE_LABELS = {
+    "micvip_audit": "MicVIP Audit",
+    "ban_appeals": "Ban Appeals",
+    "link_quotas": "Admin Link Quotas",
+    "vip_roles": "VIP Roles & Tags",
+}
+
+
+def tier_allows(tier, required) -> bool:
+    """True si `tier` alcanza o supera `required` (free < pro < ultra_pro)."""
+    return _TIER_RANK[normalize_tier(tier)] >= _TIER_RANK[normalize_tier(required)]
+
+
+def feature_min_tier(feature: str) -> str:
+    if feature not in FEATURE_MIN_TIER:
+        raise KeyError(f"Función sin nivel registrado: {feature!r}")
+    return FEATURE_MIN_TIER[feature]
+
+
+@db_async
+def feature_allowed(chat_id: int, feature: str) -> bool:
+    """¿La licencia VIGENTE de la comunidad (caducidad y concesiones incluidas) desbloquea `feature`?"""
+    return tier_allows(get_group_tier.sync(int(chat_id)), feature_min_tier(feature))
+
+
+@db_async
+def get_chat_entitlements(chat_id: int) -> dict:
+    """Bloque `entitlements` del dashboard: nivel vigente + mapa función → {allowed, required}."""
+    tier = normalize_tier(get_group_tier.sync(int(chat_id)))
+    return {
+        "tier": tier,
+        "label": TIER_LABELS[tier],
+        "features": {
+            name: {"allowed": tier_allows(tier, req), "required": req, "label": FEATURE_LABELS.get(name, name)}
+            for name, req in FEATURE_MIN_TIER.items()
+        },
+    }
 
 
 # Inicialización del esquema al importar (al final, para que todas las funciones —incluida la Matriz— existan).

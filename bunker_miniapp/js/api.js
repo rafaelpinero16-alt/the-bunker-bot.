@@ -165,7 +165,31 @@ function carriesCredentials(payload) {
 /** Mensaje legible de un cuerpo de error de FastAPI (detail puede ser string, lista u objeto). */
 function errorDetail(errData, status) {
     const detail = errData && errData.detail;
-    return (typeof detail === 'string' && detail.trim()) ? detail : `HTTP ${status}`;
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    // v29 · 402 estructurado ({code, feature, required_tier, message}) y validaciones de FastAPI (lista).
+    if (detail && typeof detail === 'object' && !Array.isArray(detail) && typeof detail.message === 'string') return detail.message;
+    if (Array.isArray(detail) && detail.length && detail[0] && detail[0].msg) return String(detail[0].msg);
+    return `HTTP ${status}`;
+}
+
+/** v29 · Extrae el muro de pago de un 402: { feature, required_tier, current_tier, chat_id } o null. */
+function paywallDetail(errData, status) {
+    if (status !== 402) return null;
+    const detail = errData && errData.detail;
+    if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+        return {
+            feature: String(detail.feature || ''),
+            required_tier: String(detail.required_tier || 'pro'),
+            current_tier: String(detail.current_tier || 'free'),
+            chat_id: detail.chat_id != null ? String(detail.chat_id) : null,
+        };
+    }
+    return { feature: '', required_tier: 'pro', current_tier: 'free', chat_id: null };
+}
+
+/** v29 · ¿La respuesta es un bloqueo por nivel (402)? */
+export function isPaywall(res) {
+    return !!(res && res.__status === 402);
 }
 
 export const api = {
@@ -205,7 +229,10 @@ export const api = {
             if (!res.ok) {
                 const errData = await res.json().catch(() => ({}));
                 if (epoch !== session.epoch) return STALE_RESULT;
-                return { __error: errorDetail(errData, res.status), __status: res.status };
+                const out = { __error: errorDetail(errData, res.status), __status: res.status };
+                const paywall = paywallDetail(errData, res.status);
+                if (paywall) out.__paywall = paywall;
+                return out;
             }
 
             const data = await res.json();
