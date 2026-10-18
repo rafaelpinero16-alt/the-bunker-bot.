@@ -1481,7 +1481,7 @@ TEXTS = {
      "ai_menu": (
          "🤖 <b>Centinela de Inteligencia Artificial (ULTRA PRO)</b>\n\n"
          "• <b>Guardián de Voz (Anti-Toxicidad):</b> {guardian_st}\n"
-         "• <b>Copilot AMA (Resúmenes):</b> {copilot_st}\n"
+         "• <b>Copiloto AMA (Resúmenes):</b> {copilot_st}\n"
          "• <b>Prompt Personalizado:</b> <code>{custom_prompt}</code>\n\n"
          "🛡️ <i>Cloud Media Management</i>"
      ),
@@ -5172,19 +5172,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
     
     # 🤖 PROMPT PERSONALIZADO DE INTELIGENCIA ARTIFICIAL (CENTINELA DE IA)
     if (bot.id, user_id) in AI_PROMPT_STATES:
-        ai_data = AI_PROMPT_STATES.pop((bot.id, user_id))
-        group_id = ai_data["group_id"]
-        back_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"ai_menu_{group_id}_{lang}")]
-        ])
-        if text_input:
-            await set_ai_sentinel_config(group_id, "ai_custom_prompt", text_input[:1000])
-            _ai_settings_changed(group_id, ["ai_custom_prompt"])
-            resp = await message.answer(t["ai_prompt_saved"], reply_markup=back_kb, parse_mode="HTML")
-        else:
-            empty_prompt_msg = "⚠️ El prompt no puede estar vacío." if lang == "es" else "⚠️ Prompt cannot be empty."
-            resp = await message.answer(empty_prompt_msg + "\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
-        fire_and_forget_auto_delete([message, resp], delay=60)
+        await _handle_ai_prompt_input(message, bot, AI_PROMPT_STATES.pop((bot.id, user_id)), text_input)
         return
 
     # 🧾 v20 · CANAL DE REGISTRO: @alias, ID numérico o un mensaje reenviado desde el canal
@@ -7681,42 +7669,100 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
 # ==========================================
 # 💎 ULTRA PRO — HERRAMIENTAS DE ÉLITE & CENTINELA DE IA
 # ==========================================
-def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: str = "g"):
-    """Construye la botonera completa del Centinela de IA (Ultra Pro): Guardián, Copiloto, Tono y Modos."""
+AI_TONE_CYCLE: dict[str, str] = {"guardian": "copilot", "copilot": "pr", "pr": "guardian"}
+AI_MODE_CYCLE: dict[str, str] = {"mention_only": "always", "always": "chance", "chance": "mention_only"}
+AI_PROMPT_PREVIEW_CHARS = 60
+AI_PROMPT_MAX_CHARS = 1000
+
+
+def _ai_tone_label(tone: str, lang: str) -> str:
+    labels: dict[str, tuple[str, str]] = {
+        "guardian": ("🛡️ Guardián Táctico", "🛡️ Tactical Guardian"),
+        "copilot": ("📝 Copiloto Ejecutivo", "📝 Executive Copilot"),
+        "pr": ("🤝 Anfitrión / PR", "🤝 Host / PR"),
+    }
+    es, en = labels.get(tone, labels["guardian"])
+    return tr(lang, es, en)
+
+
+def _ai_mode_label(mode: str, chance: int, lang: str) -> str:
+    if mode == "always":
+        return tr(lang, "⚡ Siempre Activo", "⚡ Always Active")
+    if mode == "chance":
+        return tr(lang, f"🎲 Probabilidad ({chance}%)", f"🎲 Chance ({chance}%)")
+    return tr(lang, "🎯 Solo mención", "🎯 Mentions only")
+
+
+def _ai_public_cfg(raw: Optional[dict]) -> dict:
+    """Normaliza la configuración de BD (claves, rangos y valores por defecto) con la misma regla que la Mini App."""
+    return perimeter_ops.public_ai_sentinel_config(raw or {})
+
+
+def get_ai_sentinel_keyboard(group_id: int, lang: str, ai_cfg: dict, chat_type: str = "g") -> InlineKeyboardMarkup:
+    """
+    Botonera del Centinela de IA (ULTRA PRO) — v35, en este orden exacto:
+      1 Guardián (ai_togguardian) · 2 Copiloto (ai_togcopilot) · 3 Tono (ai_tonemenu) · 4 Modo (ai_modemenu) ·
+      5 Probabilidad (ai_chance) · 6 Editar prompt (ai_prompt) · 7 Volver a Herramientas ULTRA (menu_ultra / cpanel).
+    """
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
-    guardian_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg.get("guardian_status") == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-    copilot_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg.get("copilot_status") == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-
-    # Mapeo de personalidades
-    tones_labels = {
-        "guardian": "🛡️ Guardián Táctico" if lang == "es" else "🛡️ Tactical Guardian",
-        "copilot": "📝 Copiloto Ejecutivo" if lang == "es" else "📝 Executive Copilot",
-        "pr": "🤝 Anfitrión / PR" if lang == "es" else "🤝 Host / PR"
-    }
-    tone_str = tones_labels.get(ai_cfg.get("personality_tone") or "", tones_labels["guardian"])
-
-    # Mapeo de modos de respuesta
-    modes_labels = {
-        "mention_only": "🎯 Solo Mención" if lang == "es" else "🎯 Mentions Only",
-        "chance": f"🎲 Probabilidad ({ai_cfg.get('response_chance', 15)}%)",
-        "always": "⚡ Siempre Activo" if lang == "es" else "⚡ Always Active"
-    }
-    mode_str = modes_labels.get(ai_cfg.get("response_mode") or "", modes_labels["mention_only"])
-
-    back_btn = ultra_back_button(chat_type, group_id, lang)
-
+    cfg = _ai_public_cfg(ai_cfg)
+    on, off = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE"), tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
+    guardian_st = on if cfg["guardian_status"] == 1 else off
+    copilot_st = on if cfg["copilot_status"] == 1 else off
+    chance = int(cfg["response_chance"])
+    chance_label = tr(lang, f"🎲 Probabilidad: {chance}%", f"🎲 Chance: {chance}%")
+    if cfg["response_mode"] != "chance":
+        chance_label += tr(lang, " (modo chance)", " (chance mode)")
+    g = group_id
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_ai_guardian"].format(guardian_st=guardian_st), callback_data=f"ai_toggle_guardian_{1 if ai_cfg.get('guardian_status') != 1 else 0}_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_ai_copilot"].format(copilot_st=copilot_st), callback_data=f"ai_toggle_copilot_{1 if ai_cfg.get('copilot_status') != 1 else 0}_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=f"🎭 {tone_str}", callback_data=f"ai_cycletone_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=f"⚙️ {mode_str}", callback_data=f"ai_cyclemode_{group_id}_{lang}")],
-        # 🎲 v20 · Probabilidad del modo «chance» configurable (antes fija en 15 %)
-        [InlineKeyboardButton(text=("🎲 Probabilidad: " if lang == "es" else "🎲 Chance: ") + f"{ai_cfg.get('response_chance', 15)}%"
-                                   + ("" if ai_cfg.get("response_mode") == "chance" else (" (modo chance)" if lang == "es" else " (chance mode)")),
-                              callback_data=f"ai_cyclechance_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_ai_prompt"], callback_data=f"ai_prompt_{group_id}_{lang}")],
-        [back_btn]
+        [InlineKeyboardButton(text=t["btn_ai_guardian"].format(guardian_st=guardian_st), callback_data=f"ai_togguardian_{g}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_ai_copilot"].format(copilot_st=copilot_st), callback_data=f"ai_togcopilot_{g}_{lang}")],
+        [InlineKeyboardButton(text=f"🎭 {_ai_tone_label(cfg['personality_tone'], lang)}", callback_data=f"ai_tonemenu_{g}_{lang}")],
+        [InlineKeyboardButton(text=f"⚙️ {_ai_mode_label(cfg['response_mode'], chance, lang)}", callback_data=f"ai_modemenu_{g}_{lang}")],
+        [InlineKeyboardButton(text=chance_label, callback_data=f"ai_chance_{g}_{lang}")],
+        [InlineKeyboardButton(text=t["btn_ai_prompt"], callback_data=f"ai_prompt_{g}_{lang}")],
+        [ultra_back_button(chat_type, g, lang)],
     ])
+
+
+def build_ai_sentinel_panel(group_id: int, lang: str, ai_cfg: Optional[dict], chat_type: str = "g") -> tuple[str, InlineKeyboardMarkup]:
+    """Texto + teclado del panel del Centinela de IA a partir de la configuración REAL de la base de datos."""
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    cfg = _ai_public_cfg(ai_cfg)
+    on, off = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE"), tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
+    prompt = str(cfg.get("custom_prompt") or "").strip()
+    if prompt:
+        preview = prompt[:AI_PROMPT_PREVIEW_CHARS] + ("…" if len(prompt) > AI_PROMPT_PREVIEW_CHARS else "")
+    else:
+        preview = tr(lang, "Por defecto (Estándar)", "Default (Standard)")
+    # El prompt lo escribe el usuario: se escapa SIEMPRE (un «<» suelto rompía el panel con TelegramBadRequest).
+    text = t["ai_menu"].format(
+        guardian_st=on if cfg["guardian_status"] == 1 else off,
+        copilot_st=on if cfg["copilot_status"] == 1 else off,
+        custom_prompt=html.escape(preview),
+    )
+    return text, get_ai_sentinel_keyboard(group_id, lang, cfg, chat_type=chat_type)
+
+
+async def render_ai_sentinel_panel(group_id: int, lang: str, chat_type: str = "g") -> tuple[str, InlineKeyboardMarkup]:
+    return build_ai_sentinel_panel(group_id, lang, await get_ai_sentinel_config(group_id), chat_type=chat_type)
+
+
+async def _apply_ai_patch(group_id: int, patch: dict, lang: str) -> tuple[Optional[dict], Optional[str]]:
+    """
+    Persiste un cambio del Centinela de IA con la MISMA validación que la Mini App (perimeter_ops.apply_ai_sentinel_patch:
+    valida, guarda e invalida la caché del Centinela) y notifica a las demás sesiones. → (config pública, error).
+    """
+    try:
+        cfg = await perimeter_ops.apply_ai_sentinel_patch(group_id, patch)
+    except perimeter_ops.AISettingsError as err:
+        return None, f"⚠️ {err.field}: {err.message}"
+    except Exception as ex:
+        logging.error(f"❌ [IA] No se pudo guardar {list(patch)} en {group_id}: {ex}")
+        return None, tr(lang, "⚠️ No se pudo guardar el cambio. Inténtalo de nuevo.", "⚠️ Could not save the change. Please try again.")
+    emit_settings_updated_bg(group_id, "bot_console", [f"ai_{k}" for k in patch])
+    return cfg, None
+
 
 def get_reputation_keyboard(group_id: int, lang: str, rep_cfg: dict, chat_type: str = "g") -> InlineKeyboardMarkup:
     """Botonera de control de Gamificación y Niveles XP con indicadores visuales activos."""
@@ -7771,14 +7817,19 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
     keyboard = None
 
     if module == "ai":
-        if sub in ("menu", "prompt", "cycletone", "cyclemode", "cyclechance"):
-            group_id = int(data[2])
-        elif sub == "toggle":
-            sub_target = data[2]
-            new_status = int(data[3])
-            group_id = int(data[4])
-        else:
-            group_id = int(data[2])
+        # v35 · Callbacks: ai_menu · ai_togguardian · ai_togcopilot · ai_tonemenu · ai_modemenu · ai_chance · ai_prompt
+        # (alias heredados de mensajes antiguos: ai_toggle_<guardian|copilot>_<0|1>, ai_cycletone, ai_cyclemode, ai_cyclechance).
+        legacy = {"cycletone": "tonemenu", "cyclemode": "modemenu", "cyclechance": "chance"}
+        try:
+            if sub == "toggle":
+                sub = "togguardian" if (len(data) > 2 and data[2] == "guardian") else "togcopilot"
+                group_id = int(data[4])
+            else:
+                sub = legacy.get(sub, sub)
+                group_id = int(data[2])
+        except (IndexError, ValueError):
+            await callback.answer()
+            return
 
         if not await verify_admin_privileges(callback, bot, group_id):
             return
@@ -7788,72 +7839,52 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
         if tier != "ultra_pro":
             feature_title = tr(lang, "🤖 <b>Centinela de Inteligencia Artificial</b>", "🤖 <b>Artificial Intelligence Sentinel</b>")
             text, keyboard = build_ultra_lock_view(group_id, lang, feature_title, chat_type=chat_kind)
+            with contextlib.suppress(Exception):
+                await callback.answer("🔒 ULTRA PRO")
+        elif sub == "prompt":
+            AI_PROMPT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang, "ts": time.time()}
+            hint = tr(lang,
+                      f"\n\n<i>Máximo {AI_PROMPT_MAX_CHARS} caracteres. Envía <code>-</code> para volver al prompt por defecto.</i>",
+                      f"\n\n<i>Up to {AI_PROMPT_MAX_CHARS} characters. Send <code>-</code> to restore the default prompt.</i>")
+            await callback.answer()
+            prompt_msg = await callback.message.answer(t["ai_prompt_prompt"] + hint + PERIMETER_SIGNATURE,
+                                                       reply_markup=_cancel_kb(t, f"ai_menu_{group_id}_{lang}"), parse_mode="HTML")
+            fire_and_forget_auto_delete([prompt_msg], delay=120)
+            return
         else:
-            if sub == "menu":
-                ai_cfg = await get_ai_sentinel_config(group_id)
-                g_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["guardian_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-                c_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["copilot_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-                prompt_prev = ai_cfg["custom_prompt"][:40] + "..." if len(ai_cfg["custom_prompt"]) > 40 else (ai_cfg["custom_prompt"] or (tr(lang, "Por defecto (Estándar)", "Default (Standard)")))
-                text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev) + PERIMETER_SIGNATURE
-                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
-            elif sub == "toggle":
-                db_field = "ai_guardian_status" if sub_target == "guardian" else "ai_copilot_status"
-                await set_ai_sentinel_config(group_id, db_field, new_status)
-                _ai_settings_changed(group_id, [db_field])
-                await callback.answer(tr(lang, "⚙️ Ajustes de IA actualizados", "⚙️ AI settings updated"))
-                ai_cfg = await get_ai_sentinel_config(group_id)
-                g_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["guardian_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-                c_st = tr(lang, "🟢 ACTIVO", "🟢 ACTIVE") if ai_cfg["copilot_status"] == 1 else tr(lang, "🔴 INACTIVO", "🔴 INACTIVE")
-                prompt_prev = ai_cfg["custom_prompt"][:40] + "..." if len(ai_cfg["custom_prompt"]) > 40 else (ai_cfg["custom_prompt"] or (tr(lang, "Por defecto (Estándar)", "Default (Standard)")))
-                text = t["ai_menu"].format(guardian_st=g_st, copilot_st=c_st, custom_prompt=prompt_prev) + PERIMETER_SIGNATURE
-                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
-            elif sub == "cycletone":
-                ai_cfg = await get_ai_sentinel_config(group_id)
-                tone_cycle = {"guardian": "copilot", "copilot": "pr", "pr": "guardian"}
-                next_tone = tone_cycle.get(ai_cfg.get("personality_tone") or "", "guardian")
-                await set_ai_sentinel_config(group_id, "ai_personality_tone", next_tone)
-                _ai_settings_changed(group_id, ["ai_personality_tone"])
-                await callback.answer(f"Personalidad: {next_tone.upper()}")
-                ai_cfg["personality_tone"] = next_tone
-                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
-                try:
-                    await callback.message.edit_reply_markup(reply_markup=keyboard)
-                except Exception:
-                    pass
+            current = _ai_public_cfg(await get_ai_sentinel_config(group_id))
+            patch: dict = {}
+            toast = ""
+            if sub == "togguardian":
+                patch = {"guardian_status": 0 if current["guardian_status"] == 1 else 1}
+                toast = tr(lang, "🛡️ Guardián ", "🛡️ Guardian ") + ("🟢" if patch["guardian_status"] else "🔴")
+            elif sub == "togcopilot":
+                patch = {"copilot_status": 0 if current["copilot_status"] == 1 else 1}
+                toast = tr(lang, "📝 Copiloto ", "📝 Copilot ") + ("🟢" if patch["copilot_status"] else "🔴")
+            elif sub == "tonemenu":
+                patch = {"personality_tone": AI_TONE_CYCLE.get(current["personality_tone"], "guardian")}
+                toast = _ai_tone_label(patch["personality_tone"], lang)
+            elif sub == "modemenu":
+                patch = {"response_mode": AI_MODE_CYCLE.get(current["response_mode"], "mention_only")}
+                toast = _ai_mode_label(patch["response_mode"], int(current["response_chance"]), lang)
+            elif sub == "chance":
+                patch = {"response_chance": perimeter_ops.next_chance_step(current["response_chance"])}
+                toast = tr(lang, f"🎲 Probabilidad: {patch['response_chance']}%", f"🎲 Chance: {patch['response_chance']}%")
+            elif sub != "menu":
+                await callback.answer()
                 return
-            elif sub == "cyclemode":
-                ai_cfg = await get_ai_sentinel_config(group_id)
-                mode_cycle = {"mention_only": "chance", "chance": "always", "always": "mention_only"}
-                next_mode = mode_cycle.get(ai_cfg.get("response_mode") or "", "mention_only")
-                await set_ai_sentinel_config(group_id, "ai_response_mode", next_mode)
-                _ai_settings_changed(group_id, ["ai_response_mode"])
-                await callback.answer(f"Modo: {next_mode.upper()}")
-                ai_cfg["response_mode"] = next_mode
-                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
-                try:
-                    await callback.message.edit_reply_markup(reply_markup=keyboard)
-                except Exception:
-                    pass
-                return
-            elif sub == "cyclechance":
-                # 🎲 v20 · 5 → 15 → 30 → 50 → 5 % (la Mini App admite cualquier valor 1–100)
-                ai_cfg = await get_ai_sentinel_config(group_id)
-                next_chance = perimeter_ops.next_chance_step(ai_cfg.get("response_chance", 15))
-                await set_ai_sentinel_config(group_id, "ai_response_chance", next_chance)
-                _ai_settings_changed(group_id, ["ai_response_chance"])
-                await callback.answer(tr(lang, f"Probabilidad: {next_chance}%", f"Chance: {next_chance}%"))
-                ai_cfg["response_chance"] = next_chance
-                keyboard = get_ai_sentinel_keyboard(group_id, lang, ai_cfg, chat_type=chat_kind)
-                try:
-                    await callback.message.edit_reply_markup(reply_markup=keyboard)
-                except Exception:
-                    pass
-                return
-            elif sub == "prompt":
-                AI_PROMPT_STATES[(bot.id, callback.from_user.id)] = {"group_id": group_id, "lang": lang}
-                prompt = await callback.message.answer(t["ai_prompt_prompt"] + PERIMETER_SIGNATURE, reply_markup=_cancel_kb(t, f"ai_menu_{group_id}_{lang}"), parse_mode="HTML")
-                fire_and_forget_auto_delete([prompt], delay=60)
-                return
+            cfg = current
+            if patch:
+                saved, error = await _apply_ai_patch(group_id, patch, lang)
+                if error:
+                    await callback.answer(error[:190], show_alert=True)
+                    return
+                cfg = saved or current
+            with contextlib.suppress(Exception):
+                await callback.answer(toast or None)
+            # Se relee la BD para que el panel muestre el valor persistido (y no un valor optimista).
+            text, keyboard = await render_ai_sentinel_panel(group_id, lang, chat_type=chat_kind) if patch else \
+                build_ai_sentinel_panel(group_id, lang, cfg, chat_type=chat_kind)
 
     elif module == "rep":
         # 🎯 EXTRACCIÓN SEGURA DE ARGUMENTOS (Evita ValueError en floats)
@@ -8914,6 +8945,59 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
 # 🛰️ v20 · PARIDAD BOT ↔ MINI APP: PERÍMETRO, CANAL DE REGISTRO, GHOST PURGE v2 Y SOPORTE IA
 # ==========================================================================
 # Toda la lógica vive en perimeter_ops (la misma que usa main.py): aquí solo hay menús y conversación.
+async def _handle_ai_prompt_input(message: Message, bot: Bot, st: dict, text_input: Optional[str]) -> None:
+    """
+    v35 · Respuesta del editor «✍️ Editar Prompt de IA»: re-verifica licencia ULTRA PRO, limpia caracteres de control,
+    recorta a 1000 caracteres, guarda con la validación compartida (que invalida la caché del Centinela), avisa con
+    auto-borrado y reabre el panel de IA actualizado. «-» restaura el prompt por defecto.
+    """
+    group_id = int(st["group_id"])
+    lang = st.get("lang") or user_lang(message.from_user)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    back_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=t["btn_back_tool"], callback_data=f"ai_menu_{group_id}_{lang}")]
+    ])
+    if time.time() - float(st.get("ts", time.time())) > STATE_TTL_SECONDS:
+        resp = await message.answer(tr(lang, "⌛ La edición caducó; vuelve a abrir el menú.", "⌛ This edit expired; reopen the menu.")
+                                    + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([resp], delay=60)
+        return
+    if await get_effective_group_tier(group_id, message.from_user.id) != "ultra_pro":
+        resp = await message.answer(tr(lang, "🔒 El Centinela de IA requiere licencia ULTRA PRO.", "🔒 The AI Sentinel requires an ULTRA PRO license.")
+                                    + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([resp], delay=60)
+        return
+    raw = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(text_input or "")).strip()
+    if not raw:
+        resp = await message.answer(tr(lang, "⚠️ El prompt no puede estar vacío. Envía texto o <code>-</code> para restaurar el estándar.",
+                                       "⚠️ The prompt cannot be empty. Send text or <code>-</code> to restore the default.")
+                                    + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+    new_prompt = "" if raw == "-" else raw[:AI_PROMPT_MAX_CHARS]
+    truncated = raw != "-" and len(raw) > AI_PROMPT_MAX_CHARS
+    _, error = await _apply_ai_patch(group_id, {"custom_prompt": new_prompt}, lang)
+    if error:
+        resp = await message.answer(html.escape(error) + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+        fire_and_forget_auto_delete([message, resp], delay=60)
+        return
+    note = ""
+    if not new_prompt:
+        note = "\n" + tr(lang, "♻️ Se restauró el prompt por defecto.", "♻️ Default prompt restored.")
+    elif truncated:
+        note = "\n" + tr(lang, f"✂️ Se recortó a {AI_PROMPT_MAX_CHARS} caracteres.", f"✂️ Trimmed to {AI_PROMPT_MAX_CHARS} characters.")
+    resp = await message.answer(t["ai_prompt_saved"] + note + PERIMETER_SIGNATURE, parse_mode="HTML")
+    fire_and_forget_auto_delete([message, resp], delay=30)
+    # Panel actualizado como mensaje nuevo (el anterior quedó arriba en el chat).
+    try:
+        chat_kind = await resolve_chat_kind(bot, group_id)
+        panel_text, panel_kb = await render_ai_sentinel_panel(group_id, lang, chat_type=chat_kind)
+        await message.answer(panel_text, reply_markup=panel_kb, parse_mode="HTML")
+    except TelegramBadRequest as ex:
+        logging.warning(f"⚠️ [IA] No se pudo redibujar el panel de IA de {group_id}: {ex}")
+        await message.answer(tr(lang, "✅ Guardado.", "✅ Saved.") + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+
+
 def _ai_settings_changed(group_id: int, fields) -> None:
     """Tras guardar ajustes de IA: el Centinela los aplica en el siguiente mensaje y la Mini App se repinta."""
     perimeter_ops.invalidate_ai_runtime(group_id)
