@@ -26,5 +26,6 @@
   "reportGeneralTypeIssues": "none",
   "reportPrivateImportUsage": "none",
   "reportReturnType": "none",
-  "reportCallIssue": "none"
+  "reportCallIssue": "none",
+  "reportIndexIssue": "none"
 }

@@ -9032,20 +9032,39 @@ def _support_kb(lang: str) -> InlineKeyboardMarkup:
 
 
 async def _handle_support_ai_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
-    lang = st.get("lang", "es")
+    ui_lang = st.get("lang", "es")
     st["ts"] = time.time()
-    if not text_input:
+    # v31 · Texto limpio (sin espacios sobrantes ni caracteres de control) e idioma REAL del mensaje: un operador con
+    # la interfaz en inglés que escribe «como programo el captcha» recibe todo (IA, avisos y botones) en español.
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(text_input or "")).strip()
+    lang = perimeter_ops.detect_message_lang(clean, default=ui_lang) if clean else ui_lang
+    if not clean:
         await message.answer("✍️ " + ("Escribe tu pregunta en texto." if lang == "es" else "Type your question as text."), reply_markup=_support_kb(lang))
         return
+    typing_task = None
+
+    async def _keep_typing():
+        with contextlib.suppress(Exception):
+            while True:
+                await bot.send_chat_action(message.chat.id, "typing")
+                await asyncio.sleep(4.5)
+
+    typing_task = asyncio.create_task(_keep_typing())
     try:
-        await bot.send_chat_action(message.chat.id, "typing")
-    except Exception:
-        pass
-    try:
-        result = await perimeter_ops.support_ai_reply(message.from_user.id, text_input, lang)
+        result = await perimeter_ops.support_ai_reply(message.from_user.id, clean, ui_lang)
     except perimeter_ops.SupportRateLimited as rl:
-        await message.answer(("⏳ Espera " if lang == "es" else "⏳ Wait ") + f"{rl.retry_after} s.", reply_markup=_support_kb(lang))
+        rl_lang = getattr(rl, "lang", lang)
+        await message.answer(("⏳ Espera " if rl_lang == "es" else "⏳ Wait ") + f"{rl.retry_after} s.", reply_markup=_support_kb(rl_lang))
         return
+    except Exception as ex:
+        logging.error(f"❌ [Soporte IA] Error inesperado respondiendo a {message.from_user.id}: {ex}")
+        result = {"reply": perimeter_ops.local_knowledge_fallback(clean, lang) or perimeter_ops._support_fallback(lang),
+                  "lang": lang}
+    finally:
+        if typing_task:
+            typing_task.cancel()
+    lang = result.get("lang", lang)
+    st["lang"] = lang   # los botones del asistente siguen el idioma de la conversación
     # Texto de la IA en plano: caracteres sueltos (<, *, _) nunca rompen el envío.
     await message.answer(f"🤖 {result['reply']}", reply_markup=_support_kb(lang), parse_mode=None)
 

@@ -1509,7 +1509,10 @@ async def api_support_ask(
     try:
         result = await perimeter_ops.support_ai_reply(user_id, message, lang)
     except perimeter_ops.SupportRateLimited as rl:
-        return JSONResponse(status_code=429, content={"detail": f"Espera {rl.retry_after} s antes de enviar otra consulta."},
+        # v31 · El aviso sigue el idioma REAL del mensaje (rl.lang), no solo el de la interfaz.
+        wait_text = (f"Wait {rl.retry_after} s before sending another question." if getattr(rl, "lang", lang) == "en"
+                     else f"Espera {rl.retry_after} s antes de enviar otra consulta.")
+        return JSONResponse(status_code=429, content={"detail": wait_text},
                             headers={"Retry-After": str(rl.retry_after)})
     return {"status": "success", **result}
 

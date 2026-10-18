@@ -89,21 +89,74 @@ except ImportError:  # radar_bus es opcional en algunos entornos de ejecución
 
     radar_hub = _RadarHubFallback()
 
-# 🤖 Integración de Mistral AI para el Guardián de Voz y Copiloto
-try:
-    from importlib import import_module
-    Mistral = import_module("mistralai").Mistral
-except (ImportError, AttributeError):
-    # AttributeError: SDK mistralai 0.x (sin la clase Mistral). Se opera con respuestas de respaldo.
-    Mistral = None
+# 🤖 Integración de Mistral AI para el Guardián de Voz, el Copiloto y el Soporte IA
+# v31 · Inicialización blindada y DIAGNOSTICABLE. Antes, cualquier fallo aquí (SDK 0.x, clase movida en una versión
+# nueva del SDK, clave con comillas pegadas desde Railway) dejaba mistral_client = None SIN ningún log y todo el
+# sistema respondía con el texto de respaldo.
+_mistral_log = logging.getLogger("assistant_radar")
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "").strip()
-try:
-    mistral_client = Mistral(api_key=MISTRAL_API_KEY) if (Mistral and MISTRAL_API_KEY) else None
-except Exception as _mistral_init_err:
-    logging.getLogger("assistant_radar").error(f"❌ [Mistral] No se pudo inicializar el cliente: {_mistral_init_err}")
-    mistral_client = None
-MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest").strip() or "mistral-small-latest"
+
+def _clean_env_secret(raw) -> str:
+    """Quita espacios, saltos de línea, comillas accidentales y un prefijo 'Bearer ' pegado por error."""
+    value = str(raw or "").strip().strip('"').strip("'").strip()
+    if value.lower().startswith("bearer "):
+        value = value[7:].strip()
+    return value
+
+
+def _resolve_mistral_sdk():
+    """(clase Mistral | None, versión del SDK, motivo del fallo). Prueba las rutas de importación conocidas (1.x y posteriores)."""
+    from importlib import import_module
+    version = ""
+    try:
+        from importlib.metadata import version as _pkg_version
+        version = _pkg_version("mistralai")
+    except Exception:
+        version = ""
+    reasons = []
+    for module_name in ("mistralai", "mistralai.client", "mistralai.sdk"):
+        try:
+            module = import_module(module_name)
+        except ImportError as ex:
+            reasons.append(f"{module_name}: {ex}")
+            if module_name == "mistralai":
+                break   # el paquete no está instalado: no tiene sentido seguir
+            continue
+        except Exception as ex:   # un submódulo antiguo puede lanzar al importarse
+            reasons.append(f"{module_name}: {type(ex).__name__}")
+            continue
+        cls = getattr(module, "Mistral", None)
+        if isinstance(cls, type):
+            return cls, version, ""
+        reasons.append(f"{module_name}: sin clase Mistral")
+    hint = ("instala mistralai>=1.0.0 (pip install -U mistralai)" if not version or version.startswith("0.")
+            else "versión del SDK no reconocida")
+    return None, version, f"{hint} · " + " | ".join(reasons)
+
+
+Mistral, MISTRAL_SDK_VERSION, _mistral_sdk_error = _resolve_mistral_sdk()
+MISTRAL_API_KEY = _clean_env_secret(os.getenv("MISTRAL_API_KEY", ""))
+MISTRAL_MODEL = _clean_env_secret(os.getenv("MISTRAL_MODEL", "mistral-small-latest")) or "mistral-small-latest"
+MISTRAL_INIT_ERROR = ""
+mistral_client = None
+if Mistral is None:
+    MISTRAL_INIT_ERROR = f"sdk_unavailable ({_mistral_sdk_error})"
+elif not MISTRAL_API_KEY:
+    MISTRAL_INIT_ERROR = "missing_api_key (define MISTRAL_API_KEY en Railway)"
+else:
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{20,128}", MISTRAL_API_KEY):
+        # No se bloquea (el formato podría cambiar), pero queda constancia: suele ser una clave mal pegada.
+        _mistral_log.warning(f"⚠️ [Mistral] MISTRAL_API_KEY tiene un formato inusual (longitud {len(MISTRAL_API_KEY)}); "
+                             "revisa espacios o caracteres pegados por error.")
+    try:
+        mistral_client = Mistral(api_key=MISTRAL_API_KEY)
+    except Exception as _mistral_init_err:
+        MISTRAL_INIT_ERROR = f"client_init_failed ({type(_mistral_init_err).__name__}: {_mistral_init_err})"
+        mistral_client = None
+if MISTRAL_INIT_ERROR:
+    _mistral_log.error(f"❌ [Mistral] IA DESACTIVADA: {MISTRAL_INIT_ERROR} · SDK mistralai={MISTRAL_SDK_VERSION or 'no instalado'}")
+else:
+    _mistral_log.info(f"🤖 [Mistral] Cliente listo · SDK mistralai={MISTRAL_SDK_VERSION or '?'} · modelo={MISTRAL_MODEL}")
 
 
 def _env_float(name: str, default: float) -> float:
@@ -1374,7 +1427,6 @@ SENTINEL_MENTION_ALIASES = {
 }
 
 _MISTRAL_SEMAPHORE = asyncio.Semaphore(MISTRAL_MAX_CONCURRENCY)
-_mistral_breaker = {"failures": 0, "open_until": 0.0}
 _MISTRAL_TRANSIENT_MARKERS = (
     "429", "rate limit", "too many requests", "timeout", "timed out", "temporar",
     "500", "502", "503", "504", "overloaded", "unavailable", "connection", "reset by peer"
@@ -1598,22 +1650,84 @@ def _is_transient_mistral_error(exc: Exception) -> bool:
     return any(marker in text for marker in _MISTRAL_TRANSIENT_MARKERS)
 
 
-def _mistral_available() -> bool:
-    return mistral_client is not None and time.monotonic() >= _mistral_breaker["open_until"]
+# v31 · Disyuntor POR PROPÓSITO: antes era uno global, así que unos cuantos fallos del Guardián (p. ej. JSON
+# inválido) dejaban también al Soporte IA y al Copiloto respondiendo con el texto de respaldo durante 60 s.
+_mistral_breakers: dict = {}
 
 
-def _register_mistral_result(success: bool) -> None:
+def _breaker(purpose: str) -> dict:
+    return _mistral_breakers.setdefault(str(purpose or "default"), {"failures": 0, "open_until": 0.0})
+
+
+def _mistral_available(purpose: Optional[str] = None) -> bool:
+    """Cliente configurado y, si se indica `purpose`, su disyuntor cerrado."""
+    if mistral_client is None:
+        return False
+    if purpose is None:
+        return True
+    return time.monotonic() >= _breaker(purpose)["open_until"]
+
+
+def _register_mistral_result(success: bool, purpose: str = "default") -> None:
+    b = _breaker(purpose)
     if success:
-        _mistral_breaker["failures"] = 0
+        b["failures"] = 0
         return
-    _mistral_breaker["failures"] += 1
-    if _mistral_breaker["failures"] >= MISTRAL_BREAKER_THRESHOLD:
-        _mistral_breaker["open_until"] = time.monotonic() + MISTRAL_BREAKER_COOLDOWN
-        _mistral_breaker["failures"] = 0
+    b["failures"] += 1
+    if b["failures"] >= MISTRAL_BREAKER_THRESHOLD:
+        b["open_until"] = time.monotonic() + MISTRAL_BREAKER_COOLDOWN
+        b["failures"] = 0
         logger.warning(
-            f"🔌 [Mistral] {MISTRAL_BREAKER_THRESHOLD} fallos seguidos: disyuntor abierto "
+            f"🔌 [Mistral:{purpose}] {MISTRAL_BREAKER_THRESHOLD} fallos seguidos: disyuntor abierto "
             f"{MISTRAL_BREAKER_COOLDOWN:.0f}s. Se usan respuestas de respaldo."
         )
+
+
+def mistral_error_status(exc: BaseException):
+    """Código HTTP de un error del SDK (mistralai 1.x: SDKError.status_code; httpx: response.status_code)."""
+    for obj in (exc, getattr(exc, "response", None), getattr(exc, "raw_response", None)):
+        status = getattr(obj, "status_code", None) if obj is not None else None
+        if isinstance(status, int):
+            return status
+    match = re.search(r"\b(4\d\d|5\d\d)\b", str(exc))
+    return int(match.group(1)) if match else None
+
+
+def describe_mistral_error(exc: BaseException) -> str:
+    """Resumen apto para logs: tipo, código HTTP y mensaje recortado. La API key JAMÁS aparece."""
+    text = str(exc) or repr(exc)
+    if MISTRAL_API_KEY:
+        text = text.replace(MISTRAL_API_KEY, "***")
+    text = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9_\-.]+", r"\1***", text)
+    text = re.sub(r"\s+", " ", text).strip()[:240]
+    status = mistral_error_status(exc)
+    hint = ""
+    if status == 401:
+        hint = " → API key inválida, revocada o sin saldo/suscripción"
+    elif status == 403:
+        hint = " → la API key no tiene acceso a este modelo"
+    elif status == 404:
+        hint = f" → modelo '{MISTRAL_MODEL}' inexistente (revisa MISTRAL_MODEL)"
+    elif status == 422 or status == 400:
+        hint = " → parámetros rechazados por la API"
+    elif status == 429:
+        hint = " → límite de uso alcanzado"
+    elif isinstance(exc, asyncio.TimeoutError):
+        hint = " → tiempo de espera agotado"
+    return f"{type(exc).__name__} status={status if status is not None else '-'}{hint} · {text}"
+
+
+def mistral_status() -> dict:
+    """Diagnóstico sin secretos (lo usan los logs del Soporte IA y puede exponerse a Arquitectos)."""
+    now = time.monotonic()
+    return {
+        "sdk_version": MISTRAL_SDK_VERSION or None,
+        "client_ready": mistral_client is not None,
+        "init_error": MISTRAL_INIT_ERROR or None,
+        "model": MISTRAL_MODEL,
+        "key_present": bool(MISTRAL_API_KEY),
+        "open_breakers": {k: round(v["open_until"] - now) for k, v in _mistral_breakers.items() if v["open_until"] > now},
+    }
 
 
 async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **request_kwargs):
@@ -1627,18 +1741,38 @@ async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **req
     Lanza la excepción final para que el llamador aplique su respaldo.
     """
     if mistral_client is None:
-        raise RuntimeError("Mistral no configurado")
-    if not _mistral_available():
-        raise RuntimeError("Disyuntor de Mistral abierto")
+        raise RuntimeError(f"Mistral no configurado: {MISTRAL_INIT_ERROR or 'sin cliente'}")
+    if not _mistral_available(purpose):
+        raise RuntimeError(f"Disyuntor de Mistral abierto para '{purpose}'")
+    if purpose == "support":
+        # El Soporte IA responde en texto plano: nunca se fuerza JSON (provoca 400/422 o respuestas vacías).
+        request_kwargs.pop("response_format", None)
 
     client = mistral_client   # referencia ya comprobada (no None) para el cierre de _call_once
-    async_complete: Any = getattr(client.chat, "complete_async", None)
+    chat_api: Any = getattr(client, "chat", None)
+    if chat_api is None:
+        raise RuntimeError("SDK de Mistral sin 'chat' (versión no compatible)")
+    async_complete: Any = getattr(chat_api, "complete_async", None)
+    sync_complete: Any = getattr(chat_api, "complete", None)
+    if not callable(async_complete) and not callable(sync_complete):
+        raise RuntimeError("SDK de Mistral sin chat.complete / complete_async (versión no compatible)")
 
     async def _call_once():
-        if callable(async_complete):
-            pending: Any = async_complete(**request_kwargs)
-            return await pending
-        return await asyncio.to_thread(client.chat.complete, **request_kwargs)
+        kwargs = dict(request_kwargs)
+        for _ in range(2):
+            try:
+                if callable(async_complete):
+                    pending: Any = async_complete(**kwargs)
+                    return await pending
+                return await asyncio.to_thread(sync_complete, **kwargs)
+            except TypeError as exc:
+                # Firma distinta en otra versión del SDK: se reintenta UNA vez solo con lo imprescindible.
+                optional = [k for k in ("response_format", "temperature", "max_tokens", "safe_prompt") if k in kwargs]
+                if not optional or "argument" not in str(exc):
+                    raise
+                logger.error(f"❌ [Mistral:{purpose}] El SDK rechazó parámetros {optional} ({exc}); reintento sin ellos.")
+                kwargs = {k: v for k, v in kwargs.items() if k not in optional}
+        raise RuntimeError("SDK de Mistral: llamada no compatible")
 
     async def _run():
         async with _MISTRAL_SEMAPHORE:
@@ -1659,10 +1793,14 @@ async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **req
         response = await asyncio.wait_for(_run(), timeout=timeout or MISTRAL_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
         raise
-    except Exception:
-        _register_mistral_result(False)
+    except Exception as exc:
+        _register_mistral_result(False, purpose)
+        status = mistral_error_status(exc)
+        log = logger.error if status in (401, 403, 404, 400, 422) or isinstance(exc, (TypeError, AttributeError)) else logger.warning
+        log(f"⚠️ [Mistral:{purpose}] Llamada fallida · modelo={request_kwargs.get('model', MISTRAL_MODEL)} · "
+            f"{describe_mistral_error(exc)}")
         raise
-    _register_mistral_result(True)
+    _register_mistral_result(True, purpose)
     return response
 
 
