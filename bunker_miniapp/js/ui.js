@@ -920,11 +920,23 @@ export const ui = {
      *    (antes se escapaban dos veces: "A &amp; B" se veía literal en la vista previa).
      *  · Todo lo demás se escapa. Cierres huérfanos se descartan; los cruces se corrigen cerrando y
      *    reabriendo; lo abierto se cierra al final. Dentro de <code> no se abren otras etiquetas.
+     *  · v37 · Las entidades se validan en minúsculas EXACTAS (Telegram solo admite &lt; &gt; &amp; &quot; y
+     *    numéricas): "&LT;" o "&#X3C;" se escapan en vez de pasar tal cual, y las numéricas fuera del rango
+     *    Unicode válido (0, sustitutos D800–DFFF, > 10FFFF) también, para que la vista previa no muestre algo
+     *    que Telegram rechazaría.
      */
     safeTelegramHtml(text) {
         const ALIASES = { b: 'b', strong: 'b', i: 'i', em: 'i', u: 'u', ins: 'u', s: 's', strike: 's', del: 's', code: 'code' };
         const TOKEN = /(<(\/?)(b|strong|i|em|u|ins|s|strike|del|code)>)|(&(?:lt|gt|amp|quot|#\d{1,7}|#x[0-9a-fA-F]{1,6});)/gi;
+        const STRICT_ENTITY = /^&(?:lt|gt|amp|quot|#(\d{1,7})|#x([0-9a-fA-F]{1,6}));$/;
         const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const validEntity = (entity) => {
+            const em = STRICT_ENTITY.exec(entity);
+            if (!em) return false;
+            if (em[1] === undefined && em[2] === undefined) return true;
+            const code = em[1] !== undefined ? parseInt(em[1], 10) : parseInt(em[2], 16);
+            return code > 0 && code <= 0x10FFFF && !(code >= 0xD800 && code <= 0xDFFF);
+        };
         const textPart = (s) => esc(s).replace(/\r?\n/g, '<br>');
         const src = text === null || text === undefined ? '' : String(text);
         const out = [];
@@ -935,7 +947,7 @@ export const ui = {
         while ((m = TOKEN.exec(src)) !== null) {
             out.push(textPart(src.slice(pos, m.index)));
             pos = TOKEN.lastIndex;
-            if (m[4]) { out.push(m[4]); continue; }
+            if (m[4]) { out.push(validEntity(m[4]) ? m[4] : esc(m[4])); continue; }
             const closing = Boolean(m[2]);
             const name = ALIASES[m[3].toLowerCase()];
             const inCode = stack.includes('code');

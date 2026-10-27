@@ -14,6 +14,12 @@ Expone a la Mini App las mismas acciones que el panel "💎 Planes de Membresía
     POST   /api/channel/{channel_id}/plan/create                 (v8.3)
     POST   /api/channel/{channel_id}/plan/{plan_id}/schedule     (v9)
 
+v37 · Coherencia de caché con el pre-checkout
+---------------------------------------------
+• Toda mutación (crear, activar/pausar, eliminar y ahora también reprogramar) invalida al instante la caché de
+  planes de handlers.payments (TTL 10–15 s). Si esa invalidación no está disponible se registra como WARNING al
+  cargar las dependencias: sin ella, un plan pausado seguiría cobrándose hasta que venciera el TTL.
+
 v9 · Programador recurrente y difusión estricta
 -----------------------------------------------
 • Cada plan puede difundirse solo cada 6, 12, 24 o 48 h (o nunca) en el propio canal, con su botón de pago en
@@ -153,7 +159,9 @@ def load_db_deps() -> PlanDeps:
         from handlers.payments import invalidate_channel_plan_cache  # type: ignore[import-not-found]
         invalidate = invalidate_channel_plan_cache
     except Exception as ex:  # pragma: no cover - depende del despliegue
-        logger.debug("Sin caché de pre-checkout que invalidar: %s", ex)
+        # v37 · WARNING (antes debug): sin invalidación, un plan pausado o editado sigue vendiéndose hasta que vence
+        # el TTL de la caché de pre-checkout. Debe verse en los logs de arranque.
+        logger.warning("⚠️ [Planes] Caché de pre-checkout (handlers.payments) no disponible: %s", ex)
 
     return PlanDeps(
         get_channel_plans=db.get_channel_plans,
@@ -508,6 +516,7 @@ async def schedule_plan(channel_id: int, plan_id: int, payload: Any, deps: PlanD
     ok = await deps.set_plan_schedule(int(plan_id), int(channel_id), interval, _clean_lang(body.get("lang")))
     if not ok:
         raise PlanApiError(422, "broadcast_interval_hours: no se pudo aplicar el intervalo.")
+    _invalidate(deps, plan_id)   # v37 · una edición también se refleja YA en el pre-checkout (no al vencer el TTL)
     fresh = await deps.get_channel_plan(int(plan_id)) or plan
     logger.info("⏰ [Planes] Canal %s: plan %s difusión %s.", channel_id, plan_id, f"cada {interval} h" if interval else "desactivada")
     return {"status": "success", "plan_id": int(plan_id), **serialize_schedule(fresh)}

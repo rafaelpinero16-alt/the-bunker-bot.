@@ -1,6 +1,8 @@
 """
 admin_group.py — Gestor de comandos y administración de grupos en The Bunker OS (Aiogram 3.x)
 Fase 5: Sistema Criptográfico de Respaldo y Migración (Backup & Restore con HMAC-SHA256).
+v37: inglés por defecto + idioma/TTL de servicio por grupo, Anti-Rogue silencioso en comandos del Dueño y
+     /reload sin choque con el /reload del Centinela (Pyrogram).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -67,9 +69,57 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 
+_LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+
+
 def get_lang(lang_code: str) -> str:
-    """Detecta el idioma del operador para renderizar la respuesta correspondiente."""
-    return "es" if lang_code and lang_code.startswith("es") else "en"
+    """v37 · Inglés por defecto; el español por language_code solo con BUNKER_LANG_AUTODETECT=1."""
+    if _LANG_AUTODETECT and lang_code and str(lang_code).lower().startswith("es"):
+        return "es"
+    return "en"
+
+
+async def _svc_lang(chat_id: int) -> str:
+    """v37 · Idioma de servicio del grupo (/lang o panel «Language & TTL»). Inglés si no hay preferencia."""
+    try:
+        from handlers.groups import group_lang
+        lang = await group_lang(int(chat_id))
+    except Exception:
+        return "en"
+    return lang if lang in ("en", "es") else "en"
+
+
+async def _svc_ttl(chat_id: int, fallback: int, minimum: int = 0) -> int:
+    """v37 · Segundos de auto-borrado fijados por el administrador; `minimum` protege paneles con botones."""
+    try:
+        from handlers.groups import service_ttl
+        ttl = int(await service_ttl(int(chat_id), fallback))
+    except Exception:
+        ttl = fallback
+    return max(minimum, ttl)
+
+
+async def _ignore(message: Message) -> None:
+    """v37 · Anti-Rogue: sin respuesta pública; solo se retira el comando."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+def _is_sentinel_account(chat_id: int, user_id: int) -> bool:
+    """
+    v37 · ¿El emisor es la cuenta Centinela (Maestro o dedicada) de este grupo? Su /reload lo procesa el cliente
+    Pyrogram (assistant.sentinel_reload_handler); el bot no debe tratarlo como un /reload de administrador.
+    """
+    if not user_id:
+        return False
+    clients = [assistant_app, (active_sentinels.get(chat_id) or {}).get("client")]
+    for client in clients:
+        me = getattr(client, "me", None)
+        if me is not None and getattr(me, "id", None) == int(user_id):
+            return True
+    return False
 
 
 async def is_user_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -123,6 +173,13 @@ TEXTS = {
     "en": {
         "owner_only": "⛔ <b>Access Denied:</b> This protocol is restricted exclusively to the community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status or is an active Administrator.\n\n🛡️ <i>Cloud Media Management</i>",
+        "denied_short": "⛔ Access denied.",
+        "invalid_button": "⚠️ Invalid button.",
+        "download_failed": "The file could not be downloaded: {error}",
+        "community": "Community",
+        "sentinel_master_standby": "Master Sentinel on standby ({error})",
+        "sentinel_reconnect_failed": "Reconnection failed ⚠️",
+        "sentinel_hint": "🎙️ <i>Dedicated Sentinel: send</i> <code>/reload</code> <i>from the Sentinel account in this group to activate voice moderation.</i>\n\n",
         "reload_success": (
             "🔄 <b>The Bunker Ecosystem Synchronized</b>\n\n"
             "• <b>Community:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
@@ -212,6 +269,13 @@ TEXTS = {
     "es": {
         "owner_only": "⛔ <b>Acceso denegado:</b> Este protocolo está reservado única y exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto o Rango de Administrador.\n\n🛡️ <i>Cloud Media Management</i>",
+        "denied_short": "⛔ Acceso denegado.",
+        "invalid_button": "⚠️ Botón inválido.",
+        "download_failed": "No se pudo descargar el archivo: {error}",
+        "community": "Comunidad",
+        "sentinel_master_standby": "Centinela Maestro en espera ({error})",
+        "sentinel_reconnect_failed": "Fallo en la reconexión ⚠️",
+        "sentinel_hint": "🎙️ <i>Centinela dedicado: envía</i> <code>/reload</code> <i>desde la cuenta Centinela en este grupo para activar la moderación de voz.</i>\n\n",
         "reload_success": (
             "🔄 <b>Ecosistema The Bunker Sincronizado</b>\n\n"
             "• <b>Comunidad:</b> <code>{title}</code> (<code>{chat_id}</code>)\n"
@@ -356,13 +420,11 @@ async def cmd_export_settings(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    lang_code = message.from_user.language_code if message.from_user and message.from_user.language_code else "es"
-    lang = get_lang(lang_code)
+    lang = await _svc_lang(chat_id)
     t = TEXTS[lang]
 
     if not await is_user_creator(bot, chat_id, user_id):
-        msg = await message.reply(t["owner_only"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 8))
+        await _ignore(message)   # v37 · Anti-Rogue: sin aviso público
         return
 
     try:
@@ -390,7 +452,7 @@ async def cmd_export_settings(message: Message, bot: Bot):
                 "🔐 <b>Cryptographic backup successfully sent to your private DMs.</b>\n\n🛡️ <i>Cloud Media Management</i>"
             )
             confirm = await message.reply(confirm_text, parse_mode="HTML")
-            _spawn(auto_delete_pair(message, confirm, 15))
+            _spawn(auto_delete_pair(message, confirm, await _svc_ttl(message.chat.id, 15)))
         except Exception:
             # Fallback al chat del grupo si el Creador no ha iniciado chat con el bot
             sent_doc = await message.reply_document(
@@ -403,7 +465,7 @@ async def cmd_export_settings(message: Message, bot: Bot):
     except Exception as ex:
         logger.error(f"Error en /exportsettings ({chat_id}): {ex}")
         err_msg = await message.reply(t["backup_export_error"].format(error=html.escape(str(ex))), parse_mode="HTML")
-        _spawn(auto_delete_pair(message, err_msg, 12))
+        _spawn(auto_delete_pair(message, err_msg, await _svc_ttl(message.chat.id, 12)))
 
 
 @router.message(Command("importsettings", "restore", "restaurar", "importar"))
@@ -414,12 +476,11 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
 
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
 
     if not await is_user_creator(bot, chat_id, user_id):
-        msg = await message.reply(t["owner_only"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 8))
+        await _ignore(message)   # v37 · Anti-Rogue: sin aviso público
         return
 
     doc = None
@@ -447,13 +508,14 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
             json_content = downloaded.read().decode("utf-8")
         except Exception as dl_err:
             logger.error(f"Error descargando archivo de backup: {dl_err}")
-            msg = await message.reply(t["backup_import_failed"].format(error=f"No se pudo descargar el archivo: {dl_err}"), parse_mode="HTML")
-            _spawn(auto_delete_pair(message, msg, 12))
+            msg = await message.reply(t["backup_import_failed"].format(
+                error=html.escape(t["download_failed"].format(error=dl_err))), parse_mode="HTML")
+            _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
             return
 
     if not json_content:
         msg = await message.reply(t["backup_import_needed"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 20))
+        _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 20, 20)))
         return
 
     try:
@@ -477,18 +539,18 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
                 t["backup_import_success"].format(title=html.escape(chat_title), chat_id=chat_id),
                 parse_mode="HTML"
             )
-            _spawn(auto_delete_pair(message, succ_msg, 30))
+            _spawn(auto_delete_pair(message, succ_msg, await _svc_ttl(message.chat.id, 30, 20)))
         else:
             fail_msg = await message.reply(
                 t["backup_import_failed"].format(error=html.escape(report)),
                 parse_mode="HTML"
             )
-            _spawn(auto_delete_pair(message, fail_msg, 15))
+            _spawn(auto_delete_pair(message, fail_msg, await _svc_ttl(message.chat.id, 15)))
 
     except Exception as ex:
         logger.error(f"Error procesando import_group_configuration en {chat_id}: {ex}")
         err_msg = await message.reply(t["backup_import_failed"].format(error=html.escape(str(ex))), parse_mode="HTML")
-        _spawn(auto_delete_pair(message, err_msg, 12))
+        _spawn(auto_delete_pair(message, err_msg, await _svc_ttl(message.chat.id, 12)))
 
 
 # ==========================================================
@@ -496,28 +558,33 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
 # ==========================================================
 @router.message(Command("reload"))
 async def cmd_reload_group(message: Message, bot: Bot):
-    """Fuerza la recarga del perímetro y sincroniza la administración en el grupo."""
-    if message.chat.type == "private": 
+    """
+    Fuerza la recarga del perímetro y sincroniza la administración en el grupo.
+    v37 · Si quien lo envía es la cuenta Centinela, el bot no interviene: ese /reload lo procesa el cliente
+    Pyrogram (assistant.sentinel_reload_handler), que publica su propia tarjeta de estado. Así no hay dos
+    respuestas, ni se registra la cuenta Centinela como operador, ni se reinicia dos veces el monitor de voz.
+    """
+    if message.chat.type == "private":
         return
-    
+
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else 0
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    if _is_sentinel_account(chat_id, user_id):
+        return
+
+    lang = await _svc_lang(chat_id)
     t = TEXTS[lang]
 
     if not await is_user_admin(bot, chat_id, user_id):
-        try: 
-            await message.delete()
-        except Exception: 
-            pass
+        await _ignore(message)
         return
 
-    chat_title = message.chat.title or "Comunidad"
+    chat_title = message.chat.title or t["community"]
     chat_type = message.chat.type
 
     await register_user_group(
-        user_id=user_id, 
-        group_id=chat_id, 
+        user_id=user_id,
+        group_id=chat_id,
         group_name=chat_title,
         chat_type=chat_type
     )
@@ -528,8 +595,10 @@ async def cmd_reload_group(message: Message, bot: Bot):
 
     await set_vc_monitor_status(chat_id, 1)
     admin_caches.pop(chat_id, None)
+    _refresh_v37_caches(chat_id)
 
     sentinel_status = "Centinela Activo 🟢" if lang == "es" else "Active Sentinel 🟢"
+    session_row = None
     try:
         session_row = await get_session_by_group(chat_id)
         if session_row:
@@ -538,31 +607,14 @@ async def cmd_reload_group(message: Message, bot: Bot):
             if connected:
                 sentinel_status = "Centinela Dedicado Reconectado 💎" if lang == "es" else "Dedicated Sentinel Reconnected 💎"
             else:
-                sentinel_status = "Error en Sesión Dedicada ⚠️️" if lang == "es" else "Dedicated Session Error ⚠️"
+                sentinel_status = "Error en Sesión Dedicada ⚠️" if lang == "es" else "Dedicated Session Error ⚠️"
         elif assistant_app and assistant_app.is_connected:
-            try:
-                peer = await assistant_app.resolve_peer(chat_id)
-                if chat_id in active_sentinels:
-                    old_info = active_sentinels.pop(chat_id)
-                    try:
-                        old_info["task"].cancel()
-                    except Exception:
-                        pass
-                master_bot_id = get_assistant_bot_id()
-                task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, master_bot_id))
-                active_sentinels[chat_id] = {
-                    "client": assistant_app,
-                    "task": task,
-                    "user_id": 0
-                }
-                sentinel_status = "Centinela Maestro Reconectado 🤖" if lang == "es" else "Master Sentinel Reconnected 🤖"
-            except Exception as master_err:
-                sentinel_status = f"Centinela Maestro Standby ({master_err})"
+            sentinel_status = await _reload_master_monitor(chat_id, lang, t)
         else:
             sentinel_status = "Modo Pasivo (Sin Sesión MTProto)" if lang == "es" else "Passive Mode (No MTProto Session)"
     except Exception as ex:
         logger.error(f"❌ Error reconectando Centinela en reload ({chat_id}): {ex}")
-        sentinel_status = "Fallo en Reconexión ⚠️"
+        sentinel_status = t["sentinel_reconnect_failed"]
 
     tier_label = current_tier.upper()
     if tier_label == "PRO":
@@ -573,7 +625,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
         tier_label = "BÁSICO (Free)" if lang == "es" else "BASIC (Free)"
 
     bot_info = await bot.get_me()
-    
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{chat_id}")],
         [InlineKeyboardButton(text=t["btn_open_miniapp"], url=f"{WEBAPP_URL}?chat_id={chat_id}")]
@@ -583,14 +635,81 @@ async def cmd_reload_group(message: Message, bot: Bot):
         title=html.escape(chat_title),
         chat_id=chat_id,
         tier=tier_label,
-        sentinel_status=sentinel_status
+        sentinel_status=html.escape(sentinel_status)
     )
-    
-    await message.answer(report_text, reply_markup=kb, parse_mode="HTML")
+    if session_row:
+        # v37 · Recordatorio: el Centinela dedicado se activa con SU propio /reload dentro del grupo.
+        report_text = report_text.replace("🛡️ <i>Cloud Media Management</i>",
+                                          t["sentinel_hint"] + "🛡️ <i>Cloud Media Management</i>", 1)
+
+    report = await message.answer(report_text, reply_markup=kb, parse_mode="HTML")
     try:
         await message.delete()
     except Exception:
         pass
+    # v37 · El informe ya no queda fijo en el chat: respeta el TTL de servicio (mínimo 30 s para usar los botones).
+    _spawn(auto_delete_msg(report, await _svc_ttl(chat_id, 60, 30)))
+
+
+def _refresh_v37_caches(chat_id: int) -> None:
+    """v37 · /reload también relee Anti-Raid, idioma/TTL de servicio y los permisos de videochat del Centinela."""
+    try:
+        from handlers import groups as _groups
+        for name in ("invalidate_raid_cfg", "invalidate_service_prefs"):
+            fn = getattr(_groups, name, None)
+            if callable(fn):
+                fn(chat_id)
+    except Exception as ex:
+        logger.debug(f"[Reload] Cachés de groups no invalidadas en {chat_id}: {ex}")
+    try:
+        import assistant as _assistant
+        fn = getattr(_assistant, "_invalidate_call_rights", None)
+        if callable(fn):
+            fn(chat_id)
+        cache = getattr(_assistant, "_SVC_PREFS_CACHE_A", None)
+        if isinstance(cache, dict):
+            cache.pop(chat_id, None)
+    except Exception as ex:
+        logger.debug(f"[Reload] Cachés del Centinela no invalidadas en {chat_id}: {ex}")
+    try:
+        from middlewares.anti_spam import forget_chat_approval, forget_sender_rights
+        forget_chat_approval(chat_id)      # /reload puede aprobar el grupo: el Anti-Rogue lo ve al instante
+        forget_sender_rights(chat_id)      # y relee los rangos de administración
+    except Exception as ex:
+        logger.debug(f"[Reload] Cachés del Anti-Rogue no invalidadas en {chat_id}: {ex}")
+
+
+async def _reload_master_monitor(chat_id: int, lang: str, t: dict) -> str:
+    """
+    v37 · Monitor del Centinela Maestro. Usa assistant._ensure_monitor_for (candado por grupo, no reinicia un monitor
+    sano ni desplaza a un Centinela dedicado). Sin esa función (assistant anterior a v37) se conserva el método v36.
+    """
+    import assistant as _assistant
+    ensure = getattr(_assistant, "_ensure_monitor_for", None)
+    if callable(ensure):
+        outcome = await ensure(assistant_app, chat_id)
+        labels = {
+            "running": ("Centinela Maestro Activo 🤖", "Master Sentinel Active 🤖"),
+            "started": ("Centinela Maestro Reconectado 🤖", "Master Sentinel Reconnected 🤖"),
+            "other": ("Centinela Dedicado Activo 💎", "Dedicated Sentinel Active 💎"),
+        }
+        if outcome in labels:
+            return labels[outcome][0 if lang == "es" else 1]
+        return t["sentinel_master_standby"].format(error=outcome)
+    try:
+        peer = await assistant_app.resolve_peer(chat_id)
+        if chat_id in active_sentinels:
+            old_info = active_sentinels.pop(chat_id)
+            try:
+                old_info["task"].cancel()
+            except Exception:
+                pass
+        master_bot_id = get_assistant_bot_id()
+        task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, master_bot_id))
+        active_sentinels[chat_id] = {"client": assistant_app, "task": task, "user_id": 0}
+        return "Centinela Maestro Reconectado 🤖" if lang == "es" else "Master Sentinel Reconnected 🤖"
+    except Exception as master_err:
+        return t["sentinel_master_standby"].format(error=str(master_err)[:80])
 
 
 # ==========================================================
@@ -616,7 +735,7 @@ async def cmd_settings_group(message: Message, bot: Bot):
         chat_type=message.chat.type
     )
     bot_info = await bot.get_me()
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -624,8 +743,8 @@ async def cmd_settings_group(message: Message, bot: Bot):
         [InlineKeyboardButton(text=t["btn_open_pv"], url=f"https://t.me/{bot_info.username}?start=gset_{message.chat.id}")]
     ])
     
-    msg = await message.answer(t["settings_title"].format(title=html.escape(message.chat.title or "Comunidad")), reply_markup=kb, parse_mode="HTML")
-    _spawn(auto_delete_pair(message, msg, 15))
+    msg = await message.answer(t["settings_title"].format(title=html.escape(message.chat.title or t["community"])), reply_markup=kb, parse_mode="HTML")
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 15)))
 
 
 # ==========================================================
@@ -646,7 +765,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
 
     chat_id = message.chat.id
     current_status = await get_autolower_status(chat_id)
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -657,7 +776,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     ])
     status_text = t["status_active"] if current_status == 1 else t["status_inactive"]
     msg = await message.answer(t["autolower_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    _spawn(auto_delete_pair(message, msg, 20))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 20, 20)))
 
 
 @router.callback_query(F.data.startswith("gautolower_"))
@@ -671,13 +790,13 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
     try:
         group_id = int(data_parts[2])
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Callback inválido.", show_alert=True)
+        await callback.answer(TEXTS["en"]["invalid_button"], show_alert=True)
         return
-    lang = data_parts[3] if len(data_parts) > 3 else get_lang(callback.from_user.language_code)
+    lang = data_parts[3] if len(data_parts) > 3 and data_parts[3] in TEXTS else await _svc_lang(group_id)
     t = TEXTS.get(lang, TEXTS["en"])
 
     if not await is_user_creator(bot, group_id, callback.from_user.id):
-        await callback.answer("⛔ Acceso denegado.", show_alert=True)
+        await callback.answer(t["denied_short"], show_alert=True)
         return
 
     await callback.answer()
@@ -707,7 +826,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     current_status = await get_podcast_status(chat_id)
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -718,7 +837,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_pod"] if current_status == 1 else t["status_inactive_pod"]
     msg = await message.answer(t["podcast_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    _spawn(auto_delete_pair(message, msg, 20))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 20, 20)))
 
 
 @router.callback_query(F.data.startswith("gpodcast_"))
@@ -732,13 +851,13 @@ async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
     try:
         group_id = int(data_parts[2])
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Callback inválido.", show_alert=True)
+        await callback.answer(TEXTS["en"]["invalid_button"], show_alert=True)
         return
-    lang = data_parts[3] if len(data_parts) > 3 else get_lang(callback.from_user.language_code)
+    lang = data_parts[3] if len(data_parts) > 3 and data_parts[3] in TEXTS else await _svc_lang(group_id)
     t = TEXTS.get(lang, TEXTS["en"])
 
     if not await is_user_creator(bot, group_id, callback.from_user.id):
-        await callback.answer("⛔ Acceso denegado.", show_alert=True)
+        await callback.answer(t["denied_short"], show_alert=True)
         return
 
     await callback.answer()
@@ -773,7 +892,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
 
     chat_id = message.chat.id
     current_status = await get_screen_shield_status(chat_id)
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -784,7 +903,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
     ])
     status_text = t["status_active_shield"] if current_status == 1 else t["status_inactive_shield"]
     msg = await message.answer(t["shield_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
-    _spawn(auto_delete_pair(message, msg, 20))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 20, 20)))
 
 
 @router.callback_query(F.data.startswith("gshield_"))
@@ -798,13 +917,13 @@ async def process_shield_callback(callback: CallbackQuery, bot: Bot):
     try:
         group_id = int(data_parts[2])
     except (ValueError, IndexError):
-        await callback.answer("⚠️ Callback inválido.", show_alert=True)
+        await callback.answer(TEXTS["en"]["invalid_button"], show_alert=True)
         return
-    lang = data_parts[3] if len(data_parts) > 3 else get_lang(callback.from_user.language_code)
+    lang = data_parts[3] if len(data_parts) > 3 and data_parts[3] in TEXTS else await _svc_lang(group_id)
     t = TEXTS.get(lang, TEXTS["en"])
 
     if not await is_user_creator(bot, group_id, callback.from_user.id):
-        await callback.answer("⛔ Acceso denegado.", show_alert=True)
+        await callback.answer(t["denied_short"], show_alert=True)
         return
 
     await callback.answer()
@@ -833,12 +952,11 @@ async def cmd_toggle_night(message: Message, bot: Bot):
     if message.chat.type == "private":
         return
         
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
 
     if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
-        msg = await message.reply(t["owner_only"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 8))
+        await _ignore(message)   # v37 · Anti-Rogue: sin aviso público
         return
 
     chat_id = message.chat.id
@@ -850,7 +968,7 @@ async def cmd_toggle_night(message: Message, bot: Bot):
         await deactivate_universal_night_mode(chat_id)
         msg = await message.reply(t["night_off_msg"], parse_mode="HTML")
 
-    _spawn(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
 
 
 # ==========================================================
@@ -862,7 +980,7 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type == "private":
         return
 
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
 
     if not await is_user_admin(bot, message.chat.id, message.from_user.id if message.from_user else 0):
@@ -871,12 +989,12 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     target_id, target_tag = await resolve_target(message, command, bot)
     if not target_id:
         msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 10))
+        _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 10)))
         return
 
     if is_super_admin(target_id) or await is_user_admin(bot, message.chat.id, target_id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 8))
+        _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 8)))
         return
 
     reason = "Violación de normas perimetrales" if lang == "es" else "Perimeter rules violation"
@@ -950,7 +1068,7 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             pass
         msg = await message.reply(t["warn_issued"].format(target_tag=target_tag, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
 
-    _spawn(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
 
 
 @router.message(Command("resetwarns"))
@@ -959,7 +1077,7 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type == "private":
         return
 
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
 
     if not await is_user_admin(bot, message.chat.id, message.from_user.id if message.from_user else 0):
@@ -968,7 +1086,7 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
     target_id, target_tag = await resolve_target(message, command, bot)
     if not target_id:
         msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 10))
+        _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 10)))
         return
 
     await reset_user_strikes(message.chat.id, target_id)
@@ -1006,7 +1124,7 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
         logger.debug(f"Aviso restaurando permisos de chat para {target_id}: {e}")
 
     msg = await message.reply(t["warns_reset_done"].format(target_tag=target_tag), parse_mode="HTML")
-    _spawn(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
 
 
 # ==========================================================
@@ -1018,23 +1136,22 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
     if message.chat.type == "private": 
         return
         
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
 
     if not await is_user_creator(bot, message.chat.id, message.from_user.id if message.from_user else 0):
-        msg = await message.reply(t["owner_only"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 8))
+        await _ignore(message)   # v37 · Anti-Rogue: sin aviso público
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
     if not target_id:
         msg = await message.reply(t["target_needed_vip"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 10))
+        _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 10)))
         return
 
     if is_super_admin(target_id):
         msg = await message.reply(t["target_protected"], parse_mode="HTML")
-        _spawn(auto_delete_pair(message, msg, 8))
+        _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 8)))
         return
         
     await revoke_vip_mic(target_id, message.chat.id)
@@ -1055,4 +1172,4 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
         pass
 
     msg = await message.answer(t["vip_revoked"].format(target_tag=target_tag), parse_mode="HTML")
-    _spawn(auto_delete_pair(message, msg, 12))
+    _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))

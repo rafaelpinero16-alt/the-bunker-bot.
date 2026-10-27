@@ -438,6 +438,343 @@ def _read_reputation_settings(group_id: int) -> dict:
     }
 
 
+# ==========================================================================================
+# 🚨🌐🔙 v37 · ANTI-RAID CONFIGURABLE · LISTA NEGRA DE RAID · IDIOMA/TTL DE SERVICIO · RETORNO POST-PAGO
+# ==========================================================================================
+# Esquema ADITIVO (CREATE TABLE IF NOT EXISTS + columnas con DEFAULT). No toca raid_shield_state, security_events,
+# processed_payments ni el libro mayor de Stars.
+# 🌐 v37 · IDIOMA Y TTL DE LOS MENSAJES DE SERVICIO (por comunidad). Inglés por defecto.
+SERVICE_LANGS: tuple[str, ...] = ("en", "es")
+DEFAULT_SERVICE_LANG = "en"
+SERVICE_TTL_CHOICES: tuple[int, ...] = (10, 20, 30, 60, 120, 300)
+DEFAULT_SERVICE_TTL = 20
+
+# 🚨 v37 · ANTI-RAID CONFIGURABLE (todos los rangos: Free, PRO y ULTRA PRO)
+RAID_PENALTIES: tuple[str, ...] = ("captcha", "mute", "kick", "ban")
+RAID_BLACKLIST_STATUSES: tuple[str, ...] = ("penalized", "released", "unbanned", "unmuted", "kept")
+RAID_DEFAULTS: Dict[str, Any] = {
+    "enabled": 1,
+    "join_threshold": 8,          # mínimo de ingresos en la ventana que DISPARA el escudo (nivel 1)
+    "critical_threshold": 20,     # máximo / crítico: a partir de aquí el escudo pasa a nivel 2
+    "window_seconds": 60,
+    "request_threshold": 10,      # solicitudes de unión (aprobaciones manuales) en la ventana
+    "new_account_only": 1,        # la penalización solo cae sobre cuentas nuevas
+    "penalty": "captcha",         # captcha | mute | kick | ban
+    "penalty_minutes": 60,        # duración del silencio / baneo temporal
+    "shield_minutes": 15,         # duración del escudo una vez activado
+}
+RAID_RANGES: Dict[str, tuple[int, int]] = {
+    "join_threshold": (3, 200),
+    "critical_threshold": (4, 1000),
+    "window_seconds": (10, 600),
+    "request_threshold": (3, 500),
+    "penalty_minutes": (1, 10080),
+    "shield_minutes": (5, 1440),
+}
+# Valores que ofrecen los botones del panel (la API acepta cualquier valor dentro de RAID_RANGES).
+RAID_CHOICES: Dict[str, tuple[int, ...]] = {
+    "join_threshold": (3, 5, 8, 10, 15, 20, 30, 50),
+    "critical_threshold": (10, 15, 20, 30, 50, 100, 200),
+    "window_seconds": (30, 60, 120, 300),
+    "request_threshold": (5, 10, 15, 20, 50),
+    "penalty_minutes": (10, 30, 60, 360, 1440, 10080),
+    "shield_minutes": (5, 15, 30, 60, 120),
+}
+_RAID_COLS: tuple[str, ...] = (
+    "enabled", "join_threshold", "critical_threshold", "window_seconds", "request_threshold",
+    "new_account_only", "penalty", "penalty_minutes", "shield_minutes", "updated_at", "updated_by",
+)
+_RAID_BL_COLS: tuple[str, ...] = (
+    "group_id", "user_id", "full_name", "username", "penalty", "status", "caught_at",
+    "penalty_until", "source", "resolved_by", "resolved_at",
+)
+RAID_BLACKLIST_RETENTION_S = 30 * 86400
+
+# 🔙 v37 · RETORNO POST-PAGO DE UN SOLO USO
+RETURN_TICKET_TTL_SECONDS = 900
+
+
+def _ensure_v37_schema(cursor) -> None:
+    """v37 · Esquema aditivo: configuración Anti-Raid, lista negra de raid, idioma/TTL y tickets de retorno."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raid_config (
+            group_id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            join_threshold INTEGER NOT NULL DEFAULT 8,
+            critical_threshold INTEGER NOT NULL DEFAULT 20,
+            window_seconds INTEGER NOT NULL DEFAULT 60,
+            request_threshold INTEGER NOT NULL DEFAULT 10,
+            new_account_only INTEGER NOT NULL DEFAULT 1,
+            penalty TEXT NOT NULL DEFAULT 'captcha',
+            penalty_minutes INTEGER NOT NULL DEFAULT 60,
+            shield_minutes INTEGER NOT NULL DEFAULT 15,
+            updated_at INTEGER,
+            updated_by INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS raid_blacklist (
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            full_name TEXT,
+            username TEXT,
+            penalty TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'penalized',
+            caught_at INTEGER NOT NULL,
+            penalty_until INTEGER,
+            source TEXT DEFAULT 'join',
+            resolved_by INTEGER,
+            resolved_at INTEGER,
+            PRIMARY KEY (group_id, user_id)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_raid_blacklist_status ON raid_blacklist (group_id, status, caught_at)")
+    _ensure_columns(cursor, "group_settings", [
+        ("service_lang", "TEXT DEFAULT 'en'"),
+        ("service_ttl_seconds", "INTEGER DEFAULT 20"),
+    ])
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_return_tickets (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            used_at INTEGER,
+            message_id INTEGER
+        )
+    """)
+
+
+# ---------- 🌐 Idioma y TTL de servicio ----------
+@db_async
+def get_service_prefs(group_id: int) -> dict:
+    """{"lang": 'en'|'es', "ttl": segundos}. Inglés y 20 s por defecto."""
+    lang = str(_get_setting(int(group_id), "service_lang", DEFAULT_SERVICE_LANG) or DEFAULT_SERVICE_LANG).lower()
+    ttl = _as_int(_get_setting(int(group_id), "service_ttl_seconds", DEFAULT_SERVICE_TTL), DEFAULT_SERVICE_TTL)
+    return {
+        "lang": lang if lang in SERVICE_LANGS else DEFAULT_SERVICE_LANG,
+        "ttl": max(SERVICE_TTL_CHOICES[0], min(SERVICE_TTL_CHOICES[-1], ttl)),
+    }
+
+
+@db_async
+def set_service_lang(group_id: int, lang: str) -> str:
+    clean = str(lang or "").strip().lower()
+    if clean not in SERVICE_LANGS:
+        raise ValueError(f"service_lang: usa {', '.join(SERVICE_LANGS)}.")
+    _upsert_setting(int(group_id), "service_lang", clean)
+    return clean
+
+
+@db_async
+def set_service_ttl(group_id: int, seconds: int) -> int:
+    value = _as_int(seconds, -1)
+    if value not in SERVICE_TTL_CHOICES:
+        raise ValueError(f"service_ttl_seconds: usa {', '.join(map(str, SERVICE_TTL_CHOICES))}.")
+    _upsert_setting(int(group_id), "service_ttl_seconds", value)
+    return value
+
+
+# ---------- 🚨 Configuración Anti-Raid ----------
+def _raid_config_sync(conn, group_id: int) -> dict:
+    try:
+        row = conn.execute(f"SELECT {', '.join(_RAID_COLS)} FROM raid_config WHERE group_id = ?",
+                           (int(group_id),)).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    cfg: Dict[str, Any] = dict(RAID_DEFAULTS)
+    cfg["updated_at"] = cfg["updated_by"] = None
+    if row:
+        data = dict(zip(_RAID_COLS, row))
+        for key in ("enabled", "new_account_only"):
+            cfg[key] = _as_flag(data[key], RAID_DEFAULTS[key])
+        for key, (lo, hi) in RAID_RANGES.items():
+            cfg[key] = max(lo, min(hi, _as_int(data[key], RAID_DEFAULTS[key])))
+        cfg["penalty"] = data["penalty"] if data["penalty"] in RAID_PENALTIES else RAID_DEFAULTS["penalty"]
+        cfg["updated_at"], cfg["updated_by"] = data["updated_at"], data["updated_by"]
+    if cfg["critical_threshold"] <= cfg["join_threshold"]:
+        cfg["critical_threshold"] = min(RAID_RANGES["critical_threshold"][1], cfg["join_threshold"] + 1)
+    return cfg
+
+
+@db_async
+def get_raid_config(group_id: int) -> dict:
+    with get_db_connection() as conn:
+        return _raid_config_sync(conn, group_id)
+
+
+def validate_raid_patch(patch) -> dict:
+    """Valida un cambio parcial → {columna: valor}. Lanza BunkerValidationError con 'campo: motivo'."""
+    if not isinstance(patch, dict) or not patch:
+        raise BunkerValidationError({"raid": "se esperaba un objeto con al menos un campo."})
+    clean: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    for key, value in patch.items():
+        if key in ("enabled", "new_account_only"):
+            if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
+                errors[key] = "se esperaba true/false."
+            else:
+                clean[key] = 1 if value else 0
+        elif key in RAID_RANGES:
+            lo, hi = RAID_RANGES[key]
+            number = _as_int(value, -1)
+            if not lo <= number <= hi:
+                errors[key] = f"entre {lo} y {hi}."
+            else:
+                clean[key] = number
+        elif key == "penalty":
+            if value not in RAID_PENALTIES:
+                errors[key] = f"usa {', '.join(RAID_PENALTIES)}."
+            else:
+                clean[key] = value
+        else:
+            errors[key] = "campo desconocido."
+    if errors:
+        raise BunkerValidationError({f"raid.{k}": v for k, v in errors.items()})
+    return clean
+
+
+@db_async
+def update_raid_config(group_id: int, patch: dict, updated_by: Optional[int] = None) -> dict:
+    """Todo o nada (BEGIN IMMEDIATE). Garantiza critical_threshold > join_threshold."""
+    clean = validate_raid_patch(patch)
+    clean["updated_at"] = _now_ts()
+    clean["updated_by"] = int(updated_by) if updated_by else None
+    cols = ", ".join(_ident(c) for c in clean)
+    marks = ", ".join("?" for _ in clean)
+    updates = ", ".join(f"{_ident(c)} = excluded.{_ident(c)}" for c in clean)
+    with _write_transaction() as conn:
+        conn.execute(f"INSERT INTO raid_config (group_id, {cols}) VALUES (?, {marks}) "
+                     f"ON CONFLICT(group_id) DO UPDATE SET {updates}", (int(group_id), *clean.values()))
+        cfg = _raid_config_sync(conn, group_id)
+        stored = conn.execute("SELECT critical_threshold FROM raid_config WHERE group_id = ?", (int(group_id),)).fetchone()
+        if stored and _as_int(stored[0], 0) != cfg["critical_threshold"]:
+            conn.execute("UPDATE raid_config SET critical_threshold = ? WHERE group_id = ?",
+                         (cfg["critical_threshold"], int(group_id)))
+        return cfg
+
+
+# ---------- 🗂️ Lista negra de raid ----------
+def _raid_bl_row(row) -> Optional[Dict[str, Any]]:
+    return dict(zip(_RAID_BL_COLS, row)) if row else None
+
+
+@db_async
+def raid_blacklist_add(group_id: int, user_id: int, penalty: str, *, full_name: Optional[str] = None,
+                       username: Optional[str] = None, penalty_until: Optional[int] = None,
+                       source: str = "join") -> None:
+    """Registra (o re-registra) a un usuario atrapado en un raid con estado 'penalized'."""
+    if penalty not in RAID_PENALTIES:
+        penalty = "captcha"
+    now = _now_ts()
+    with _write_transaction() as conn:
+        conn.execute("""
+            INSERT INTO raid_blacklist (group_id, user_id, full_name, username, penalty, status, caught_at,
+                                        penalty_until, source, resolved_by, resolved_at)
+            VALUES (?, ?, ?, ?, ?, 'penalized', ?, ?, ?, NULL, NULL)
+            ON CONFLICT(group_id, user_id) DO UPDATE SET
+                full_name = COALESCE(excluded.full_name, raid_blacklist.full_name),
+                username = COALESCE(excluded.username, raid_blacklist.username),
+                penalty = excluded.penalty, status = 'penalized', caught_at = excluded.caught_at,
+                penalty_until = excluded.penalty_until, source = excluded.source,
+                resolved_by = NULL, resolved_at = NULL
+        """, (int(group_id), int(user_id), (full_name or None) and str(full_name)[:64],
+              (username or None) and str(username)[:32], penalty, now, penalty_until, str(source)[:16]))
+        conn.execute("DELETE FROM raid_blacklist WHERE status != 'penalized' AND resolved_at < ?",
+                     (now - RAID_BLACKLIST_RETENTION_S,))
+
+
+@db_async
+def raid_blacklist_get(group_id: int, user_id: int) -> Optional[dict]:
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute(f"SELECT {', '.join(_RAID_BL_COLS)} FROM raid_blacklist WHERE group_id = ? AND user_id = ?",
+                               (int(group_id), int(user_id))).fetchone()
+        except sqlite3.OperationalError:
+            return None
+    return _raid_bl_row(row)
+
+
+@db_async
+def raid_blacklist_list(group_id: int, status: str = "penalized", limit: int = 6, offset: int = 0) -> dict:
+    limit = max(1, min(100, _as_int(limit, 6)))
+    offset = max(0, _as_int(offset, 0))
+    where, params = "group_id = ?", [int(group_id)]
+    if status in RAID_BLACKLIST_STATUSES:
+        where += " AND status = ?"
+        params.append(status)
+    with get_db_connection() as conn:
+        try:
+            total = conn.execute(f"SELECT COUNT(*) FROM raid_blacklist WHERE {where}", params).fetchone()[0]
+            rows = conn.execute(f"SELECT {', '.join(_RAID_BL_COLS)} FROM raid_blacklist WHERE {where} "
+                                f"ORDER BY caught_at DESC LIMIT ? OFFSET ?", (*params, limit, offset)).fetchall()
+            counts = dict(conn.execute("SELECT status, COUNT(*) FROM raid_blacklist WHERE group_id = ? GROUP BY status",
+                                       (int(group_id),)).fetchall())
+        except sqlite3.OperationalError:
+            return {"records": [], "total": 0, "summary": {}}
+    return {"records": [_raid_bl_row(r) for r in rows], "total": int(total),
+            "summary": {s: int(counts.get(s, 0)) for s in RAID_BLACKLIST_STATUSES}}
+
+
+@db_async
+def raid_blacklist_resolve(group_id: int, user_id: int, status: str, actor_id: Optional[int] = None) -> Optional[dict]:
+    """Cierra un caso de la lista negra. Solo actúa sobre filas 'penalized'. None si no existía."""
+    if status not in RAID_BLACKLIST_STATUSES or status == "penalized":
+        raise ValueError(f"Estado de lista negra no permitido: {status!r}")
+    with _write_transaction() as conn:
+        try:
+            cur = conn.execute("UPDATE raid_blacklist SET status = ?, resolved_by = ?, resolved_at = ? "
+                               "WHERE group_id = ? AND user_id = ? AND status = 'penalized'",
+                               (status, int(actor_id) if actor_id else None, _now_ts(), int(group_id), int(user_id)))
+        except sqlite3.OperationalError:
+            return None
+        if cur.rowcount == 0:
+            return None
+        row = conn.execute(f"SELECT {', '.join(_RAID_BL_COLS)} FROM raid_blacklist WHERE group_id = ? AND user_id = ?",
+                           (int(group_id), int(user_id))).fetchone()
+        return _raid_bl_row(row)
+
+
+# ---------- 🔙 Tickets de retorno post-pago (un solo uso) ----------
+@db_async
+def create_return_ticket(user_id: int, chat_id: int) -> str:
+    token = secrets.token_urlsafe(12)
+    now = _now_ts()
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO payment_return_tickets (token, user_id, chat_id, created_at) VALUES (?, ?, ?, ?)",
+                     (token, int(user_id), int(chat_id), now))
+        conn.execute("DELETE FROM payment_return_tickets WHERE created_at < ?", (now - 86400,))
+    return token
+
+
+@db_async
+def bind_return_ticket_message(token: str, message_id: int) -> None:
+    with _write_transaction() as conn:
+        conn.execute("UPDATE payment_return_tickets SET message_id = ? WHERE token = ?", (int(message_id), str(token)))
+
+
+@db_async
+def consume_return_ticket(token: str, user_id: int, ttl_seconds: int = RETURN_TICKET_TTL_SECONDS) -> dict:
+    """
+    Consumo atómico (BEGIN IMMEDIATE). status ∈ ok | used | expired | forbidden | missing.
+    Solo el comprador puede usarlo y solo una vez: un reenvío del mensaje no sirve a terceros.
+    """
+    now = _now_ts()
+    with _write_transaction() as conn:
+        row = conn.execute("SELECT user_id, chat_id, created_at, used_at, message_id FROM payment_return_tickets "
+                           "WHERE token = ?", (str(token),)).fetchone()
+        if not row:
+            return {"status": "missing"}
+        if int(row[0]) != int(user_id):
+            return {"status": "forbidden"}
+        if row[3] is not None:
+            return {"status": "used", "chat_id": int(row[1])}
+        if now - int(row[2]) > int(ttl_seconds):
+            return {"status": "expired", "chat_id": int(row[1])}
+        conn.execute("UPDATE payment_return_tickets SET used_at = ? WHERE token = ? AND used_at IS NULL", (now, str(token)))
+        return {"status": "ok", "chat_id": int(row[1]), "message_id": row[4]}
+
+
 def init_db():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
@@ -669,6 +1006,8 @@ def init_db():
         _ensure_v24_schema(cursor)
         # v28 · MicVIP con etiqueta nativa (sin ascenso a administrador) + cola de migración de ascensos antiguos.
         _ensure_micvip_tag_schema(cursor)
+        # v37 · Anti-Raid configurable, idioma/TTL de servicio y retorno post-pago de un solo uso.
+        _ensure_v37_schema(cursor)
         cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
         cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")

@@ -19,6 +19,9 @@ v25 · Integración nativa con handlers/payments.py: payments es la ÚNICA puert
 pagos y deep links (familia appeal_ en sus regex). Este módulo aporta la lógica y reutiliza send_stars_invoice (registro
 de ofertas en memoria), process_star_refund (reembolso idempotente anotado en stars_payment_ledger) y la idempotencia
 por processed_payments. Sin payments disponible (pruebas, despliegues parciales) recurre a la Bot API directa.
+v37 · Retorno seguro post-pago: el DM de «apelación aceptada» lleva UN botón de retorno de un solo uso (ticket de
+handlers/payments.py, solo el comprador, autoeliminable). La invitación «appeal-<id>» se crea al pulsarlo
+(return_link_provider), así on_member_joined y el barrido siguen rastreándola. Sin payments → flujo v25 intacto.
 Memoria: _bg y _title_cache acotados. Telegram siempre con asyncio.wait_for + try/except. Logs solo con ids.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
@@ -377,8 +380,31 @@ async def _refund(bot, user_id: int, charge_id: str, reason: str = "Apelación d
         return False
 
 
-async def reinstate(event_bot, appeal: dict) -> dict:
-    """Desbanea + limpia la marca global y los strikes + crea el enlace de un uso. → {ok, bot, link, expires_at, error}"""
+async def _create_appeal_link(appeal: dict, preferred_bot=None) -> dict:
+    """Invitación de un uso «appeal-<id>» con la caducidad de la comunidad. → {link, bot, expires_at, ttl_min, error}"""
+    db = _db()
+    group_id = int(appeal["group_id"])
+    cfg = await db.get_appeal_config(group_id)
+    ttl_min = int(cfg["link_ttl_min"])
+    expires_at = int(time.time()) + ttl_min * 60
+    error = ""
+    candidates = await _candidate_bots(group_id, preferred_bot)
+    for candidate in candidates:
+        try:
+            invite = await asyncio.wait_for(candidate.create_chat_invite_link(
+                chat_id=group_id, name=f"appeal-{int(appeal['id'])}", expire_date=expires_at, member_limit=1),
+                timeout=TG_TIMEOUT_S)
+            return {"link": invite.invite_link, "bot": candidate, "expires_at": expires_at, "ttl_min": ttl_min, "error": ""}
+        except Exception as ex:
+            error = str(ex)
+    return {"link": None, "bot": preferred_bot, "expires_at": None, "ttl_min": ttl_min, "error": error}
+
+
+async def reinstate(event_bot, appeal: dict, create_link: bool = True) -> dict:
+    """
+    Desbanea + limpia la marca global y los strikes. create_link=False (v37): el enlace se crea al pulsar el
+    botón de retorno de un solo uso. → {ok, bot, link, expires_at, ttl_min, error}
+    """
     db = _db()
     group_id, user_id = int(appeal["group_id"]), int(appeal["user_id"])
     unban_bot, error = None, ""
@@ -393,26 +419,16 @@ async def reinstate(event_bot, appeal: dict) -> dict:
     if unban_bot is None:
         return {"ok": False, "error": error or "no bot can unban"}
     if not appeal.get("prior_global_ban"):
-        # La marca la activó ESTE baneo (comprobado al ofrecer). v25: también se borra su registro de origen.
         with contextlib.suppress(Exception):
             if not await db.lift_global_ban_if_origin(user_id, group_id):
                 await db.unban_user_global(user_id)   # baneo anterior a v25 (sin origen registrado)
     with contextlib.suppress(Exception):
         await db.reset_user_strikes(group_id, user_id)
-    cfg = await db.get_appeal_config(group_id)
-    expires_at = int(time.time()) + int(cfg["link_ttl_min"]) * 60
-    link = None
-    for candidate in [unban_bot] + [b for b in await _candidate_bots(group_id) if b is not unban_bot]:
-        try:
-            invite = await asyncio.wait_for(candidate.create_chat_invite_link(
-                chat_id=group_id, name=f"appeal-{int(appeal['id'])}", expire_date=expires_at, member_limit=1),
-                timeout=TG_TIMEOUT_S)
-            link, unban_bot = invite.invite_link, candidate
-            break
-        except Exception as ex:
-            error = str(ex)
-    return {"ok": True, "bot": unban_bot, "link": link, "expires_at": expires_at if link else None,
-            "ttl_min": int(cfg["link_ttl_min"]), "error": "" if link else error}
+    if not create_link:
+        return {"ok": True, "bot": unban_bot, "link": None, "expires_at": None, "ttl_min": None, "error": ""}
+    info = await _create_appeal_link(appeal, unban_bot)
+    return {"ok": True, "bot": info["bot"] or unban_bot, "link": info["link"], "expires_at": info["expires_at"],
+            "ttl_min": info["ttl_min"], "error": info["error"]}
 
 
 async def process_payment(bot, message) -> str:
@@ -446,7 +462,7 @@ async def process_payment(bot, message) -> str:
 
 
 async def complete_appeal(bot, appeal: dict, lang: str) -> str:
-    """Tras el claim: desbaneo + enlace, o reembolso si no es posible. Escribe al usuario con el bot que cobró."""
+    """Tras el claim: desbaneo + botón de retorno de un solo uso (o enlace clásico), o reembolso si no es posible."""
     db = _db()
     group_id, user_id, appeal_id, charge = int(appeal["group_id"]), int(appeal["user_id"]), int(appeal["id"]), appeal["charge_id"]
 
@@ -455,8 +471,10 @@ async def complete_appeal(bot, appeal: dict, lang: str) -> str:
             return await asyncio.wait_for(bot.send_message(user_id, text, reply_markup=kb, parse_mode="HTML"), timeout=TG_TIMEOUT_S)
         return None
 
+    pay = _payments()
+    use_ticket = pay is not None and hasattr(pay, "build_return_markup") and hasattr(pay, "arm_return_message")
     title = await _group_title(bot, group_id)
-    outcome = await reinstate(bot, appeal)
+    outcome = await reinstate(bot, appeal, create_link=not use_ticket)
     if not outcome["ok"]:
         refunded = await _refund(bot, user_id, charge)
         await db.appeal_update(appeal_id, status="refunded" if refunded else "failed", error=outcome["error"])
@@ -470,7 +488,29 @@ async def complete_appeal(bot, appeal: dict, lang: str) -> str:
         return "refunded" if refunded else "failed"
 
     group = html.escape(title or str(group_id))
-    if outcome["link"]:
+    markup, token = None, None
+    if use_ticket:
+        with contextlib.suppress(Exception):
+            markup, token = await pay.build_return_markup(user_id, group_id, lang, title)
+        if markup is None:   # sin ticket → enlace clásico de un uso (v25)
+            info = await _create_appeal_link(appeal, outcome["bot"])
+            outcome.update(link=info["link"], expires_at=info["expires_at"], ttl_min=info["ttl_min"],
+                           bot=info["bot"] or outcome["bot"], error=info["error"])
+
+    if markup is not None:
+        ticket_min = max(1, int(getattr(pay, "RETURN_TICKET_TTL", 900)) // 60)
+        text = _t(lang,
+                  f"✅ <b>Apelación aceptada</b>\n\nYa no estás baneado de <b>{group}</b> y tus advertencias se reiniciaron.\n"
+                  f"Pulsa el botón para volver: es <b>personal y de un solo uso</b>, y este mensaje se elimina en "
+                  f"<b>{ticket_min} min</b>.",
+                  f"✅ <b>Appeal accepted</b>\n\nYou are no longer banned from <b>{group}</b> and your warnings were reset.\n"
+                  f"Tap the button to rejoin: it is <b>personal and single-use</b>, and this message is deleted in "
+                  f"<b>{ticket_min} min</b>.") + SIG
+        link_msg = await tell(text, markup)
+        with contextlib.suppress(Exception):
+            await pay.arm_return_message(bot, link_msg, token)
+        link_message_id = None   # el mensaje del enlace real lo registra return_link_provider() al pulsar
+    elif outcome["link"]:
         text = _t(lang,
                   f"✅ <b>Apelación aceptada</b>\n\nYa no estás baneado de <b>{group}</b> y tus advertencias se reiniciaron.\n"
                   f"Usa el botón para volver: el enlace es de <b>un solo uso</b> y caduca en <b>{outcome['ttl_min']} min</b>.",
@@ -478,21 +518,79 @@ async def complete_appeal(bot, appeal: dict, lang: str) -> str:
                   f"Use the button to rejoin: the link is <b>single-use</b> and expires in <b>{outcome['ttl_min']} min</b>.") + SIG
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text=_t(lang, f"🚪 Volver a {title or 'la comunidad'}", f"🚪 Rejoin {title or 'the community'}")[:60], url=outcome["link"])]])
+        link_msg = await tell(text, kb)
+        link_message_id = getattr(link_msg, "message_id", None)
     else:
         text = _t(lang,
                   f"✅ <b>Apelación aceptada</b>\n\nYa no estás baneado de <b>{group}</b>. El bot no pudo crear un enlace de "
                   f"invitación: vuelve con el enlace público de la comunidad o pide uno a un administrador.",
                   f"✅ <b>Appeal accepted</b>\n\nYou are no longer banned from <b>{group}</b>. The bot could not create an "
                   f"invite link: rejoin with the community's public link or ask an admin for one.") + SIG
-        kb = None
-    link_msg = await tell(text, kb)
+        link_msg = await tell(text, None)
+        link_message_id = getattr(link_msg, "message_id", None)
+
     await db.appeal_update(appeal_id, status="reinstated", reinstated_at=int(time.time()), invite_link=outcome["link"],
-                           link_expires_at=outcome["expires_at"], link_bot_id=getattr(outcome["bot"], "id", None),
-                           dm_bot_id=getattr(bot, "id", None),
-                           link_message_id=getattr(link_msg, "message_id", None), error=outcome["error"] or None)
+                           link_expires_at=outcome["expires_at"],
+                           link_bot_id=getattr(outcome["bot"], "id", None) if outcome["link"] else None,
+                           dm_bot_id=getattr(bot, "id", None), link_message_id=link_message_id,
+                           error=outcome["error"] or None)
     _publish(group_id, user_id, "reinstated")
-    logger.info(f"⚖️ [Apelaciones] Apelación {appeal_id}: {user_id} desbaneado en {group_id} ({appeal['price_stars']} ⭐).")
+    logger.info(f"⚖️ [Apelaciones] Apelación {appeal_id}: {user_id} desbaneado en {group_id} ({appeal['price_stars']} ⭐, "
+                f"{'ticket de un uso' if markup is not None else 'enlace directo'}).")
     return "reinstated"
+
+
+RETURN_APPEAL_WINDOW_S = 3600   # solo apelaciones desbaneadas en la última hora pueden reclamar el botón de retorno
+
+
+async def _pending_rejoin_appeal(group_id: int, user_id: int) -> Optional[dict]:
+    """
+    Apelación desbaneada RECIENTE del usuario en la comunidad cuyo enlace de reingreso aún no se emitió.
+    Sin la ventana temporal y la marca link_message_id, una apelación antigua secuestraría el botón de retorno de
+    un pago posterior (MicVIP, propina) en la misma comunidad.
+    """
+    db = _db()
+    since = int(time.time()) - RETURN_APPEAL_WINDOW_S
+
+    def _sync() -> Optional[int]:
+        with db.get_db_connection() as conn:
+            row = conn.execute("SELECT id FROM ban_appeals WHERE group_id = ? AND user_id = ? AND status = 'reinstated' "
+                               "AND invite_link IS NULL AND link_message_id IS NULL AND reinstated_at >= ? "
+                               "ORDER BY id DESC LIMIT 1", (int(group_id), int(user_id), since)).fetchone()
+        return int(row[0]) if row else None
+
+    try:
+        appeal_id = await asyncio.to_thread(_sync)
+    except Exception as ex:
+        logger.debug(f"[Apelaciones] Consulta de reingreso fallida ({group_id}/{user_id}): {ex}")
+        return None
+    return await db.appeal_get(appeal_id) if appeal_id else None
+
+
+async def return_link_provider(bot, chat_id: int, user_id: int) -> Optional[dict]:
+    """
+    Gancho de payments.cb_one_time_return: si quien pulsa el botón de retorno viene de una apelación pagada,
+    crea AHORA la invitación «appeal-<id>» (rastreable por on_member_joined y el barrido) en vez del enlace
+    genérico. None → payments usa su enlace de un solo uso por defecto.
+    → {"url", "invite" (a revocar), "ttl" (s), "bind"(message_id, bot_id)}
+    """
+    appeal = await _pending_rejoin_appeal(int(chat_id), int(user_id))
+    if not appeal:
+        return None
+    info = await _create_appeal_link(appeal, bot)
+    if not info["link"]:
+        return None
+    db = _db()
+    appeal_id = int(appeal["id"])
+    await db.appeal_update(appeal_id, invite_link=info["link"], link_expires_at=info["expires_at"],
+                           link_bot_id=getattr(info["bot"], "id", None))
+
+    async def bind(message_id: int, bot_id: Optional[int] = None) -> None:
+        with contextlib.suppress(Exception):
+            await db.appeal_update(appeal_id, link_message_id=int(message_id), dm_bot_id=bot_id or getattr(bot, "id", None))
+
+    _publish(int(chat_id), int(user_id), "link_issued")
+    return {"url": info["link"], "invite": info["link"], "ttl": int(info["ttl_min"]) * 60, "bind": bind}
 
 
 # --------------------------------------------------------------------------

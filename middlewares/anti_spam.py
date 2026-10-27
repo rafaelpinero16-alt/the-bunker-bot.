@@ -4,6 +4,8 @@ anti_spam.py — The Bunker OS (Aiogram 3.x)
 Middleware de inspección perimetral y seguridad global.
 Motor Híbrido: Detección proactiva CAS (Combot Anti-Spam) + Blacklist alfanumérica + 
                Escudo Semántico en el Borde (Fase 2: Mistral AI Guardián) + Inmunidad táctica.
+v37 · Anti-Rogue: en grupos, el bot ignora EN SILENCIO los comandos de quien no tiene rango para invocarlo
+      (o enviados en grupos que el bot no aprobó). Avisos de respaldo en el idioma de servicio del grupo.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -21,6 +23,8 @@ from aiogram.types import ChatPermissions, Message
 from assistant import active_sentinels, set_participant_mic, semantic_scan_content
 from database.database import (
     add_user_strike,
+    get_lock_status,
+    is_group_approved,
     add_warning,
     ban_user,
     get_blacklist,
@@ -57,6 +61,192 @@ def _spawn(coro) -> asyncio.Task:
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+# ==========================================
+# 🛡️ v37 · ANTI-ROGUE (BLOQUEO DE INVOCACIÓN EXTERNA)
+# ==========================================
+# Protege al bot de reportes masivos: nadie sin rango puede hacerle responder en un grupo.
+#   • Grupos NO aprobados por el bot → se ignora todo comando dirigido al bot (salvo creador / «Añadir admins»).
+#   • Comunidades aprobadas:
+#       - creador, Arquitecto o administrador con «Añadir administradores» → cualquier comando;
+#       - cualquier otro administrador → solo los comandos de moderación (MODERATOR_COMMANDS);
+#       - miembros → solo los comandos públicos (PUBLIC_MEMBER_COMMANDS).
+#   • Lo demás se descarta sin responder (y se borra si la comunidad tiene /lock_commands activo).
+# Los comandos dirigidos explícitamente a OTRO bot (/cmd@otrobot) no se tocan. Las listas se amplían por entorno
+# (ANTI_ROGUE_PUBLIC_COMMANDS / ANTI_ROGUE_MODERATOR_COMMANDS, separados por comas).
+def _env_commands(name: str) -> set[str]:
+    return {c.strip().lstrip("/").lower() for c in os.getenv(name, "").split(",") if c.strip()}
+
+
+PUBLIC_MEMBER_COMMANDS: frozenset[str] = frozenset({
+    "micvip", "mic_vip", "rank", "xp", "nivel", "top", "leaderboard", "ranking",
+    "speakers", "lang", "language", "idioma",
+} | _env_commands("ANTI_ROGUE_PUBLIC_COMMANDS"))
+MODERATOR_COMMANDS: frozenset[str] = frozenset({
+    "warn", "unwarn", "resetwarns", "warns", "ban", "unban", "tban", "kick", "mute", "unmute", "tmute",
+    "del", "delete", "purge", "pin", "unpin", "report", "reload", "settings", "matrix", "panel", "info", "id",
+} | _env_commands("ANTI_ROGUE_MODERATOR_COMMANDS"))
+_COMMAND_RE = re.compile(r"^[/!]([A-Za-z0-9_]{1,64})(?:@([A-Za-z0-9_]{3,64}))?(?:\s|$)")
+_ROGUE_RIGHTS_TTL = 120.0
+_ROGUE_APPROVED_TTL = 300.0
+_ROGUE_RIGHTS_CACHE: dict[tuple[int, int], tuple[str, float]] = {}
+_ROGUE_APPROVED_CACHE: dict[int, tuple[bool, float]] = {}
+_ROGUE_BOT_USERNAMES: dict[int, str] = {}
+
+RIGHTS_FULL, RIGHTS_MODERATOR, RIGHTS_NONE = "full", "moderator", "none"
+
+
+async def _rogue_bot_username(bot) -> str:
+    cached = _ROGUE_BOT_USERNAMES.get(bot.id)
+    if cached is not None:
+        return cached
+    try:
+        username = ((await bot.get_me()).username or "").lower()
+    except Exception:
+        return ""
+    _ROGUE_BOT_USERNAMES[bot.id] = username
+    return username
+
+
+async def sender_rights(bot, chat_id: int, user_id: int) -> str:
+    """'full' (creador / Arquitecto / admin con can_promote_members) · 'moderator' (otro admin) · 'none'."""
+    if is_super_admin(user_id) or user_id in SERVICE_ACCOUNT_IDS:
+        return RIGHTS_FULL
+    key = (int(chat_id), int(user_id))
+    now = time.monotonic()
+    cached = _ROGUE_RIGHTS_CACHE.get(key)
+    if cached and now - cached[1] < _ROGUE_RIGHTS_TTL:
+        return cached[0]
+    try:
+        member = await asyncio.wait_for(bot.get_chat_member(chat_id=chat_id, user_id=user_id), timeout=5)
+        status = str(getattr(member.status, "value", member.status) or "")
+        if status == "creator" or (status == "administrator" and bool(getattr(member, "can_promote_members", False))):
+            rights = RIGHTS_FULL
+        elif status == "administrator":
+            rights = RIGHTS_MODERATOR
+        else:
+            rights = RIGHTS_NONE
+    except Exception:
+        return RIGHTS_NONE   # fallo cerrado y sin caché: sin verificación no se ejecutan comandos privilegiados
+    if len(_ROGUE_RIGHTS_CACHE) > 20000:
+        _ROGUE_RIGHTS_CACHE.clear()
+    _ROGUE_RIGHTS_CACHE[key] = (rights, now)
+    return rights
+
+
+async def sender_can_invoke(bot, chat_id: int, user_id: int) -> bool:
+    """Compatibilidad v37: True para creador, Arquitecto o administrador con «Añadir administradores»."""
+    return await sender_rights(bot, chat_id, user_id) == RIGHTS_FULL
+
+
+def forget_sender_rights(chat_id: int, user_id: Optional[int] = None) -> None:
+    """Invalida la caché de rangos (cambios de administrador)."""
+    if user_id is None:
+        for key in [k for k in _ROGUE_RIGHTS_CACHE if k[0] == int(chat_id)]:
+            _ROGUE_RIGHTS_CACHE.pop(key, None)
+    else:
+        _ROGUE_RIGHTS_CACHE.pop((int(chat_id), int(user_id)), None)
+
+
+async def _rogue_chat_approved(chat_id: int) -> bool:
+    now = time.monotonic()
+    cached = _ROGUE_APPROVED_CACHE.get(chat_id)
+    if cached and now - cached[1] < _ROGUE_APPROVED_TTL:
+        return cached[0]
+    try:
+        approved = bool(await is_group_approved(chat_id))
+    except Exception:
+        return cached[0] if cached else False
+    if len(_ROGUE_APPROVED_CACHE) > 20000:
+        _ROGUE_APPROVED_CACHE.clear()
+    _ROGUE_APPROVED_CACHE[chat_id] = (approved, now)
+    return approved
+
+
+def forget_chat_approval(chat_id: int) -> None:
+    _ROGUE_APPROVED_CACHE.pop(int(chat_id), None)
+
+
+async def anti_rogue_should_drop(event: Message) -> bool:
+    """True si el comando debe ignorarse en silencio (Anti-Rogue)."""
+    match = _COMMAND_RE.match(event.text or event.caption or "")
+    if not match:
+        return False
+    command, target = match.group(1).lower(), (match.group(2) or "").lower()
+    if target and target != await _rogue_bot_username(event.bot):
+        return False   # comando para otro bot: no es asunto nuestro
+    chat_id = event.chat.id
+
+    if event.sender_chat is not None:
+        # Admin anónimo del propio grupo: en una comunidad aprobada pasa (los handlers exigen al Dueño y le explican
+        # cómo desactivar el anonimato). Un canal externo nunca invoca al bot.
+        return not (event.sender_chat.id == chat_id and await _rogue_chat_approved(chat_id))
+
+    user = event.from_user
+    if user is None or user.is_bot:
+        return True
+    rights = await sender_rights(event.bot, chat_id, user.id)
+    if rights == RIGHTS_FULL:
+        return False
+    if not await _rogue_chat_approved(chat_id):
+        return True
+    if rights == RIGHTS_MODERATOR and command in MODERATOR_COMMANDS:
+        return False
+    return command not in PUBLIC_MEMBER_COMMANDS
+
+
+async def _rogue_cleanup(event: Message) -> None:
+    """Borrado silencioso opcional: solo si la comunidad tiene la cerradura de comandos activa."""
+    try:
+        if await get_lock_status(event.chat.id, "lock_commands") == 1:
+            await event.delete()
+    except Exception:
+        pass
+
+
+class AntiRogueMiddleware(BaseMiddleware):
+    """Uso opcional como middleware independiente (dp.message.outer_middleware(AntiRogueMiddleware()))."""
+
+    async def __call__(self, handler, event: Message, data: dict):
+        if event.chat and event.chat.type in ("group", "supergroup") and await anti_rogue_should_drop(event):
+            _spawn(_rogue_cleanup(event))
+            return None
+        return await handler(event, data)
+
+
+# ==========================================
+# 🌐 v37 · AVISOS DE RESPALDO EN EL IDIOMA DE SERVICIO DEL GRUPO
+# ==========================================
+_FALLBACK_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "sanction": ("🚫 <b>Enforcement active</b>\n\n{mention} was {action} after reaching <b>{strikes}/{limit}</b> warnings.\n"
+                     "• <b>Violation:</b> <code>{reason}</code>\n\n🛡️ <i>Cloud Media Management</i>"),
+        "strike": ("⚠️ <b>Security strike ({strikes}/{limit})</b>\n\n{mention}, your message was removed for a perimeter "
+                   "violation.\n• <b>Violation:</b> <code>{reason}</code>\n\nReaching {limit} warnings triggers an automatic "
+                   "sanction.\n\n🛡️ <i>Cloud Media Management</i>"),
+        "ban": "permanently banned", "kick": "kicked", "mute": "muted in chat and voice", "default": "sanctioned",
+        "user": "User",
+    },
+    "es": {
+        "sanction": ("🚫 <b>Protocolo de sanción ejecutado</b>\n\n{mention} fue {action} tras acumular <b>{strikes}/{limit}</b> "
+                     "advertencias.\n• <b>Infracción:</b> <code>{reason}</code>\n\n🛡️ <i>Cloud Media Management</i>"),
+        "strike": ("⚠️ <b>Advertencia táctica ({strikes}/{limit})</b>\n\n{mention}, tu mensaje fue purgado por violación "
+                   "perimetral.\n• <b>Infracción:</b> <code>{reason}</code>\n\nAl acumular {limit} advertencias recibirás una "
+                   "sanción automática.\n\n🛡️ <i>Cloud Media Management</i>"),
+        "ban": "bloqueado permanentemente", "kick": "expulsado temporalmente", "mute": "silenciado en chat y voz",
+        "default": "sancionado", "user": "Usuario",
+    },
+}
+
+
+async def _service_lang_ttl(chat_id: int) -> tuple[str, int]:
+    """(idioma, TTL) de servicio de la comunidad; inglés y 20 s si handlers.groups no está disponible."""
+    try:
+        from handlers.groups import group_lang, service_ttl
+        return await group_lang(chat_id), await service_ttl(chat_id, 20)
+    except Exception:
+        return "en", 20
 
 
 # ==========================================
@@ -179,6 +369,13 @@ class AntiSpamMiddleware(BaseMiddleware):
         # 1. Permitir flujo inmediato en chats privados (DMs del bot y clones)
         if event.chat and event.chat.type == "private":
             return await handler(event, data)
+
+        # 1b. 🛡️ v37 · Anti-Rogue: comandos sin rango suficiente o en grupos ajenos → ignorados en silencio.
+        if event.chat and event.chat.type in ("group", "supergroup") and await anti_rogue_should_drop(event):
+            logger.debug(f"🛡️ [Anti-Rogue] Comando ignorado en {event.chat.id} "
+                         f"(emisor={getattr(event.from_user, 'id', None)} sender_chat={getattr(event.sender_chat, 'id', None)}).")
+            _spawn(_rogue_cleanup(event))
+            return None
 
         # 2. Control sobre canales externos usados como remitente (Telegram Premium channel posting)
         if event.sender_chat and event.sender_chat.id != event.chat.id:
@@ -303,7 +500,9 @@ class AntiSpamMiddleware(BaseMiddleware):
                 except Exception as e:
                     logger.warning(f"Aviso al purgar mensaje prohibido en grupo {chat_id}: {e}")
 
-                clean_name = html.escape(event.from_user.full_name or "Usuario")
+                fb_lang, fb_ttl = await _service_lang_ttl(chat_id)
+                fbt = _FALLBACK_TEXTS.get(fb_lang, _FALLBACK_TEXTS["en"])
+                clean_name = html.escape(event.from_user.full_name or fbt["user"])
                 user_mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
 
                 # 🎯 Delegación preferente a la escalera unificada de sanciones
@@ -335,7 +534,7 @@ class AntiSpamMiddleware(BaseMiddleware):
                 action = warns_cfg.get("action", "mute")
 
                 if strikes >= limit:
-                    action_desc = "sancionado / sanctioned"
+                    action_desc = fbt["default"]
                     try:
                         await set_participant_mic(chat_id=chat_id, user_id=user_id, muted=True, volume=0)
                     except Exception:
@@ -345,7 +544,7 @@ class AntiSpamMiddleware(BaseMiddleware):
                         if action == "ban":
                             await ban_user(user_id)
                             await event.bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
-                            action_desc = "bloqueado permanentemente / permanently banned"
+                            action_desc = fbt["ban"]
                         elif action == "kick":
                             await event.bot.ban_chat_member(
                                 chat_id=chat_id,
@@ -353,36 +552,24 @@ class AntiSpamMiddleware(BaseMiddleware):
                                 until_date=int(time.time() + 35)
                             )
                             await event.bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
-                            action_desc = "expulsado temporalmente / kicked"
+                            action_desc = fbt["kick"]
                         elif action == "mute":
                             await event.bot.restrict_chat_member(
                                 chat_id=chat_id,
                                 user_id=user_id,
                                 permissions=ChatPermissions(can_send_messages=False)
                             )
-                            action_desc = "silenciado en chat y voz / muted"
+                            action_desc = fbt["mute"]
                     except Exception as e:
                         logger.error(f"Error aplicando castigo por infracción perimetral: {e}")
 
                     await reset_user_strikes(chat_id, user_id)
 
-                    warning_text = (
-                        f"🚫 <b>Protocolo de Sanción Ejecutado / Enforcement Active</b>\n\n"
-                        f"{user_mention} ha sido {action_desc} tras acumular "
-                        f"<b>{strikes}/{limit}</b> advertencias.\n"
-                        f"• <b>Infracción:</b> <code>{html.escape(threat_reason)}</code>\n\n"
-                        f"🇺🇸 <i>Strike limit reached. Automated perimeter sanctions applied across chat and audio streams.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>"
-                    )
+                    warning_text = fbt["sanction"].format(mention=user_mention, action=action_desc, strikes=strikes,
+                                                          limit=limit, reason=html.escape(threat_reason))
                 else:
-                    warning_text = (
-                        f"⚠️ <b>Advertencia Táctica / Security Strike ({strikes}/{limit})</b>\n\n"
-                        f"{user_mention}, tu mensaje ha sido purgado por violación perimetral.\n"
-                        f"• <b>Infracción:</b> <code>{html.escape(threat_reason)}</code>\n\n"
-                        f"Al acumular {limit} advertencias recibirás una sanción automática.\n\n"
-                        f"🇺🇸 <i>Prohibited content purged. Reaching {limit} strikes triggers automated expulsion or mute.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>"
-                    )
+                    warning_text = fbt["strike"].format(mention=user_mention, strikes=strikes, limit=limit,
+                                                        reason=html.escape(threat_reason))
 
                 try:
                     warning_msg = await event.bot.send_message(
@@ -392,7 +579,7 @@ class AntiSpamMiddleware(BaseMiddleware):
                     )
 
                     async def auto_delete_notice(msg: Message):
-                        await asyncio.sleep(20)
+                        await asyncio.sleep(fb_ttl)
                         try:
                             await msg.delete()
                         except Exception:

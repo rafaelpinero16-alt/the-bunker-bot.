@@ -287,6 +287,135 @@ VC_SCHED_MESSAGES = {
 }
 
 # ==========================================
+# 🌐 v37 · TEXTOS DE SERVICIO BILINGÜES (INGLÉS POR DEFECTO) · GUÍA DEL CENTINELA · /reload
+# ==========================================
+# Las constantes anteriores (SCREEN_SHIELD_ALERT_TEXT, OPTIMIZATION_TEXT, VC_SCHED_MESSAGES…) se CONSERVAN como
+# versión en español para compatibilidad con otros módulos.
+SCREEN_SHIELD_ALERT_TEXTS: dict[str, str] = {
+    "en": ("🎥 <b>The Bunker Bot: Screen-Share Shield</b>\n\nAn unauthorized screen share by <b>{user_name}</b> was "
+           "detected. The stream was cut and the account removed from the room.\n\n🛡️ <i>Cloud Media Management</i>"),
+    "es": SCREEN_SHIELD_ALERT_TEXT,
+}
+NOISE_SHIELD_ALERT_TEXTS: dict[str, str] = {
+    "en": ("🔇 <b>The Bunker Bot: Noise Shield</b>\n\n<b>{user_name}</b> was muted automatically after repeated "
+           "abnormal noise spikes.\n\n🛡️ <i>Cloud Media Management</i>"),
+    "es": NOISE_SHIELD_ALERT_TEXT,
+}
+OPTIMIZATION_TEXTS: dict[str, str] = {
+    "en": ("🔄 <b>Audiovisual optimization — The Bunker</b>\n\nWe are running a routine background refresh to clean "
+           "cameras and keep the stream lag-free.\n\n⚡ <i>The room restarts in 3 seconds. VIP passes stay active "
+           "when you reconnect.</i>\n\n🛡️ <i>Cloud Media Management</i>"),
+    "es": OPTIMIZATION_TEXT,
+}
+VC_SCHED_MESSAGES_I18N: dict[str, dict[str, str]] = {
+    "en": {
+        "start": "📡 <b>Scheduled opening — The Bunker</b>\n\nThe community video chat was opened automatically by the "
+                 "ULTRA PRO schedule.\n\n🛡️ <i>Cloud Media Management</i>",
+        "end": "📡 <b>Scheduled closing — The Bunker</b>\n\nThe scheduled video chat cycle ended and the room was closed "
+               "in an orderly way.\n\n🛡️ <i>Cloud Media Management</i>",
+    },
+    "es": VC_SCHED_MESSAGES,
+}
+
+# 📖 Guía paso a paso de moderación de Video Chat (la muestra handlers/user_private.py → menú «🎙️ Video Chat Guide»).
+SENTINEL_SETUP_GUIDE: dict[str, str] = {
+    "en": (
+        "🎙️ <b>Video Chat moderation — step by step</b>\n\n"
+        "<b>0 · Requirements</b>\n"
+        "• The group needs an active <b>ULTRA PRO</b> license.\n"
+        "• A <b>secondary</b> Telegram account for the Sentinel (never your main account).\n\n"
+        "<b>1 · Create your Bot Clone (optional, recommended)</b>\n"
+        "• Open @BotFather → <code>/newbot</code> → choose a name and username → copy the token.\n"
+        "• In this bot: <i>Group Settings → your group → 🧬 Clone &amp; Sentinel → 🔑 Connect token</i> and paste it.\n"
+        "• Add the clone to your group as administrator. 100% of MicVIP / tips Stars go to the clone's balance.\n\n"
+        "<b>2 · Link the Sentinel</b>\n"
+        "• Same panel → <i>🎙️ Connect own Sentinel (phone)</i>.\n"
+        "• Send the Sentinel number with country code (e.g. <code>+12025550143</code>).\n"
+        "• Type the login code <b>with spaces</b> (e.g. <code>1 2 3 4 5</code>): Telegram cancels codes pasted as-is.\n"
+        "• If the account has 2-Step Verification, send its password.\n\n"
+        "<b>3 · Give the Sentinel admin rights in the group</b>\n"
+        "• Add the Sentinel account to the group and promote it to <b>administrator</b> with at least:\n"
+        "  ✅ <b>Manage video chats</b> (mandatory: without it there is no AutoLower)\n"
+        "  ✅ Delete messages · ✅ Ban users · ✅ Invite users\n\n"
+        "<b>4 · Activate it with /reload</b>\n"
+        "• From the <b>Sentinel account</b>, send <code>/reload</code> <b>inside the configured group</b>.\n"
+        "• The Sentinel replies with a status card: admin ✅, video chat permission ✅, monitor active ✅.\n"
+        "• Send <code>/reload</code> again whenever you change its permissions or after a reconnection.\n\n"
+        "<b>5 · Start the video chat</b>\n"
+        "• Non-VIP members are lowered to the AutoLower level (1–10%). MicVIP buyers, admins and whitelist speak at 100%.\n"
+        "• Configure notices, buttons and auto-delete in <i>💎 ULTRA Tools → ⚙️ Sentinel Settings</i>.\n\n"
+        "<b>Troubleshooting</b>\n"
+        "• «Session revoked» alert → the session was closed in <i>Devices</i>: link it again (step 2).\n"
+        "• No AutoLower → missing <b>Manage video chats</b>: grant it and send <code>/reload</code>.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+    "es": (
+        "🎙️ <b>Moderación de Video Chat — paso a paso</b>\n\n"
+        "<b>0 · Requisitos</b>\n"
+        "• El grupo necesita una licencia <b>ULTRA PRO</b> activa.\n"
+        "• Una cuenta de Telegram <b>secundaria</b> para el Centinela (nunca tu cuenta principal).\n\n"
+        "<b>1 · Crea tu Bot Clon (opcional, recomendado)</b>\n"
+        "• Abre @BotFather → <code>/newbot</code> → elige nombre y usuario → copia el token.\n"
+        "• En este bot: <i>Configuración de Grupos → tu grupo → 🧬 Clon &amp; Centinela → 🔑 Conectar token</i> y pégalo.\n"
+        "• Añade el clon a tu grupo como administrador. El 100 % de las Stars de MicVIP / propinas va al saldo del clon.\n\n"
+        "<b>2 · Vincula el Centinela</b>\n"
+        "• Mismo panel → <i>🎙️ Conectar Centinela propio (teléfono)</i>.\n"
+        "• Envía el número del Centinela con código de país (ej. <code>+573001234567</code>).\n"
+        "• Escribe el código de acceso <b>con espacios</b> (ej. <code>1 2 3 4 5</code>): Telegram anula los códigos pegados tal cual.\n"
+        "• Si la cuenta tiene verificación en dos pasos, envía su contraseña.\n\n"
+        "<b>3 · Dale permisos de administrador en el grupo</b>\n"
+        "• Añade la cuenta Centinela al grupo y promuévela a <b>administrador</b> con al menos:\n"
+        "  ✅ <b>Gestionar videochats</b> (obligatorio: sin él no hay AutoLower)\n"
+        "  ✅ Eliminar mensajes · ✅ Bloquear usuarios · ✅ Invitar usuarios\n\n"
+        "<b>4 · Actívalo con /reload</b>\n"
+        "• Desde la <b>cuenta Centinela</b>, envía <code>/reload</code> <b>dentro del grupo configurado</b>.\n"
+        "• El Centinela responde con una tarjeta de estado: administrador ✅, permiso de videochat ✅, monitor activo ✅.\n"
+        "• Repite <code>/reload</code> cada vez que cambies sus permisos o tras una reconexión.\n\n"
+        "<b>5 · Inicia el videochat</b>\n"
+        "• Los miembros sin VIP quedan al nivel de AutoLower (1–10 %). Compradores MicVIP, admins y whitelist hablan al 100 %.\n"
+        "• Configura avisos, botones y auto-borrado en <i>💎 Herramientas ULTRA → ⚙️ Configuración del Centinela</i>.\n\n"
+        "<b>Solución de problemas</b>\n"
+        "• Alerta «Sesión revocada» → la sesión se cerró en <i>Dispositivos</i>: vuelve a vincularla (paso 2).\n"
+        "• Sin AutoLower → falta <b>Gestionar videochats</b>: concédelo y envía <code>/reload</code>.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+}
+
+RELOAD_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "title": "🔁 <b>Sentinel reloaded</b>",
+        "admin": "• Group administrator: {v}",
+        "vc": "• «Manage video chats» permission: {v}",
+        "monitor": "• Voice monitor: {v}",
+        "running": "🟢 active", "started": "🟢 started", "other": "🟡 handled by another Sentinel",
+        "unbound": "🔴 this account is not linked to this group — link it in the bot (🧬 Clone & Sentinel)",
+        "not_admin": "🔴 waiting for admin rights", "error": "🔴 could not start (check the logs)",
+        "hint": "<i>Grant the missing permissions and send /reload again.</i>",
+    },
+    "es": {
+        "title": "🔁 <b>Centinela recargado</b>",
+        "admin": "• Administrador del grupo: {v}",
+        "vc": "• Permiso «Gestionar videochats»: {v}",
+        "monitor": "• Monitor de voz: {v}",
+        "running": "🟢 activo", "started": "🟢 iniciado", "other": "🟡 lo gestiona otro Centinela",
+        "unbound": "🔴 esta cuenta no está vinculada a este grupo — vincúlala en el bot (🧬 Clon & Centinela)",
+        "not_admin": "🔴 esperando permisos de administrador", "error": "🔴 no se pudo iniciar (revisa los logs)",
+        "hint": "<i>Concede los permisos que faltan y vuelve a enviar /reload.</i>",
+    },
+}
+
+GUARDIAN_ALERT_TEXTS: dict[str, str] = {
+    "en": ("🛡️ <b>The Bunker Bot: Guardian semantic intervention</b>\n\n"
+           "Message from <b>{user}</b> {state}.\n• <b>Detection:</b> <code>{reason}</code>\n\n🛡️ <i>Cloud Media Management</i>"),
+    "es": ("🛡️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
+           "Mensaje de <b>{user}</b> {state}.\n• <b>Detección:</b> <code>{reason}</code>\n\n🛡️ <i>Cloud Media Management</i>"),
+}
+GUARDIAN_STATES: dict[str, tuple[str, str]] = {
+    "en": ("purged preventively", "flagged for review"),
+    "es": ("purgado preventivamente", "marcado para revisión"),
+}
+
+# ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS Y SERVICIO
 # ==========================================
 RAW_ADMINS = os.getenv("ADMIN_IDS", "")
@@ -571,6 +700,7 @@ async def _safe_stop_client(client: Client, label: str = "") -> None:
     """Detiene un cliente Pyrogram propio con time-out; nunca detiene al maestro."""
     if client is None or client is assistant_app:
         return
+    _client_bindings.pop(id(client), None)   # v37 · el cliente deja de estar vinculado a su grupo (/reload)
     try:
         if getattr(client, "is_initialized", False):
             await asyncio.wait_for(client.stop(), timeout=MTPROTO_STOP_TIMEOUT)
@@ -652,6 +782,40 @@ def get_assistant_bot_id() -> int:
         _default_my_id = assistant_app.me.id
         return _default_my_id
     return 0
+
+
+# ==========================================
+# 🌐 v37 · IDIOMA Y TTL DE SERVICIO POR COMUNIDAD (caché local; sin importar handlers.groups)
+# ==========================================
+_SVC_PREFS_CACHE_A: dict[int, tuple[float, str, int]] = {}
+SVC_PREFS_CACHE_TTL = 60.0
+_SVC_PREFS_MAX = 20000
+
+
+async def _group_service_prefs(chat_id: int) -> tuple[str, int]:
+    now = time.monotonic()
+    cached = _SVC_PREFS_CACHE_A.get(chat_id)
+    if cached and now - cached[0] < SVC_PREFS_CACHE_TTL:
+        return cached[1], cached[2]
+    lang, ttl = "en", 20
+    try:
+        from database.database import get_service_prefs
+        prefs = await get_service_prefs(chat_id)
+        lang, ttl = str(prefs.get("lang") or "en"), int(prefs.get("ttl") or 20)
+    except Exception as e:
+        logger.debug(f"[i18n] Preferencias de servicio no disponibles para {chat_id}: {e}")
+    if len(_SVC_PREFS_CACHE_A) > _SVC_PREFS_MAX:
+        _SVC_PREFS_CACHE_A.clear()
+    _SVC_PREFS_CACHE_A[chat_id] = (now, lang, ttl)
+    return lang, ttl
+
+
+async def _group_service_lang(chat_id: int) -> str:
+    return (await _group_service_prefs(chat_id))[0]
+
+
+async def _group_service_ttl(chat_id: int) -> int:
+    return (await _group_service_prefs(chat_id))[1]
 
 
 active_sentinels = {}
@@ -944,7 +1108,7 @@ def _extract_urls_to_markup(text: str, custom_btn_text: Optional[str] = None, cu
     return cleaned_text, markup
 
 
-def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "es", price: int = 50, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None):
+def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "en", price: int = 50, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None):
     """
     Botón de llamada a la acción de los avisos de voz. v14: si el operador no configuró texto ni URL propios se
     construye SIEMPRE el botón por defecto (deep-link de MicVIP hacia el bot maestro), para que el aviso nunca
@@ -984,7 +1148,8 @@ def _merge_markups(primary, extra):
 async def _resolve_reset_text(chat_id: int):
     svc_cfg = await get_sentinel_service_messages_config(chat_id)
     custom_text = svc_cfg.get("reset_text")
-    text = custom_text if custom_text else OPTIMIZATION_TEXT
+    lang = await _group_service_lang(chat_id)
+    text = custom_text if custom_text else OPTIMIZATION_TEXTS.get(lang, OPTIMIZATION_TEXTS["en"])
     media_id = svc_cfg.get("reset_media_id")
     media_type = svc_cfg.get("reset_media_type")
     btn_text = svc_cfg.get("reset_btn")
@@ -1154,7 +1319,7 @@ def _vc_join_notice_enabled(svc_cfg: dict) -> bool:
     return True
 
 
-async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "es"):
+async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "en"):
     """
     Encola la mención del miembro al que el radar acaba de aplicar AutoLower. v14: antes, un bloqueo de 3 s
     descartaba a todo el que entraba justo después de otro (y ya quedaba marcado como avisado: nunca recibía su
@@ -1180,7 +1345,7 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         _vc_notice_flush_tasks[chat_id] = _spawn(_flush_member_vc_notice(chat_id, lang), name=f"vc_notice:{chat_id}")
 
 
-async def _flush_member_vc_notice(chat_id: int, lang: str = "es"):
+async def _flush_member_vc_notice(chat_id: int, lang: str = "en"):
     try:
         await asyncio.sleep(VC_NOTICE_BATCH_WINDOW_SECONDS)
         wait_gap = VC_NOTICE_MIN_GAP_SECONDS - (time.time() - _vc_notice_locks.get(chat_id, 0))
@@ -1207,7 +1372,7 @@ async def _flush_member_vc_notice(chat_id: int, lang: str = "es"):
             _vc_notice_flush_tasks[chat_id] = _spawn(_flush_member_vc_notice(chat_id, lang), name=f"vc_notice:{chat_id}")
 
 
-async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, lang: str = "es"):
+async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, lang: str = "en"):
     last_id = _last_vc_notice.pop(chat_id, None)
     if last_id:
         # El aviso previo pudo publicarlo el maestro o el clon: se intenta con ambos, en silencio.
@@ -1276,7 +1441,7 @@ async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, la
         logger.warning(f"⚠️ [Radar] No se pudo publicar el aviso de AutoLower en {chat_id}: revisa que el bot pueda escribir en el grupo.")
 
 
-async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "es"):
+async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
     if not _has_notice_channel() or not _is_group_chat_id(chat_id):
         return
     try:
@@ -2064,11 +2229,11 @@ async def _run_guardian(client: Client, message, chat_id: int, user_id: int, fro
         user_tag = f"@{from_user.username}"
     else:
         user_tag = (getattr(from_user, "first_name", None) or f"ID {user_id}")
-    alert_text = (
-        f"🛡️ <b>The Bunker Bot: Intervención Semántica del Guardián</b>\n\n"
-        f"Mensaje de <b>{html.escape(str(user_tag))}</b> {'purgado preventivamente' if deleted else 'marcado para revisión'}.\n"
-        f"• <b>Detección:</b> <code>{html.escape(str(threat.get('reason') or 'Infracción semántica'))}</code>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>"
+    g_lang = await _group_service_lang(chat_id)
+    g_states = GUARDIAN_STATES.get(g_lang, GUARDIAN_STATES["en"])
+    alert_text = GUARDIAN_ALERT_TEXTS.get(g_lang, GUARDIAN_ALERT_TEXTS["en"]).format(
+        user=html.escape(str(user_tag)), state=g_states[0] if deleted else g_states[1],
+        reason=html.escape(str(threat.get("reason") or ("Infracción semántica" if g_lang == "es" else "Semantic violation"))),
     )
     if deleted:
         _spawn(_record_guardian_block(chat_id, user_id), name=f"guardian_metric:{chat_id}")
@@ -2078,7 +2243,8 @@ async def _run_guardian(client: Client, message, chat_id: int, user_id: int, fro
     except Exception:
         notice_ok = True
     if notice_ok:
-        _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=20), name=f"guardian_notice:{chat_id}")
+        _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=await _group_service_ttl(chat_id)),
+               name=f"guardian_notice:{chat_id}")
     logger.info(f"🛡️ [Guardián IA] Mensaje de {user_id} en {chat_id} {'purgado' if deleted else 'detectado'}: {threat.get('reason')}")
     return deleted
 
@@ -2179,6 +2345,98 @@ async def sentinel_incoming_message_dispatcher(client: Client, message):
         await _sentinel_incoming_message_dispatcher(client, message)
     except Exception as e:
         logger.debug(f"Aviso en dispatcher de mensajes del Centinela: {e}")
+
+
+# 🔁 v37 · /reload — la cuenta Centinela lo envía DENTRO del grupo configurado para (re)activar la moderación.
+RELOAD_FILTER = filters.command("reload", prefixes=["/", "!", "."]) & filters.me & filters.group
+_client_bindings: dict[int, tuple[int, int]] = {}   # id(cliente Pyrogram) → (operador, group_id vinculado)
+RELOAD_NOTICE_TTL = 60
+
+
+async def _ensure_monitor_for(client: Client, chat_id: int) -> str:
+    """running | started | other | unbound | error. Nunca sustituye a otro Centinela propio vinculado al grupo."""
+    lock = _get_launch_lock(chat_id)
+    async with lock:
+        entry = active_sentinels.get(chat_id)
+        task = entry.get("task") if entry else None
+        alive = task is not None and not task.done()
+        if entry and entry.get("client") is client and alive:
+            return "running"
+        binding = _client_bindings.get(id(client))
+        bound_here = bool(binding and binding[1] == chat_id)
+        if client is not assistant_app and not bound_here:
+            return "unbound"
+        if entry and alive and entry.get("client") is not client:
+            if not bound_here:
+                return "other"          # el Maestro no desplaza a un Centinela propio
+            task.cancel()               # el Centinela propio vinculado sustituye al monitor del Maestro
+        try:
+            peer = await asyncio.wait_for(client.resolve_peer(chat_id), timeout=MTPROTO_RPC_TIMEOUT)
+            me = getattr(client, "me", None) or await asyncio.wait_for(client.get_me(), timeout=MTPROTO_RPC_TIMEOUT)
+        except Exception as e:
+            logger.warning(f"⚠️ [Reload] No se pudo preparar el monitor de {chat_id}: {e}")
+            return "error"
+        user_id = binding[0] if binding else 0
+        new_task = asyncio.create_task(monitor_single_group(chat_id, peer, client, me.id, user_id),
+                                       name=f"radar_reload:{chat_id}")
+        active_sentinels[chat_id] = {"client": client, "task": new_task, "user_id": user_id}
+        new_task.add_done_callback(_make_sentinel_cleanup(chat_id))
+        _notify_assets_change(chat_id)
+        return "started"
+
+
+async def sentinel_reload_handler(client: Client, message) -> None:
+    """Recarga cachés, verifica permisos y garantiza el monitor de voz del grupo donde se envió /reload."""
+    if not _sentinel_may_write(message):
+        return
+    chat_id = message.chat.id
+    lang = await _group_service_lang(chat_id)
+    tx = RELOAD_TEXTS.get(lang, RELOAD_TEXTS["en"])
+    with contextlib.suppress(Exception):
+        await message.delete()
+
+    _invalidate_call_rights(chat_id)
+    admin_caches.pop(chat_id, None)
+    _last_join_attempt.pop(chat_id, None)
+    _autolower_cooldowns.pop(chat_id, None)
+    _forbidden_strikes.pop(chat_id, None)
+    invalidate_ai_sentinel_cache(chat_id)
+    _SVC_PREFS_CACHE_A.pop(chat_id, None)
+
+    status, privileges = "unknown", None
+    try:
+        member = await asyncio.wait_for(client.get_chat_member(chat_id, "me"), timeout=MTPROTO_RPC_TIMEOUT)
+        status = str(getattr(member.status, "value", member.status)).lower()
+        privileges = getattr(member, "privileges", None)
+    except Exception as e:
+        logger.debug(f"[Reload] No se pudo leer el rango del Centinela en {chat_id}: {e}")
+    is_admin = status in ("owner", "creator", "administrator")
+    can_vc = status in ("owner", "creator") or bool(privileges and getattr(privileges, "can_manage_video_chats", False))
+    monitor = await _ensure_monitor_for(client, chat_id) if is_admin else "not_admin"
+
+    lines = [
+        tx["title"], "",
+        tx["admin"].format(v="✅" if is_admin else "❌"),
+        tx["vc"].format(v="✅" if can_vc else "❌"),
+        tx["monitor"].format(v=tx.get(monitor, monitor)),
+    ]
+    if not (is_admin and can_vc) or monitor in ("unbound", "error", "not_admin"):
+        lines += ["", tx["hint"]]
+    logger.info(f"🔁 [Reload] {chat_id}: admin={is_admin} vc={can_vc} monitor={monitor}")
+    try:
+        await _bucket_for(client).acquire(max_wait=MTPROTO_FLOOD_MAX_INLINE_WAIT)
+        sent = await client.send_message(chat_id, "\n".join(lines) + "\n\n🛡️ <i>Cloud Media Management</i>",
+                                         parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.debug(f"[Reload] No se pudo publicar el estado en {chat_id}: {e}")
+        return
+
+    async def _cleanup() -> None:
+        await asyncio.sleep(RELOAD_NOTICE_TTL)
+        with contextlib.suppress(Exception):
+            await sent.delete()
+
+    _spawn(_cleanup(), name=f"reload_cleanup:{chat_id}")
 
 
 async def _sentinel_incoming_message_dispatcher(client: Client, message):
@@ -3298,7 +3556,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     if not current_call or current_call.id != raw_call_obj.id:
                         call_start_time = time.monotonic()
                         is_joined_audio = False
-                        _spawn(_dispatch_pinned_vc_welcome(chat_id, lang="es"))
+                        _spawn(_dispatch_pinned_vc_welcome(chat_id, lang=await _group_service_lang(chat_id)))
                     current_call = raw_call_obj
                 else:
                     current_call = None
@@ -3320,7 +3578,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     reset_markup = build_vc_moderation_keyboard(
                                         chat_id=chat_id,
                                         bot_username=await _get_bot_username(),
-                                        lang="es",
+                                        lang=await _group_service_lang(chat_id),
                                         custom_btn_text=btn_text,
                                         custom_btn_url=btn_url
                                     )
@@ -3499,8 +3757,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     user_name = f"@{user_obj.username}" if (user_obj and getattr(user_obj, "username", None)) else f"ID {u_id}"
                                     _spawn(_dispatch_radar_notice(
                                         chat_id=chat_id,
-                                        text=SCREEN_SHIELD_ALERT_TEXT.format(user_name=user_name),
-                                        auto_delete_after=30
+                                        text=SCREEN_SHIELD_ALERT_TEXTS.get(await _group_service_lang(chat_id), SCREEN_SHIELD_ALERT_TEXTS["en"]).format(user_name=user_name),
+                                        auto_delete_after=await _group_service_ttl(chat_id)
                                     ))
                             except Exception as e:
                                 logger.debug(f"Aviso en Escudo Antinota para {u_id} en {chat_id}: {e}")
@@ -3610,11 +3868,12 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 if noise_spike:
                                     _spawn(_dispatch_radar_notice(
                                         chat_id=chat_id,
-                                        text=NOISE_SHIELD_ALERT_TEXT.format(user_name=user_mention),
-                                        auto_delete_after=30
+                                        text=NOISE_SHIELD_ALERT_TEXTS.get(await _group_service_lang(chat_id), NOISE_SHIELD_ALERT_TEXTS["en"]).format(user_name=user_mention),
+                                        auto_delete_after=await _group_service_ttl(chat_id)
                                     ))
                                 else:
-                                    _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang="es"))
+                                    _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention,
+                                                                      lang=await _group_service_lang(chat_id)))
                             except Exception:
                                 pass
 
@@ -3708,7 +3967,8 @@ async def vc_scheduler_loop():
                         if _global_bot:
                             svc_cfg = await get_sentinel_service_messages_config(group_id)
                             if svc_cfg.get("sched_enabled", 1) == 1:
-                                sched_text = svc_cfg.get("sched_start_text") or VC_SCHED_MESSAGES["start"]
+                                svc_lang = await _group_service_lang(group_id)
+                                sched_text = svc_cfg.get("sched_start_text") or VC_SCHED_MESSAGES_I18N.get(svc_lang, VC_SCHED_MESSAGES_I18N["en"])["start"]
                                 sched_media_id = svc_cfg.get("sched_start_media_id")
                                 sched_media_type = svc_cfg.get("sched_start_media_type")
                                 sched_autodel = int(svc_cfg.get("sched_start_autodel", 0) or 0)
@@ -3727,7 +3987,7 @@ async def vc_scheduler_loop():
                             # La bienvenida fijada la emite el monitor del grupo al detectar la llamada;
                             # solo se envía aquí si no hay monitor activo (evita duplicados).
                             if group_id not in active_sentinels:
-                                _spawn(_dispatch_pinned_vc_welcome(group_id, lang="es"))
+                                _spawn(_dispatch_pinned_vc_welcome(group_id, lang=await _group_service_lang(group_id)))
                             try:
                                 await _dispatch_sentinel_payload(group_id, origin="apertura_programada")
                             except Exception as payload_err:
@@ -3747,7 +4007,8 @@ async def vc_scheduler_loop():
                             await _invoke(client, DiscardGroupCall(call=raw_call_obj))
                         await update_vc_call_status(group_id, 0)
                         # Vía resiliente (maestro → clon); un fallo de Telegram no se confunde con un fallo de cierre.
-                        _spawn(_dispatch_radar_notice(chat_id=group_id, text=VC_SCHED_MESSAGES["end"]), name=f"vc_sched_end:{group_id}")
+                        end_text = VC_SCHED_MESSAGES_I18N.get(await _group_service_lang(group_id), VC_SCHED_MESSAGES_I18N["en"])["end"]
+                        _spawn(_dispatch_radar_notice(chat_id=group_id, text=end_text), name=f"vc_sched_end:{group_id}")
                         logger.info(f"📡 [Cierre VC Programado] Sala concluida ordenadamente en comunidad {group_id}.")
                     except Exception as e:
                         err_up = str(e).upper()
@@ -3945,6 +4206,10 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
         session_client.add_handler(
             MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
         )
+        # 🔁 v37 · /reload enviado por la propia cuenta Centinela dentro del grupo. group=-1: se evalúa antes y
+        # además del dispatcher general (Pyrogram ejecuta un handler por grupo).
+        session_client.add_handler(MessageHandler(sentinel_reload_handler, RELOAD_FILTER), group=-1)
+        _client_bindings[id(session_client)] = (int(user_id), int(group_id))
 
         await asyncio.wait_for(session_client.start(), timeout=MTPROTO_CONNECT_TIMEOUT)
         me = await asyncio.wait_for(session_client.get_me(), timeout=MTPROTO_RPC_TIMEOUT)
@@ -4033,6 +4298,7 @@ def _purge_group_state(group_id: int) -> None:
     (puede estar retenido por quien llama): esos locks los poda el janitor cuando están libres.
     """
     admin_caches.pop(group_id, None)
+    _SVC_PREFS_CACHE_A.pop(group_id, None)   # v37 · idioma/TTL de servicio
     purge_audio_state(group_id)   # v33 · cooldowns y reincidencias del Guardián Acústico
     if group_id in _audio_capture_active:   # v36 · el Centinela se fue: se cierra la captura y se descarta el audio
         _spawn(bunker_audio_capture_backend(group_id, False), name=f"audio_stop:{group_id}")
@@ -4470,6 +4736,8 @@ async def init_assistant_master():
                     assistant_app.add_handler(
                         MessageHandler(sentinel_incoming_message_dispatcher, filters.group | filters.channel)
                     )
+                    # 🔁 v37 · /reload del Centinela Maestro dentro de un grupo.
+                    assistant_app.add_handler(MessageHandler(sentinel_reload_handler, RELOAD_FILTER), group=-1)
                     assistant_app._bunker_handler_added = True
                 await asyncio.wait_for(assistant_app.start(), timeout=MTPROTO_CONNECT_TIMEOUT)
             me = await asyncio.wait_for(assistant_app.get_me(), timeout=MTPROTO_RPC_TIMEOUT)

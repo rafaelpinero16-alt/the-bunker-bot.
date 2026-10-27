@@ -194,11 +194,20 @@ const WEB_TOKEN_RE = /^[A-Za-z0-9._~+\/=-]{16,512}$/;
 
 const STALE_RESULT = Object.freeze({ __error: 'stale_session', __status: 0, __stale: true });
 
-/** Id numérico seguro para construir rutas: evita que un valor manipulado inyecte segmentos ("../"). */
+/**
+ * Id numérico seguro para construir rutas: evita que un valor manipulado inyecte segmentos ("../", "?", "#").
+ * v37 · Además de solo dígitos (con signo opcional) se exige que quepa en un entero de Telegram (≤ 20 cifras)
+ * y que no sea 0: un id vacío, "0" o desbordado nunca llega a la red.
+ */
 function numericId(value) {
+    if (typeof value === 'number' && !Number.isSafeInteger(value)) return null;
     const text = String(value ?? '').trim();
-    return /^-?\d+$/.test(text) ? text : null;
+    if (!/^-?\d{1,20}$/.test(text) || /^-?0+$/.test(text)) return null;
+    return text;
 }
+
+/** v37 · Contextos válidos de GET /stats (el resto se descarta en vez de concatenarse a la URL). */
+const STATS_CONTEXTS = new Set(['global', 'groups', 'channels']);
 
 const INVALID_ID_RESULT = Object.freeze({ __error: 'invalid_id', __status: 400 });
 
@@ -337,7 +346,8 @@ export const api = {
     // --- Endpoints de Telemetría y Ecosistema ---
 
     async fetchStats(context = 'global') {
-        return await this.get(`/stats?context=${context}`);
+        const ctx = STATS_CONTEXTS.has(String(context)) ? String(context) : 'global';
+        return await this.get(`/stats?context=${encodeURIComponent(ctx)}`);
     },
 
     async fetchChannels() {
@@ -366,15 +376,21 @@ export const api = {
     },
 
     async fetchChatStats(chatId) {
-        return await this.get(`/chat/${chatId}/stats`);
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/stats`);
     },
 
     async fetchChatAdminStats(chatId) {
-        return await this.get(`/chat/${chatId}/admin-stats`);
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/admin-stats`);
     },
 
     async fetchChatTopUsers(chatId) {
-        return await this.get(`/chat/${chatId}/top-users`);
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/top-users`);
     },
 
     /** POST /api/chat/{chat_id}/settings — acciones perimetrales. Nunca transporta credenciales (v18). */
@@ -529,6 +545,62 @@ export const api = {
         return await this.post(`/chat/${chat}/ban-appeals`, { ban_appeals: patch }, { timeoutMs: CONFIG.V23?.TIMEOUT_MS || 12000 });
     },
 
+    // --- v37 · Anti-Raid configurable, lista negra de raid e idioma/TTL de servicio ---
+    // Mismos permisos que la consola del bot: dueño, Arquitecto, delegado anti-spam o administrador con
+    // «Añadir administradores». Disponible en todos los rangos. 403 si no, 422 "raid.campo: motivo".
+
+    /** GET /api/chat/{id}/raid → { raid, shield, blacklist_summary, options: { penalties, ranges, choices } } */
+    async fetchRaidConfig(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/raid?_=${Date.now()}`, { timeoutMs: 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/raid — { enabled?, join_threshold?, critical_threshold?, window_seconds?, request_threshold?,
+     *  new_account_only?, penalty?, penalty_minutes?, shield_minutes? }. Todo o nada. */
+    async updateRaidConfig(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/raid`, { raid: patch }, { timeoutMs: 12000 });
+    },
+
+    /** POST /api/chat/{id}/raid/lift — levanta un escudo activo (falsa alarma). */
+    async liftRaidShield(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/raid/lift`, {}, { timeoutMs: 12000 });
+    },
+
+    /** GET /api/chat/{id}/raid/blacklist?status=penalized|released|unbanned|unmuted|kept|all&limit&offset */
+    async fetchRaidBlacklist(chatId, { status = 'penalized', limit = 20, offset = 0 } = {}) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        const q = `status=${encodeURIComponent(status)}&limit=${Number(limit) || 20}&offset=${Number(offset) || 0}&_=${Date.now()}`;
+        return await this.get(`/chat/${chat}/raid/blacklist?${q}`, { timeoutMs: 12000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/raid/blacklist/{user_id} — { action: 'unban' | 'unmute' | 'keep' }. 409 si ya se cerró. */
+    async resolveRaidBlacklist(chatId, userId, action) {
+        const chat = numericId(chatId), user = numericId(userId);
+        if (!chat || !user) return INVALID_ID_RESULT;
+        if (!['unban', 'unmute', 'keep'].includes(action)) return { __error: 'invalid_action', __status: 400 };
+        return await this.post(`/chat/${chat}/raid/blacklist/${user}`, { action }, { timeoutMs: 15000 });
+    },
+
+    /** GET /api/chat/{id}/service-prefs → { service_prefs: { lang, ttl }, options: { langs, ttl_seconds } } */
+    async fetchServicePrefs(chatId) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.get(`/chat/${chat}/service-prefs?_=${Date.now()}`, { timeoutMs: 10000, noStore: true });
+    },
+
+    /** POST /api/chat/{id}/service-prefs — { lang?: 'en'|'es', ttl_seconds?: 10|20|30|60|120|300 } */
+    async updateServicePrefs(chatId, patch) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
+        return await this.post(`/chat/${chat}/service-prefs`, { service_prefs: patch }, { timeoutMs: 10000 });
+    },
+
     // --- v21 · Idioma del operador (compartido con el bot: users.lang) ---
 
     /** GET /api/user/language → { lang, chosen, default, supported } */
@@ -550,9 +622,11 @@ export const api = {
      * Devuelve { __error, __status } ante cualquier fallo (403 = sin permisos, 503/504 = no disponible).
      */
     async fetchCommunityAnalytics(chatId, fresh = false) {
+        const chat = numericId(chatId);
+        if (!chat) return INVALID_ID_RESULT;
         const flag = fresh ? 'true' : 'false';
         return await this.get(
-            `/community/${encodeURIComponent(chatId)}/analytics?fresh=${flag}`,
+            `/community/${chat}/analytics?fresh=${flag}`,
             { timeoutMs: CONFIG.ANALYTICS?.REST_TIMEOUT_MS || 12000 }
         );
     },
@@ -785,6 +859,7 @@ const LIVE_EVENTS = new Set([
     'assets_status', 'vip_role', 'link_quota',  // v23
     'ban_appeal'                                // v24
 ]);
+// v37 · 'raid_shield' también llega con { active: false, source: 'manual_lift' } al levantar el escudo a mano.
 const SNAPSHOT_EVENTS = new Set(['analytics_snapshot', 'initial_state', 'state_refresh']);
 const AUTH_CLOSE_CODES = new Set([4401, 4403, 1008]);
 const BAD_REQUEST_CLOSE_CODE = 4400;
@@ -804,7 +879,9 @@ export class BunkerWebSocketClient {
      */
     constructor(chatId, options = {}) {
         const cfg = CONFIG.WS || {};
-        this.chatId = String(chatId);
+        // v37 · El id viaja en la ruta del socket: si no es numérico la conexión ni se intenta (connect → 'denied').
+        this._validChatId = numericId(chatId);
+        this.chatId = this._validChatId || String(chatId ?? '');
         this.options = {
             baseUrl: deriveWsBase(),
             authMode: cfg.AUTH_MODE || 'query',
@@ -987,6 +1064,12 @@ export class BunkerWebSocketClient {
                     this._open(true);
                 }, this.options.backoffMaxMs);
             }
+            return;
+        }
+
+        if (!this._validChatId) {
+            this._fatal = true;
+            this._setStatus('denied', { reason: 'invalid_id' });
             return;
         }
 

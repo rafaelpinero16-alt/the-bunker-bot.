@@ -151,9 +151,27 @@ def _ban_appeals_module():  # noqa: E302
     return importlib.import_module(name)
 
 
+_LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+
+
 def get_lang(lang_code: str | None) -> str:
-    """Detecta el idioma del operador para renderizar la facturación en Stars."""
-    return "es" if lang_code and lang_code.startswith("es") else "en"
+    """v37 · Inglés por defecto; el español por language_code solo con BUNKER_LANG_AUTODETECT=1."""
+    if _LANG_AUTODETECT and lang_code and str(lang_code).lower().startswith("es"):
+        return "es"
+    return "en"
+
+
+async def resolve_user_lang(user) -> str:
+    """v37 · Idioma elegido por el usuario (bot / Mini App, users.lang) o inglés por defecto."""
+    if user is None:
+        return "en"
+    try:
+        stored = await _call_db_fn("get_user_lang", int(user.id))
+        if stored in ("en", "es"):
+            return stored
+    except Exception:
+        pass
+    return get_lang(getattr(user, "language_code", None))
 
 
 def _user_private_module():
@@ -675,7 +693,7 @@ def render_tip_thanks(template: str, stars: int, user_id: int, full_name: str, c
     return text
 
 
-async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "es",
+async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lang: str = "en",
                           full_name: str = "", chat_id: int | None = None) -> bool:
     """
     ÚNICO mensaje de agradecimiento al donante, en privado:
@@ -683,7 +701,7 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
       • Un solo botón: volver al grupo/canal de origen. Sin Command Center ni Mini App.
     Devuelve True si el mensaje se entregó.
     """
-    lang = lang if lang in DEFAULT_TIP_THANKS else "es"
+    lang = lang if lang in DEFAULT_TIP_THANKS else "en"
     target = chat_id or user_id
     try:
         chat = await bot.get_chat(group_id)
@@ -703,23 +721,28 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
     if custom and "Cloud Media Management" not in text:
         text = f"{text}\n\n{_SIGNATURE}"
 
-    markup = None
-    url, _title = await resolve_chat_return_link(bot, group_id, chat=chat)
-    if url:
-        label = f"🔙 Volver a {community}" if lang == "es" else f"🔙 Back to {community}"
-        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label[:64], url=url)]])
+    # v37 · Un ÚNICO botón de retorno efímero (un solo uso, solo el donante, autoeliminable a los 15 min).
+    markup, token = await build_return_markup(user_id, group_id, lang, community)
+    if markup is None:
+        # Sin ticket (base no disponible): se conserva el botón URL clásico de v36.
+        url, _title = await resolve_chat_return_link(bot, group_id, chat=chat)
+        if url:
+            label = f"🔙 Volver a {community}" if lang == "es" else f"🔙 Back to {community}"
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label[:64], url=url)]])
 
     try:
-        await bot.send_message(chat_id=target, text=text[:4096], reply_markup=markup, parse_mode="HTML")
+        sent = await bot.send_message(chat_id=target, text=text[:4096], reply_markup=markup, parse_mode="HTML")
+        await arm_return_message(bot, sent, token)
         return True
     except TelegramBadRequest as ex:
         # HTML inválido en la plantilla personalizada o URL rechazada: un único reintento con el texto oficial.
         logger.warning(f"⚠️ [Propinas] Agradecimiento rechazado en {group_id} ({ex}); se usa el texto oficial.")
-        if "button" in str(ex).lower() or "url" in str(ex).lower():
+        if token is None and ("button" in str(ex).lower() or "url" in str(ex).lower()):
             markup = None
         fallback = render_tip_thanks(DEFAULT_TIP_THANKS[lang], stars, user_id, full_name, community)
         try:
-            await bot.send_message(chat_id=target, text=fallback, reply_markup=markup, parse_mode="HTML")
+            sent = await bot.send_message(chat_id=target, text=fallback, reply_markup=markup, parse_mode="HTML")
+            await arm_return_message(bot, sent, token)
             return True
         except Exception as ex2:
             logger.error(f"❌ [Propinas] No se pudo enviar el agradecimiento a {user_id}: {ex2}")
@@ -727,6 +750,138 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
     except Exception as ex:
         logger.error(f"❌ [Propinas] No se pudo enviar el agradecimiento a {user_id}: {ex}")
         return False
+
+
+# ==========================================
+# 🔙 v37 · RETORNO SEGURO POST-PAGO (UN SOLO USO, AUTOELIMINABLE)
+# ==========================================
+# El botón es un callback (no una URL): reenviar el mensaje no da acceso a nadie. Solo el comprador puede pulsarlo
+# y solo una vez; al pulsarlo se borra el agradecimiento y se entrega un enlace de un uso que caduca y se revoca.
+# Si no se pulsa, el agradecimiento se autoelimina a los 15 minutos. Libro mayor, idempotencia y reembolsos intactos.
+RETURN_TICKET_TTL = 900        # el agradecimiento (y su botón) vive 15 minutos
+RETURN_LINK_TTL = 120          # el enlace de un solo uso caduca a los 2 minutos
+RETURN_LINK_NAME = "Bunker · one-time return"
+
+
+async def _delete_message_later(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
+    await asyncio.sleep(max(1, int(delay)))
+    with contextlib.suppress(Exception):
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+
+
+async def build_return_markup(user_id: int, chat_id: int, lang: str,
+                              community: str = "") -> tuple[InlineKeyboardMarkup | None, str | None]:
+    """Teclado con un ÚNICO botón de retorno efímero. (None, None) si no se pudo crear el ticket."""
+    try:
+        token = await _call_db_fn("create_return_ticket", int(user_id), int(chat_id))
+    except Exception as ex:
+        logger.warning(f"⚠️ [Retorno] No se pudo crear el ticket para {user_id}/{chat_id}: {ex}")
+        return None, None
+    name = (community or ("la comunidad" if lang == "es" else "the community")).strip()
+    label = (f"🔙 Volver a {name}" if lang == "es" else f"🔙 Back to {name}")[:64]
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"pret_{token}")]]), token
+
+
+async def arm_return_message(bot: Bot, sent: Message | None, token: str | None) -> None:
+    """Vincula el mensaje al ticket y programa su autoeliminación si el botón no se usa."""
+    if sent is None or not token:
+        return
+    with contextlib.suppress(Exception):
+        await _call_db_fn("bind_return_ticket_message", token, sent.message_id)
+    _spawn(_delete_message_later(bot, sent.chat.id, sent.message_id, RETURN_TICKET_TTL))
+
+
+async def _one_time_chat_url(bot: Bot, chat_id: int) -> tuple[str | None, str | None]:
+    """(url, enlace_a_revocar). Público → t.me/usuario. Privado → invitación member_limit=1 de 2 minutos."""
+    try:
+        chat = await bot.get_chat(chat_id)
+    except Exception:
+        chat = None
+    username = getattr(chat, "username", None)
+    if username:
+        return f"https://t.me/{username}", None
+    try:
+        link = await bot.create_chat_invite_link(chat_id=chat_id, name=RETURN_LINK_NAME, member_limit=1,
+                                                 expire_date=int(time.time()) + RETURN_LINK_TTL)
+        return link.invite_link, link.invite_link
+    except Exception as ex:
+        logger.debug(f"[Retorno] Sin permiso para crear invitación en {chat_id}: {ex}")
+    if str(chat_id).startswith("-100"):
+        return f"https://t.me/c/{str(chat_id)[4:]}/999999999", None   # solo abre el chat a quien ya es miembro
+    return None, None
+
+
+async def _expire_return_link(bot: Bot, chat_id: int, sent: Message, invite: str | None,
+                              ttl: int = RETURN_LINK_TTL) -> None:
+    await asyncio.sleep(max(30, int(ttl)))
+    with contextlib.suppress(Exception):
+        await sent.delete()
+    if invite:
+        with contextlib.suppress(Exception):
+            await bot.revoke_chat_invite_link(chat_id=chat_id, invite_link=invite)
+
+
+@router.callback_query(F.data.startswith("pret_"))
+async def cb_one_time_return(callback: CallbackQuery, bot: Bot):
+    """
+    v37 · Botón de retorno post-pago de UN SOLO USO. Solo el comprador puede pulsarlo y solo una vez (consumo atómico
+    en SQLite): el mensaje de agradecimiento se borra y se entrega un enlace de acceso de un uso con caducidad corta.
+    Si el ticket pertenece a una apelación de baneo, ban_appeals.return_link_provider() aporta la invitación
+    «appeal-<id>» (rastreable por on_member_joined y por el barrido de enlaces).
+    """
+    token = (callback.data or "")[5:]
+    lang = await resolve_user_lang(callback.from_user)
+    try:
+        result = await _call_db_fn("consume_return_ticket", token, callback.from_user.id, RETURN_TICKET_TTL)
+    except Exception as ex:
+        logger.error(f"❌ [Retorno] Error consumiendo ticket: {ex}")
+        result = {"status": "missing"}
+    status = result.get("status")
+    if status != "ok":
+        msg = {
+            "forbidden": ("⛔ Este botón pertenece a otra persona.", "⛔ This button belongs to someone else."),
+            "used": ("ℹ️ Este botón ya se usó.", "ℹ️ This button was already used."),
+        }.get(status, ("⌛ Este botón expiró.", "⌛ This button has expired."))
+        await callback.answer(msg[0] if lang == "es" else msg[1], show_alert=True)
+        if status in ("used", "expired") and callback.message is not None:
+            with contextlib.suppress(Exception):
+                await callback.message.delete()
+        return
+
+    chat_id = int(result["chat_id"])
+    if callback.message is not None:
+        with contextlib.suppress(Exception):
+            await callback.message.delete()
+    custom: dict | None = None
+    with contextlib.suppress(Exception):
+        provider = getattr(_ban_appeals_module(), "return_link_provider", None)
+        if callable(provider):
+            custom = await provider(bot, chat_id, callback.from_user.id)
+    if custom:
+        url, invite = custom.get("url"), custom.get("invite")
+        link_ttl, bind = int(custom.get("ttl") or RETURN_LINK_TTL), custom.get("bind")
+    else:
+        url, invite = await _one_time_chat_url(bot, chat_id)
+        link_ttl, bind = RETURN_LINK_TTL, None
+    if not url:
+        await callback.answer("⚠️ No pude generar el acceso. Abre el grupo desde tu lista de chats." if lang == "es"
+                              else "⚠️ I couldn't create the access link. Open the group from your chat list.", show_alert=True)
+        return
+    await callback.answer()
+    minutes = max(1, link_ttl // 60)
+    text = (f"🔐 <b>Acceso de un solo uso</b>\n\nPulsa para volver a tu comunidad. El enlace caduca en {minutes} min."
+            if lang == "es" else
+            f"🔐 <b>Single-use access</b>\n\nTap to return to your community. The link expires in {minutes} min.") + \
+        "\n\n🛡️ <i>Cloud Media Management</i>"
+    sent = await bot.send_message(
+        chat_id=callback.from_user.id, text=text, parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text="🚪 Entrar ahora" if lang == "es" else "🚪 Enter now", url=url)]]),
+    )
+    if callable(bind):
+        with contextlib.suppress(Exception):
+            await bind(sent.message_id, getattr(bot, "id", None))
+    _spawn(_expire_return_link(bot, chat_id, sent, invite, link_ttl))
 
 
 async def get_channel_plan(plan_id: int):
@@ -751,7 +906,18 @@ async def record_channel_subscription(**kwargs):
 # usuario no puede alterarlos; la validación solo protege contra ofertas desactualizadas.
 OFFER_TTL_SECONDS = 72 * 3600
 OFFER_REGISTRY_MAX = 20000
-CHANNEL_PLAN_CACHE_TTL = 10.0
+def _plan_cache_ttl() -> float:
+    """v37 · TTL de la caché de planes del pre-checkout, acotado a 10–15 s (CHANNEL_PLAN_CACHE_TTL en el entorno)."""
+    try:
+        value = float(os.getenv("CHANNEL_PLAN_CACHE_TTL", "10").strip())
+    except (TypeError, ValueError):
+        value = 10.0
+    return max(10.0, min(15.0, value))
+
+
+# Toda edición, pausa o borrado de un plan (bot o Mini App) llama a invalidate_channel_plan_cache(), que vacía la
+# entrada en RAM al instante; el TTL solo cubre cambios hechos fuera de esas rutas (p. ej. a mano en SQLite).
+CHANNEL_PLAN_CACHE_TTL = _plan_cache_ttl()
 PRECHECKOUT_DB_BUDGET_SECONDS = 1.2
 PRECHECKOUT_SLA_SECONDS = 2.0
 
@@ -1255,7 +1421,7 @@ async def cmd_pro_ultra(message: Message, command: CommandObject, bot: Bot):
     if not message.from_user or (message.sender_chat and message.chat.type != "private"):
         # Administrador anónimo o publicación como canal: la factura necesita un DM real.
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = await resolve_user_lang(message.from_user)
     t = TEXTS[lang]
 
     if message.chat.type == "private":
@@ -1321,7 +1487,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
     if user is None:
         return
 
-    lang = get_lang(user.language_code)
+    lang = await resolve_user_lang(user)
     t = TEXTS[lang]
     args = command.args or ""
 
@@ -1549,7 +1715,7 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
     if message is None:
         return
 
-    lang = get_lang(callback.from_user.language_code)
+    lang = await resolve_user_lang(callback.from_user)
     t = TEXTS[lang]
     parts = callback.data.split("_")
 
@@ -1616,7 +1782,7 @@ async def process_invoice_callback(callback: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.startswith("paytip_"))
 async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
     parts = callback.data.split("_")
-    lang = get_lang(callback.from_user.language_code)
+    lang = await resolve_user_lang(callback.from_user)
 
     # Caso 1: El usuario pulsa "Donar otro monto"
     if len(parts) >= 3 and parts[1] == "custom":
@@ -1687,7 +1853,7 @@ async def handle_tip_selection(callback: CallbackQuery, bot: Bot):
 async def cancel_custom_tip_callback(callback: CallbackQuery, bot: Bot):
     """Cancela la solicitud de monto manual y libera el estado en memoria."""
     _close_custom_tip(bot.id, callback.from_user.id)
-    lang = get_lang(callback.from_user.language_code)
+    lang = await resolve_user_lang(callback.from_user)
     await callback.answer("Donación cancelada." if lang == "es" else "Donation cancelled.")
     try:
         await callback.message.delete()
@@ -1701,7 +1867,7 @@ async def process_custom_tip_input(message: Message, bot: Bot):
     group_id = _close_custom_tip(bot.id, message.from_user.id)
     if group_id is None:
         return
-    lang = get_lang(message.from_user.language_code)
+    lang = await resolve_user_lang(message.from_user)
     text_val = (message.text or "").strip().replace(".", "").replace(",", "")
 
     if not text_val.isdigit() or not (1 <= int(text_val) <= MAX_TIP_STARS):
@@ -1854,7 +2020,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 # ==========================================
 @router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_|appeal_)"))
 async def process_successful_payment(message: Message, bot: Bot):
-    lang = get_lang(message.from_user.language_code)
+    lang = await resolve_user_lang(message.from_user)
     t = TEXTS[lang]
     payload = message.successful_payment.invoice_payload
     user_id = message.from_user.id
@@ -2054,19 +2220,13 @@ async def process_successful_payment(message: Message, bot: Bot):
             except Exception as tag_err:
                 logger.warning(f"Error general al asignar la etiqueta del pase VIP de micrófono: {tag_err}")
 
-            kb_rows = []
-            try:
-                chat_info = await bot.get_chat(chat_id)
-                if chat_info and getattr(chat_info, "username", None):
-                    kb_rows.append([InlineKeyboardButton(text=t["btn_return_vc"], url=f"https://t.me/{chat_info.username}")])
-            except Exception:
-                pass
-
-            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))])
-            kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
-
-            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-            await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
+            # v37 · Agradecimiento con un ÚNICO botón de retorno efímero (un solo uso, solo el comprador).
+            title = ""
+            with contextlib.suppress(Exception):
+                title = (await bot.get_chat(chat_id)).title or ""
+            markup, token = await build_return_markup(user_id, chat_id, lang, title)
+            sent = await message.answer(t["pmt_vip_ok"], parse_mode="HTML", reply_markup=markup)
+            await arm_return_message(bot, sent, token)
         except Exception as e:
             if benefit_granted:
                 logger.error(f"Pase VIP {payload!r} concedido; falló un paso posterior no crítico para {user_id}: {e}")
@@ -2089,19 +2249,14 @@ async def process_successful_payment(message: Message, bot: Bot):
             benefit_granted = True
             position = await get_user_speaker_position(chat_id, user_id)
 
-            kb_rows = []
-            try:
-                chat_info = await bot.get_chat(chat_id)
-                if chat_info and getattr(chat_info, "username", None):
-                    kb_rows.append([InlineKeyboardButton(text=t["btn_return_vc"], url=f"https://t.me/{chat_info.username}")])
-            except Exception:
-                pass
-
-            kb_rows.append([InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))])
-            markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-
+            # v37 · Confirmación con un ÚNICO botón de retorno efímero (un solo uso, solo el comprador).
+            title = ""
+            with contextlib.suppress(Exception):
+                title = (await bot.get_chat(chat_id)).title or ""
+            markup, token = await build_return_markup(user_id, chat_id, lang, title)
             confirm_text = t["pmt_speaker_ok"].format(position=position, stars=stars_paid)
-            await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
+            sent = await message.answer(confirm_text, parse_mode="HTML", reply_markup=markup)
+            await arm_return_message(bot, sent, token)
             logger.info(f"🎙️ [Speaker Encolado]: Usuario {user_id} en posición #{position} para grupo {chat_id} ({stars_paid} Stars).")
         except Exception as e:
             if benefit_granted:
@@ -2140,18 +2295,22 @@ async def process_successful_payment(message: Message, bot: Bot):
             # Anuncio opcional en la comunidad
             if chat_id:
                 try:
-                    buyer_name = html.escape(message.from_user.full_name or "Usuario")
+                    group_prefs: dict = {"lang": "en", "ttl": 45}
+                    with contextlib.suppress(Exception):
+                        group_prefs = await _call_db_fn("get_service_prefs", chat_id)
+                    group_lang = group_prefs.get("lang") or "en"
+                    buyer_name = html.escape(message.from_user.full_name or ("Usuario" if group_lang == "es" else "User"))
                     public_notice = (
                         f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> acaba de enviar una propina "
                         f"de <b>{stars_paid} Stars (XTR)</b>. ¡Gracias por respaldar el proyecto!\n\n"
                         f"🛡️ <i>Cloud Media Management</i>"
-                    ) if lang == "es" else (
+                    ) if group_lang == "es" else (
                         f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> just sent a tip "
                         f"of <b>{stars_paid} Stars (XTR)</b>. Thank you for supporting the community!\n\n"
                         f"🛡️ <i>Cloud Media Management</i>"
                     )
                     pub_msg = await bot.send_message(chat_id=chat_id, text=public_notice, parse_mode="HTML")
-                    _spawn(auto_delete_pair(pub_msg, pub_msg, delay=45))
+                    _spawn(auto_delete_pair(pub_msg, pub_msg, delay=int(group_prefs.get("ttl") or 45)))
                 except Exception:
                     pass
 

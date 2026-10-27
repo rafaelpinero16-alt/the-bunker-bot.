@@ -21,7 +21,7 @@ import logging
 import contextlib
 import html
 import types
-from typing import Optional
+from typing import Any, Optional
 
 from aiogram import Router, F, Bot
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
@@ -59,6 +59,10 @@ from database.database import (
     schedule_gamification_announcement_now,
     # 🛡️ v9: métricas de bloqueos y Escudo Anti-Raid
     record_security_event,
+    # 🚨🌐 v37: Anti-Raid configurable, lista negra de raid e idioma/TTL de servicio
+    get_raid_config, raid_blacklist_add, raid_blacklist_resolve,
+    get_service_prefs, set_service_lang, set_user_lang,
+    DEFAULT_SERVICE_LANG, DEFAULT_SERVICE_TTL,
 )
 import raid_shield
 import assistant as _assistant_module
@@ -209,19 +213,16 @@ async def _message_author_is_admin(bot: Bot, message: Message) -> bool:
 # Los administradores comunes (con todos o algunos permisos) NO pueden usar comandos de configuración ni
 # herramientas ejecutivas del bot. _is_group_admin se conserva solo para decisiones de PROTECCIÓN (inmunidad
 # ante filtros, quién puede añadir bots durante un raid), nunca para conceder acceso a configuración.
+# v37 · Se conservan los nombres (otros módulos los importan); el texto sale en el idioma de servicio del grupo.
 OWNER_ONLY_ALERT = (
-    "⛔ <b>Acceso Denegado:</b> esta herramienta está reservada única y exclusivamente al <b>Dueño</b> de la comunidad.\n"
-    "🇺🇸 <i>Access Denied: this tool is strictly restricted to the community Owner.</i>\n\n"
+    "⛔ <b>Access denied:</b> this tool is restricted to the community <b>Owner</b>.\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
-OWNER_ONLY_ALERT_SHORT = "⛔ Acceso Denegado: herramienta exclusiva del Dueño de la comunidad. / Owner only."
+OWNER_ONLY_ALERT_SHORT = "⛔ Access denied: Owner only."
 ANONYMOUS_ADMIN_ALERT = (
-    "⛔ <b>Acceso Denegado:</b> los mensajes enviados como administrador anónimo no permiten verificar al Dueño. "
-    "Desactiva el anonimato y repite el comando.\n"
-    "🇺🇸 <i>Anonymous admin messages cannot be verified as the Owner. Disable anonymity and retry.</i>\n\n"
+    "⛔ <b>Access denied:</b> anonymous admin messages cannot be verified as the Owner. Disable anonymity and retry.\n\n"
     "🛡️ <i>Cloud Media Management</i>"
 )
-
 
 async def _is_community_owner(bot: Bot, chat_id: int, user_id: int) -> bool:
     """
@@ -261,8 +262,10 @@ async def _message_author_is_owner(bot: Bot, message: Message) -> bool:
 
 
 async def _deny_owner_only_message(message: Message) -> None:
-    """Aviso estándar de dueño (efímero) y retirada del comando para no ensuciar el chat."""
-    text = ANONYMOUS_ADMIN_ALERT if message.sender_chat is not None else OWNER_ONLY_ALERT
+    """
+    v37 · Anti-Rogue: quien no es el Dueño no recibe respuesta pública (solo se retira el comando). La única
+    excepción es el administrador ANÓNIMO, que puede ser el propio Dueño: se le explica cómo identificarse.
+    """
     logger.warning(
         f"⛔ [Aduana] Comando '{(message.text or '')[:40]}' bloqueado en {message.chat.id}: "
         f"autor={getattr(message.from_user, 'id', None)} sender_chat={getattr(message.sender_chat, 'id', None)} no es el Dueño."
@@ -271,12 +274,14 @@ async def _deny_owner_only_message(message: Message) -> None:
         await message.delete()
     except Exception:
         pass
+    if message.sender_chat is None or message.sender_chat.id != message.chat.id:
+        return
     try:
-        warn = await message.bot.send_message(chat_id=message.chat.id, text=text, parse_mode="HTML")
-        _spawn(auto_delete_msg(warn, 10))
+        lang = await group_lang(message.chat.id)
+        warn = await message.bot.send_message(chat_id=message.chat.id, text=gtx(lang, "anon_admin"), parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, await service_ttl(message.chat.id, 10)))
     except Exception:
         pass
-
 
 def _sync_miniapp(group_id: int, changed, source: str = "group_command") -> None:
     """
@@ -378,6 +383,278 @@ async def auto_delete_msg(message: Optional[Message], delay: int = 15):
         pass
 
 
+# ==========================================
+# 🌐 v37 · IDIOMA (INGLÉS POR DEFECTO) Y TTL DE LOS MENSAJES DE SERVICIO DEL GRUPO
+# ==========================================
+# Cada comunidad fija su idioma de servicio (/lang o panel «Language & TTL») y cuántos segundos viven los avisos.
+# Sin preferencia: inglés y 20 s. Los textos personalizados del dueño (captcha, advertencias) se respetan tal cual.
+SVC_SIGNATURE = "\n\n🛡️ <i>Cloud Media Management</i>"
+SVC_PREFS_TTL = 60.0
+_SVC_PREFS_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+
+GROUP_SVC_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "community": "the community",
+        "user": "User",
+        "captcha_title": "🛑 <b>SECURITY CHECKPOINT</b>",
+        "captcha_intro": "Hi {mention}! To protect the community we need a quick verification.",
+        "captcha_code": "Tap the button that shows exactly this code:\n👉 <code>{code}</code>",
+        "captcha_simple": "Tap the button below to confirm your identity.",
+        "captcha_time": "⏱️ <b>Time limit:</b> {seconds}s",
+        "captcha_expired_default": "⏱️ The verification time limit has expired.",
+        "captcha_expired_dm": "❌ <b>Access denied</b>\n\n{text}",
+        "captcha_expired_group": "❌ {mention} did not complete the verification in time.",
+        "captcha_ok": "🎉 <b>Access granted!</b>\n\n{mention}, you passed the security checkpoint. You can now take part in <b>{title}</b>.",
+        "captcha_fail_default": "❌ Wrong code selected at the security checkpoint.",
+        "captcha_fail_dm": "❌ <b>Checkpoint failed</b>\n\n{text}",
+        "captcha_fail_group": "❌ <b>Checkpoint failed</b>\n\n{mention}: {text}",
+        "captcha_not_yours": "⚠️ This checkpoint is not yours.",
+        "captcha_verified_toast": "✅ Identity verified!",
+        "captcha_wrong_toast": "❌ Wrong code.",
+        "btn_verify": "✅ Verify identity",
+        "btn_support": "💬 Support",
+        "gate_text": "🚨 <b>Anti-Raid Shield active</b>\n\nAn abnormal join spike was detected. New members stay read-only until they pass the Captcha Pro (deadline: {minutes} min).",
+        "btn_gate": "🛡️ Verify me",
+        "gate_none": "ℹ️ You have no pending verification in that community.",
+        "gate_dm": "🛑 <b>SECURITY CHECKPOINT</b>\n\nCommunity: <b>{title}</b>\nTap the button that shows exactly this code:\n👉 <code>{code}</code>",
+        "raid_log": "🚨 <b>Anti-Raid Shield engaged — {title}</b>\n\n• <b>Level:</b> {level}\n• <b>Signals:</b> {signals}\n• <b>Joins in {window}s:</b> {joins} ({new} new accounts)\n• <b>Duration:</b> {minutes} min (extended if the attack continues)\n\nMeasures: mandatory code Captcha Pro, public notices muted and broadcasts paused.",
+        "level_critical": "CRITICAL 🔴",
+        "level_elevated": "ELEVATED 🟠",
+        "sig_join_spike": "join spike",
+        "sig_new_accounts": "new accounts",
+        "sig_similar_names": "cloned names",
+        "owner_only": "⛔ <b>Access denied:</b> this tool is restricted to the community <b>Owner</b>.",
+        "owner_only_short": "⛔ Access denied: Owner only.",
+        "anon_admin": "⛔ <b>Access denied:</b> anonymous admin messages cannot be verified as the Owner. Disable anonymity and retry.",
+        "warn": "⚠️ <b>Security notice ({strikes}/{limit})</b>\n\n{mention}, {reason}",
+        "warn_pro": "⚠️ <b>PRO ⭐ security notice ({strikes}/{limit})</b>\n\n{body}",
+        "warn_ultra": "⚠️ <b>ULTRA PRO 💎 perimeter notice ({strikes}/{limit})</b>\n\n{body}",
+        "warn_body": "{mention}, you received a formal warning ({strikes}/{limit}).\n• <b>Reason:</b> {reason}",
+        "sanction_mute": "🔇 <b>Auto-sanction{badge} ({strikes}/{limit})</b>\n\n{mention} was muted in chat and voice after reaching the warning limit.\n• <b>Action:</b> <code>MUTE</code>",
+        "sanction_kick": "👢 <b>Auto-sanction{badge} ({strikes}/{limit})</b>\n\n{mention} was kicked after reaching the warning limit.\n• <b>Action:</b> <code>KICK</code>",
+        "sanction_ban": "🚫 <b>Permanent ban{badge} ({strikes}/{limit})</b>\n\n{mention} was permanently banned for repeated violations.\n• <b>Action:</b> <code>BAN</code>",
+        "flood_kick": "👢 <b>Kick notice:</b> {mention} was temporarily removed for message flooding.",
+        "flood_mute": "🔇 <b>Mute notice:</b> {mention} was muted for message flooding.",
+        "flood_ban": "🚫 <b>Ban notice:</b> {mention} was permanently banned for repeated flooding.",
+        "levelup": "🎉 <b>Level up!</b>\n\nCongratulations {mention}! You reached <b>level {level}</b> with <code>{xp} XP</code>.",
+        "welcome_group": "🛡️ <b>The Bunker OS — Perimeter core online</b>\n\nThe security system is now deployed in <b>{title}</b>.\n\n👑 <b>Owner-only control panel:</b> tap below to configure anti-spam, captcha, anti-raid and locks in the bot's private chat.",
+        "welcome_channel": "📡 <b>CHANNEL STUDIO CONNECTED!</b>\n\nYou promoted <b>@{bot}</b> as administrator in <b>{title}</b>.\n\n• 🎙️ <b>Live moderation:</b> smart unmute after “Raise Hand”.\n• 💎 <b>VIP memberships:</b> single-use links and automatic removal of expired members.\n• ⭐ <b>Stars tips:</b> direct monetization of your streams.\n\nTap below to open this channel's console in private or in the Mini App.",
+        "btn_settings": "⚙️ Configure privately",
+        "btn_channel_console": "📡 Channel console",
+        "btn_command_center": "🌐 Open Command Center",
+        "raid_status": "🚨 <b>Anti-Raid</b>\n\n• Status: {status}\n• Trigger: <b>{min}</b> joins / {window}s (critical: <b>{max}</b>)\n• Penalty: <b>{penalty}</b>\n\nOpen the private panel to change thresholds, penalties and review the raid blacklist.",
+        "btn_open_raid": "🚨 Open Anti-Raid panel",
+        "on": "🟢 Enabled",
+        "off": "🔴 Disabled",
+        "lang_pick": "🌐 <b>Language / Idioma</b>\n\nAdmins with settings rights change the group's service language. Members change their personal language for private chats.",
+        "lang_set_group": "✅ Service language for this group: English.",
+        "lang_set_user": "✅ Your personal language is now English (private chat with the bot).",
+        "ghost_free_limit": "⏳ <b>Ghost Purge limit (Free plan):</b> only 1 free scan per day.\nUpgrade to <b>PRO ⭐</b> or <b>ULTRA PRO 💎</b> for unlimited automated scans and purges.",
+        "ghost_busy": "⏳ A Ghost Purge is already running in this community. Wait for it to finish.",
+        "ghost_start": "🧹 <b>Ghost Purge{sim}:</b> evaluating the environment and starting the hybrid engine...",
+        "ghost_sim": " (simulation)",
+        "ghost_done": "🧹 <b>Ghost Purge {sim}completed</b>\n• <b>Engine:</b> <code>{engine}</code>\n• 👻 <b>Ghosts detected:</b> <b>{found}</b>\n• 💀 <b>Ghosts purged:</b> <b>{purged}</b>\n• ⚖️ <b>Action:</b> <code>{action}</code>",
+        "ghost_sim_done": "(Simulation) ",
+        "ghost_error": "⚠️ The Ghost Purge stopped because of an unexpected error.",
+        "panic_btn_off": "🟢 Disable Raid Lockdown",
+        "panic_dm": "🚨 <b>RAID LOCKDOWN PROTOCOL ENGAGED</b>\n\nCommunity: <b>{title}</b> (<code>{chat_id}</code>)\nActivated by: <code>{by}</code>\n\nAll locks were raised, the Captcha switched to strict mode, Anti-Spam sensitivity went up and the general chat is restricted to administrators.",
+        "panic_already": "🛡️ The Raid Lockdown protocol is already <b>active</b> in this community.",
+        "panic_on": "🚨 <b>RAID LOCKDOWN PROTOCOL ENGAGED</b>\n\nLocks at maximum, strict Captcha, raised Anti-Spam and general chat restricted to administrators.",
+        "panic_off_done": "✅ <b>Raid Lockdown disabled.</b>\n\nThe community perimeter was restored to its pre-alert state.",
+        "panic_off_toast": "Perimeter restored ✅",
+        "untitled": "Untitled",
+        "activated": "ENABLED",
+        "deactivated": "DISABLED",
+        "screenshield": "🎥 Screen-Share Shield: <b>{state}</b>",
+        "noiseshield": "🔇 Noise Shield: <b>{state}</b>",
+        "duck_usage": "Usage: /duckvolume <percent 1-100> — e.g. /duckvolume 5",
+        "duck_ok": "🎚️ Podcast Mode ducking volume set to <b>{pct}%</b>.",
+        "spk_empty": "📭 The speakers queue is empty.",
+        "spk_next": "🎙️ <b>Next speaker in the Q&amp;A round:</b> {mention}{tag}",
+        "spk_cleared": "🧹 Speakers queue cleared.",
+        "spk_price_ok": "⭐ Priority turn price updated to <b>{price} Stars (XTR)</b>.",
+        "spk_price_usage": "Usage: /speakers price <stars_amount>",
+        "spk_queue_empty_line": "— The queue is empty —",
+        "spk_btn": "🎟️ Book a priority turn ({price} ⭐)",
+        "spk_card": "🎙️ <b>Q&amp;A queue — {title}</b>\n\n{queue}\n\n💰 Pay <b>{price} Telegram Stars</b> to lock in priority in the next round.",
+        "spk_inv_title": "🎙️ Priority turn — Q&A queue",
+        "spk_inv_desc": "Lock in your priority in the community's next Q&A round.",
+        "spk_inv_label": "Priority turn",
+        "spk_open_dm": "⚠️ Open a private chat with the bot first to pay with Stars.",
+        "btn_open_dm": "💬 Open private chat",
+        "spk_paid_dm": "✅ <b>Turn booked!</b>\n\nYou paid <b>{stars} Stars</b> for priority in the Q&amp;A queue.",
+        "spk_paid_group": "🎙️ {mention} booked a priority turn in the Q&amp;A queue (⭐ {stars} XTR).",
+        "rank_card": "🎖️ <b>Rank &amp; reputation — {title}</b>\n\n👤 <b>Member:</b> {mention}\n⭐ <b>Leaderboard position:</b> <code>#{pos}</code>\n🏆 <b>Level:</b> <b>{level}</b>\n⚡ <b>Total experience:</b> <code>{xp} XP</code>\n\n<b>Progress to next level:</b>\n<code>[{bar}]</code> {pct}%\n<i>({current} / {diff} XP to level {next})</i>",
+        "top_empty": "📭 <b>Not enough activity recorded on the reputation board yet.</b>",
+        "top_line": "{medal} <b>{name}</b> — <code>Level {level}</code> ({xp} XP)",
+        "top_card": "🏆 <b>Community Hall of Fame (Top 10)</b>\n📍 <b>Community:</b> <code>{title}</code>\n\n{lines}\n\n<i>Chat legitimately to earn XP and climb the ranks!</i>",
+        "btn_top": "🌐 View full analytics",
+        "heatmap": "📊 <b>Traffic &amp; peak hours audit (Heatmap)</b>\n📍 <b>Community:</b> <code>{title}</code>\n\n• 📈 <b>Indexed messages:</b> <code>{total}</code>\n• ⚡ <b>Busiest day:</b> <b>{day}</b>\n• ⏰ <b>Busiest time slot:</b> <code>{h1:02d}:00 - {h2:02d}:00</code>\n• 🔥 <b>Peak traffic record:</b> <code>{peak} messages</code>\n\n💡 <i>Tip: schedule video chats and announcements during peak days and hours to maximise the audience.</i>",
+        "heatmap_default_day": "Monday",
+        "btn_heatmap": "📊 View 24x7 heatmap",
+    },
+    "es": {
+        "community": "la comunidad",
+        "user": "Usuario",
+        "captcha_title": "🛑 <b>ADUANA DE SEGURIDAD</b>",
+        "captcha_intro": "¡Hola, {mention}! Para proteger la comunidad necesitamos una breve verificación.",
+        "captcha_code": "Selecciona el botón que contiene exactamente este código:\n👉 <code>{code}</code>",
+        "captcha_simple": "Pulsa el botón inferior para confirmar tu identidad.",
+        "captcha_time": "⏱️ <b>Tiempo límite:</b> {seconds}s",
+        "captcha_expired_default": "⏱️ El tiempo límite para verificar tu identidad ha expirado.",
+        "captcha_expired_dm": "❌ <b>Acceso denegado</b>\n\n{text}",
+        "captcha_expired_group": "❌ {mention} no completó la verificación a tiempo.",
+        "captcha_ok": "🎉 <b>¡Acceso concedido!</b>\n\n{mention}, completaste la aduana de seguridad. Ya puedes participar en <b>{title}</b>.",
+        "captcha_fail_default": "❌ Código incorrecto ingresado en la aduana de seguridad.",
+        "captcha_fail_dm": "❌ <b>Verificación fallida</b>\n\n{text}",
+        "captcha_fail_group": "❌ <b>Verificación fallida</b>\n\n{mention}: {text}",
+        "captcha_not_yours": "⚠️ Este desafío no pertenece a tu perfil.",
+        "captcha_verified_toast": "✅ ¡Identidad verificada con éxito!",
+        "captcha_wrong_toast": "❌ Código incorrecto.",
+        "btn_verify": "✅ Verificar identidad",
+        "btn_support": "💬 Soporte",
+        "gate_text": "🚨 <b>Escudo Anti-Raid activo</b>\n\nSe detectó un pico anómalo de ingresos. Los nuevos miembros permanecen en modo lectura hasta verificarse con el Captcha Pro (plazo: {minutes} min).",
+        "btn_gate": "🛡️ Verificarme",
+        "gate_none": "ℹ️ No tienes ninguna verificación pendiente en esa comunidad.",
+        "gate_dm": "🛑 <b>ADUANA DE SEGURIDAD</b>\n\nComunidad: <b>{title}</b>\nSelecciona el botón que contiene exactamente este código:\n👉 <code>{code}</code>",
+        "raid_log": "🚨 <b>Escudo Anti-Raid activado — {title}</b>\n\n• <b>Nivel:</b> {level}\n• <b>Señales:</b> {signals}\n• <b>Ingresos en {window}s:</b> {joins} ({new} cuentas nuevas)\n• <b>Duración:</b> {minutes} min (se prolonga si el ataque continúa)\n\nMedidas: Captcha Pro obligatorio por código, avisos públicos silenciados y difusiones pausadas.",
+        "level_critical": "CRÍTICO 🔴",
+        "level_elevated": "ELEVADO 🟠",
+        "sig_join_spike": "pico de ingresos",
+        "sig_new_accounts": "cuentas nuevas",
+        "sig_similar_names": "nombres clonados",
+        "owner_only": "⛔ <b>Acceso denegado:</b> esta herramienta está reservada al <b>Dueño</b> de la comunidad.",
+        "owner_only_short": "⛔ Acceso denegado: exclusivo del Dueño.",
+        "anon_admin": "⛔ <b>Acceso denegado:</b> los mensajes de administrador anónimo no permiten verificar al Dueño. Desactiva el anonimato y repite el comando.",
+        "warn": "⚠️ <b>Aviso de seguridad ({strikes}/{limit})</b>\n\n{mention}, {reason}",
+        "warn_pro": "⚠️ <b>Aviso de seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n{body}",
+        "warn_ultra": "⚠️ <b>Aviso perimetral ULTRA PRO 💎 ({strikes}/{limit})</b>\n\n{body}",
+        "warn_body": "{mention}, has recibido una falta formal ({strikes}/{limit}).\n• <b>Motivo:</b> {reason}",
+        "sanction_mute": "🔇 <b>Sanción automática{badge} ({strikes}/{limit})</b>\n\n{mention} fue silenciado en el chat y el videochat por acumulación de faltas.\n• <b>Medida:</b> <code>MUTE</code>",
+        "sanction_kick": "👢 <b>Sanción automática{badge} ({strikes}/{limit})</b>\n\n{mention} fue expulsado temporalmente por infringir las reglas.\n• <b>Medida:</b> <code>KICK</code>",
+        "sanction_ban": "🚫 <b>Bloqueo definitivo{badge} ({strikes}/{limit})</b>\n\n{mention} fue bloqueado permanentemente por faltas reiteradas.\n• <b>Medida:</b> <code>BAN</code>",
+        "flood_kick": "👢 <b>Aviso de expulsión:</b> {mention} fue expulsado temporalmente por saturación de mensajes.",
+        "flood_mute": "🔇 <b>Aviso de silencio:</b> {mention} fue silenciado por saturación de mensajes.",
+        "flood_ban": "🚫 <b>Bloqueo definitivo:</b> {mention} fue baneado por flood reiterado.",
+        "levelup": "🎉 <b>¡Ascenso de rango!</b>\n\n¡Felicitaciones {mention}! Alcanzaste el <b>nivel {level}</b> con <code>{xp} XP</code>.",
+        "welcome_group": "🛡️ <b>The Bunker OS — Núcleo perimetral activado</b>\n\nEl sistema de seguridad fue desplegado en <b>{title}</b>.\n\n👑 <b>Panel exclusivo del Dueño:</b> pulsa abajo para configurar anti-spam, captcha, anti-raid y cerraduras en el chat privado del bot.",
+        "welcome_channel": "📡 <b>¡ESTUDIO DE CANAL CONECTADO!</b>\n\nPromoviste a <b>@{bot}</b> como administrador en <b>{title}</b>.\n\n• 🎙️ <b>Moderación de directos:</b> desmuteo inteligente tras «Levantar la mano».\n• 💎 <b>Membresías VIP:</b> enlaces de un solo uso y expulsión automática de morosos.\n• ⭐ <b>Propinas Stars:</b> monetización directa de tus transmisiones.\n\nPulsa abajo para abrir la consola de este canal en privado o en la Mini App.",
+        "btn_settings": "⚙️ Configurar en privado",
+        "btn_channel_console": "📡 Consola del canal",
+        "btn_command_center": "🌐 Abrir Command Center",
+        "raid_status": "🚨 <b>Anti-Raid</b>\n\n• Estado: {status}\n• Disparo: <b>{min}</b> ingresos / {window}s (crítico: <b>{max}</b>)\n• Penalización: <b>{penalty}</b>\n\nAbre el panel privado para cambiar umbrales, penalizaciones y revisar la lista negra de raid.",
+        "btn_open_raid": "🚨 Abrir panel Anti-Raid",
+        "on": "🟢 Activado",
+        "off": "🔴 Desactivado",
+        "lang_pick": "🌐 <b>Language / Idioma</b>\n\nLos administradores con permisos de configuración cambian el idioma de servicio del grupo. Los miembros cambian su idioma personal en el chat privado.",
+        "lang_set_group": "✅ Idioma de servicio del grupo: Español.",
+        "lang_set_user": "✅ Tu idioma personal ahora es Español (chat privado con el bot).",
+        "ghost_free_limit": "⏳ <b>Límite de Ghost Purge (Plan Free):</b> solo se permite 1 escaneo diario gratuito.\nMejora a <b>PRO ⭐</b> o <b>ULTRA PRO 💎</b> para escaneos y purgas automatizadas ilimitadas.",
+        "ghost_busy": "⏳ Ya hay un Ghost Purge en curso en esta comunidad. Espera a que termine.",
+        "ghost_start": "🧹 <b>Ghost Purge{sim}:</b> evaluando el entorno y activando el motor híbrido...",
+        "ghost_sim": " (simulación)",
+        "ghost_done": "🧹 <b>Ghost Purge {sim}completado</b>\n• <b>Motor utilizado:</b> <code>{engine}</code>\n• 👻 <b>Fantasmas detectados:</b> <b>{found}</b>\n• 💀 <b>Fantasmas depurados:</b> <b>{purged}</b>\n• ⚖️ <b>Acción aplicada:</b> <code>{action}</code>",
+        "ghost_sim_done": "(Simulación) ",
+        "ghost_error": "⚠️ El Ghost Purge se interrumpió por un error inesperado.",
+        "panic_btn_off": "🟢 Desactivar Raid Lockdown",
+        "panic_dm": "🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\nComunidad: <b>{title}</b> (<code>{chat_id}</code>)\nActivado por: <code>{by}</code>\n\nSe elevaron todas las cerraduras, el Captcha entró en modo estricto, el Anti-Spam subió su sensibilidad y el chat general quedó restringido a administradores.",
+        "panic_already": "🛡️ El Protocolo Raid Lockdown ya está <b>activo</b> en esta comunidad.",
+        "panic_on": "🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\nCerraduras al máximo, Captcha estricto, Anti-Spam elevado y chat general restringido a administradores.",
+        "panic_off_done": "✅ <b>Protocolo Raid Lockdown desactivado.</b>\n\nEl perímetro de la comunidad fue restaurado a su estado previo a la alerta.",
+        "panic_off_toast": "Perímetro restaurado ✅",
+        "untitled": "Sin título",
+        "activated": "ACTIVADO",
+        "deactivated": "DESACTIVADO",
+        "screenshield": "🎥 Escudo Antinota: <b>{state}</b>",
+        "noiseshield": "🔇 Escudo Antirruido: <b>{state}</b>",
+        "duck_usage": "Uso: /duckvolume <porcentaje 1-100> — Ej: /duckvolume 5",
+        "duck_ok": "🎚️ Volumen de atenuación del Modo Podcast ajustado a <b>{pct}%</b>.",
+        "spk_empty": "📭 La cola de oradores está vacía.",
+        "spk_next": "🎙️ <b>Siguiente orador en la ronda de preguntas:</b> {mention}{tag}",
+        "spk_cleared": "🧹 Cola de oradores vaciada.",
+        "spk_price_ok": "⭐ Tarifa de turno prioritario actualizada a <b>{price} Stars (XTR)</b>.",
+        "spk_price_usage": "Uso: /speakers price <cantidad_de_stars>",
+        "spk_queue_empty_line": "— La cola está vacía —",
+        "spk_btn": "🎟️ Asegurar turno prioritario ({price} ⭐)",
+        "spk_card": "🎙️ <b>Cola de preguntas (AMA) — {title}</b>\n\n{queue}\n\n💰 Paga <b>{price} Telegram Stars</b> y asegura tu prioridad en la próxima ronda de preguntas.",
+        "spk_inv_title": "🎙️ Turno prioritario — Cola de preguntas",
+        "spk_inv_desc": "Asegura tu prioridad en la próxima ronda de preguntas (AMA) de la comunidad.",
+        "spk_inv_label": "Turno prioritario",
+        "spk_open_dm": "⚠️ Abre un privado con el bot primero para poder pagar con Stars.",
+        "btn_open_dm": "💬 Abrir privado",
+        "spk_paid_dm": "✅ <b>¡Turno asegurado!</b>\n\nPagaste <b>{stars} Stars</b> por prioridad en la cola de preguntas.",
+        "spk_paid_group": "🎙️ {mention} aseguró un turno prioritario en la cola de preguntas (⭐ {stars} XTR).",
+        "rank_card": "🎖️ <b>Registro de rango y reputación — {title}</b>\n\n👤 <b>Miembro:</b> {mention}\n⭐ <b>Posición en el cuadro:</b> <code>#{pos}</code>\n🏆 <b>Nivel:</b> <b>{level}</b>\n⚡ <b>Experiencia total:</b> <code>{xp} XP</code>\n\n<b>Progreso al siguiente nivel:</b>\n<code>[{bar}]</code> {pct}%\n<i>({current} / {diff} XP para el nivel {next})</i>",
+        "top_empty": "📭 <b>Aún no hay suficiente actividad registrada en el cuadro de reputación.</b>",
+        "top_line": "{medal} <b>{name}</b> — <code>Nivel {level}</code> ({xp} XP)",
+        "top_card": "🏆 <b>Cuadro de honor comunitario (Top 10)</b>\n📍 <b>Comunidad:</b> <code>{title}</code>\n\n{lines}\n\n<i>¡Chatea legítimamente para acumular XP y subir de rango!</i>",
+        "btn_top": "🌐 Ver analítica completa",
+        "heatmap": "📊 <b>Auditoría de tráfico y horas pico (Heatmap)</b>\n📍 <b>Comunidad:</b> <code>{title}</code>\n\n• 📈 <b>Mensajes indexados:</b> <code>{total}</code>\n• ⚡ <b>Día de mayor actividad:</b> <b>{day}</b>\n• ⏰ <b>Franja horaria más concurrida:</b> <code>{h1:02d}:00 - {h2:02d}:00</code>\n• 🔥 <b>Récord de tráfico en pico:</b> <code>{peak} mensajes</code>\n\n💡 <i>Recomendación: programa videollamadas y anuncios en los días y horas pico para maximizar la audiencia.</i>",
+        "heatmap_default_day": "Lunes",
+        "btn_heatmap": "📊 Ver mapa de calor 24x7",
+    },
+}
+
+
+def gtx(lang: str, key: str, signed: bool = True, **fmt: Any) -> str:
+    """Texto de servicio localizado (inglés de respaldo) con firma perimetral opcional."""
+    bundle = GROUP_SVC_TEXTS.get(lang) or GROUP_SVC_TEXTS["en"]
+    template = bundle.get(key) or GROUP_SVC_TEXTS["en"].get(key, key)
+    text = template.format(**fmt) if fmt else template
+    return text + SVC_SIGNATURE if signed else text
+
+
+def reason_text(lang: str, reason: str) -> str:
+    """Motivo de la escalera de advertencias en el idioma del grupo (_REASON_TEXT guarda pares ES/EN)."""
+    pair = _REASON_TEXT.get(reason)
+    if not pair:
+        return reason
+    return pair[0] if lang == "es" else pair[1]
+
+
+async def service_prefs(chat_id: int) -> dict[str, Any]:
+    """{"lang", "ttl"} de la comunidad con caché de 60 s (invalidate_service_prefs la vacía al cambiarla)."""
+    now = time.monotonic()
+    cached = _SVC_PREFS_CACHE.get(chat_id)
+    if cached and now - cached[0] < SVC_PREFS_TTL:
+        return cached[1]
+    try:
+        prefs = await get_service_prefs(chat_id)
+    except Exception as e:
+        logger.debug(f"Preferencias de servicio no disponibles para {chat_id}: {e}")
+        prefs = {"lang": DEFAULT_SERVICE_LANG, "ttl": DEFAULT_SERVICE_TTL}
+    if len(_SVC_PREFS_CACHE) > 5000:
+        _SVC_PREFS_CACHE.clear()
+    _SVC_PREFS_CACHE[chat_id] = (now, prefs)
+    return prefs
+
+
+async def group_lang(chat_id: int) -> str:
+    lang = str((await service_prefs(chat_id)).get("lang") or DEFAULT_SERVICE_LANG)
+    return lang if lang in GROUP_SVC_TEXTS else DEFAULT_SERVICE_LANG
+
+
+def group_lang_cached(chat_id: int) -> str:
+    """Versión síncrona para módulos que no pueden await (vc_manager._msg_lang). Refresca en segundo plano."""
+    cached = _SVC_PREFS_CACHE.get(chat_id)
+    if cached is None or time.monotonic() - cached[0] >= SVC_PREFS_TTL:
+        with contextlib.suppress(RuntimeError):
+            _spawn(service_prefs(chat_id))
+    lang = str(cached[1].get("lang")) if cached else DEFAULT_SERVICE_LANG
+    return lang if lang in GROUP_SVC_TEXTS else DEFAULT_SERVICE_LANG
+
+
+async def service_ttl(chat_id: int, fallback: int = DEFAULT_SERVICE_TTL) -> int:
+    try:
+        return int((await service_prefs(chat_id)).get("ttl") or fallback)
+    except Exception:
+        return fallback
+
+
+def invalidate_service_prefs(chat_id: int) -> None:
+    _SVC_PREFS_CACHE.pop(int(chat_id), None)
+
+
 async def is_sentinel_account(group_id: int, user_id: int, username: str) -> bool:
     clean_username = (username or "").lower()
     if clean_username == "alphacentinel":
@@ -448,25 +725,26 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
 
     await approve_group(group_id, tier="free")
     await register_user_group(owner_to_register, group_id, group_name, chat_type=chat_type_str)
+    # 🛡️ v37 · El Anti-Rogue deja de tratar el chat como ajeno al instante (sin esperar a su caché de 5 min).
+    try:
+        from middlewares.anti_spam import forget_chat_approval
+        forget_chat_approval(group_id)
+    except Exception:
+        pass
 
     bot_info = await bot.get_me()
+    lang = await group_lang(group_id)
 
     if is_channel:
         # La consola solo se ofrece por privado al creador (un administrador común sería rechazado igualmente).
         if user and promoter_is_creator:
             ch_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🌐 Abrir Command Center", web_app=WebAppInfo(url=f"{WEBAPP_URL}?channel_id={group_id}"))],
-                [InlineKeyboardButton(text="📡 Consola del Canal / Studio Panel", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")]
+                [InlineKeyboardButton(text=gtx(lang, "btn_command_center", signed=False),
+                                      web_app=WebAppInfo(url=f"{WEBAPP_URL}?channel_id={group_id}"))],
+                [InlineKeyboardButton(text=gtx(lang, "btn_channel_console", signed=False),
+                                      url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")]
             ])
-            channel_welcome_text = (
-                f"📡 <b>¡ESTUDIO DE CANAL CONECTADO! / CHANNEL CONNECTED!</b>\n\n"
-                f"Has promovido a <b>@{bot_info.username}</b> como administrador en <b>{html.escape(group_name)}</b>.\n\n"
-                f"• 🎙️ <b>Moderación de Lives:</b> Desmuteo inteligente tras 'Levantar Mano' (*Raise Hand*).\n"
-                f"• 💎 <b>Membresías VIP:</b> Enlaces efímeros de 1 solo uso y expulsión automática de morosos.\n"
-                f"• ⭐ <b>Propinas Stars:</b> Monetización directa en tus transmisiones.\n\n"
-                f"Pulsa el botón inferior para abrir la consola de gestión de este canal en privado o en la Mini App.\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            )
+            channel_welcome_text = gtx(lang, "welcome_channel", bot=bot_info.username, title=html.escape(group_name))
             try:
                 await bot.send_message(chat_id=user.id, text=channel_welcome_text, reply_markup=ch_kb, parse_mode="HTML")
             except Exception as ex:
@@ -474,17 +752,11 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     else:
         # En grupos se utiliza URL directa para evitar BUTTON_TYPE_INVALID
         group_welcome_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⚙️ Configurar en Privado / Settings", url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
+            [InlineKeyboardButton(text=gtx(lang, "btn_settings", signed=False),
+                                  url=f"https://t.me/{bot_info.username}?start=gset_{group_id}")],
             [InlineKeyboardButton(text="🌐 Command Center", url=f"{WEBAPP_URL}?chat_id={group_id}")]
         ])
-
-        group_welcome_text = (
-            f"🛡️ <b>The Bunker OS — Núcleo Perimetral Activado</b>\n\n"
-            f"El sistema de seguridad ha sido desplegado exitosamente en <b>{html.escape(group_name)}</b>.\n\n"
-            f"👑 <b>Panel de Control Exclusivo para el Dueño:</b>\n"
-            f"Pulsa el botón inferior para configurar la aduana anti-spam, captcha y cerraduras directamente en el chat privado del bot.\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        )
+        group_welcome_text = gtx(lang, "welcome_group", title=html.escape(group_name))
 
         try:
             await bot.send_message(
@@ -495,7 +767,6 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
             )
         except Exception as ex:
             logger.warning(f"Aviso al enviar bienvenida al grupo {group_id}: {ex}")
-
 
 # ==========================================
 # 🤖 ADUANA DE SEGURIDAD (CAPTCHA PRO BILINGÜE)
@@ -523,15 +794,15 @@ def generate_captcha_keyboard(group_id: int, user_id: int, correct_code: str) ->
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-def generate_simple_keyboard(group_id: int, user_id: int) -> InlineKeyboardMarkup:
+def generate_simple_keyboard(group_id: int, user_id: int, lang: str = DEFAULT_SERVICE_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Verificar Identidad / Verify Identity", callback_data=f"cap_simple_{group_id}_{user_id}")]
+        [InlineKeyboardButton(text=gtx(lang, "btn_verify", signed=False), callback_data=f"cap_simple_{group_id}_{user_id}")]
     ])
 
 
-def _support_keyboard() -> InlineKeyboardMarkup:
+def _support_keyboard(lang: str = DEFAULT_SERVICE_LANG) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Soporte Técnico / Support", url=SUPPORT_URL)]
+        [InlineKeyboardButton(text=gtx(lang, "btn_support", signed=False), url=SUPPORT_URL)]
     ])
 
 
@@ -567,6 +838,7 @@ async def _post_group_notice(bot: Bot, group_id: int, text: str,
     # Anti-reportes: presupuesto de avisos por minuto y silencio total de lo no esencial bajo escudo.
     if not raid_shield.notice_allowed(group_id, essential=essential):
         return
+    ttl = await service_ttl(group_id, ttl)   # v37 · el administrador fija el TTL de los avisos
     try:
         notice = await bot.send_message(chat_id=group_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
         _spawn(auto_delete_msg(notice, ttl))
@@ -635,30 +907,19 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
         except Exception:
             pass
 
-    custom_msg = cfg["text"] if cfg["text"] else "⏱️ El tiempo límite para verificar tu identidad ha expirado."
+    lang = session_data.get("lang") or await group_lang(group_id)
+    custom_msg = cfg["text"] if cfg["text"] else gtx(lang, "captcha_expired_default", signed=False)
 
     if is_join_req:
         # Aviso privado dentro de la ventana legal y ANTES de rechazar (el rechazo la cierra).
-        await _send_join_request_dm(
-            bot, session_data,
-            (
-                f"❌ <b>Acceso Denegado / Access Denied</b>\n\n"
-                f"{custom_msg}\n\n"
-                f"🇺🇸 <i>Verification time expired. Automated perimeter protocol applied.</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            ),
-            reply_markup=_support_keyboard()
-        )
+        await _send_join_request_dm(bot, session_data, gtx(lang, "captcha_expired_dm", text=custom_msg),
+                                    reply_markup=_support_keyboard(lang))
     else:
         # Ingreso directo: jamás se escribe por privado. Aviso efímero en el grupo.
         await _post_group_notice(
             bot, group_id,
-            (
-                f"❌ <a href='tg://user?id={user_id}'>Usuario / User</a> no completó la verificación a tiempo.\n"
-                f"🇺🇸 <i>Verification time expired.</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            ),
-            reply_markup=_support_keyboard()
+            gtx(lang, "captcha_expired_group", mention=f"<a href='tg://user?id={user_id}'>{gtx(lang, 'user', signed=False)}</a>"),
+            reply_markup=_support_keyboard(lang)
         )
 
     await _apply_captcha_sanction(bot, group_id, user_id, cfg, is_join_req, session_data)
@@ -692,20 +953,14 @@ async def _ensure_raid_gate(bot: Bot, group_id: int) -> None:
         if not username:
             return
         minutes = max(1, raid_shield.RAID_GATE_SECONDS // 60)
+        lang = await group_lang(group_id)
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🛡️ Verificarme / Verify me", url=f"https://t.me/{username}?start=raidv_{group_id}")
+            InlineKeyboardButton(text=gtx(lang, "btn_gate", signed=False), url=f"https://t.me/{username}?start=raidv_{group_id}")
         ]])
         try:
             gate = await bot.send_message(
                 chat_id=group_id,
-                text=(
-                    "🚨 <b>Escudo Anti-Raid activo / Anti-Raid Shield active</b>\n\n"
-                    "Se detectó un pico anómalo de ingresos. Los nuevos miembros permanecen en modo lectura hasta "
-                    f"verificarse con el Captcha Pro (plazo: {minutes} min).\n"
-                    "🇺🇸 <i>An abnormal join spike was detected. New members stay read-only until they pass the "
-                    f"Captcha Pro (deadline: {minutes} min).</i>\n\n"
-                    "🛡️ <i>Cloud Media Management</i>"
-                ),
+                text=gtx(lang, "gate_text", minutes=minutes),
                 reply_markup=kb,
                 parse_mode="HTML",
             )
@@ -732,23 +987,17 @@ async def _send_raid_shield_alert(bot: Bot, group_id: int, verdict: dict) -> Non
         title = (await bot.get_chat(group_id)).title or str(group_id)
     except Exception:
         title = str(group_id)
-    reasons_es = {"join_spike": "pico de ingresos", "new_accounts": "cuentas nuevas", "similar_names": "nombres clonados"}
-    reasons_en = {"join_spike": "join spike", "new_accounts": "new accounts", "similar_names": "cloned names"}
+    lang = await group_lang(group_id)
     rs = verdict.get("reasons") or []
     level = int(verdict.get("level") or 1)
     minutes = max(1, raid_shield.shield_remaining(group_id) // 60)
-    text = (
-        f"🚨 <b>Escudo Anti-Raid activado — {html.escape(title)}</b>\n\n"
-        f"• <b>Nivel:</b> {'CRÍTICO 🔴' if level >= 2 else 'ELEVADO 🟠'}\n"
-        f"• <b>Señales:</b> {html.escape(', '.join(str(reasons_es.get(r, r)) for r in rs) or '—')}\n"
-        f"• <b>Ingresos en {raid_shield.RAID_WINDOW_SECONDS}s:</b> {int(verdict.get('joins') or 0)} "
-        f"({int(verdict.get('new_joins') or 0)} cuentas nuevas)\n"
-        f"• <b>Duración:</b> {minutes} min (se prolonga si el ataque continúa)\n\n"
-        "Medidas: Captcha Pro obligatorio por código, avisos públicos silenciados y difusiones pausadas.\n\n"
-        f"🇺🇸 <i>Anti-Raid Shield engaged ({'CRITICAL' if level >= 2 else 'ELEVATED'}): "
-        f"{html.escape(', '.join(str(reasons_en.get(r, r)) for r in rs) or '—')}. Mandatory code Captcha Pro, public notices "
-        "muted and broadcasts paused.</i>\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
+    signals = ", ".join(gtx(lang, f"sig_{r}", signed=False) if f"sig_{r}" in GROUP_SVC_TEXTS["en"] else str(r) for r in rs) or "—"
+    text = gtx(
+        lang, "raid_log", title=html.escape(title),
+        level=gtx(lang, "level_critical" if level >= 2 else "level_elevated", signed=False),
+        signals=html.escape(signals),
+        window=int(verdict.get("window") or raid_shield.RAID_WINDOW_SECONDS),   # v37 · ventana configurada
+        joins=int(verdict.get("joins") or 0), new=int(verdict.get("new_joins") or 0), minutes=minutes,
     )
     try:
         await bot.send_message(chat_id=int(log_id) if str(log_id).lstrip("-").isdigit() else log_id, text=text, parse_mode="HTML")
@@ -756,9 +1005,61 @@ async def _send_raid_shield_alert(bot: Bot, group_id: int, verdict: dict) -> Non
         logger.debug(f"Aviso enviando alerta anti-raid al canal de registro de {group_id}: {e}")
 
 
-async def _register_join_and_alert(bot: Bot, group_id: int, user_id: int, full_name: str, is_bot: bool) -> dict:
+# ==========================================
+# 🚨 v37 · ANTI-RAID CONFIGURABLE (Free / PRO / ULTRA PRO)
+# ==========================================
+# Los umbrales (mínimo, máximo/crítico, ventana, solicitudes de unión, duración del escudo) los fija el dueño o un
+# administrador con «Añadir administradores» en raid_config. raid_shield.register_join los aplica en su propio
+# detector (sin contadores paralelos) y raid_shield.lift_shield levanta el escudo de verdad (caché + SQLite).
+RAID_CFG_TTL = 30.0
+_RAID_CFG_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
+_RAID_CFG_FALLBACK: dict[str, Any] = {
+    "enabled": 1, "join_threshold": 8, "critical_threshold": 20, "window_seconds": 60, "request_threshold": 10,
+    "new_account_only": 1, "penalty": "captcha", "penalty_minutes": 60, "shield_minutes": 15,
+}
+
+
+async def raid_cfg(group_id: int) -> dict[str, Any]:
+    now = time.monotonic()
+    cached = _RAID_CFG_CACHE.get(group_id)
+    if cached and now - cached[0] < RAID_CFG_TTL:
+        return cached[1]
     try:
-        verdict = await raid_shield.register_join(group_id, user_id, full_name, is_bot=is_bot)
+        cfg = await get_raid_config(group_id)
+    except Exception as e:
+        logger.warning(f"[Anti-Raid] Configuración no disponible para {group_id}: {e}")
+        return cached[1] if cached else dict(_RAID_CFG_FALLBACK)
+    if len(_RAID_CFG_CACHE) > 5000:
+        _RAID_CFG_CACHE.clear()
+    _RAID_CFG_CACHE[group_id] = (now, cfg)
+    return cfg
+
+
+def invalidate_raid_cfg(group_id: int) -> None:
+    """Llamar tras cambiar la configuración desde el bot o la Mini App."""
+    _RAID_CFG_CACHE.pop(int(group_id), None)
+
+
+def _raid_isolated(group_id: int) -> bool:
+    return bool(raid_shield.is_isolated(group_id))
+
+
+async def raid_force_clear(group_id: int) -> None:
+    """Levanta el escudo de verdad: caché en memoria + mensaje-puerta + ventanas + raid_shield_state."""
+    await raid_shield.lift_shield(group_id)
+
+
+async def _register_join_and_alert(bot: Bot, group_id: int, user_id: int, full_name: str, is_bot: bool,
+                                   kind: str = "join") -> dict:
+    """
+    kind = 'join' (ingreso directo) | 'request' (solicitud de unión / aprobación manual).
+    Anti-Raid desactivado por el dueño → no se cuenta ni se aísla nada. Una alerta por activación.
+    """
+    cfg = await raid_cfg(group_id)
+    if not cfg.get("enabled", 1):
+        return {"isolated": False, "triggered": False, "is_new": False, "disabled": True}
+    try:
+        verdict = await raid_shield.register_join(group_id, user_id, full_name, is_bot=is_bot, kind=kind, config=cfg)
     except Exception as e:
         logger.error(f"[RaidShield] Error evaluando el ingreso de {user_id} en {group_id}: {e}")
         return {"isolated": raid_shield.is_isolated(group_id), "triggered": False, "is_new": False}
@@ -767,6 +1068,57 @@ async def _register_join_and_alert(bot: Bot, group_id: int, user_id: int, full_n
         _spawn(_quarantine_recent_joiners(bot, group_id, exclude_user_id=user_id))
     return verdict
 
+
+async def _raid_should_penalize(group_id: int, verdict: dict) -> bool:
+    cfg = await raid_cfg(group_id)
+    if not cfg.get("enabled", 1) or not verdict.get("isolated"):
+        return False
+    return not cfg.get("new_account_only", 1) or bool(verdict.get("is_new"))
+
+
+async def _apply_raid_penalty(bot: Bot, group_id: int, user, *, is_join_req: bool) -> bool:
+    """
+    Aplica la penalización configurada a una cuenta atrapada en el raid y la anota en la lista negra de raid.
+    Devuelve True si la penalización sustituye al captcha (mute / kick / ban). Con 'captcha' se registra el
+    caso y devuelve False para que siga el Captcha Pro estricto habitual.
+    """
+    cfg = await raid_cfg(group_id)
+    penalty = str(cfg.get("penalty") or "captcha")
+    minutes = int(cfg.get("penalty_minutes") or 60)
+    until = int(time.time()) + max(60, minutes * 60)
+    common: dict[str, Any] = {"full_name": getattr(user, "full_name", None), "username": getattr(user, "username", None),
+                              "source": "request" if is_join_req else "join"}
+    if penalty == "captcha":
+        with contextlib.suppress(Exception):
+            await raid_blacklist_add(group_id, user.id, "captcha", **common)
+        return False
+    try:
+        if is_join_req:
+            await bot.decline_chat_join_request(chat_id=group_id, user_id=user.id)
+            if penalty == "ban":
+                await bot.ban_chat_member(chat_id=group_id, user_id=user.id, until_date=until)
+            action = "decline"
+        elif penalty == "mute":
+            await bot.restrict_chat_member(chat_id=group_id, user_id=user.id,
+                                           permissions=ChatPermissions(can_send_messages=False), until_date=until)
+            action = "mute"
+        elif penalty == "kick":
+            await bot.ban_chat_member(chat_id=group_id, user_id=user.id, until_date=int(time.time() + 45))
+            await bot.unban_chat_member(chat_id=group_id, user_id=user.id, only_if_banned=True)
+            await registry_forget(group_id, user.id)
+            action = "kick"
+        else:
+            await bot.ban_chat_member(chat_id=group_id, user_id=user.id, until_date=until)
+            await registry_forget(group_id, user.id)
+            action = "ban"
+    except TelegramAPIError as e:
+        logger.warning(f"[Anti-Raid] No se pudo aplicar '{penalty}' a {user.id} en {group_id}: {e}; se usa el captcha.")
+        return False
+    with contextlib.suppress(Exception):
+        await raid_blacklist_add(group_id, user.id, penalty,
+                                 penalty_until=until if penalty in ("mute", "ban") else None, **common)
+    track_security(group_id, user.id, "raid_shield", action, bool(getattr(user, "is_bot", False)))
+    return True
 
 async def _quarantine_recent_joiners(bot: Bot, group_id: int, exclude_user_id: int) -> None:
     """
@@ -825,7 +1177,8 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
     if previous and previous.get("task"):
         previous["task"].cancel()
 
-    clean_name = html.escape(full_name or "Usuario")
+    lang = await group_lang(group_id)
+    clean_name = html.escape(full_name or gtx(lang, "user", signed=False))
     mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
 
     if not is_join_req:
@@ -849,9 +1202,9 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
         cfg["mode"] = overrides["mode"]
         time_limit = max(15, min(time_limit, overrides["max_time"]))
 
-    custom_intro = cfg["text"] if cfg["text"] else f"¡Hola, {mention}! Para proteger la comunidad, requerimos una breve verificación."
+    custom_intro = cfg["text"] if cfg["text"] else gtx(lang, "captcha_intro", signed=False, mention=mention)
 
-    session_data: dict = {"is_join_req": is_join_req, "is_bot": bool(is_bot)}
+    session_data: dict = {"is_join_req": is_join_req, "is_bot": bool(is_bot), "lang": lang}
     if overrides:
         session_data["action_override"] = overrides["action"]
         session_data["source"] = "raid_shield" if overrides.get("isolated") else "captcha"
@@ -863,18 +1216,15 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
         correct_code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
         session_data["code"] = correct_code
         kb = generate_captcha_keyboard(group_id, user_id, correct_code)
-        challenge_line = (
-            f"Selecciona el botón que contiene exactamente este código:\n"
-            f"👉 <code>{correct_code}</code>\n\n"
-        )
-        footer_en = "🇺🇸 <i>Tap the button matching the code above to clear entry!</i>"
+        challenge_line = gtx(lang, "captcha_code", signed=False, code=correct_code)
     else:
         session_data["code"] = "simple"
-        kb = generate_simple_keyboard(group_id, user_id)
-        challenge_line = "Pulsa el botón inferior para confirmar tu identidad:\n\n"
-        footer_en = "🇺🇸 <i>Hit the button below to verify your account and join the chat!</i>"
+        kb = generate_simple_keyboard(group_id, user_id, lang)
+        challenge_line = gtx(lang, "captcha_simple", signed=False)
 
     CAPTCHA_SESSIONS[session_key] = session_data
+    title = gtx(lang, "captcha_title", signed=False)
+    timer = gtx(lang, "captcha_time", signed=False, seconds=time_limit)
 
     if not is_join_req and overrides.get("isolated") and not is_bot:
         # Ruta 3 — Ingreso directo bajo escudo: sin desafío público individual. El miembro ya quedó
@@ -887,14 +1237,7 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
 
     if is_join_req:
         # Ruta 1 — Solicitud de unión: diálogo privado autorizado por Telegram.
-        text = (
-            f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
-            f"{custom_intro}\n\n"
-            f"{challenge_line}"
-            f"⏱️ <b>Tiempo límite:</b> {time_limit}s\n\n"
-            f"{footer_en}\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        )
+        text = "\n\n".join([title, custom_intro, challenge_line, timer]) + SVC_SIGNATURE
         try:
             sent_msg = await bot.send_message(chat_id=session_data["dm_chat_id"], text=text, reply_markup=kb, parse_mode="HTML")
             session_data["msg_id"] = sent_msg.message_id
@@ -909,14 +1252,7 @@ async def process_user_captcha(bot: Bot, group_id: int, user_id: int, full_name:
         try:
             group_msg = await bot.send_message(
                 chat_id=group_id,
-                text=(
-                    f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
-                    f"{custom_intro}\n\n"
-                    f"{mention}, {challenge_line}"
-                    f"⏱️ <i>Tiempo restante / Time left: {time_limit}s</i>\n\n"
-                    f"{footer_en}\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
+                text="\n\n".join([title, custom_intro, f"{mention} — {challenge_line}", timer]) + SVC_SIGNATURE,
                 reply_markup=kb,
                 parse_mode="HTML"
             )
@@ -938,8 +1274,13 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     user_id = event.from_user.id
     is_bot = bool(event.from_user.is_bot)
 
-    # 🚨 v9 · Detector de picos coordinados (las solicitudes también cuentan).
-    verdict = await _register_join_and_alert(bot, group_id, user_id, event.from_user.full_name or "", is_bot)
+    # 🚨 v9/v37 · Detector de picos coordinados: las solicitudes tienen su propio umbral configurable.
+    verdict = await _register_join_and_alert(bot, group_id, user_id, event.from_user.full_name or "", is_bot,
+                                             kind="request")
+    # 🚨 v37 · Penalización configurable de raid (antes de CAS / captcha).
+    if not is_bot and await _raid_should_penalize(group_id, verdict):
+        if await _apply_raid_penalty(bot, group_id, event.from_user, is_join_req=True):
+            return
 
     if await check_global_cas_spam(user_id):
         try:
@@ -1017,6 +1358,11 @@ async def handle_new_members(message: Message, bot: Bot):
                     logger.warning(f"[RaidShield] No se pudo retirar el bot {new_user.id} de {group_id}: {e}")
                 continue
 
+        # 🚨 v37 · Penalización configurable de raid (silencio / expulsión / baneo temporal o captcha estricto).
+        if not new_user.is_bot and await _raid_should_penalize(group_id, verdict):
+            if await _apply_raid_penalty(bot, group_id, new_user, is_join_req=False):
+                continue
+
         # 🛸 v15 · Vector 29 (bot_added): bot invitado por un miembro sin privilegios → el bot se retira al
         # instante y quien lo invitó recibe la sanción configurada en la matriz multimedia.
         if new_user.is_bot and await media_locks.handle_bot_added(bot, message, adder, new_user):
@@ -1063,6 +1409,12 @@ async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
         invalidate_owner_status(group_id, user.id)
     except Exception:
         pass
+    # 🛡️ v37 · Anti-Rogue: un ascenso o degradación se refleja al instante en quién puede invocar al bot.
+    try:
+        from middlewares.anti_spam import forget_sender_rights
+        forget_sender_rights(group_id, user.id)
+    except Exception:
+        pass
 
     new_status = event.new_chat_member.status
     if new_status in ("left", "kicked"):
@@ -1100,9 +1452,10 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
         target_user_id = int(data[3])
         is_correct = 1
 
+    lang = await group_lang(group_id)
     clicker_id = callback.from_user.id
     if clicker_id != target_user_id:
-        await callback.answer("⚠️ Este desafío no pertenece a tu perfil / Not your checkpoint.", show_alert=True)
+        await callback.answer(gtx(lang, "captcha_not_yours", signed=False), show_alert=True)
         return
 
     session_key = (group_id, target_user_id)
@@ -1143,14 +1496,16 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
     chat_info = None
     try:
         chat_info = await bot.get_chat(group_id)
-        group_title = chat_info.title or "la comunidad"
+        group_title = chat_info.title or gtx(lang, "community", signed=False)
     except Exception:
-        group_title = "la comunidad"
+        group_title = gtx(lang, "community", signed=False)
 
     if is_correct == 1:
-        await callback.answer("✅ ¡Identidad verificada con éxito!", show_alert=False)
+        await callback.answer(gtx(lang, "captcha_verified_toast", signed=False), show_alert=False)
         RECENTLY_VERIFIED[(group_id, target_user_id)] = time.time()
         track_security(group_id, target_user_id, "captcha", "verified", False)
+        # 🗂️ v37 · Si estaba en la lista negra de raid (captcha estricto), el caso se cierra como liberado.
+        _spawn(raid_blacklist_resolve(group_id, target_user_id, "released", None))
 
         if is_join_req:
             try:
@@ -1181,48 +1536,28 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
             except Exception as e:
                 logger.warning(f"Aviso otorgando permisos en {group_id}: {e}")
 
-        user_full_name = html.escape(callback.from_user.full_name or "Usuario")
+        user_full_name = html.escape(callback.from_user.full_name or gtx(lang, "user", signed=False))
         user_mention = f"<a href='tg://user?id={target_user_id}'>{user_full_name}</a>"
 
-        await _post_group_notice(
-            bot, group_id,
-            (
-                f"🎉 <b>¡Acceso Concedido! / Access Granted!</b>\n\n"
-                f"Estimado {user_mention}, has completado la aduana de seguridad con éxito.\n"
-                f"🔓 Tu acceso ha sido liberado para participar en <b>{html.escape(group_title)}</b>.\n\n"
-                f"🇺🇸 <i>Security checkpoint cleared. Welcome aboard!</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            ),
-            ttl=20
-        )
+        await _post_group_notice(bot, group_id, gtx(lang, "captcha_ok", mention=user_mention,
+                                                    title=html.escape(group_title)), ttl=20)
 
     else:
-        await callback.answer("❌ Código incorrecto / Wrong code.", show_alert=True)
-        custom_fail = cfg["text"] if cfg["text"] else "❌ Código incorrecto ingresado en la aduana de seguridad."
+        await callback.answer(gtx(lang, "captcha_wrong_toast", signed=False), show_alert=True)
+        custom_fail = cfg["text"] if cfg["text"] else gtx(lang, "captcha_fail_default", signed=False)
 
         if is_join_req:
             # Aviso privado dentro de la ventana legal, ANTES de rechazar la solicitud.
-            await _send_join_request_dm(
-                bot, session_data,
-                (
-                    f"❌ <b>Verificación Fallida / Checkpoint Failed</b>\n\n"
-                    f"{custom_fail}\n\n"
-                    f"🇺🇸 <i>Incorrect code selected. Access protocol denied.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
-                reply_markup=_support_keyboard()
-            )
+            await _send_join_request_dm(bot, session_data, gtx(lang, "captcha_fail_dm", text=custom_fail),
+                                        reply_markup=_support_keyboard(lang))
         else:
             # Ingreso directo: el aviso se publica solo en el grupo y se autoelimina.
             await _post_group_notice(
                 bot, group_id,
-                (
-                    f"❌ <b>Verificación Fallida / Checkpoint Failed</b>\n\n"
-                    f"<a href='tg://user?id={target_user_id}'>Usuario / User</a>: {custom_fail}\n\n"
-                    f"🇺🇸 <i>Incorrect code selected. Access protocol denied.</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
-                reply_markup=_support_keyboard()
+                gtx(lang, "captcha_fail_group",
+                    mention=f"<a href='tg://user?id={target_user_id}'>{gtx(lang, 'user', signed=False)}</a>",
+                    text=custom_fail),
+                reply_markup=_support_keyboard(lang)
             )
 
         await _apply_captcha_sanction(bot, group_id, target_user_id, cfg, is_join_req, session_data)
@@ -1239,13 +1574,10 @@ async def raid_gate_start(message: Message, command: CommandObject, bot: Bot):
     except (IndexError, ValueError):
         return
     user_id = message.from_user.id
+    lang = await group_lang(group_id)
     session_data = CAPTCHA_SESSIONS.get((group_id, user_id))
     if not session_data or not session_data.get("raid_gate"):
-        await message.answer(
-            "ℹ️ No tienes ninguna verificación pendiente en esa comunidad.\n"
-            "🇺🇸 <i>You have no pending verification in that community.</i>\n\n🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
+        await message.answer(gtx(lang, "gate_none"), parse_mode="HTML")
         return
     previous_msg = session_data.get("msg_id")
     if previous_msg:
@@ -1257,15 +1589,11 @@ async def raid_gate_start(message: Message, command: CommandObject, bot: Bot):
     session_data["code"] = correct_code
     session_data["dm_chat_id"] = message.chat.id
     try:
-        title = (await bot.get_chat(group_id)).title or "la comunidad"
+        title = (await bot.get_chat(group_id)).title or gtx(lang, "community", signed=False)
     except Exception:
-        title = "la comunidad"
+        title = gtx(lang, "community", signed=False)
     sent = await message.answer(
-        f"🛑 <b>ADUANA DE SEGURIDAD / SECURITY CHECKPOINT</b>\n\n"
-        f"Comunidad: <b>{html.escape(title)}</b>\n"
-        f"Selecciona el botón que contiene exactamente este código:\n👉 <code>{correct_code}</code>\n\n"
-        f"🇺🇸 <i>Tap the button matching the code above to unlock your access.</i>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>",
+        gtx(lang, "gate_dm", title=html.escape(title), code=correct_code),
         reply_markup=generate_captcha_keyboard(group_id, user_id, correct_code),
         parse_mode="HTML"
     )
@@ -1520,18 +1848,14 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     if not await _require_owner_message(bot, message):
         return
 
+    lang = await group_lang(group_id)
     tier = (await get_group_tier(group_id) or "free").lower()
     if tier == "free":
         try:
             from database.database import check_can_free_purge
             if not await check_can_free_purge(group_id):
-                warn = await message.answer(
-                    "⏳ <b>Límite de Ghost Purge (Plan Free):</b> Solo se permite 1 escaneo diario gratuito.\n"
-                    "Mejora a <b>PRO ⭐</b> o <b>ULTRA PRO 💎</b> para escaneos y purgas automatizadas ilimitadas.\n\n"
-                    "🛡️ <i>Cloud Media Management</i>",
-                    parse_mode="HTML"
-                )
-                _spawn(auto_delete_msg(warn, 15))
+                warn = await message.answer(gtx(lang, "ghost_free_limit"), parse_mode="HTML")
+                _spawn(auto_delete_msg(warn, await service_ttl(group_id, 15)))
                 return
         except Exception:
             pass
@@ -1541,32 +1865,21 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     action = "kick" if bool(args) and args[0].strip().lower() in ("kick", "expulsar") else "ban"
 
     if group_id in _GHOST_PURGE_RUNNING:
-        busy = await message.answer("⏳ Ya hay un Ghost Purge en curso en esta comunidad. Espera a que termine.", parse_mode="HTML")
-        _spawn(auto_delete_msg(busy, 8))
+        busy = await message.answer(gtx(lang, "ghost_busy"), parse_mode="HTML")
+        _spawn(auto_delete_msg(busy, await service_ttl(group_id, 8)))
         return
 
     _GHOST_PURGE_RUNNING.add(group_id)
     try:
         status_msg = await message.answer(
-            f"🧹 <b>Ghost Purge{' (simulación)' if dry_run else ''}:</b> Evaluando entorno y activando motor híbrido...\n\n"
-            "🛡️ <i>Cloud Media Management</i>",
+            gtx(lang, "ghost_start", sim=gtx(lang, "ghost_sim", signed=False) if dry_run else ""),
             parse_mode="HTML"
         )
 
         res = await execute_unified_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
-        engine_name = res.get("engine", "Híbrido")
-        found = res.get("found", 0)
-        purged = res.get("purged", 0)
-
-        lines = [
-            f"🧹 <b>Ghost Purge {'(Simulación) ' if dry_run else ''}Completado</b>",
-            f"• <b>Motor Utilizado:</b> <code>{engine_name}</code>",
-            f"• 👻 <b>Fantasmas Detectados:</b> <b>{found}</b>",
-            f"• 💀 <b>Fantasmas Depurados:</b> <b>{purged}</b>",
-            f"• ⚖️ <b>Acción Aplicada:</b> <code>{action.upper()}</code>",
-            "",
-            "🛡️ <i>Cloud Media Management</i>"
-        ]
+        lines = [gtx(lang, "ghost_done", sim=gtx(lang, "ghost_sim_done", signed=False) if dry_run else "",
+                     engine=res.get("engine", "Hybrid"), found=res.get("found", 0), purged=res.get("purged", 0),
+                     action=action.upper())]
 
         await _edit_status(status_msg, "\n".join(lines))
         _spawn(auto_delete_msg(status_msg, 60))
@@ -1574,7 +1887,7 @@ async def purge_ghosts_command(message: Message, bot: Bot):
     except Exception as e:
         logger.error(f"Error ejecutando Ghost Purge en {group_id}: {e}")
         try:
-            await message.answer("⚠️ El Ghost Purge se interrumpió por un error inesperado.", parse_mode="HTML")
+            await message.answer(gtx(lang, "ghost_error"), parse_mode="HTML")
         except Exception:
             pass
     finally:
@@ -1622,22 +1935,17 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
         logger.warning(f"Aviso: no se pudieron restringir los permisos de {group_id} en /panic: {e}")
 
     try:
+        lang = await group_lang(group_id)
         admins = await bot.get_chat_administrators(group_id)
         owner = next((a for a in admins if a.status == "creator"), None)
         if owner:
             alert_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🟢 Desactivar Raid Lockdown", callback_data=f"panic_off_{group_id}")]
+                [InlineKeyboardButton(text=gtx(lang, "panic_btn_off", signed=False), callback_data=f"panic_off_{group_id}")]
             ])
             await bot.send_message(
                 chat_id=owner.user.id,
-                text=(
-                    f"🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\n"
-                    f"Comunidad: <b>{chat.title or 'Sin título'}</b> (<code>{group_id}</code>)\n"
-                    f"Activado por: <code>{activated_by}</code>\n\n"
-                    f"Se elevaron todas las cerraduras, el Captcha entró en modo estricto, el Anti-Spam "
-                    f"subió su sensibilidad y el chat general quedó restringido sólo a administradores.\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                ),
+                text=gtx(lang, "panic_dm", title=html.escape(chat.title or gtx(lang, "untitled", signed=False)),
+                         chat_id=group_id, by=activated_by),
                 reply_markup=alert_kb,
                 parse_mode="HTML"
             )
@@ -1656,29 +1964,17 @@ async def panic_command(message: Message, bot: Bot):
     if not await _require_owner_message(bot, message):
         return
 
+    lang = await group_lang(group_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=gtx(lang, "panic_btn_off", signed=False), callback_data=f"panic_off_{group_id}")]
+    ])
     if await get_panic_status(group_id) == 1:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🟢 Desactivar Raid Lockdown", callback_data=f"panic_off_{group_id}")]
-        ])
-        await message.answer(
-            "🛡️ El Protocolo Raid Lockdown ya está <b>activo</b> en esta comunidad.\n\n"
-            "🛡️ <i>Cloud Media Management</i>",
-            reply_markup=kb, parse_mode="HTML"
-        )
+        await message.answer(gtx(lang, "panic_already"), reply_markup=kb, parse_mode="HTML")
         return
 
     engaged = await _engage_panic(bot, message.chat, user_id)
     if engaged:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🟢 Desactivar Raid Lockdown", callback_data=f"panic_off_{group_id}")]
-        ])
-        await message.answer(
-            "🚨 <b>PROTOCOLO RAID LOCKDOWN ACTIVADO</b>\n\n"
-            "Cerraduras al máximo, Captcha estricto, Anti-Spam elevado y chat general restringido sólo a administradores.\n\n"
-            "🇺🇸 <i>Raid Lockdown engaged. Perimeter secured.</i>\n\n"
-            "🛡️ <i>Cloud Media Management</i>",
-            reply_markup=kb, parse_mode="HTML"
-        )
+        await message.answer(gtx(lang, "panic_on"), reply_markup=kb, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("panic_off_"))
@@ -1691,9 +1987,10 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id
 
     # 👑 Regla de Oro: solo el Dueño legítimo o el Arquitecto levantan el Protocolo.
+    lang = await group_lang(group_id)
     if not await _is_community_owner(bot, group_id, user_id):
         logger.warning(f"⛔ [Aduana] panic_off bloqueado: user={user_id} no es Dueño de {group_id}.")
-        await callback.answer(OWNER_ONLY_ALERT_SHORT, show_alert=True)
+        await callback.answer(gtx(lang, "owner_only_short", signed=False), show_alert=True)
         return
 
     result = await deactivate_panic(group_id)
@@ -1708,15 +2005,10 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
             logger.warning(f"Aviso restaurando permisos de {group_id} tras desactivar /panic: {e}")
 
     try:
-        await callback.message.edit_text(
-            "✅ <b>Protocolo Raid Lockdown desactivado.</b>\n\n"
-            "El perímetro de la comunidad fue restaurado a su estado previo a la alerta.\n\n"
-            "🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text(gtx(lang, "panic_off_done"), parse_mode="HTML")
     except Exception:
         pass
-    await callback.answer("Perímetro restaurado ✅")
+    await callback.answer(gtx(lang, "panic_off_toast", signed=False))
 
 
 async def execute_raid_lockdown(bot: Bot, group_id: int) -> bool:
@@ -1770,10 +2062,11 @@ async def screenshield_toggle(message: Message, bot: Bot):
     status = _parse_on_off(args)
     await set_screen_shield_status(group_id, status)
     _sync_miniapp(group_id, ["shield_enabled"])
-    await message.answer(
-        f"🎥 Escudo Antinota (Screen-Sharing Shield): <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
+    lang = await group_lang(group_id)
+    reply = await message.answer(
+        gtx(lang, "screenshield", state=gtx(lang, "activated" if status else "deactivated", signed=False)), parse_mode="HTML"
     )
+    _spawn(auto_delete_msg(reply, await service_ttl(group_id, 20)))
 
 
 @router.message(Command("duckvolume"), F.chat.type.in_({"group", "supergroup"}))
@@ -1782,13 +2075,16 @@ async def duck_volume_command(message: Message, bot: Bot):
     if not await _require_owner_message(bot, message):
         return
     args = message.text.split()[1:]
+    lang = await group_lang(group_id)
     if not args or not args[0].strip().isdigit():
-        await message.answer("Uso: /duckvolume <porcentaje 1-100> — Ej: /duckvolume 5")
+        reply = await message.answer(html.escape(gtx(lang, "duck_usage", signed=False)), parse_mode="HTML")
+        _spawn(auto_delete_msg(reply, await service_ttl(group_id, 20)))
         return
     pct = max(1, min(100, int(args[0].strip())))
     await set_podcast_duck_volume(group_id, pct * 100)
     _sync_miniapp(group_id, ["podcast_duck_volume"])
-    await message.answer(f"🎚️ Volumen de atenuación del Modo Podcast ajustado a <b>{pct}%</b>.", parse_mode="HTML")
+    reply = await message.answer(gtx(lang, "duck_ok", pct=pct), parse_mode="HTML")
+    _spawn(auto_delete_msg(reply, await service_ttl(group_id, 20)))
 
 
 @router.message(Command("noiseshield"), F.chat.type.in_({"group", "supergroup"}))
@@ -1800,10 +2096,11 @@ async def noiseshield_toggle(message: Message, bot: Bot):
     status = _parse_on_off(args)
     await set_noise_shield_status(group_id, status)
     _sync_miniapp(group_id, ["noise_shield"])
-    await message.answer(
-        f"🔇 Escudo Antirruido: <b>{'ACTIVADO' if status else 'DESACTIVADO'}</b>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
+    lang = await group_lang(group_id)
+    reply = await message.answer(
+        gtx(lang, "noiseshield", state=gtx(lang, "activated" if status else "deactivated", signed=False)), parse_mode="HTML"
     )
+    _spawn(auto_delete_msg(reply, await service_ttl(group_id, 20)))
 
 
 # ==========================================
@@ -1815,6 +2112,7 @@ async def speakers_command(message: Message, bot: Bot):
     user_id = message.from_user.id if message.from_user else 0
     args = (message.text or "").split(maxsplit=2)[1:]
     sub = args[0].lower() if args else ""
+    lang = await group_lang(group_id)
     # 👑 Las subórdenes de gestión (next / clear / price) son exclusivas del Dueño o del Arquitecto;
     # consultar la cola y comprar turno sigue abierto a cualquier miembro.
     is_admin = False
@@ -1829,23 +2127,19 @@ async def speakers_command(message: Message, bot: Bot):
             return
         row = await pop_next_speaker(group_id)
         if not row:
-            await message.answer("📭 La cola de oradores está vacía.")
+            await message.answer(gtx(lang, "spk_empty"), parse_mode="HTML")
             return
         _, spk_user_id, full_name, spk_username, stars_paid = row
         mention = f"<a href='tg://user?id={spk_user_id}'>{html.escape(full_name)}</a>"
         tag = f" (⭐ {stars_paid} XTR)" if stars_paid else ""
-        await message.answer(
-            f"🎙️ <b>Siguiente orador en la ronda de preguntas:</b> {mention}{tag}\n\n"
-            f"🇺🇸 <i>Next up in the queue: {mention}{tag}</i>\n\n🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
+        await message.answer(gtx(lang, "spk_next", mention=mention, tag=tag), parse_mode="HTML")
         return
 
     if sub == "clear":
         if not is_admin:
             return
         await clear_speaker_queue(group_id)
-        await message.answer("🧹 Cola de oradores vaciada.")
+        await message.answer(gtx(lang, "spk_cleared"), parse_mode="HTML")
         return
 
     if sub == "price":
@@ -1855,9 +2149,9 @@ async def speakers_command(message: Message, bot: Bot):
             new_price = int(args[1].strip())
             await set_speaker_price(group_id, new_price)
             _sync_miniapp(group_id, ["speaker_price"])
-            await message.answer(f"⭐ Tarifa de turno prioritario actualizada a <b>{new_price} Stars (XTR)</b>.", parse_mode="HTML")
+            await message.answer(gtx(lang, "spk_price_ok", price=new_price), parse_mode="HTML")
         else:
-            await message.answer("Uso: /speakers price <cantidad_de_stars>")
+            await message.answer(html.escape(gtx(lang, "spk_price_usage", signed=False)), parse_mode="HTML")
         return
 
     queue = await get_speaker_queue(group_id)
@@ -1871,18 +2165,16 @@ async def speakers_command(message: Message, bot: Bot):
             lines.append(f"{idx}. {html.escape(full_name)}{tag}")
         queue_text = "\n".join(lines)
     else:
-        queue_text = "— La cola está vacía —"
+        queue_text = gtx(lang, "spk_queue_empty_line", signed=False)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🎟️ Asegurar turno prioritario ({price} ⭐)", callback_data=f"speak_buy_{group_id}_{price}")]
+        [InlineKeyboardButton(text=gtx(lang, "spk_btn", signed=False, price=price), callback_data=f"speak_buy_{group_id}_{price}")]
     ])
-    await message.answer(
-        f"🎙️ <b>Cola de Preguntas (AMA) — {html.escape(message.chat.title or '')}</b>\n\n{queue_text}\n\n"
-        f"💰 Paga <b>{price} Telegram Stars</b> y asegura tu prioridad en la próxima ronda de preguntas.\n\n"
-        f"🇺🇸 <i>Pay {price} Telegram Stars to lock in priority in the next round.</i>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>",
+    card = await message.answer(
+        gtx(lang, "spk_card", title=html.escape(message.chat.title or ""), queue=queue_text, price=price),
         reply_markup=kb, parse_mode="HTML"
     )
+    _spawn(auto_delete_msg(card, await service_ttl(group_id, 60)))
 
 
 @router.callback_query(F.data.startswith("speak_buy_"))
@@ -1891,15 +2183,16 @@ async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
     group_id = int(parts[2])
     price = int(parts[3])
     await callback.answer()
+    lang = await group_lang(group_id)
 
     try:
         await bot.send_invoice(
             chat_id=callback.from_user.id,
-            title="🎙️ Turno Prioritario — Cola de Preguntas",
-            description="Asegura tu prioridad en la próxima ronda de preguntas (AMA) de la comunidad.",
+            title=gtx(lang, "spk_inv_title", signed=False)[:32],
+            description=gtx(lang, "spk_inv_desc", signed=False),
             payload=f"speak_{group_id}_{callback.from_user.id}",
             currency="XTR",
-            prices=[LabeledPrice(label="Turno prioritario", amount=price)],
+            prices=[LabeledPrice(label=gtx(lang, "spk_inv_label", signed=False), amount=price)],
         )
     except Exception as e:
         # Si la factura no se entregó, el usuario no ha iniciado el bot: un segundo DM fallaría
@@ -1908,16 +2201,10 @@ async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
         try:
             bot_info = await bot.me()
             open_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💬 Abrir privado / Open chat", url=f"https://t.me/{bot_info.username}?start=speakers")]
+                [InlineKeyboardButton(text=gtx(lang, "btn_open_dm", signed=False), url=f"https://t.me/{bot_info.username}?start=speakers")]
             ])
-            notice = await callback.message.answer(
-                "⚠️ Abre un privado con el bot primero para poder pagar con Stars.\n"
-                "🇺🇸 <i>Open a private chat with the bot first to pay with Stars.</i>\n\n"
-                "🛡️ <i>Cloud Media Management</i>",
-                reply_markup=open_kb,
-                parse_mode="HTML"
-            )
-            _spawn(auto_delete_msg(notice, 30))
+            notice = await callback.message.answer(gtx(lang, "spk_open_dm"), reply_markup=open_kb, parse_mode="HTML")
+            _spawn(auto_delete_msg(notice, await service_ttl(group_id, 30)))
         except Exception:
             pass
 
@@ -1942,20 +2229,16 @@ async def speakers_successful_payment(message: Message, bot: Bot):
 
     await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
 
-    await message.answer(
-        f"✅ <b>¡Turno asegurado!</b>\n\nPagaste <b>{stars_paid} Stars</b> por prioridad en la cola de preguntas.\n\n"
-        f"🛡️ <i>Cloud Media Management</i>", parse_mode="HTML"
-    )
+    lang = await group_lang(group_id)
+    await message.answer(gtx(lang, "spk_paid_dm", stars=stars_paid), parse_mode="HTML")
     try:
         clean_name = html.escape(full_name)
-        await bot.send_message(
+        notice = await bot.send_message(
             chat_id=group_id,
-            text=(
-                f"🎙️ <a href='tg://user?id={buyer_id}'>{clean_name}</a> aseguró un turno prioritario en la "
-                f"cola de preguntas (⭐ {stars_paid} XTR).\n\n🛡️ <i>Cloud Media Management</i>"
-            ),
+            text=gtx(lang, "spk_paid_group", mention=f"<a href='tg://user?id={buyer_id}'>{clean_name}</a>", stars=stars_paid),
             parse_mode="HTML"
         )
+        _spawn(auto_delete_msg(notice, await service_ttl(group_id, 45)))
     except Exception:
         pass
 
@@ -2253,6 +2536,7 @@ async def _send_temp(
     # Anti-reportes: los avisos temporales no son esenciales (presupuesto por minuto; silencio bajo escudo).
     if not raid_shield.notice_allowed(chat_id):
         return
+    ttl = await service_ttl(chat_id, ttl)   # v37 · TTL configurado por el administrador
     try:
         sent = None
         if media_id and media_type:
@@ -2337,61 +2621,28 @@ async def enforce_warn_ladder(
         es_txt, en_txt = _REASON_TEXT[reason]
     else:
         es_txt = en_txt = reason
+    lang = await group_lang(chat_id)
+    reason_loc = es_txt if lang == "es" else en_txt
 
     # CASO A: EL USUARIO AÚN NO ALCANZA EL LÍMITE PUNITIVO
     if strikes < limit:
         await _acoustic_attenuate(bot, chat_id, target_id, target_username, strikes, limit)
 
         if not silent:
-            if group_tier in ("ultra_pro", "ultra"):
-                if custom_text:
-                    body = (
-                        custom_text.replace("{mention}", target_mention)
-                        .replace("{user}", target_mention)
-                        .replace("{user_name}", target_mention)
-                        .replace("{name}", target_mention)
-                        .replace("{strikes}", str(strikes))
-                        .replace("{limit}", str(limit))
-                        .replace("{reason}", es_txt)
-                    )
-                else:
-                    body = f"{target_mention}, has recibido una advertencia ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
-                    
-                notice = (
-                    f"⚠️ <b>Aviso Perimetral ULTRA PRO 💎 ({strikes}/{limit})</b>\n\n"
-                    f"{body}\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                )
-                await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to, media_id=media_id, media_type=media_type)
+            def _fill(template: str) -> str:
+                return (template.replace("{mention}", target_mention).replace("{user}", target_mention)
+                        .replace("{user_name}", target_mention).replace("{name}", target_mention)
+                        .replace("{strikes}", str(strikes)).replace("{limit}", str(limit)).replace("{reason}", reason_loc))
 
-            elif group_tier == "pro":
-                if custom_text:
-                    body = (
-                        custom_text.replace("{mention}", target_mention)
-                        .replace("{user}", target_mention)
-                        .replace("{user_name}", target_mention)
-                        .replace("{name}", target_mention)
-                        .replace("{strikes}", str(strikes))
-                        .replace("{limit}", str(limit))
-                        .replace("{reason}", es_txt)
-                    )
-                else:
-                    body = f"{target_mention}, has recibido una falta formal ({strikes}/{limit}).\n• <b>Motivo:</b> {es_txt}"
-
-                notice = (
-                    f"⚠️ <b>Aviso de Seguridad PRO ⭐ ({strikes}/{limit})</b>\n\n"
-                    f"{body}\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                )
-                await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to)
-
+            if group_tier in ("ultra_pro", "ultra", "pro"):
+                body = _fill(custom_text) if custom_text else gtx(lang, "warn_body", signed=False, mention=target_mention,
+                                                                   strikes=strikes, limit=limit, reason=reason_loc)
+                ultra = group_tier in ("ultra_pro", "ultra")
+                notice = gtx(lang, "warn_ultra" if ultra else "warn_pro", strikes=strikes, limit=limit, body=body)
+                await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to,
+                                 media_id=media_id if ultra else None, media_type=media_type if ultra else None)
             else:
-                notice = (
-                    f"⚠️ <b>Aviso de Seguridad ({strikes}/{limit})</b>\n\n"
-                    f"{target_mention}, {es_txt}\n"
-                    f"🇺🇸 <i>Notice: {target_mention}, {en_txt}</i>\n\n"
-                    f"🛡️ <i>Cloud Media Management</i>"
-                )
+                notice = gtx(lang, "warn", strikes=strikes, limit=limit, mention=target_mention, reason=reason_loc)
                 await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to)
 
         return {"status": "warned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
@@ -2454,15 +2705,8 @@ async def enforce_warn_ladder(
         ))
 
     if not silent:
-        icon, title, s_es, s_en = _SANCTION_TEXT[action]
         badge = " 💎" if group_tier in ("ultra_pro", "ultra") else (" ⭐" if group_tier == "pro" else "")
-        sanction_notice = (
-            f"{icon} <b>{title}{badge} ({strikes}/{limit})</b>\n\n"
-            f"{target_mention} {s_es}\n"
-            f"• <b>Medida ejecutada:</b> <code>{action.upper()}</code>\n"
-            f"🇺🇸 <i>{s_en}</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        )
+        sanction_notice = gtx(lang, f"sanction_{action}", badge=badge, strikes=strikes, limit=limit, mention=target_mention)
         use_media = media_id if group_tier in ("ultra_pro", "ultra") else None
         use_type = media_type if group_tier in ("ultra_pro", "ultra") else None
         await _send_temp(bot, chat_id, sanction_notice, ttl=25, reply_to=reply_to, media_id=use_media, media_type=use_type)
@@ -2503,15 +2747,11 @@ async def _process_message_reputation(bot: Bot, message: Message):
         })
         clean_name = html.escape(full_name)
         mention = f"<a href='tg://user?id={user_id}'>{clean_name}</a>"
-        levelup_text = (
-            f"🎉 <b>¡Ascenso de Rango en el Búnker! / Level Up!</b>\n\n"
-            f"¡Felicitaciones {mention}! Has alcanzado el <b>Nivel {new_lvl}</b> con <code>{rep_result.get('xp', 0)} XP</code>.\n"
-            f"<i>Tu reputación e influencia perimetral se han elevado en la comunidad.</i>\n\n"
-            f"🛡️ <i>Cloud Media Management</i>"
-        )
+        lang = await group_lang(group_id)
+        levelup_text = gtx(lang, "levelup", mention=mention, level=new_lvl, xp=rep_result.get("xp", 0))
         try:
             lvl_msg = await message.answer(levelup_text, parse_mode="HTML")
-            _spawn(auto_delete_msg(lvl_msg, 15))
+            _spawn(auto_delete_msg(lvl_msg, await service_ttl(group_id, 15)))
         except Exception:
             pass
 
@@ -2559,24 +2799,17 @@ async def cmd_user_rank(message: Message, command: CommandObject, bot: Bot):
     filled = pct // 10
     bar = "█" * filled + "░" * (10 - filled)
 
-    clean_name = html.escape(getattr(target_user, "full_name", getattr(target_user, "first_name", "Usuario")))
+    lang = await group_lang(group_id)
+    clean_name = html.escape(getattr(target_user, "full_name", getattr(target_user, "first_name", gtx(lang, "user", signed=False))))
     mention = f"<a href='tg://user?id={target_user.id}'>{clean_name}</a>"
 
-    rank_card = (
-        f"🎖️ <b>Registro de Rango & Reputación — {message.chat.title or 'Comunidad'}</b>\n\n"
-        f"👤 <b>Miembro:</b> {mention}\n"
-        f"⭐ <b>Posición en el Cuadro:</b> <code>#{rank_pos}</code>\n"
-        f"🏆 <b>Nivel:</b> <b>{level}</b>\n"
-        f"⚡ <b>Experiencia Total:</b> <code>{xp} XP</code>\n\n"
-        f"<b>Progreso al siguiente nivel:</b>\n"
-        f"<code>[{bar}]</code> {pct}%\n"
-        f"<i>({current_in_level} / {diff} XP para Nivel {level + 1})</i>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>"
-    )
+    rank_card = gtx(lang, "rank_card", title=html.escape(message.chat.title or gtx(lang, "community", signed=False)),
+                    mention=mention, pos=rank_pos, level=level, xp=xp, bar=bar, pct=pct,
+                    current=current_in_level, diff=diff, next=level + 1)
 
     try:
         sent = await message.answer(rank_card, parse_mode="HTML")
-        _spawn(auto_delete_msg(sent, 25))
+        _spawn(auto_delete_msg(sent, await service_ttl(group_id, 25)))
         try:
             await message.delete()
         except Exception:
@@ -2590,13 +2823,11 @@ async def cmd_top_ranking(message: Message, bot: Bot):
     """Muestra el Top 10 de usuarios con mayor nivel y XP en la comunidad."""
     group_id = message.chat.id
     top_list = await get_top_reputation(group_id, limit=10)
+    lang = await group_lang(group_id)
 
     if not top_list:
-        msg = await message.answer(
-            "📭 <b>Aún no hay suficiente actividad registrada en el cuadro de reputación.</b>\n\n🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
-        _spawn(auto_delete_msg(msg, 15))
+        msg = await message.answer(gtx(lang, "top_empty"), parse_mode="HTML")
+        _spawn(auto_delete_msg(msg, await service_ttl(group_id, 15)))
         return
 
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
@@ -2604,23 +2835,17 @@ async def cmd_top_ranking(message: Message, bot: Bot):
     for idx, item in enumerate(top_list):
         medal = medals[idx] if idx < len(medals) else f"#{idx+1}"
         name = html.escape(item["name"])
-        lines.append(f"{medal} <b>{name}</b> — <code>Nivel {item['level']}</code> ({item['xp']} XP)")
+        lines.append(gtx(lang, "top_line", signed=False, medal=medal, name=name, level=item["level"], xp=item["xp"]))
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Ver Analítica Completa", url=f"{WEBAPP_URL}?chat_id={group_id}")]
+        [InlineKeyboardButton(text=gtx(lang, "btn_top", signed=False), url=f"{WEBAPP_URL}?chat_id={group_id}")]
     ])
 
-    top_card = (
-        f"🏆 <b>Cuadro de Honor Comunitario (Top 10)</b>\n"
-        f"📍 <b>Comunidad:</b> <code>{html.escape(message.chat.title or '')}</code>\n\n"
-        + "\n".join(lines) + "\n\n"
-        f"<i>¡Chatea legítimamente para acumular XP y subir de rango!</i>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>"
-    )
+    top_card = gtx(lang, "top_card", title=html.escape(message.chat.title or ""), lines="\n".join(lines))
 
     try:
         sent = await message.answer(top_card, reply_markup=kb, parse_mode="HTML")
-        _spawn(auto_delete_msg(sent, 35))
+        _spawn(auto_delete_msg(sent, await service_ttl(group_id, 35)))
         try:
             await message.delete()
         except Exception:
@@ -2641,8 +2866,9 @@ async def cmd_chat_heatmap(message: Message, bot: Bot):
     matrix = data.get("matrix", {})
     days = data.get("days", [])
 
+    lang = await group_lang(group_id)
     # Identificar la hora pico global y el día de mayor actividad
-    peak_day = "Lunes"
+    peak_day = gtx(lang, "heatmap_default_day", signed=False)
     peak_hour = 12
     max_count = 0
     total_msgs = 0
@@ -2656,23 +2882,15 @@ async def cmd_chat_heatmap(message: Message, bot: Bot):
                 peak_hour = hour
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Ver Mapa de Calor 24x7", url=f"{WEBAPP_URL}?chat_id={group_id}")]
+        [InlineKeyboardButton(text=gtx(lang, "btn_heatmap", signed=False), url=f"{WEBAPP_URL}?chat_id={group_id}")]
     ])
 
-    report = (
-        f"📊 <b>Auditoría de Tráfico y Horas Pico (Heatmap)</b>\n"
-        f"📍 <b>Comunidad:</b> <code>{html.escape(message.chat.title or '')}</code>\n\n"
-        f"• 📈 <b>Mensajes Indexados:</b> <code>{total_msgs}</code>\n"
-        f"• ⚡ <b>Día de Mayor Actividad:</b> <b>{peak_day}</b>\n"
-        f"• ⏰ <b>Franja Horaria Más Concurrida:</b> <code>{peak_hour:02d}:00 - {peak_hour+1:02d}:00</code>\n"
-        f"• 🔥 <b>Récord de Tráfico en Pico:</b> <code>{max_count} mensajes</code>\n\n"
-        f"💡 <i>Recomendación Táctica: Programa tus aperturas de videollamada y difusión de anuncios durante los días y horas pico para maximizar la audiencia.</i>\n\n"
-        f"🛡️ <i>Cloud Media Management</i>"
-    )
+    report = gtx(lang, "heatmap", title=html.escape(message.chat.title or ""), total=total_msgs, day=peak_day,
+                 h1=peak_hour, h2=(peak_hour + 1) % 24, peak=max_count)
 
     try:
         sent = await message.answer(report, reply_markup=kb, parse_mode="HTML")
-        _spawn(auto_delete_msg(sent, 40))
+        _spawn(auto_delete_msg(sent, await service_ttl(group_id, 40)))
         try:
             await message.delete()
         except Exception:
@@ -2756,9 +2974,7 @@ async def gamification_announcement_command(message: Message, bot: Bot):
     se realiza en la consola privada, que vuelve a verificar la propiedad de la comunidad.
     """
     group_id = message.chat.id
-    lang = "es"
-    if message.from_user and message.from_user.language_code and not message.from_user.language_code.startswith("es"):
-        lang = "en"
+    lang = await group_lang(group_id)
     gt = _GAMI_GROUP_TEXTS[lang]
 
     try:
@@ -2769,9 +2985,10 @@ async def gamification_announcement_command(message: Message, bot: Bot):
     # 👑 Regla de Oro: exclusivo del Dueño legítimo o del Arquitecto (administradores comunes y anónimos fuera).
     if not await _message_author_is_owner(bot, message):
         logger.warning(f"⛔ [Aduana] /gamification bloqueado en {group_id}: el autor no es el Dueño.")
-        warn = await message.answer(ANONYMOUS_ADMIN_ALERT if message.sender_chat is not None else gt["admin_only"], parse_mode="HTML")
-        _spawn(auto_delete_msg(warn, 8))
-        return
+        if message.sender_chat is not None and message.sender_chat.id == group_id:
+            warn = await message.answer(gtx(lang, "anon_admin"), parse_mode="HTML")
+            _spawn(auto_delete_msg(warn, await service_ttl(group_id, 8)))
+        return   # v37 · Anti-Rogue: sin aviso público para quien no es el Dueño
 
     args = (message.text or "").split()[1:]
     sub = args[0].lower() if args else ""
@@ -2779,14 +2996,14 @@ async def gamification_announcement_command(message: Message, bot: Bot):
     if sub in ("now", "ahora"):
         scheduled = await schedule_gamification_announcement_now(group_id)
         reply = await message.answer(gt["now_ok"] if scheduled else gt["now_inactive"], parse_mode="HTML")
-        _spawn(auto_delete_msg(reply, 15))
+        _spawn(auto_delete_msg(reply, await service_ttl(group_id, 15)))
         return
 
     if sub in ("off", "apagar", "desactivar"):
         await set_gamification_announcement_field(group_id, "status", 0)
         logger.info(f"🎮 [Gamificación] Anuncio desactivado desde el grupo {group_id}.")
         reply = await message.answer(gt["off_ok"], parse_mode="HTML")
-        _spawn(auto_delete_msg(reply, 15))
+        _spawn(auto_delete_msg(reply, await service_ttl(group_id, 15)))
         return
 
     tier = str(await get_group_tier(group_id) or "free").lower()
@@ -2810,7 +3027,94 @@ async def gamification_announcement_command(message: Message, bot: Bot):
         )
 
     reply = await message.answer(text, reply_markup=open_kb, parse_mode="HTML")
-    _spawn(auto_delete_msg(reply, 30))
+    _spawn(auto_delete_msg(reply, await service_ttl(group_id, 30)))
+
+
+# ==========================================
+# 🚨🌐 v37 · /antiraid · /lang · PERMISO DE CONFIGURACIÓN
+# ==========================================
+async def has_config_rights(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """
+    v37 · Permiso de configuración: Dueño legítimo / Arquitecto, o administrador con «Añadir administradores»
+    (can_promote_members). Se usa SOLO para Anti-Raid, idioma y TTL de servicio (todos los rangos).
+    """
+    if not user_id:
+        return False
+    if await _is_community_owner(bot, chat_id, user_id):
+        return True
+    try:
+        member = await asyncio.wait_for(bot.get_chat_member(chat_id=chat_id, user_id=user_id), timeout=5)
+    except Exception:
+        return False
+    status = str(getattr(member.status, "value", member.status) or "")
+    return status == "administrator" and bool(getattr(member, "can_promote_members", False))
+
+
+_RAID_PENALTY_NAMES = {"captcha": ("Captcha estricto", "Strict captcha"), "mute": ("Silencio", "Mute"),
+                       "kick": ("Expulsión", "Kick"), "ban": ("Baneo", "Ban")}
+
+
+@router.message(Command("antiraid", "raid"), F.chat.type.in_({"group", "supergroup"}))
+async def antiraid_command(message: Message, bot: Bot):
+    """Estado del Anti-Raid + acceso al panel privado. Solo Dueño o admin con «Añadir administradores»."""
+    group_id = message.chat.id
+    with contextlib.suppress(Exception):
+        await message.delete()
+    user = message.from_user
+    if message.sender_chat is not None or not user or not await has_config_rights(bot, group_id, user.id):
+        return   # Anti-Rogue: silencio total
+    lang = await group_lang(group_id)
+    cfg = await raid_cfg(group_id)
+    username = await _bot_username(bot)
+    penalty = _RAID_PENALTY_NAMES.get(cfg["penalty"], ("—", "—"))[0 if lang == "es" else 1]
+    text = gtx(lang, "raid_status", status=gtx(lang, "on" if cfg["enabled"] else "off", signed=False),
+               min=cfg["join_threshold"], max=cfg["critical_threshold"], window=cfg["window_seconds"], penalty=penalty)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text=gtx(lang, "btn_open_raid", signed=False), url=f"https://t.me/{username}?start=raidcfg_{group_id}")]])
+    sent = await bot.send_message(chat_id=group_id, text=text, reply_markup=kb, parse_mode="HTML")
+    _spawn(auto_delete_msg(sent, await service_ttl(group_id, 30)))
+
+
+@router.message(Command("lang", "language", "idioma"), F.chat.type.in_({"group", "supergroup"}))
+async def group_lang_command(message: Message, bot: Bot):
+    """Selector de idioma: admins con permisos → idioma del grupo; miembros → idioma personal (privado)."""
+    group_id = message.chat.id
+    with contextlib.suppress(Exception):
+        await message.delete()
+    lang = await group_lang(group_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=("✅ " if lang == "en" else "") + "🇺🇸 English", callback_data=f"glang_{group_id}_en"),
+        InlineKeyboardButton(text=("✅ " if lang == "es" else "") + "🇪🇸 Español", callback_data=f"glang_{group_id}_es"),
+    ]])
+    sent = await bot.send_message(chat_id=group_id, text=gtx(lang, "lang_pick"), reply_markup=kb, parse_mode="HTML")
+    _spawn(auto_delete_msg(sent, await service_ttl(group_id, 30)))
+
+
+@router.callback_query(F.data.startswith("glang_"))
+async def group_lang_callback(callback: CallbackQuery, bot: Bot):
+    parts = (callback.data or "").split("_")
+    try:
+        group_id, code = int(parts[1]), parts[2]
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if code not in ("en", "es"):
+        await callback.answer()
+        return
+    user = callback.from_user
+    if await has_config_rights(bot, group_id, user.id):
+        await set_service_lang(group_id, code)
+        invalidate_service_prefs(group_id)
+        _sync_miniapp(group_id, ["service_lang"], source="group_command")
+        await callback.answer(gtx(code, "lang_set_group", signed=False), show_alert=True)
+        with contextlib.suppress(Exception):
+            await callback.message.delete()
+        return
+    await set_user_lang(user.id, code, user.username, user.full_name)
+    with contextlib.suppress(Exception):
+        from handlers.user_private import forget_user_lang_cache
+        forget_user_lang_cache(user.id)
+    await callback.answer(gtx(code, "lang_set_user", signed=False), show_alert=True)
 
 
 # ==========================================
@@ -2976,38 +3280,20 @@ async def group_security_matrix(message: Message, bot: Bot):
                     await bot.unban_chat_member(chat_id=group_id, user_id=user_id, only_if_banned=True)
                     await registry_forget(group_id, user_id)
                     track_security(group_id, user_id, "antiflood", "kick", False)
-                    await _send_temp(
-                        bot, group_id,
-                        f"👢 <b>Aviso de Expulsión / Kick Notice:</b>\n"
-                        f"{user_mention} ha sido expulsado temporalmente por saturación de mensajes (Flood).\n"
-                        f"🇺🇸 <i>User kicked due to message flood.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>",
-                        ttl=20, reply_to=message
-                    )
+                    await _send_temp(bot, group_id, gtx(await group_lang(group_id), "flood_kick", mention=user_mention),
+                                     ttl=20, reply_to=message)
                 elif af_action == "mute":
                     await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=ChatPermissions(can_send_messages=False))
                     track_security(group_id, user_id, "antiflood", "mute", False)
-                    await _send_temp(
-                        bot, group_id,
-                        f"🔇 <b>Aviso de Silencio / Mute Notice:</b>\n"
-                        f"{user_mention} ha sido silenciado por saturación masiva de mensajes (Flood).\n"
-                        f"🇺🇸 <i>User muted due to message flood.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>",
-                        ttl=20, reply_to=message
-                    )
+                    await _send_temp(bot, group_id, gtx(await group_lang(group_id), "flood_mute", mention=user_mention),
+                                     ttl=20, reply_to=message)
                 elif af_action == "ban":
                     await ban_user(user_id)
                     await bot.ban_chat_member(chat_id=group_id, user_id=user_id)
                     await registry_forget(group_id, user_id)
                     track_security(group_id, user_id, "antiflood", "ban", False)
-                    await _send_temp(
-                        bot, group_id,
-                        f"🚫 <b>Bloqueo Definitivo / Ban Notice:</b>\n"
-                        f"{user_mention} ha sido baneado permanentemente por flood reiterado.\n"
-                        f"🇺🇸 <i>User permanently banned due to continuous flood.</i>\n\n"
-                        f"🛡️ <i>Cloud Media Management</i>",
-                        ttl=25, reply_to=message
-                    )
+                    await _send_temp(bot, group_id, gtx(await group_lang(group_id), "flood_ban", mention=user_mention),
+                                     ttl=25, reply_to=message)
             except Exception as e:
                 logger.error(f"Error aplicando sanción anti-flood ({group_id}/{user_id}): {e}")
             return

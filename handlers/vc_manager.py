@@ -3,6 +3,8 @@ vc_manager.py — The Bunker OS (Aiogram 3.x)
 
 Módulo de gestión y supervisión acústica de videochats (Voice Rooms).
 Integrado con Centinela MTProto, pasarela de Telegram Stars, telemetría CAMS y botoneras bilingües.
+v37 · Inglés por defecto: en grupos manda el idioma de servicio de la comunidad y en privado la preferencia del
+      usuario; los avisos usan el TTL de servicio; /start en grupos se ignora en silencio (Anti-Rogue).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -61,15 +63,48 @@ def is_super_admin(user_id: int) -> bool:
         return False
 
 
+_LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+
+
 def get_lang(lang_code: str) -> str:
-    """Detecta el idioma del operador para renderizar la respuesta correspondiente."""
-    return "es" if lang_code and lang_code.startswith("es") else "en"
+    """v37 · Inglés por defecto; el español por language_code solo con BUNKER_LANG_AUTODETECT=1."""
+    if _LANG_AUTODETECT and lang_code and str(lang_code).lower().startswith("es"):
+        return "es"
+    return "en"
+
+
+def _user_lang(user) -> str:
+    """Idioma personal del usuario (preferencia guardada en el bot) o inglés."""
+    if user is None:
+        return "en"
+    try:
+        from handlers.user_private import user_lang
+        lang = user_lang(user)
+    except Exception:
+        lang = get_lang(getattr(user, "language_code", None) or "")
+    return lang if lang in TEXTS else "en"
 
 
 def _msg_lang(message: Message) -> str:
-    """Idioma del autor tolerando mensajes publicados como canal (sin from_user)."""
-    user = getattr(message, "from_user", None)
-    return get_lang(getattr(user, "language_code", None) or "es")
+    """v37 · En grupos, el idioma de servicio de la comunidad; en privado, la preferencia del usuario."""
+    chat = getattr(message, "chat", None)
+    if chat is not None and getattr(chat, "type", None) in ("group", "supergroup"):
+        try:
+            from handlers.groups import group_lang_cached
+            lang = group_lang_cached(chat.id)
+        except Exception:
+            lang = "en"
+        return lang if lang in TEXTS else "en"
+    return _user_lang(getattr(message, "from_user", None))
+
+
+async def _service_ttl(chat_id: int, fallback: int) -> int:
+    """TTL de los avisos de servicio fijado por el administrador (fallback si groups no está disponible)."""
+    try:
+        from handlers.groups import service_ttl
+        return await service_ttl(chat_id, fallback)
+    except Exception:
+        return fallback
 
 
 def _sync_registered_owners(chat_ids: tuple) -> dict:
@@ -102,6 +137,11 @@ TEXTS = {
         "owner_only": "⛔ <b>Access Denied:</b> This protocol is strictly reserved for the Community Owner.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Action Denied:</b> Target user has Architect status, Admin privileges, or Whitelist immunity.\n\n🛡️️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, please start a private chat with me first to view this control console: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
+        "micvip_private_only": "⚠️ Run this command inside the community with an active video chat to unlock your microphone.\n\n🛡️ <i>Cloud Media Management</i>",
+        "anon_restricted": "⚠️ <b>Access restricted:</b> for perimeter security, executive commands do not accept group anonymous mode. Disable “Remain anonymous” to verify Owner status or manage The Bunker from DMs.\n\n🛡️ <i>Cloud Media Management</i>",
+        "sync_done": "🔄 <b>Synchronization completed:</b> voice room refreshed successfully.\n\n🛡️ <i>Cloud Media Management</i>",
+        "lang_toast": "Language: English 🇬🇧",
+        "none": "None",
         "unauthorized_start": "⚠️ @{name}, this command is strictly reserved for community administrators.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 Voice chat monitoring and AutoLower sentinel are now <b>activated</b> for your group.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_disabled": "🔇 Voice chat monitoring and AutoLower sentinel have been <b>deactivated</b>.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -173,6 +213,11 @@ TEXTS = {
         "owner_only": "⛔ <b>Acceso Denegado:</b> Este protocolo está reservado exclusivamente para el Dueño de la comunidad.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_protected": "🛡️ <b>Acción Denegada:</b> El usuario objetivo cuenta con inmunidad de Arquitecto, Rango de Administrador o Lista Blanca.\n\n🛡️ <i>Cloud Media Management</i>",
         "private_warning": "⚠️ @{name}, para ver esta información debes iniciar un chat privado conmigo primero: t.me/{bot_user}\n\n🛡️ <i>Cloud Media Management</i>",
+        "micvip_private_only": "⚠️ Este comando debe ejecutarse dentro de la comunidad con videochat activo para desbloquear tu micrófono.\n\n🛡️ <i>Cloud Media Management</i>",
+        "anon_restricted": "⚠️ <b>Acceso restringido:</b> por seguridad perimetral, los comandos ejecutivos no admiten modo anónimo de grupo. Desactiva «Permanecer anónimo» para validar tu rango de Creador o gestiona el Búnker desde tu chat privado.\n\n🛡️ <i>Cloud Media Management</i>",
+        "sync_done": "🔄 <b>Sincronización completada:</b> refresco de sala de voz ejecutado con éxito.\n\n🛡️ <i>Cloud Media Management</i>",
+        "lang_toast": "Idioma: Español 🇪🇸",
+        "none": "Ninguno",
         "unauthorized_start": "⚠️ @{name}, este comando está reservado exclusivamente para los administradores del grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_enabled": "🔊 El sistema de control acústico y radar centinela ha sido <b>activado</b> para tu grupo.\n\n🛡️ <i>Cloud Media Management</i>",
         "vc_disabled": "🔇 El sistema de monitoreo de voz y centinela ha sido <b>desactivado</b>.\n\n🛡️ <i>Cloud Media Management</i>",
@@ -376,10 +421,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
                 await message.delete()
             except Exception:
                 pass
-            lang = _msg_lang(message)
-            warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
-            _spawn(auto_delete_msg(warn, 8))
-            return False
+            return False   # v37 · Anti-Rogue: un canal ajeno no recibe respuesta
 
     # 2. Caso: Administrador Anónimo genérico de grupo (sender_chat == chat_id)
     # Por protocolo Telegram oculta la identidad real; se bloquea para evitar que admins secundarios usurpen al Dueño
@@ -388,18 +430,9 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
             await message.delete()
         except Exception:
             pass
-        lang = get_lang(message.from_user.language_code if message.from_user else "es")
-        anon_warn = (
-            "⚠️ <b>Acceso Restringido:</b> Por seguridad perimetral, los comandos ejecutivos no admiten "
-            "modo anónimo de grupo. Desactiva 'Permanecer anónimo' para validar tu rango de Creador "
-            "o gestiona el Búnker desde tu chat privado.\n\n🛡️ <i>Cloud Media Management</i>"
-        ) if lang == "es" else (
-            "⚠️ <b>Access Restricted:</b> For perimeter security, executive commands do not accept "
-            "group anonymous mode. Disable 'Remain anonymous' to verify Owner status or manage "
-            "The Bunker from DMs.\n\n🛡️ <i>Cloud Media Management</i>"
-        )
-        warn = await bot.send_message(chat_id=chat_id, text=anon_warn, parse_mode="HTML")
-        _spawn(auto_delete_msg(warn, 10))
+        lang = _msg_lang(message)
+        warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["anon_restricted"], parse_mode="HTML")
+        _spawn(auto_delete_msg(warn, await _service_ttl(chat_id, 10)))
         return False
 
     if not message.from_user:
@@ -423,14 +456,12 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
                 pass
             return True
         else:
-            # Bloqueo inmediato a cualquier administrador secundario o usuario regular
+            # Bloqueo inmediato a cualquier administrador secundario o usuario regular.
+            # v37 · Anti-Rogue: sin aviso público (solo se retira el comando).
             try:
                 await message.delete()
             except Exception:
                 pass
-            lang = _msg_lang(message)
-            warn = await bot.send_message(chat_id=chat_id, text=TEXTS[lang]["owner_only"], parse_mode="HTML")
-            _spawn(auto_delete_msg(warn, 8))
             return False
     except Exception:
         return False
@@ -439,7 +470,7 @@ async def verify_creator_and_approved(message: Message, bot: Bot) -> bool:
 async def send_private_response(message: Message, text: str, reply_markup=None):
     """Fuerza que las respuestas a comandos de administración lleguen al chat privado."""
     user_id = message.from_user.id if message.from_user else 0
-    lang = get_lang(message.from_user.language_code if message.from_user else "es")
+    lang = _msg_lang(message)
     t = TEXTS[lang]
 
     sent_dm = False
@@ -459,7 +490,7 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
                 text=t["private_warning"].format(name=name, bot_user=bot_info.username),
                 parse_mode="HTML"
             )
-            _spawn(auto_delete_msg(temp_msg, 12))
+            _spawn(auto_delete_msg(temp_msg, await _service_ttl(message.chat.id, 12)))
         except Exception:
             pass
 
@@ -490,8 +521,8 @@ async def cb_vcinfo_micvip(callback: CallbackQuery):
     """Abre en segundo plano la ventana emergente oficial con la información personalizada de MicVIP."""
     parts = callback.data.split("_")
     chat_id = int(parts[2]) if len(parts) > 2 and parts[2].lstrip("-").isdigit() else 0
-    lang = parts[3] if len(parts) > 3 and parts[3] in ["es", "en"] else "es"
-    t = TEXTS.get(lang, TEXTS["es"])
+    lang = parts[3] if len(parts) > 3 and parts[3] in ["es", "en"] else "en"
+    t = TEXTS.get(lang, TEXTS["en"])
 
     custom_cfg = await get_mic_vip_custom_config(chat_id) if chat_id else {"price": 50, "text": ""}
     price = custom_cfg.get("price") or 50
@@ -515,7 +546,7 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
         await callback.answer()
         return
 
-    new_lang = parts[3] if parts[3] in ["es", "en"] else "es"
+    new_lang = parts[3] if parts[3] in ["es", "en"] else "en"
     bot_info = await bot.get_me()
     bot_username = bot_info.username or "thebunkerapp_bot"
     custom_cfg = await get_mic_vip_custom_config(chat_id)
@@ -532,10 +563,10 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
         user_line = next((l for l in lines if "@" in l or "volumen" in l or "volume" in l), "")
         # El texto se reconstruye como HTML: el nombre recuperado del mensaje plano se escapa.
         user_ref = html.escape(user_line.split(",")[0].replace("🔇", "").strip() or "Miembro")
-        text_template = VC_MEMBER_JOIN_TEXTS.get(new_lang, VC_MEMBER_JOIN_TEXTS["es"])
+        text_template = VC_MEMBER_JOIN_TEXTS.get(new_lang, VC_MEMBER_JOIN_TEXTS.get("en") or VC_MEMBER_JOIN_TEXTS["es"])
         new_text = text_template.format(user_name=user_ref)
     else:
-        new_text = VC_START_TEXTS.get(new_lang, VC_START_TEXTS["es"])
+        new_text = VC_START_TEXTS.get(new_lang, VC_START_TEXTS.get("en") or VC_START_TEXTS["es"])
 
     new_kb = build_vc_moderation_keyboard(
         chat_id=chat_id,
@@ -548,7 +579,7 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
 
     try:
         await callback.message.edit_text(new_text, reply_markup=new_kb, parse_mode="HTML")
-        await callback.answer(f"Idioma: {'Español 🇪🇸' if new_lang == 'es' else 'English 🇬🇧'}")
+        await callback.answer(TEXTS[new_lang]["lang_toast"])
     except TelegramBadRequest:
         await callback.answer()
 
@@ -558,22 +589,12 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
 # ==========================================
 @router.message(Command("start"), F.chat.type.in_({"group", "supergroup"}))
 async def cmd_start_group(message: Message, bot: Bot):
+    """
+    v37 · /start en grupos se ignora en silencio (Anti-Rogue): antes publicaba un aviso a quien no era
+    administrador, justo el tipo de mensaje que alimenta los reportes masivos. Solo se retira el comando.
+    """
     try:
         await message.delete()
-    except Exception:
-        pass
-
-    try:
-        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
-        if member.status not in ["creator", "administrator"] and not is_super_admin(message.from_user.id):
-            lang = _msg_lang(message)
-            name = message.from_user.username or message.from_user.first_name
-            temp_msg = await bot.send_message(
-                chat_id=message.chat.id,
-                text=TEXTS[lang]["unauthorized_start"].format(name=name),
-                parse_mode="HTML"
-            )
-            _spawn(auto_delete_msg(temp_msg, 8))
     except Exception:
         pass
 
@@ -749,7 +770,7 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
     except ValueError:
         return
 
-    lang = get_lang(callback.from_user.language_code)
+    lang = _user_lang(callback.from_user)
     t = TEXTS[lang]
 
     if not await is_operator_admin(bot, chat_id, callback.from_user.id):
@@ -812,13 +833,7 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
                     join_attempts.pop(chat_id, None)
             except Exception as sync_err:
                 logger.debug(f"Aviso sincronizando radar en {chat_id}: {sync_err}")
-            synced = (
-                "🔄 <b>Sincronización Completada:</b> Refresco de sala de voz ejecutado con éxito.\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            ) if lang == "es" else (
-                "🔄 <b>Synchronization Completed:</b> Voice room refreshed successfully.\n\n"
-                "🛡️ <i>Cloud Media Management</i>"
-            )
+            synced = t["sync_done"]
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]
             ])
@@ -838,7 +853,7 @@ async def cmd_get_id(message: Message, bot: Bot):
         t["getid_text"].format(
             type=message.chat.type,
             chat_id=message.chat.id,
-            thread_id=message.message_thread_id or ('Ninguno' if lang == 'es' else 'None')
+            thread_id=message.message_thread_id or t["none"]
         )
     )
 
@@ -856,10 +871,7 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
         return
 
     if message.chat.type == "private":
-        await message.answer(
-            "⚠️ Este comando debe ejecutarse dentro de la comunidad con videochat activo para desbloquear tu micrófono.\n\n🛡️ <i>Cloud Media Management</i>",
-            parse_mode="HTML"
-        )
+        await message.answer(t["micvip_private_only"], parse_mode="HTML")
         return
 
     chat_id = message.chat.id
@@ -918,12 +930,12 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
     except Exception:
         pass
 
-    # Auto-borrado coherente con Sentinel Settings (micvip_autodel, 0 = permanente).
+    # Auto-borrado coherente con Sentinel Settings (micvip_autodel, 0 = permanente). v37 · Se elimina el borrado fijo
+    # de 45 s que anulaba el «0 = permanente»; sin valor propio se usa el TTL de servicio de la comunidad.
+    raw_autodel = svc_cfg.get("micvip_autodel")
     try:
-        autodel = int(svc_cfg.get("micvip_autodel", 30) or 0)
+        autodel = int(raw_autodel) if raw_autodel is not None else await _service_ttl(chat_id, 30)
     except (TypeError, ValueError):
-        autodel = 30
+        autodel = await _service_ttl(chat_id, 30)
     if sent_msg and autodel > 0:
         _spawn(auto_delete_msg(sent_msg, autodel))
-
-    _spawn(auto_delete_msg(sent_msg, 45))

@@ -5,6 +5,8 @@ Núcleo de arranque maestro, sincronización de enrutadores, pasarela Web API y
 administración concurrente de clones y Centinelas acústicos.
 Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints de Heatmaps, Reputación y Backups.
 Fase 5: Analítica en Caliente nivel Combot (GET /api/community/{chat_id}/analytics + /ws/radar/{chat_id} blindado).
+v37: Anti-Raid configurable (API /chat/{id}/raid + lista negra), idioma/TTL de servicio (/chat/{id}/service-prefs),
+     rehidratación del escudo al arrancar y avisos del núcleo en inglés por defecto.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from __future__ import annotations
@@ -225,6 +227,19 @@ except ImportError:  # pragma: no cover - el escudo es opcional en entornos mini
         def status_payload(chat_id: int) -> dict:
             return {}
 
+        # v37 · Mismas funciones que main.py usa del módulo real (arranque y API de Anti-Raid).
+        @staticmethod
+        async def load_active_shields() -> int:
+            return 0
+
+        @staticmethod
+        async def lift_shield(chat_id: int) -> None:
+            return None
+
+        @staticmethod
+        def is_isolated(chat_id: int) -> bool:
+            return False
+
     raid_shield = _RaidShieldFallback()
 try:
     from database.analytics import (  # type: ignore[import-not-found]
@@ -430,10 +445,27 @@ async def build_settings_snapshot(chat_id: int) -> Dict[str, Any]:
     GET /chat/{id}/configuration, la que consume ui.renderChatConfiguration) + interruptores del Centinela.
     """
     try:
-        return await get_settings_snapshot(int(chat_id))
+        snapshot = dict(await get_settings_snapshot(int(chat_id)) or {})
     except Exception as ex:
         logger.debug("Aviso leyendo el estado para el radar (%s): %s", chat_id, ex)
         return {}
+    # v37 · Anti-Raid e idioma/TTL viajan en cada 'settings_updated': la Mini App repinta sin pedirlos aparte.
+    snapshot.update(await _v37_settings_extras(int(chat_id)))
+    return snapshot
+
+
+async def _v37_settings_extras(chat_id: int) -> Dict[str, Any]:
+    """{raid_config, service_prefs} de la comunidad; vacío si el esquema v37 aún no está desplegado."""
+    extras: Dict[str, Any] = {}
+    try:
+        from database.database import get_raid_config, get_service_prefs
+    except ImportError:
+        return extras
+    with contextlib.suppress(Exception):
+        extras["raid_config"] = await get_raid_config(int(chat_id))
+    with contextlib.suppress(Exception):
+        extras["service_prefs"] = await get_service_prefs(int(chat_id))
+    return extras
 
 
 async def emit_settings_updated(chat_id: int, source: str, changed, extra: Optional[Dict[str, Any]] = None) -> None:
@@ -1236,6 +1268,8 @@ async def api_chat_dashboard(
         # v29 · Derechos por función (muro de pago): la Mini App bloquea paneles sin adivinar el nivel.
         data["entitlements"] = await _v29_entitlements(numeric_id, user_id)
         data["raid_shield"] = raid_shield.status_payload(numeric_id)
+        # v37 · Configuración Anti-Raid e idioma/TTL de servicio en la primera vista.
+        data.update(await _v37_settings_extras(numeric_id))
         # v17 · Supervisión del Bot Clon y del Centinela (estado en vivo; jamás credenciales).
         data.update(await build_assets_status(numeric_id))
         # v20 · Estado REAL del perímetro en la primera vista (sin bloquear el dashboard si algo tarda).
@@ -1811,6 +1845,274 @@ async def api_update_ban_appeals(
     _v23_emit(numeric_id, [f"appeal_{k}" for k in patch])
     logger.info(f"⚖️ [Apelaciones] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(sorted(patch))}")
     return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "ban_appeals": config}, headers=_NO_STORE)
+
+
+# ==========================================
+# 🚨🌐 v37 · ANTI-RAID CONFIGURABLE · LISTA NEGRA DE RAID · IDIOMA Y TTL DE SERVICIO
+# ==========================================
+# Paridad con la consola del bot (handlers/user_private.py, callbacks raidcfg_ / svcset_):
+#   • Disponible en TODOS los rangos (Free, PRO, ULTRA PRO): sin require_chat_feature.
+#   • Lectura y escritura: dueño legítimo / Arquitecto, delegado con can_manage_antispam, o administrador en vivo
+#     con «Añadir administradores» (can_promote_members). Un administrador común recibe 403.
+#   • Toda escritura invalida las cachés del bot (handlers.groups) y emite 'settings_updated' (raid_* / service_*).
+_V37_RIGHTS_TTL = 120.0
+_V37_RIGHTS_CACHE: Dict[tuple, tuple] = {}
+_V37_BL_ACTIONS = {"unban": "unbanned", "unmute": "unmuted", "keep": "kept"}
+
+
+async def _v37_can_promote(user_id: int, chat_id: int) -> bool:
+    """Creador o administrador con can_promote_members según Telegram en vivo (caché 2 min, fallo cerrado)."""
+    key = (int(chat_id), int(user_id))
+    now = time.monotonic()
+    cached = _V37_RIGHTS_CACHE.get(key)
+    if cached and now - cached[1] < _V37_RIGHTS_TTL:
+        return cached[0]
+    allowed = False
+    if master_bot_instance is not None:
+        try:
+            member = await asyncio.wait_for(master_bot_instance.get_chat_member(int(chat_id), int(user_id)), timeout=4)
+            status = str(getattr(member.status, "value", member.status) or "")
+            allowed = status == "creator" or (status == "administrator" and bool(getattr(member, "can_promote_members", False)))
+        except Exception as ex:
+            logger.debug(f"[Anti-Raid] Rango de {user_id} en {chat_id} no verificable: {ex}")
+            return False   # sin respuesta de Telegram no se cachea ni se concede
+    if len(_V37_RIGHTS_CACHE) > 20000:
+        _V37_RIGHTS_CACHE.clear()
+    _V37_RIGHTS_CACHE[key] = (allowed, now)
+    return allowed
+
+
+async def assert_config_admin(user_id: int, chat_id: int) -> None:
+    """401 sin sesión · 403 si no es dueño, delegado anti-spam ni administrador con «Añadir administradores»."""
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Autenticación requerida.")
+    if await is_legitimate_chat_owner(int(user_id), int(chat_id)):
+        return
+    try:
+        delegated = await has_delegate_permission(int(chat_id), int(user_id), "can_manage_antispam")
+    except Exception:
+        delegated = False
+    if delegated and await _live_member_status(int(user_id), int(chat_id)) not in ("left", "kicked", ""):
+        return
+    if await _v37_can_promote(int(user_id), int(chat_id)):
+        return
+    raise HTTPException(status_code=403, detail=_OWNER_DENIED_DETAIL)
+
+
+def _v37_invalidate_bot_caches(chat_id: int, raid: bool = False, service: bool = False) -> None:
+    """El bot relee la configuración en su siguiente evento (sin esperar al TTL de sus cachés)."""
+    for name, wanted in (("invalidate_raid_cfg", raid), ("invalidate_service_prefs", service)):
+        fn = getattr(groups, name, None)
+        if wanted and callable(fn):
+            with contextlib.suppress(Exception):
+                fn(int(chat_id))
+    if service:
+        cache = getattr(_assistant_runtime, "_SVC_PREFS_CACHE_A", None)
+        if isinstance(cache, dict):
+            cache.pop(int(chat_id), None)
+
+
+async def _v37_action_bot(chat_id: int):
+    """Bot clon en ejecución de la comunidad (si existe) o el maestro, para desbanear / desmutear."""
+    with contextlib.suppress(Exception):
+        clone = await _clone_bot_for_chat(int(chat_id))
+        if clone is not None:
+            return clone
+    return master_bot_instance
+
+
+@api_router.get("/chat/{chat_id}/raid")
+async def api_get_raid_config(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🚨 Configuración Anti-Raid + estado del escudo + resumen de la lista negra de raid."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import RAID_CHOICES, RAID_PENALTIES, RAID_RANGES, get_raid_config, raid_blacklist_list
+    config = await get_raid_config(numeric_id)
+    summary = (await raid_blacklist_list(numeric_id, status="penalized", limit=1)).get("summary") or {}
+    return JSONResponse(content={
+        "status": "success", "chat_id": str(numeric_id), "raid": config,
+        "shield": raid_shield.status_payload(numeric_id), "blacklist_summary": summary,
+        "options": {"penalties": list(RAID_PENALTIES), "ranges": {k: list(v) for k, v in RAID_RANGES.items()},
+                    "choices": {k: list(v) for k, v in RAID_CHOICES.items()}},
+    }, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/raid")
+async def api_update_raid_config(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{raid: {enabled?, join_threshold?, critical_threshold?, window_seconds?, request_threshold?, new_account_only?,
+    penalty?, penalty_minutes?, shield_minutes?}} → 422 "raid.campo: motivo". Todo o nada."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import BunkerValidationError, update_raid_config
+    patch = payload.get("raid", payload) if isinstance(payload, dict) else {}
+    try:
+        config = await update_raid_config(numeric_id, patch, updated_by=user_id)
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v37_invalidate_bot_caches(numeric_id, raid=True)
+    if "enabled" in patch and not config.get("enabled"):
+        with contextlib.suppress(Exception):
+            await raid_shield.lift_shield(numeric_id)   # apagar el Anti-Raid levanta el escudo en curso
+    _v23_emit(numeric_id, [f"raid_{k}" for k in patch])
+    logger.info(f"🚨 [Anti-Raid] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(sorted(patch))}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "raid": config,
+                                 "shield": raid_shield.status_payload(numeric_id)}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/raid/lift")
+async def api_lift_raid_shield(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """Levanta manualmente un escudo activo (falsa alarma). No cambia la configuración."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    await raid_shield.lift_shield(numeric_id)
+    _spawn(emit_radar_event(numeric_id, "raid_shield", {"active": False, "source": "manual_lift", "by": user_id}),
+           name=f"raid_lift:{numeric_id}")
+    logger.info(f"🚨 [Anti-Raid] Escudo de {numeric_id} levantado manualmente por {user_id}.")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id),
+                                 "shield": raid_shield.status_payload(numeric_id)}, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/raid/blacklist")
+async def api_get_raid_blacklist(
+    chat_id: str,
+    status: str = "penalized",
+    limit: int = 20,
+    offset: int = 0,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🗂️ Lista negra de raid paginada. status ∈ penalized | released | unbanned | unmuted | kept | all."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import raid_blacklist_list
+    listing = await raid_blacklist_list(numeric_id, status=status, limit=max(1, min(100, int(limit))),
+                                        offset=max(0, int(offset)))
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "filter": status, **listing},
+                        headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/raid/blacklist/{target_id}")
+async def api_resolve_raid_blacklist(
+    chat_id: str,
+    target_id: int,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{action: 'unban' | 'unmute' | 'keep'} → aplica la acción en Telegram y cierra el caso. 409 si ya estaba cerrado."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    action = str((payload or {}).get("action") or "").lower()
+    if action not in _V37_BL_ACTIONS:
+        raise HTTPException(status_code=422, detail="action: usa unban, unmute o keep.")
+    from database.database import raid_blacklist_get, raid_blacklist_resolve
+    record = await raid_blacklist_get(numeric_id, int(target_id))
+    if not record or record.get("status") != "penalized":
+        raise HTTPException(status_code=409, detail="Este caso ya no está pendiente en la lista negra de raid.")
+    if action != "keep":
+        bot = await _v37_action_bot(numeric_id)
+        if bot is None:
+            raise HTTPException(status_code=503, detail="El bot aún no está listo.")
+        try:
+            if action == "unban":
+                await bot.unban_chat_member(chat_id=numeric_id, user_id=int(target_id), only_if_banned=True)
+            else:
+                from aiogram.types import ChatPermissions
+                chat = await bot.get_chat(numeric_id)
+                perms = getattr(chat, "permissions", None) or ChatPermissions(
+                    can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True,
+                    can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
+                    can_send_other_messages=True, can_add_web_page_previews=True)
+                await bot.restrict_chat_member(chat_id=numeric_id, user_id=int(target_id), permissions=perms)
+        except Exception as ex:
+            raise HTTPException(status_code=502, detail=f"Telegram rechazó la acción: {str(ex)[:150]}")
+    resolved = await raid_blacklist_resolve(numeric_id, int(target_id), _V37_BL_ACTIONS[action], user_id)
+    if resolved is None:
+        raise HTTPException(status_code=409, detail="Este caso ya no está pendiente en la lista negra de raid.")
+    _v23_emit(numeric_id, ["raid_blacklist"])
+    logger.info(f"🗂️ [Anti-Raid] Caso {target_id} en {numeric_id} cerrado como '{_V37_BL_ACTIONS[action]}' por {user_id}.")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "record": resolved}, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/service-prefs")
+async def api_get_service_prefs(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🌐 Idioma de los mensajes de servicio del grupo (inglés por defecto) y TTL de auto-borrado."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import SERVICE_LANGS, SERVICE_TTL_CHOICES, get_service_prefs
+    prefs = await get_service_prefs(numeric_id)
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "service_prefs": prefs,
+                                 "options": {"langs": list(SERVICE_LANGS), "ttl_seconds": list(SERVICE_TTL_CHOICES)}},
+                        headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/service-prefs")
+async def api_update_service_prefs(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{lang?: 'en' | 'es', ttl_seconds?: 10 | 20 | 30 | 60 | 120 | 300} → 422 "campo: motivo"."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import (SERVICE_LANGS, SERVICE_TTL_CHOICES, get_service_prefs, set_service_lang,
+                                   set_service_ttl)
+    body = payload.get("service_prefs", payload) if isinstance(payload, dict) else {}
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(status_code=422, detail="service_prefs: se esperaba un objeto con al menos un campo.")
+    unknown = [k for k in body if k not in ("lang", "ttl_seconds")]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"service_prefs.{unknown[0]}: campo desconocido.")
+    # Todo o nada: se valida antes de escribir para no guardar el idioma si el TTL es inválido.
+    if "lang" in body and str(body["lang"]).strip().lower() not in SERVICE_LANGS:
+        raise HTTPException(status_code=422, detail=f"lang: usa {', '.join(SERVICE_LANGS)}.")
+    if "ttl_seconds" in body:
+        try:
+            ttl_ok = int(body["ttl_seconds"]) in SERVICE_TTL_CHOICES
+        except (TypeError, ValueError):
+            ttl_ok = False
+        if not ttl_ok:
+            raise HTTPException(status_code=422, detail=f"ttl_seconds: usa {', '.join(map(str, SERVICE_TTL_CHOICES))}.")
+    changed = []
+    try:
+        if "lang" in body:
+            await set_service_lang(numeric_id, str(body["lang"]))
+            changed.append("service_lang")
+        if "ttl_seconds" in body:
+            await set_service_ttl(numeric_id, int(body["ttl_seconds"]))
+            changed.append("service_ttl_seconds")
+    except (TypeError, ValueError) as err:
+        raise HTTPException(status_code=422, detail=str(err))
+    _v37_invalidate_bot_caches(numeric_id, service=True)
+    _v23_emit(numeric_id, changed)
+    logger.info(f"🌐 [Servicio] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(changed)}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id),
+                                 "service_prefs": await get_service_prefs(numeric_id)}, headers=_NO_STORE)
 
 
 @api_router.get("/user/language")
@@ -2810,6 +3112,10 @@ if build_channel_plans_router is not None:
         assert_owner=assert_chat_ownership,
         get_bot=lambda: master_bot_instance,
     ))
+    logger.info("💎 [Planes] Endpoints /api/channel/{id}/plan* montados en la API.")
+else:
+    # v37 · Sin el módulo, la Mini App muestra «endpoint no disponible» (api.isEndpointMissing): que se vea en el log.
+    logger.warning("⚠️ [Planes] channel_plans_api no disponible: /api/channel/{id}/plan* responderá 404.")
 
 
 app.include_router(api_router, prefix="/api")
@@ -2891,6 +3197,21 @@ async def stop_fastapi_server(timeout: float = 10.0):
 # ⚙️ GESTIÓN DE CALLBACKS Y CLONES DE AIOGRAM
 # ==========================================
 fallback_router = Router(name="callback_fallback")
+_V37_LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+
+
+async def _v37_user_lang(user) -> str:
+    """v37 · Idioma elegido por el usuario (users.lang) o inglés por defecto; autodetección solo con BUNKER_LANG_AUTODETECT=1."""
+    if user is None:
+        return "en"
+    with contextlib.suppress(Exception):
+        from database.database import get_user_lang
+        stored = await get_user_lang(int(user.id))
+        if stored in ("en", "es"):
+            return stored
+    code = str(getattr(user, "language_code", "") or "").lower()
+    return "es" if _V37_LANG_AUTODETECT and code.startswith("es") else "en"
+
 
 
 @fallback_router.callback_query()
@@ -2904,8 +3225,7 @@ async def cb_unhandled_fallback(callback: CallbackQuery, bot: Bot):
     user_id = callback.from_user.id if callback.from_user else 0
     logger.warning(f"🧭 [Callback sin handler] usuario={user_id} callback_data={callback.data!r}")
 
-    lang_code = callback.from_user.language_code if callback.from_user else ""
-    is_es = bool(lang_code and lang_code.startswith("es"))
+    is_es = await _v37_user_lang(callback.from_user) == "es"
     text = "⚠️ Este botón ya no está activo. Envía /start." if is_es else "⚠️ This button is no longer active. Send /start."
 
     try:
@@ -3088,7 +3408,7 @@ class OwnerCallbackGuardMiddleware(BaseMiddleware):
                     logger.warning(f"⚠️ [Aduana] Verificación de dueño fallida para '{raw[:48]}': {ex}")
                 if not allowed:
                     logger.warning(f"⛔ [Aduana] Botón de cobro '{raw[:48]}' bloqueado: user={user.id} no es dueño de {chat_id}.")
-                    is_es = bool(user.language_code and user.language_code.startswith("es"))
+                    is_es = await _v37_user_lang(user) == "es"
                     with contextlib.suppress(Exception):
                         await event.answer(
                             "⛔ Acceso Denegado: esta consola está reservada única y exclusivamente para el Dueño de la comunidad o canal."
@@ -3109,7 +3429,8 @@ class OwnerCallbackGuardMiddleware(BaseMiddleware):
 # algo cambió, con la lista exacta de campos. Cubre también los ajustes futuros y nunca emite en falso.
 _SETTINGS_SYNC_CHAT_RE = re.compile(r"^-\d{5,20}$")
 # Prefijos que ya emiten por su cuenta (evita eventos duplicados).
-_SETTINGS_SELF_EMITTING = ("mlk_", "sentinelcfg_", "alset_", "toglock_")
+_SETTINGS_SELF_EMITTING = ("mlk_", "sentinelcfg_", "alset_", "toglock_",
+                           "raidcfg_", "svcset_", "glang_")   # v37 · Anti-Raid e idioma/TTL emiten por su cuenta
 _SETTINGS_SYNC_MAX_CHATS = 2
 
 
@@ -3847,6 +4168,14 @@ async def main():
     init_db()
     _verify_sqlite_wal()
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
+    # 🚨 v37 · Rehidrata los escudos Anti-Raid vigentes antes de recibir updates: un redeploy en pleno raid no
+    #    puede dejar la comunidad sin aislamiento hasta la siguiente activación.
+    try:
+        restored = await raid_shield.load_active_shields()
+        if restored:
+            logger.warning(f"🚨 [Anti-Raid]: {restored} escudo(s) activo(s) restaurado(s) tras el arranque.")
+    except Exception as e:
+        logger.warning(f"⚠️ [Anti-Raid]: No se pudieron rehidratar los escudos: {e}")
     start_analytics_flusher()
     logger.info("📈 [Analítica en Caliente]: Búfer de volcado por lotes activo.")
     _spawn(assets_watch_loop(), name="assets_watch")
@@ -3892,6 +4221,10 @@ async def main():
         logger.warning(f"⚠️ [Identidad Maestro]: {e}")
 
     # Registro formal de middlewares
+    # v37 · AntiSpamMiddleware incluye el Anti-Rogue: en grupos, el creador y los administradores con «Añadir
+    #       administradores» invocan cualquier comando; el resto de administradores, solo los de moderación
+    #       (MODERATOR_COMMANDS); los miembros, solo los públicos. Lo demás (y todo en grupos no aprobados) se descarta
+    #       en silencio antes del handler. Vale para el maestro y para los clones (comparten este Dispatcher).
     dp.message.middleware(AntiSpamMiddleware())
     dp.message.outer_middleware.register(ActivityTrackerMiddleware())
     dp.my_chat_member.outer_middleware.register(ChatAutoDetectMiddleware())

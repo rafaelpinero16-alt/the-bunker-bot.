@@ -93,13 +93,18 @@ from database.database import (
     get_user_reputation,
     get_reputation_settings,
     set_reputation_setting,
+    # 🚨🌐 v37 · Anti-Raid configurable, lista negra de raid e idioma/TTL de servicio
+    get_raid_config, update_raid_config, raid_blacklist_list, raid_blacklist_resolve,
+    get_service_prefs, set_service_lang, set_service_ttl,
+    RAID_CHOICES, RAID_PENALTIES, SERVICE_TTL_CHOICES, BunkerValidationError,
 )
 
 from assistant import (
     register_or_update_sentinel, disconnect_sentinel,
     start_phone_auth, verify_phone_code, verify_2fa_password, cancel_phone_auth,
     engage_screen_shield, disengage_screen_shield,
-    engage_podcast_ducking, disengage_podcast_ducking
+    engage_podcast_ducking, disengage_podcast_ducking,
+    SENTINEL_SETUP_GUIDE,   # 📖 v37 · guía paso a paso de moderación de Video Chat
 )
 import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purga v2, canal de registro, IA, soporte IA)
 import micvip_audit    # 🎟️ v22 · auditoría MicVIP compartida con la Mini App
@@ -107,7 +112,9 @@ import vip_roles       # 👑 v23 · roles y etiquetas VIP automáticos (compart
 import link_quotas     # 🔗 v23 · cuota diaria de enlaces por administrador (compartido con la Mini App)
 from handlers.groups import (
     execute_raid_lockdown, lift_raid_lockdown,
-    clear_speaker_queue, get_speaker_queue
+    clear_speaker_queue, get_speaker_queue,
+    # 🚨🌐 v37 · permiso de configuración (admins con «Añadir administradores») y cachés del bot en grupos
+    has_config_rights, invalidate_raid_cfg, invalidate_service_prefs, raid_force_clear,
 )
 
 # 💳 Fase 3 · Exclusividad financiera: los planes se cobran SOLO en Telegram Stars (XTR).
@@ -2321,6 +2328,8 @@ DELEGATE_CALLBACK_RULES = (
     ("gset_antispam_", "can_manage_antispam"), ("astog_", "can_manage_antispam"), ("as_fwd_", "can_manage_antispam"),
     ("as_togdel_", "can_manage_antispam"), ("gset_antiflood_", "can_manage_antispam"), ("afset_", "can_manage_antispam"),
     ("afval_", "can_manage_antispam"), ("afact_", "can_manage_antispam"),
+    # 🚨🌐 v37 · Anti-Raid configurable e idioma/TTL de servicio
+    ("raidcfg_", "can_manage_antispam"), ("svcset_", "can_manage_antispam"),
     # 📢 Difusión de planes y anuncios (sin crear, pausar ni borrar planes: eso es del Dueño)
     ("chplans_menu_", "can_manage_broadcast"), ("chplans_view_", "can_manage_broadcast"),
     ("chplans_share_", "can_manage_broadcast"), ("chplans_postto_", "can_manage_broadcast"),
@@ -2368,8 +2377,20 @@ async def is_authorized_operator(bot: Bot, user_id: int, chat_id: int, perm: Opt
     return True
 
 
+# v37 · Paneles que también gestionan los administradores con «Añadir administradores» (todos los rangos).
+CONFIG_ADMIN_PREFIXES: tuple[str, ...] = ("raidcfg_", "svcset_")
+
+
 async def is_authorized_for_callback(bot: Bot, user_id: int, chat_id: int, callback_data: str) -> bool:
-    return await is_authorized_operator(bot, user_id, chat_id, required_delegate_permission(callback_data))
+    """
+    Dueño / Arquitecto / delegado (regla de DELEGATE_CALLBACK_RULES). v37: el Anti-Raid y el idioma/TTL de servicio
+    también los gestionan los administradores con «Añadir administradores» (can_promote_members).
+    """
+    if await is_authorized_operator(bot, user_id, chat_id, required_delegate_permission(callback_data)):
+        return True
+    if (callback_data or "").startswith(CONFIG_ADMIN_PREFIXES):
+        return await has_config_rights(bot, chat_id, user_id)
+    return False
 
 
 def _state_delegate_permission(state_dict: dict):
@@ -2716,6 +2737,11 @@ def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False, user
         # 🌐 v21 · Muestra el idioma al que se cambia (🇺🇸 EN por defecto, 🇪🇸 ES persistente)
         InlineKeyboardButton(text="🇪🇸 Español" if lang == "en" else "🇺🇸 English", callback_data=f"lang_{'es' if lang == 'en' else 'en'}")
     ])
+    # 💎🎙️ v37 · Qué incluye cada rango (antes de pagar) y guía paso a paso de moderación de Video Chat
+    rows.append([
+        InlineKeyboardButton(text="💎 " + ("Planes y Rangos" if lang == "es" else "Plans & Ranks"), callback_data=f"menu_plans_{lang}"),
+        InlineKeyboardButton(text="🎙️ " + ("Guía Video Chat" if lang == "es" else "Video Chat Guide"), callback_data=f"menu_vcguide_{lang}"),
+    ])
     rows.append([
         InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}"),
         InlineKeyboardButton(text=t["btn_info"], callback_data=f"menu_info_{lang}")
@@ -2780,6 +2806,8 @@ def get_info_keyboard(lang: str):
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=t["btn_how_works"], callback_data=f"menu_infohow_{lang}")],
+        [InlineKeyboardButton(text="💎 " + tr(lang, "Planes y Rangos", "Plans & Ranks"), callback_data=f"menu_plans_{lang}"),
+         InlineKeyboardButton(text="🎙️ " + tr(lang, "Guía Video Chat", "Video Chat Guide"), callback_data=f"menu_vcguide_{lang}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
     ])
 
@@ -2900,6 +2928,12 @@ def get_group_panel_keyboard(group_id: int, lang: str):
         [
             InlineKeyboardButton(text="🛰️ " + ("Perímetro" if lang == "es" else "Perimeter"), callback_data=f"perim_view_{group_id}_{lang}"),
             InlineKeyboardButton(text="🧾 " + ("Canal de Registro" if lang == "es" else "Log Channel"), callback_data=f"logch_menu_{group_id}_{lang}"),
+        ],
+        # 🚨🌐 v37 · Anti-Raid configurable (todos los rangos) e idioma / auto-borrado de los avisos del grupo
+        [
+            InlineKeyboardButton(text="🚨 Anti-Raid", callback_data=f"raidcfg_m_{group_id}_{lang}"),
+            InlineKeyboardButton(text="🌐 " + ("Idioma y TTL" if lang == "es" else "Language & TTL"),
+                                 callback_data=f"svcset_m_{group_id}_{lang}"),
         ],
         # 🎟️ v22 · Registro auditable de compras MicVIP (compra → pase → Centinela)
         [InlineKeyboardButton(text="🎟️ " + ("Auditoría MicVIP" if lang == "es" else "MicVIP Audit"), callback_data=f"mvaudit_{group_id}_all_1_{lang}")],
@@ -3960,6 +3994,17 @@ def _not_payments_route(message: Message) -> bool:
 
 
 @router.message(CommandStart(), F.chat.type == "private", _not_payments_route)
+async def _is_first_contact(user_id: int) -> bool:
+    """v37 · True si el usuario aún no existe en `users` (primera interacción con el bot)."""
+    def _sync() -> bool:
+        with get_db_connection() as conn:
+            return conn.execute("SELECT 1 FROM users WHERE user_id = ? LIMIT 1", (int(user_id),)).fetchone() is None
+    try:
+        return await asyncio.to_thread(_sync)
+    except Exception:
+        return False
+
+
 async def cmd_start(message: Message, bot: Bot, command: CommandObject):
     try:
         try:
@@ -3984,6 +4029,7 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
         t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
         
         # Registro del usuario y despacho de la bienvenida / deep-links.
+        first_contact = await _is_first_contact(message.from_user.id)   # 💎 v37 · guía de rangos en el primer /start
 
         try:
             await get_or_create_user(message.from_user.id, message.from_user.username or "Sin username", message.from_user.full_name)
@@ -4025,6 +4071,19 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                 await send_clone_panel(bot, message.from_user, clone_chat_id, lang)
                 return
 
+        # 🚨 v37 · Deep link de /antiraid en el grupo: abre directamente el panel Anti-Raid.
+        if command.args and command.args.startswith("raidcfg_"):
+            try:
+                raid_gid = int(command.args.split("_", 1)[1])
+            except (ValueError, IndexError):
+                raid_gid = 0
+            if raid_gid and await is_authorized_for_callback(bot, message.from_user.id, raid_gid, "raidcfg_m"):
+                raid_text, raid_kb = await render_raid_panel(raid_gid, lang)
+                await message.answer(raid_text, reply_markup=raid_kb, parse_mode="HTML")
+            else:
+                await message.answer(t["owner_only_alert"])
+            return
+
         if command.args and command.args.startswith("gset_"):
             try:
                 group_id = int(command.args.split("_")[1])
@@ -4049,6 +4108,10 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                 logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
 
         await send_official_welcome(bot, message.chat.id, message.from_user, bot_username)
+        if first_contact:
+            # 💎 v37 · Primera interacción: el usuario ve qué incluye cada rango ANTES de pagar.
+            await message.answer(PLANS_GUIDE.get(lang, PLANS_GUIDE["en"]), reply_markup=plans_keyboard(lang),
+                                 parse_mode="HTML", disable_web_page_preview=True)
         logging.info(f"✅ [cmd_start ÉXITO] Matriz desplegada en @{bot_username} para {message.from_user.id}.")
     except Exception as e:
         logging.error(f"❌ [cmd_start ERROR CRÍTICO]: {e}", exc_info=True)
@@ -4067,16 +4130,16 @@ async def cmd_login(message: Message, bot: Bot):
     login_url = f"{WEBAPP_URL.rstrip('/')}/?token={token}"
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌐 Abrir Dashboard Web / Open Dashboard", url=login_url)]
+        [InlineKeyboardButton(text=tr(lang, "🌐 Abrir Dashboard Web", "🌐 Open Web Dashboard"), url=login_url)]
     ])
-    
-    text = (
-        "🔐 <b>Acceso Web Autorizado / Web Access Authorized</b>\n\n"
-        "Pulsa el botón inferior para abrir tu consola de administración en el navegador. "
-        "Este enlace es único y expirará en <b>5 minutos</b> por seguridad.\n\n"
-        "🇺🇸 <i>Tap the button below to open your web console. This unique link expires in <b>5 minutes</b>.</i>\n\n"
-        "🛡️ <i>Cloud Media Management</i>"
-    )
+
+    text = tr(
+        lang,
+        "🔐 <b>Acceso web autorizado</b>\n\nPulsa el botón inferior para abrir tu consola de administración en el "
+        "navegador. Este enlace es único y expirará en <b>5 minutos</b> por seguridad.",
+        "🔐 <b>Web access authorized</b>\n\nTap the button below to open your admin console in the browser. "
+        "This link is unique and expires in <b>5 minutes</b> for security.",
+    ) + PERIMETER_SIGNATURE
     
     resp = await message.answer(text, reply_markup=kb, parse_mode="HTML")
     fire_and_forget_auto_delete([message, resp], delay=120)
@@ -6546,6 +6609,19 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
             else:
                 rank_str = (tr(lang, "Comandante ULTRA 💎", "ULTRA Commander 💎") if tier_db == "ultra_pro" else (tr(lang, "Comandante PRO ⭐", "PRO Commander ⭐") if tier_db == "pro" else tr(lang, "Comandante (Free)", "Commander (Free)")))
             text, keyboard = t["id_status"].format(id=user.id, username=user.username or "N/A", rank=rank_str), get_simple_back_keyboard(lang)
+
+        elif target == "plans":
+            # 💎 v37 · Qué incluye cada rango (Free / PRO / ULTRA PRO)
+            text, keyboard = PLANS_GUIDE.get(lang, PLANS_GUIDE["en"]), plans_keyboard(lang)
+
+        elif target == "vcguide":
+            # 🎙️ v37 · Clon → Centinela → permisos de admin → /reload desde la cuenta Centinela
+            text = SENTINEL_SETUP_GUIDE.get(lang, SENTINEL_SETUP_GUIDE["en"])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💎 " + tr(lang, "Planes y Rangos", "Plans & Ranks"), callback_data=f"menu_plans_{lang}")],
+                [InlineKeyboardButton(text=t["btn_settings"], callback_data=f"menu_settings_{lang}")],
+                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")],
+            ])
 
         elif target in ["mod", "eco"]:
             group_id = int(data[2])
@@ -10030,3 +10106,337 @@ async def _handle_appeal_price_input(message: Message, bot: Bot, st: dict, text_
     await message.answer(tr(lang, f"✅ Precio de apelación: <b>{cfg['price_stars']} ⭐</b>. Aplica a los próximos baneos.",
                             f"✅ Appeal price: <b>{cfg['price_stars']} ⭐</b>. Applies to future bans.")
                          + PERIMETER_SIGNATURE, reply_markup=back_kb, parse_mode="HTML")
+
+
+# ==========================================================================================
+# 💎 v37 · GUÍA DE RANGOS · 🚨 PANEL ANTI-RAID + LISTA NEGRA · 🌐 IDIOMA Y TTL DE SERVICIO
+# ==========================================================================================
+PLANS_GUIDE: dict[str, str] = {
+    "en": (
+        "💎 <b>The Bunker OS — What each rank includes</b>\n\n"
+        "🆓 <b>FREE</b> (forever)\n"
+        "• Captcha checkpoint (button or code) with kick/mute punishment\n"
+        "• Anti-Spam (Telegram/web links, forwards, quotes) and Anti-Flood\n"
+        "• 30-vector media lock matrix, blacklist / whitelist, warn ladder\n"
+        "• <b>Configurable Anti-Raid</b>: thresholds, penalties and raid blacklist\n"
+        "• Moderation console (ban, kick, mute, unmute) from private chat\n"
+        "• 3 bot command uses per day · 1 free Ghost Purge per day\n"
+        "• 1 tips target channel · 1 channel membership plan\n\n"
+        f"⭐ <b>PRO</b> — {PRICE_PRO_STARS} Stars / 30 days\n"
+        "• Everything in Free, <b>unlimited commands</b>\n"
+        "• Automatic service-message purge and main-chat cleanup\n"
+        "• Custom captcha, warning and tips texts + custom thank-you message\n"
+        "• Recurring gamification announcement (every ≥ 3 h)\n"
+        "• MicVIP audit, paid ban appeals and admin link quotas\n"
+        "• 3 tips channels · 3 membership plans\n\n"
+        f"💎 <b>ULTRA PRO</b> — {PRICE_ULTRAPRO_STARS} Stars / 30 days\n"
+        "• Everything in PRO\n"
+        "• <b>Bot Clone</b> with your own @BotFather token (100% of Stars to you)\n"
+        "• <b>Dedicated Voice Sentinel</b>: AutoLower radar (1–10%), MicVIP 100%, VC scheduler\n"
+        "• Panic button, screen-share shield, podcast ducking, paid speakers queue\n"
+        "• AI Sentinel (Mistral guardian + copilot), XP levels and leaderboards\n"
+        "• VIP roles & native tags, media in tips/warnings/announcements\n"
+        "• Signed .bunker backups · 10 tips channels · 10 membership plans\n\n"
+        "⭐ Paid 100% in-app with Telegram Stars; activation is instant and remaining days carry over.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+    "es": (
+        "💎 <b>The Bunker OS — Qué incluye cada rango</b>\n\n"
+        "🆓 <b>FREE</b> (para siempre)\n"
+        "• Aduana Captcha (botón o código) con castigo de expulsión/silencio\n"
+        "• Anti-Spam (enlaces de Telegram/web, reenvíos, citas) y Anti-Flood\n"
+        "• Matriz de 30 bloqueos multimedia, lista negra / blanca y escalera de advertencias\n"
+        "• <b>Anti-Raid configurable</b>: umbrales, penalizaciones y lista negra de raid\n"
+        "• Consola de moderación (ban, kick, mute, unmute) desde el privado\n"
+        "• 3 usos diarios de comandos · 1 Ghost Purge gratis al día\n"
+        "• 1 canal destino de propinas · 1 plan de membresía de canal\n\n"
+        f"⭐ <b>PRO</b> — {PRICE_PRO_STARS} Stars / 30 días\n"
+        "• Todo lo de Free, <b>comandos ilimitados</b>\n"
+        "• Purga automática de mensajes de servicio y limpieza del chat\n"
+        "• Textos personalizados de captcha, advertencias y propinas + agradecimiento propio\n"
+        "• Anuncio recurrente de gamificación (cada ≥ 3 h)\n"
+        "• Auditoría MicVIP, apelaciones de baneo pagadas y cuotas de enlaces de admins\n"
+        "• 3 canales de propinas · 3 planes de membresía\n\n"
+        f"💎 <b>ULTRA PRO</b> — {PRICE_ULTRAPRO_STARS} Stars / 30 días\n"
+        "• Todo lo de PRO\n"
+        "• <b>Bot Clon</b> con tu propio token de @BotFather (el 100% de las Stars para ti)\n"
+        "• <b>Centinela de voz dedicado</b>: radar AutoLower (1–10 %), MicVIP al 100 %, programador de VC\n"
+        "• Botón de pánico, escudo antinota, modo podcast y cola de speakers pagada\n"
+        "• Centinela IA (guardián + copiloto Mistral), niveles XP y rankings\n"
+        "• Roles VIP con etiqueta nativa, multimedia en propinas/advertencias/anuncios\n"
+        "• Respaldos firmados .bunker · 10 canales de propinas · 10 planes de membresía\n\n"
+        "⭐ Pago 100 % in-app con Telegram Stars; activación inmediata y los días restantes se conservan.\n\n"
+        "🛡️ <i>Cloud Media Management</i>"
+    ),
+}
+
+
+def plans_keyboard(lang: str) -> InlineKeyboardMarkup:
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎙️ " + tr(lang, "Guía de moderación de Video Chat", "Video Chat moderation guide"),
+                              callback_data=f"menu_vcguide_{lang}")],
+        [InlineKeyboardButton(text=t["btn_settings"], callback_data=f"menu_settings_{lang}"),
+         InlineKeyboardButton(text=t["btn_chsettings"], callback_data=f"menu_chsettings_{lang}")],
+        [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")],
+    ])
+
+
+# 🚨 v37 · PANEL ANTI-RAID + LISTA NEGRA DE RAID
+_RAID_CODE_FIELDS: dict[str, str] = {
+    "jt": "join_threshold", "ct": "critical_threshold", "ws": "window_seconds",
+    "rt": "request_threshold", "pm": "penalty_minutes", "sm": "shield_minutes",
+}
+_RAID_TOGGLE_FIELDS: dict[str, str] = {"en": "enabled", "na": "new_account_only"}
+_RAID_PENALTY_LABELS: dict[str, tuple[str, str]] = {
+    "captcha": ("🧩 Captcha estricto", "🧩 Strict captcha"), "mute": ("🔇 Silenciar", "🔇 Mute"),
+    "kick": ("👢 Expulsar", "👢 Kick"), "ban": ("🚫 Banear", "🚫 Ban"),
+}
+RAID_BL_PER_PAGE = 5
+
+
+def _fmt_minutes(minutes: int, lang: str) -> str:
+    minutes = int(minutes)
+    if minutes >= 1440 and minutes % 1440 == 0:
+        return f"{minutes // 1440} {tr(lang, 'd', 'd')}"
+    if minutes >= 60 and minutes % 60 == 0:
+        return f"{minutes // 60} h"
+    return f"{minutes} min"
+
+
+def _raid_main_view(group_id: int, cfg: dict, summary: dict, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    g = group_id
+    on = cfg["enabled"] == 1
+    penalty = _RAID_PENALTY_LABELS.get(cfg["penalty"], ("—", "—"))[0 if lang == "es" else 1]
+    pending = int(summary.get("penalized", 0))
+    text = (
+        f"🚨 <b>{tr(lang, 'Anti-Raid configurable', 'Configurable Anti-Raid')}</b>\n\n"
+        f"• {tr(lang, 'Estado', 'Status')}: <b>{tr(lang, '🟢 Activado', '🟢 Enabled') if on else tr(lang, '🔴 Desactivado', '🔴 Disabled')}</b>\n"
+        f"• 📉 {tr(lang, 'Umbral mínimo (dispara el escudo)', 'Minimum threshold (triggers the shield)')}: "
+        f"<b>{cfg['join_threshold']}</b> {tr(lang, 'ingresos en', 'joins in')} <b>{cfg['window_seconds']} s</b>\n"
+        f"• 📈 {tr(lang, 'Umbral máximo (nivel crítico)', 'Maximum threshold (critical level)')}: <b>{cfg['critical_threshold']}</b>\n"
+        f"• 📨 {tr(lang, 'Solicitudes / aprobaciones manuales', 'Join requests / manual approvals')}: <b>{cfg['request_threshold']}</b>\n"
+        f"• ⚖️ {tr(lang, 'Penalización', 'Penalty')}: <b>{penalty}</b> · ⏳ <b>{_fmt_minutes(cfg['penalty_minutes'], lang)}</b>\n"
+        f"• 🛡️ {tr(lang, 'Duración del escudo', 'Shield duration')}: <b>{_fmt_minutes(cfg['shield_minutes'], lang)}</b>\n"
+        f"• 🆕 {tr(lang, 'Solo cuentas nuevas', 'New accounts only')}: <b>{'✅' if cfg['new_account_only'] else '❌'}</b>\n\n"
+        f"🗂️ {tr(lang, 'En lista negra de raid', 'In raid blacklist')}: <b>{pending}</b>\n\n"
+        + tr(lang,
+             "<i>Disponible en todos los rangos. Lo gestionan el Dueño y los administradores con permiso de «Añadir administradores».</i>",
+             "<i>Available on every rank. Managed by the Owner and admins with the “Add new admins” right.</i>")
+        + PERIMETER_SIGNATURE
+    )
+    rows = [
+        [InlineKeyboardButton(text=tr(lang, "🟢 Activado", "🟢 Enabled") if on else tr(lang, "🔴 Desactivado", "🔴 Disabled"),
+                              callback_data=f"raidcfg_t_{g}_en_{lang}")],
+        [InlineKeyboardButton(text=f"📉 Min: {cfg['join_threshold']}", callback_data=f"raidcfg_c_{g}_jt_{lang}"),
+         InlineKeyboardButton(text=f"📈 Max: {cfg['critical_threshold']}", callback_data=f"raidcfg_c_{g}_ct_{lang}")],
+        [InlineKeyboardButton(text=f"⏱️ {cfg['window_seconds']} s", callback_data=f"raidcfg_c_{g}_ws_{lang}"),
+         InlineKeyboardButton(text=f"📨 {cfg['request_threshold']}", callback_data=f"raidcfg_c_{g}_rt_{lang}")],
+        [InlineKeyboardButton(text=f"⚖️ {penalty}", callback_data=f"raidcfg_p_{g}_{lang}"),
+         InlineKeyboardButton(text=f"⏳ {_fmt_minutes(cfg['penalty_minutes'], lang)}", callback_data=f"raidcfg_c_{g}_pm_{lang}")],
+        [InlineKeyboardButton(text=f"🛡️ {_fmt_minutes(cfg['shield_minutes'], lang)}", callback_data=f"raidcfg_c_{g}_sm_{lang}"),
+         InlineKeyboardButton(text=f"🆕 {'✅' if cfg['new_account_only'] else '❌'}", callback_data=f"raidcfg_t_{g}_na_{lang}")],
+        [InlineKeyboardButton(text=f"🗂️ {tr(lang, 'Lista negra de raid', 'Raid blacklist')} ({pending})",
+                              callback_data=f"raidcfg_bl_{g}_1_{lang}")],
+        [InlineKeyboardButton(text="⬅️ " + tr(lang, "Panel del grupo", "Group panel"), callback_data=f"gpanel_{g}_{lang}")],
+    ]
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def render_raid_panel(group_id: int, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    cfg = await get_raid_config(group_id)
+    summary = (await raid_blacklist_list(group_id, status="penalized", limit=1)).get("summary") or {}
+    return _raid_main_view(group_id, cfg, summary, lang)
+
+
+async def _raid_blacklist_view(group_id: int, page: int, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    listing = await raid_blacklist_list(group_id, status="penalized", limit=RAID_BL_PER_PAGE,
+                                        offset=(page - 1) * RAID_BL_PER_PAGE)
+    total = int(listing.get("total") or 0)
+    pages = max(1, -(-total // RAID_BL_PER_PAGE))
+    lines, rows = [], []
+    for rec in listing.get("records") or []:
+        uid = int(rec["user_id"])
+        who = html.escape(rec.get("full_name") or (f"@{rec['username']}" if rec.get("username") else str(uid)))
+        penalty = _RAID_PENALTY_LABELS.get(rec.get("penalty"), ("—", "—"))[0 if lang == "es" else 1]
+        caught = time.strftime("%d/%m %H:%M", time.gmtime(int(rec.get("caught_at") or 0)))
+        until = (" · ⏳ " + time.strftime("%d/%m %H:%M", time.gmtime(int(rec["penalty_until"])))) if rec.get("penalty_until") else ""
+        lines.append(f"• <b>{who}</b> <code>{uid}</code>\n   {penalty} · {caught} UTC{until}")
+        rows.append([
+            InlineKeyboardButton(text=f"🔓 {tr(lang, 'Desbanear', 'Unban')}", callback_data=f"raidcfg_ub_{group_id}_{uid}_{page}_{lang}"),
+            InlineKeyboardButton(text=f"🔊 {tr(lang, 'Desmutear', 'Unmute')}", callback_data=f"raidcfg_um_{group_id}_{uid}_{page}_{lang}"),
+            InlineKeyboardButton(text=f"⛓️ {tr(lang, 'Mantener', 'Keep')}", callback_data=f"raidcfg_kp_{group_id}_{uid}_{page}_{lang}"),
+        ])
+    text = (f"🗂️ <b>{tr(lang, 'Lista negra de raid', 'Raid blacklist')}</b> · {page}/{pages}\n\n"
+            + ("\n".join(lines) if lines else tr(lang, "<i>No hay cuentas penalizadas pendientes.</i>",
+                                                   "<i>No pending penalized accounts.</i>"))
+            + "\n\n" + tr(lang, "<i>🔓 levanta el baneo · 🔊 devuelve los permisos del grupo · ⛓️ deja la penalización y archiva el caso.</i>",
+                          "<i>🔓 lifts the ban · 🔊 restores group permissions · ⛓️ keeps the penalty and archives the case.</i>")
+            + PERIMETER_SIGNATURE)
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"raidcfg_bl_{group_id}_{page - 1}_{lang}"))
+    nav.append(InlineKeyboardButton(text="🔄", callback_data=f"raidcfg_bl_{group_id}_{page}_{lang}"))
+    if page < pages:
+        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"raidcfg_bl_{group_id}_{page + 1}_{lang}"))
+    rows.append(nav)
+    rows.append([InlineKeyboardButton(text="⬅️ Anti-Raid", callback_data=f"raidcfg_m_{group_id}_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _raid_release_member(bot: Bot, group_id: int, user_id: int, action: str) -> tuple[bool, str]:
+    """action: 'ub' (desbanear) | 'um' (desmutear). Devuelve (ok, detalle)."""
+    try:
+        if action == "ub":
+            await bot.unban_chat_member(chat_id=group_id, user_id=user_id, only_if_banned=True)
+        else:
+            chat = await bot.get_chat(group_id)
+            perms = getattr(chat, "permissions", None) or ChatPermissions(
+                can_send_messages=True, can_send_audios=True, can_send_documents=True, can_send_photos=True,
+                can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True)
+            await bot.restrict_chat_member(chat_id=group_id, user_id=user_id, permissions=perms)
+        return True, ""
+    except (TelegramBadRequest, TelegramForbiddenError) as ex:
+        return False, str(ex)[:150]
+
+
+@router.callback_query(F.data.startswith("raidcfg_"))
+async def cb_raid_config(callback: CallbackQuery, bot: Bot):
+    """raidcfg_{sub}_{group_id}_…_{lang} — Dueño, Arquitecto, delegado (anti-spam) o admin con can_promote_members."""
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        sub, group_id = data[1], int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    uid = callback.from_user.id
+    clear_user_states(bot.id, uid)
+
+    async def save(patch: dict) -> bool:
+        try:
+            await update_raid_config(group_id, patch, updated_by=uid)
+        except BunkerValidationError as err:
+            await callback.answer("⚠️ " + "; ".join(err.errors.values())[:180], show_alert=True)
+            return False
+        invalidate_raid_cfg(group_id)
+        if "enabled" in patch and not patch["enabled"]:
+            await raid_force_clear(group_id)   # apagar el Anti-Raid levanta cualquier escudo en curso
+        emit_settings_updated_bg(group_id, "bot_console", [f"raid_{k}" for k in patch])
+        return True
+
+    if sub == "t" and len(data) > 4 and data[3] in _RAID_TOGGLE_FIELDS:
+        field = _RAID_TOGGLE_FIELDS[data[3]]
+        cfg = await get_raid_config(group_id)
+        if not await save({field: not cfg[field]}):
+            return
+        await callback.answer("✅")
+    elif sub == "c" and len(data) > 4 and data[3] in _RAID_CODE_FIELDS:
+        field = _RAID_CODE_FIELDS[data[3]]
+        choices = RAID_CHOICES[field]
+        current = (await get_raid_config(group_id))[field]
+        nxt = next((v for v in choices if v > current), choices[0])
+        if not await save({field: nxt}):
+            return
+        await callback.answer("✅")
+    elif sub == "p":
+        current = (await get_raid_config(group_id))["penalty"]
+        nxt = RAID_PENALTIES[(RAID_PENALTIES.index(current) + 1) % len(RAID_PENALTIES)] if current in RAID_PENALTIES else RAID_PENALTIES[0]
+        if not await save({"penalty": nxt}):
+            return
+        await callback.answer("✅")
+    elif sub == "bl":
+        try:
+            page = max(1, int(data[3]))
+        except (IndexError, ValueError):
+            page = 1
+        text, kb = await _raid_blacklist_view(group_id, page, lang)
+        await safe_edit_text(callback, text, reply_markup=kb)
+        await callback.answer()
+        return
+    elif sub in ("ub", "um", "kp"):
+        try:
+            target, page = int(data[3]), max(1, int(data[4]))
+        except (IndexError, ValueError):
+            await callback.answer()
+            return
+        if sub == "kp":
+            ok, detail, status = True, "", "kept"
+        else:
+            ok, detail = await _raid_release_member(bot, group_id, target, sub)
+            status = "unbanned" if sub == "ub" else "unmuted"
+        if ok:
+            await raid_blacklist_resolve(group_id, target, status, uid)
+            await callback.answer({"kept": "⛓️", "unbanned": "🔓", "unmuted": "🔊"}[status] + " ✅")
+        else:
+            await callback.answer("⚠️ " + (detail or tr(lang, "Telegram rechazó la acción.", "Telegram rejected the action.")), show_alert=True)
+        text, kb = await _raid_blacklist_view(group_id, page, lang)
+        await safe_edit_text(callback, text, reply_markup=kb)
+        return
+    else:
+        await callback.answer()
+    text, kb = await render_raid_panel(group_id, lang)
+    await safe_edit_text(callback, text, reply_markup=kb)
+
+
+# 🌐 v37 · IDIOMA (inglés por defecto) Y TTL DE LOS MENSAJES DE SERVICIO DEL GRUPO
+def _service_view(group_id: int, prefs: dict, lang: str) -> tuple[str, InlineKeyboardMarkup]:
+    g, cur_lang, cur_ttl = group_id, prefs.get("lang", "en"), int(prefs.get("ttl", 20))
+    text = (
+        f"🌐 <b>{tr(lang, 'Idioma y auto-borrado de avisos', 'Language & notice auto-delete')}</b>\n\n"
+        f"• {tr(lang, 'Idioma de servicio del grupo', 'Group service language')}: "
+        f"<b>{'🇺🇸 English' if cur_lang == 'en' else '🇪🇸 Español'}</b>\n"
+        f"• {tr(lang, 'Los avisos se borran a los', 'Notices auto-delete after')}: <b>{cur_ttl} s</b>\n\n"
+        + tr(lang,
+             "<i>Afecta a bienvenidas, captcha, advertencias, sanciones, flood, niveles y avisos del Video Chat. "
+             "Cada miembro puede elegir su idioma personal con /lang.</i>",
+             "<i>Applies to welcomes, captcha, warnings, sanctions, flood, levels and Video Chat notices. "
+             "Each member can pick a personal language with /lang.</i>")
+        + PERIMETER_SIGNATURE
+    )
+    ttl_rows, row = [], []
+    for seconds in SERVICE_TTL_CHOICES:
+        row.append(InlineKeyboardButton(text=("✅ " if seconds == cur_ttl else "") + (f"{seconds // 60} min" if seconds >= 60 else f"{seconds} s"),
+                                        callback_data=f"svcset_t_{g}_{seconds}_{lang}"))
+        if len(row) == 3:
+            ttl_rows.append(row)
+            row = []
+    if row:
+        ttl_rows.append(row)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=("✅ " if cur_lang == "en" else "") + "🇺🇸 English", callback_data=f"svcset_l_{g}_en_{lang}"),
+         InlineKeyboardButton(text=("✅ " if cur_lang == "es" else "") + "🇪🇸 Español", callback_data=f"svcset_l_{g}_es_{lang}")],
+        *ttl_rows,
+        [InlineKeyboardButton(text="⬅️ " + tr(lang, "Panel del grupo", "Group panel"), callback_data=f"gpanel_{g}_{lang}")],
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data.startswith("svcset_"))
+async def cb_service_prefs(callback: CallbackQuery, bot: Bot):
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        sub, group_id = data[1], int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    try:
+        if sub == "l" and len(data) > 4:
+            await set_service_lang(group_id, data[3])
+        elif sub == "t" and len(data) > 4:
+            await set_service_ttl(group_id, int(data[3]))
+    except ValueError as err:
+        await callback.answer(f"⚠️ {err}"[:190], show_alert=True)
+        return
+    if sub in ("l", "t"):
+        invalidate_service_prefs(group_id)
+        emit_settings_updated_bg(group_id, "bot_console", ["service_lang" if sub == "l" else "service_ttl_seconds"])
+        await callback.answer("✅")
+    text, kb = _service_view(group_id, await get_service_prefs(group_id), lang)
+    await safe_edit_text(callback, text, reply_markup=kb)
