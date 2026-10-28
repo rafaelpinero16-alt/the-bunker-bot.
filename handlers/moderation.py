@@ -13,6 +13,15 @@ v25:
     users.is_banned si la puso esta comunidad (antes el middleware anti-spam los volvía a expulsar al primer mensaje),
     reinicia sus strikes y cierra las apelaciones de pago abiertas para que nadie pague por algo ya resuelto.
   • Los baneos permanentes manuales registran el origen de la marca global (global_ban_origins).
+
+v39 · Log Channel Hub (fase 2):
+  • /ban, /kick y /mute publican en el canal de registro la acción HUMANA: administrador que la ordenó, administrador
+    que pulsó el botón de ejecución, motivo escrito y duración. El motivo de «/ban @user spam» viaja de la orden a la
+    consola remota (los botones no caben en 64 bytes) y se consume al ejecutarse.
+  • También /unban, /unmute, /unwarn y el baneo por /blacklist. Las tarjetas genéricas de chat_member se suprimen para
+    no duplicar (mark_audit_handled).
+  • /warn pasa actor + manual=True a la escalera (sin métrica de sistema ni oferta de apelación pagada).
+  • Tipado estricto: message.bot / message.from_user / callback.message (InaccessibleMessage) protegidos.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -21,7 +30,8 @@ import contextlib
 import time
 import html
 import logging
-from typing import Any, Optional, Tuple
+import re
+from typing import Any, Dict, Optional, Tuple
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup,
@@ -38,6 +48,8 @@ from database.database import (
 )
 import database.database as _db_module   # v25 · origen de la marca global y apelaciones (resolución diferida)
 from assistant import set_participant_mic
+# 🧾 v39 · Log Channel Hub: auditoría de la moderación manual en el canal de registro de la comunidad.
+from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
 
 logger = logging.getLogger("moderation_handler")
 router = Router()
@@ -78,6 +90,91 @@ def _msg_lang(message: Message) -> str:
 
 def _is_anonymous_admin(message: Message) -> bool:
     return bool(message.sender_chat and message.sender_chat.id == message.chat.id)
+
+
+# ==========================================
+# 🧾 v39 · LOG CHANNEL HUB (AUDITORÍA DE LA ACCIÓN HUMANA)
+# ==========================================
+_MOD_REASON_TTL = 1800.0          # la consola remota caduca de hecho a los pocos minutos; 30 min es holgado
+_MOD_REASON_MAX = 2000
+# (chat_id, target_id, acción) → (motivo, id de quien ordenó, nombre de quien ordenó, marca de tiempo)
+_PENDING_MOD_ORDERS: Dict[Tuple[int, int, str], Tuple[Optional[str], Optional[int], Optional[str], float]] = {}
+
+
+def _audit(bot: Optional[Bot], chat_id: int, event_type: str, **fields: Any) -> None:
+    """Publica el evento en el canal de registro sin bloquear el handler (vía _spawn). Nunca lanza."""
+    _spawn(dispatch_audit_log(bot, chat_id, event_type, **fields))
+
+
+def _audit_claim(chat_id: int, user_id: int, *kinds: str) -> None:
+    """La acción ya tiene su tarjeta humana: el observador de chat_member no publica además la genérica."""
+    for kind in kinds:
+        mark_audit_handled(f"{int(chat_id)}:{kind}:{int(user_id)}", 30.0)
+
+
+def _extract_reason(message: Message, command: Optional[CommandObject]) -> Optional[str]:
+    """
+    Motivo escrito por el operador: en respuesta, todos los argumentos («/ban spam»); con objetivo explícito, lo que
+    sigue al ID / @alias («/ban @user spam»). Texto plano (el Hub lo escapa), una línea, máx. 200 caracteres.
+    """
+    args = (command.args or "").strip() if command is not None else ""
+    if not args:
+        return None
+    if message.reply_to_message is not None and message.reply_to_message.from_user is not None:
+        reason = args
+    else:
+        parts = args.split(maxsplit=1)
+        reason = parts[1] if len(parts) > 1 else ""
+    reason = re.sub(r"\s+", " ", reason).strip()[:200]
+    return reason or None
+
+
+def _operator_of(message: Message) -> Any:
+    """Quién ordenó el comando: la persona o, si es un administrador anónimo, el propio grupo (sender_chat)."""
+    if _is_anonymous_admin(message) and message.sender_chat is not None:
+        return message.sender_chat
+    return message.from_user
+
+
+def _remember_order(message: Message, target_id: int, action: str, reason: Optional[str]) -> None:
+    """Guarda motivo y autor de /ban, /kick o /mute hasta que alguien pulse el botón de ejecución."""
+    now = time.time()
+    if len(_PENDING_MOD_ORDERS) >= _MOD_REASON_MAX:
+        for key in [k for k, v in _PENDING_MOD_ORDERS.items() if now - v[3] > _MOD_REASON_TTL] or \
+                   sorted(_PENDING_MOD_ORDERS, key=lambda k: _PENDING_MOD_ORDERS[k][3])[:_MOD_REASON_MAX // 4]:
+            _PENDING_MOD_ORDERS.pop(key, None)
+    operator = _operator_of(message)
+    op_id = getattr(operator, "id", None)
+    op_name = getattr(operator, "full_name", None) or getattr(operator, "title", None)
+    _PENDING_MOD_ORDERS[(int(message.chat.id), int(target_id), action)] = (
+        reason, int(op_id) if op_id is not None else None, str(op_name) if op_name else None, now)
+
+
+def _take_order(chat_id: int, target_id: int, action: str) -> Tuple[Optional[str], Optional[int], Optional[str]]:
+    """Consume la orden pendiente (motivo, id y nombre de quien la dio). Sin orden vigente → (None, None, None)."""
+    entry = _PENDING_MOD_ORDERS.pop((int(chat_id), int(target_id), action), None)
+    if entry is None or time.time() - entry[3] > _MOD_REASON_TTL:
+        return None, None, None
+    return entry[0], entry[1], entry[2]
+
+
+def _order_fields(executor_id: int, ordered_by_id: Optional[int], ordered_by_name: Optional[str]) -> Dict[str, Any]:
+    """Si otro administrador ordenó la sanción (p. ej. consola de un admin anónimo), queda constancia en la tarjeta."""
+    if ordered_by_id is None or ordered_by_id == executor_id:
+        return {}
+    label = f"{ordered_by_name or 'ID'} · {ordered_by_id}"
+    return {"extra": {("Ordered by", "Ordenado por"): label}}
+
+
+async def _edit_cb(callback: CallbackQuery, text: str) -> None:
+    """Edita la consola remota; un mensaje inaccesible (InaccessibleMessage) no se puede editar."""
+    msg = callback.message
+    if not isinstance(msg, Message):
+        return
+    try:
+        await msg.edit_text(text, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
 
 
 _FULL_CHAT_PERMISSIONS = dict(
@@ -308,16 +405,19 @@ async def extract_target_user(message: Message, command: CommandObject):
         if replied_user.id in SERVICE_ACCOUNT_IDS:
             return None
         return replied_user
+    bot = message.bot
+    if bot is None:   # v39 · Pylance: Message.bot es Optional (siempre presente en un update real)
+        return None
     if command and command.args:
         arg = command.args.split()[0].strip()
         if arg.isdigit():
             user_id = int(arg)
             try:
-                chat_member = await message.bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
+                chat_member = await bot.get_chat_member(chat_id=message.chat.id, user_id=user_id)
                 return chat_member.user
             except Exception:
                 try:
-                    user_chat = await message.bot.get_chat(user_id)
+                    user_chat = await bot.get_chat(user_id)
                     return user_chat
                 except Exception:
                     # Objeto ligero para permitir sanción/desbaneo de IDs externos
@@ -331,7 +431,7 @@ async def extract_target_user(message: Message, command: CommandObject):
                     return _SimpleUser(user_id)
         elif arg.startswith("@"):
             try:
-                user_chat = await message.bot.get_chat(arg)
+                user_chat = await bot.get_chat(arg)
                 return user_chat
             except Exception:
                 return None
@@ -364,8 +464,11 @@ async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKey
         except Exception as ex:
             logger.debug(f"Aviso mostrando consola remota en grupo: {ex}")
         return
+    bot = message.bot
+    if bot is None:
+        return
     try:
-        await message.bot.send_message(chat_id=message.from_user.id, text=text, reply_markup=kb, parse_mode="HTML")
+        await bot.send_message(chat_id=message.from_user.id, text=text, reply_markup=kb, parse_mode="HTML")
         tier = await get_group_tier(message.chat.id)
         if tier in ["pro", "ultra_pro"] or is_super_admin(message.from_user.id):
             try:
@@ -373,7 +476,7 @@ async def send_remote_menu(message: Message, lang: str, text: str, kb: InlineKey
             except Exception:
                 pass
     except Exception:
-        bot_info = await message.bot.get_me()
+        bot_info = await bot.get_me()
         warn = await message.reply(TEXTS[lang]["start_pm_warning"].format(bot_user=bot_info.username), parse_mode="HTML")
         _spawn(auto_delete_pair(message, warn, delay=10))
 
@@ -407,7 +510,8 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
         _spawn(auto_delete_pair(message, msg, delay=8))
         return None, None, None
 
-    if not is_anon and target.id == message.from_user.id:
+    operator_id = message.from_user.id if message.from_user else 0   # v39 · Pylance (admin anónimo)
+    if not is_anon and target.id == operator_id:
         msg = await message.reply(t["self_sanction"], parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, delay=8))
         return None, None, None
@@ -418,10 +522,10 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
         _spawn(auto_delete_pair(message, msg, delay=8))
         return None, None, None
 
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, cmd_name, lang, bot)
+    limit_text, markup = await enforce_limits(message.chat.id, operator_id, cmd_name, lang, bot)
     if limit_text:
         try:
-            await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
+            await bot.send_message(chat_id=operator_id, text=limit_text, reply_markup=markup, parse_mode="HTML")
         except Exception:
             pass
         try:
@@ -463,6 +567,8 @@ async def cmd_ban(message: Message, command: CommandObject, bot: Bot):
 
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["ban_title"].format(group_name=html.escape(chat_title), name=target_name)
+    # 🧾 v39 · Motivo y autor de la orden: los recoge el botón de ejecución para la tarjeta de auditoría.
+    _remember_order(message, target.id, "ban", _extract_reason(message, command))
     await send_remote_menu(message, lang, text, kb)
 
 
@@ -485,6 +591,12 @@ async def cmd_unban(message: Message, command: CommandObject, bot: Bot):
                 still_global = bool(await _db_module.is_user_globally_banned(target.id))
         if still_global:
             text = text.replace("\n\n🛡️", "\n" + t["unban_global_kept"] + "\n\n🛡️", 1)
+        # 🧾 v39 · Auditoría: desbaneo manual (y si se retiró la marca global de esta comunidad).
+        _audit(bot, message.chat.id, "unban", user=target, actor=_operator_of(message), action="unban",
+               reason=_extract_reason(message, command), chat_title=message.chat.title,
+               extra={("Global ban lifted", "Marca global retirada"): "✅" if lifted["global_lifted"] else
+                      ("⚠️ kept / se mantiene" if still_global else "—"),
+                      ("Appeals closed", "Apelaciones cerradas"): lifted["appeals_closed"] or None})
         await send_remote_menu(message, lang, text, None)
     except Exception as e:
         msg = await message.reply(t["error"].format(error=e), parse_mode="HTML")
@@ -507,6 +619,8 @@ async def cmd_kick(message: Message, command: CommandObject, bot: Bot):
 
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["kick_title"].format(group_name=html.escape(chat_title), name=target_name)
+    # 🧾 v39 · Motivo y autor de la orden: los recoge el botón de ejecución para la tarjeta de auditoría.
+    _remember_order(message, target.id, "kick", _extract_reason(message, command))
     await send_remote_menu(message, lang, text, kb)
 
 
@@ -537,6 +651,8 @@ async def cmd_mute(message: Message, command: CommandObject, bot: Bot):
 
     chat_title = message.chat.title or f"Chat {message.chat.id}"
     text = t["mute_title"].format(group_name=html.escape(chat_title), name=target_name)
+    # 🧾 v39 · Motivo y autor de la orden: los recoge el botón de ejecución para la tarjeta de auditoría.
+    _remember_order(message, target.id, "mute", _extract_reason(message, command))
     await send_remote_menu(message, lang, text, kb)
 
 
@@ -578,7 +694,10 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
             target_username=clean_username,
             target_mention=target_mention,
             reply_to=message,
-            reason=reason
+            reason=reason,
+            # v39 · advertencia MANUAL: autor en la auditoría; sin métrica de sistema ni oferta de apelación pagada.
+            actor=_operator_of(message),
+            manual=True
         )
         if outcome.get("status") in ("warned", "sanctioned", "immune"):
             try:
@@ -594,6 +713,9 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
     limit = cfg.get("limit", 3)
     action = cfg.get("action", "mute")
     current_strikes = await add_user_strike(message.chat.id, target.id, reason=reason)
+    # 🧾 v39 · Ruta de respaldo (sin escalera disponible): la auditoría se registra aquí.
+    audit_fields: Dict[str, Any] = {"user": target, "actor": _operator_of(message), "reason": html.unescape(reason),
+                                    "strikes": current_strikes, "limit": limit, "chat_title": message.chat.title}
 
     if current_strikes >= limit:
         await reset_user_strikes(message.chat.id, target.id)
@@ -613,6 +735,8 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
                 await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=True, volume=0)
             except Exception:
                 pass
+            _audit_claim(message.chat.id, target.id, "removal", "restrict")
+            _audit(bot, message.chat.id, "sanction", action=action, **audit_fields)   # 🧾 v39
             msg = await message.reply(t["warn_max_hit"].format(name=target_mention, limit=limit, action=action.upper()), parse_mode="HTML")
         except Exception as ex:
             msg = await message.reply(f"❌ Error: {html.escape(str(ex))}", parse_mode="HTML")
@@ -622,6 +746,7 @@ async def cmd_warn(message: Message, command: CommandObject, bot: Bot):
             await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=False, volume=vol)
         except Exception:
             pass
+        _audit(bot, message.chat.id, "warn", action="warn", **audit_fields)   # 🧾 v39
         msg = await message.reply(t["warn_issued"].format(name=target_mention, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
 
     _spawn(auto_delete_pair(message, msg, delay=12))
@@ -649,6 +774,10 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
         return
 
     await reset_user_strikes(message.chat.id, target.id)
+    # 🧾 v39 · Auditoría: historial a cero (la restauración de permisos que sigue no genera otra tarjeta).
+    _audit_claim(message.chat.id, target.id, "unrestrict")
+    _audit(bot, message.chat.id, "warns_reset", user=target, actor=_operator_of(message),
+           reason=_extract_reason(message, command), chat_title=message.chat.title)
 
     # 1. Restaurar volumen acústico en la llamada
     try:
@@ -673,7 +802,7 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
 # ⚡ EJECUCIÓN DIRECTA DESDE BOTONES REMOTOS
 # ==========================================
 @router.callback_query(F.data.startswith("exec_"))
-async def cb_mod_execution(callback: CallbackQuery):
+async def cb_mod_execution(callback: CallbackQuery, bot: Bot):
     """Ejecuta la sanción seleccionada sincronizándola en tiempo real con el Centinela de voz."""
     await callback.answer()
     parts = (callback.data or "").split("_")
@@ -693,21 +822,29 @@ async def cb_mod_execution(callback: CallbackQuery):
     lang = get_lang(callback.from_user.language_code)
     t = TEXTS[lang]
 
-    if not await is_operator_admin(callback.bot, group_id, callback.from_user.id):
-        await callback.message.edit_text(t["admin_only"], parse_mode="HTML")
+    if not await is_operator_admin(bot, group_id, callback.from_user.id):
+        await _edit_cb(callback, t["admin_only"])
         return
 
-    if await is_target_protected(callback.bot, group_id, target_id):
-        await callback.message.edit_text(t["target_protected"], parse_mode="HTML")
+    if await is_target_protected(bot, group_id, target_id):
+        await _edit_cb(callback, t["target_protected"])
         return
 
+    target_user: Any = target_id
     try:
-        target_member = await callback.bot.get_chat_member(chat_id=group_id, user_id=target_id)
+        target_member = await bot.get_chat_member(chat_id=group_id, user_id=target_id)
+        target_user = target_member.user
         raw_name = target_member.user.full_name or f"ID: {target_id}"
     except Exception:
         raw_name = f"ID: {target_id}"
 
     target_name = html.escape(raw_name)
+    # 🧾 v39 · Datos de la tarjeta: quién ejecuta (botón), quién ordenó y con qué motivo (comando /ban /kick /mute).
+    reason, ordered_by_id, ordered_by_name = _take_order(group_id, target_id, action)
+    audit_fields: Dict[str, Any] = {
+        "user": target_user, "user_id": target_id, "actor": callback.from_user, "reason": reason, "action": action,
+        **_order_fields(callback.from_user.id, ordered_by_id, ordered_by_name),
+    }
 
     try:
         # Sincronización acústica en vivo con el Centinela
@@ -717,20 +854,25 @@ async def cb_mod_execution(callback: CallbackQuery):
             pass
 
         if action == "ban":
+            _audit_claim(group_id, target_id, "removal")
             if minutes == 0:
-                await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id)
+                await bot.ban_chat_member(chat_id=group_id, user_id=target_id)
                 already_global = False
                 with contextlib.suppress(Exception):
                     already_global = bool(await _db_module.is_user_globally_banned(target_id))
                 await ban_user(target_id)
                 if not already_global:
                     await _record_ban_origin(target_id, group_id, "manual_ban")
-                await callback.message.edit_text(t["ban_success"].format(name=target_name), parse_mode="HTML")
+                _audit(bot, group_id, "ban", duration_minutes=0,
+                       detail="Global ban flag set" if not already_global else None, **audit_fields)   # 🧾 v39
+                await _edit_cb(callback, t["ban_success"].format(name=target_name))
             else:
                 until_timestamp = int(time.time() + (minutes * 60))
-                await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=until_timestamp)
+                await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=until_timestamp)
+                _audit(bot, group_id, "ban", duration_minutes=minutes, expires_at=until_timestamp,
+                       **audit_fields)   # 🧾 v39
                 dur = format_duration(minutes, lang)
-                await callback.message.edit_text(t["ban_timed_success"].format(name=target_name, duration=dur), parse_mode="HTML")
+                await _edit_cb(callback, t["ban_timed_success"].format(name=target_name, duration=dur))
 
             # Sincronización del padrón local
             try:
@@ -740,9 +882,11 @@ async def cb_mod_execution(callback: CallbackQuery):
                 pass
 
         elif action == "kick":
-            await callback.bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
-            await callback.bot.unban_chat_member(chat_id=group_id, user_id=target_id, only_if_banned=True)
-            await callback.message.edit_text(t["kick_success"].format(name=target_name), parse_mode="HTML")
+            _audit_claim(group_id, target_id, "removal")
+            await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
+            await bot.unban_chat_member(chat_id=group_id, user_id=target_id, only_if_banned=True)
+            _audit(bot, group_id, "kick", **audit_fields)   # 🧾 v39
+            await _edit_cb(callback, t["kick_success"].format(name=target_name))
 
             try:
                 from handlers.groups import registry_forget
@@ -763,20 +907,21 @@ async def cb_mod_execution(callback: CallbackQuery):
                 can_send_other_messages=False,
                 can_add_web_page_previews=False
             )
+            _audit_claim(group_id, target_id, "restrict")
             if minutes == 0:
-                await callback.bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms)
-                await callback.message.edit_text(t["mute_perm"].format(name=target_name), parse_mode="HTML")
+                await bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms)
+                _audit(bot, group_id, "mute", duration_minutes=0, **audit_fields)   # 🧾 v39
+                await _edit_cb(callback, t["mute_perm"].format(name=target_name))
             else:
                 until_timestamp = int(time.time() + (minutes * 60))
-                await callback.bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms, until_date=until_timestamp)
+                await bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms, until_date=until_timestamp)
+                _audit(bot, group_id, "mute", duration_minutes=minutes, expires_at=until_timestamp,
+                       **audit_fields)   # 🧾 v39
                 dur = format_duration(minutes, lang)
-                await callback.message.edit_text(t["mute_success"].format(name=target_name, duration=dur), parse_mode="HTML")
+                await _edit_cb(callback, t["mute_success"].format(name=target_name, duration=dur))
 
     except Exception as e:
-        try:
-            await callback.message.edit_text(t["error"].format(error=html.escape(str(e))), parse_mode="HTML")
-        except TelegramBadRequest:
-            pass
+        await _edit_cb(callback, t["error"].format(error=html.escape(str(e))))
 
 
 # ==========================================
@@ -803,10 +948,11 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
         _spawn(auto_delete_pair(message, msg, delay=10))
         return
 
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "unmute", lang, bot)
+    operator_id = message.from_user.id if message.from_user else 0   # v39 · Pylance (admin anónimo)
+    limit_text, markup = await enforce_limits(message.chat.id, operator_id, "unmute", lang, bot)
     if limit_text:
         try:
-            await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
+            await bot.send_message(chat_id=operator_id, text=limit_text, reply_markup=markup, parse_mode="HTML")
         except Exception:
             pass
         try:
@@ -818,7 +964,11 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
     permissions = await _chat_default_permissions(bot, message.chat.id)
 
     try:
+        _audit_claim(message.chat.id, target.id, "unrestrict")
         await bot.restrict_chat_member(chat_id=message.chat.id, user_id=target.id, permissions=permissions)
+        # 🧾 v39 · Auditoría: silencio retirado por un administrador.
+        _audit(bot, message.chat.id, "unmute", user=target, actor=_operator_of(message), action="unmute",
+               reason=_extract_reason(message, command), chat_title=message.chat.title)
         try:
             await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=False, volume=10000)
         except Exception:
@@ -853,10 +1003,11 @@ async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
 
     target = await extract_target_user(message, command)
 
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "whitelist", lang, bot)
+    operator_id = message.from_user.id if message.from_user else 0   # v39 · Pylance (admin anónimo)
+    limit_text, markup = await enforce_limits(message.chat.id, operator_id, "whitelist", lang, bot)
     if limit_text:
         try:
-            await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
+            await bot.send_message(chat_id=operator_id, text=limit_text, reply_markup=markup, parse_mode="HTML")
         except Exception:
             pass
         try:
@@ -932,10 +1083,11 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
             pass
         return
 
-    limit_text, markup = await enforce_limits(message.chat.id, message.from_user.id, "blacklist", lang, bot)
+    operator_id = message.from_user.id if message.from_user else 0   # v39 · Pylance (admin anónimo)
+    limit_text, markup = await enforce_limits(message.chat.id, operator_id, "blacklist", lang, bot)
     if limit_text:
         try:
-            await bot.send_message(chat_id=message.from_user.id, text=limit_text, reply_markup=markup, parse_mode="HTML")
+            await bot.send_message(chat_id=operator_id, text=limit_text, reply_markup=markup, parse_mode="HTML")
         except Exception:
             pass
         try:
@@ -980,12 +1132,17 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
                 await ban_user(target.id)
                 if not already_global:
                     await _record_ban_origin(target.id, message.chat.id, "blacklist_ban")
+                _audit_claim(message.chat.id, target.id, "removal")
                 try:
                     await bot.ban_chat_member(chat_id=message.chat.id, user_id=target.id)
                 except Exception as ban_err:
                     msg = await message.reply(t["error"].format(error=html.escape(str(ban_err))), parse_mode="HTML")
                     _spawn(auto_delete_pair(message, msg, delay=10))
                     return
+                # 🧾 v39 · Auditoría: baneo permanente desde /blacklist (respuesta a un mensaje sin texto).
+                _audit(bot, message.chat.id, "ban", user=target, actor=_operator_of(message), action="ban",
+                       reason="Blacklist", duration_minutes=0, chat_title=message.chat.title,
+                       detail="Global ban flag set" if not already_global else None)
                 try:
                     await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=True, volume=0)
                 except Exception:

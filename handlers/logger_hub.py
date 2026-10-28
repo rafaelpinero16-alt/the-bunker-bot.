@@ -120,6 +120,7 @@ EVENTS: Dict[str, Tuple[str, str, str, str, str]] = {
     "join_request": ("membership", "📨", "REQUEST", "Join request received", "Solicitud de ingreso recibida"),
     "bot_joined": ("membership", "🤖", "BOT", "Bot added to the community", "Bot añadido a la comunidad"),
     "bunker_connected": ("owner", "🛡️", "SETUP", "The Bunker connected as administrator", "The Bunker conectado como administrador"),
+    "log_channel_linked": ("owner", "🧾", "LOGCHANNEL", "Log channel linked", "Canal de registro vinculado"),
     # 🛂 Aduana (Captcha)
     "captcha_passed": ("captcha", "✅", "CAPTCHA_OK", "Captcha passed", "Captcha superado"),
     "captcha_failed": ("captcha", "❌", "CAPTCHA_FAIL", "Captcha failed (wrong code)", "Captcha fallido (código erróneo)"),
@@ -201,6 +202,7 @@ _LABELS: Dict[str, Tuple[str, str]] = {
     "plan": ("Plan", "Plan"),
     "validity": ("Validity", "Vigencia"),
     "expires": ("Expired on", "Venció el"),
+    "until": ("Until", "Hasta"),
     "via": ("Joined via", "Ingreso por"),
     "level": ("Level", "Nivel"),
     "signals": ("Signals", "Señales"),
@@ -300,9 +302,29 @@ def _master_bot() -> Any:
     return None
 
 
-def forget_audit_target(chat_id: int) -> None:
-    """Invalida la caché del canal de registro (llamar al cambiarlo desde la consola o la Mini App)."""
-    _TARGET_CACHE.pop(int(chat_id), None)
+def _reset_lane_circuit(target: Any) -> None:
+    lane = _LANES.get(str(target))
+    if lane is not None:
+        lane.circuit_until = 0.0
+        lane.warned = False
+
+
+def forget_audit_target(chat_id: int, new_target: Any = None) -> None:
+    """
+    Invalida la caché del canal de registro de la comunidad (llamar al vincularlo, cambiarlo, verificarlo o
+    desactivarlo desde la consola o la Mini App): el siguiente evento lee el valor nuevo sin esperar el TTL de 60 s.
+    También cierra el disyuntor del canal anterior y del nuevo: si el operador acaba de dar permisos al bot, la
+    auditoría se reanuda al instante en lugar de esperar la pausa de 10 min. Nunca lanza.
+    """
+    try:
+        cached = _TARGET_CACHE.pop(int(chat_id), None)
+    except (TypeError, ValueError):
+        return
+    if cached is not None and cached[1] is not None:
+        _reset_lane_circuit(cached[1])
+    parsed = _parse_target(new_target) if new_target not in (None, "") else None
+    if parsed is not None:
+        _reset_lane_circuit(parsed)
 
 
 def mark_audit_handled(dedupe_key: Any, ttl: float = AUDIT_DEDUPE_TTL) -> None:
@@ -496,6 +518,20 @@ def _fmt_stamp(value: Any) -> str:
         return _esc(value, 40)
 
 
+def _stamp_is_future(value: Any, now: Optional[datetime] = None) -> bool:
+    """¿La fecha aún no llegó? (sanción temporal vigente → «Hasta»; membresía vencida → «Venció el»)."""
+    try:
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        elif isinstance(value, (int, float)) or str(value).strip().isdigit():
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(str(value).strip().replace("Z", "")[:19]).replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+    return dt > (now or datetime.now(timezone.utc))
+
+
 def _hashtag(word: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9_]", "_", str(word or "")).strip("_").upper()
     return f"#{clean}" if clean else ""
@@ -582,7 +618,8 @@ def build_audit_card(chat_id: int, event_type: str, lang: str = "en", chat_title
         lines.append(f"🗓️ <b>{_t(lang, _LABELS['validity'])}:</b> {_esc(kwargs.get('duration_days'), 10)} "
                      + ("días" if lang == "es" else "days"))
     if kwargs.get("expires_at"):
-        lines.append(f"📅 <b>{_t(lang, _LABELS['expires'])}:</b> {_fmt_stamp(kwargs.get('expires_at'))}")
+        label = _LABELS["until"] if _stamp_is_future(kwargs.get("expires_at"), now) else _LABELS["expires"]
+        lines.append(f"📅 <b>{_t(lang, label)}:</b> {_fmt_stamp(kwargs.get('expires_at'))}")
     if kwargs.get("detail"):
         lines.append(f"ℹ️ <b>{_t(lang, _LABELS['detail'])}:</b> {_esc(kwargs.get('detail'), 400)}")
     extra = kwargs.get("extra")

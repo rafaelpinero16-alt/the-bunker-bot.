@@ -7,6 +7,9 @@ Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints d
 Fase 5: Analítica en Caliente nivel Combot (GET /api/community/{chat_id}/analytics + /ws/radar/{chat_id} blindado).
 v37: Anti-Raid configurable (API /chat/{id}/raid + lista negra), idioma/TTL de servicio (/chat/{id}/service-prefs),
      rehidratación del escudo al arrancar y avisos del núcleo en inglés por defecto.
+v39: Log Channel Hub — el bot maestro se registra como remitente de respaldo de la auditoría (si un clon pierde los
+     permisos en el canal de registro, publica el maestro antes de abrir el disyuntor) y los cambios del canal de
+     registro desde la Mini App (ajustes o restauración de respaldo) invalidan su caché al instante.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from __future__ import annotations
@@ -337,6 +340,8 @@ from handlers import (
     vc_manager
 )
 from handlers import metrics as community_metrics
+# 🧾 v39 · Log Channel Hub (auditoría perimetral en el canal de registro de cada comunidad).
+from handlers.logger_hub import forget_audit_target, register_master_bot as register_audit_master_bot
 
 
 def _ban_appeals_module():
@@ -2334,6 +2339,7 @@ async def api_import_backup(
         success, msg = await import_group_configuration(numeric_id, backup_json)
         if not success:
             raise HTTPException(status_code=400, detail=msg)
+        forget_audit_target(numeric_id)   # 🧾 v39 · el respaldo puede traer otro canal de registro
         return {"status": "success", "message": msg}
     except HTTPException:
         raise
@@ -2535,6 +2541,9 @@ async def api_update_chat_settings(
         # 6. Actualización general (interruptores, Estudio: enlace VIP, tarifa, duración, …)
         if payload:
             await update_chat_operational_settings(numeric_id, payload)
+            if "log_channel_id" in payload:
+                # 🧾 v39 · Canal de registro vinculado / cambiado / desactivado desde la Mini App: el Hub lo aplica YA.
+                forget_audit_target(numeric_id, payload.get("log_channel_id") or None)
 
         # Notificar en vivo a los WebSockets de la sala: payload original (compatibilidad) + estado real
         # guardado (árbol de configuración + Centinela) para repintar los switches sin recargar.
@@ -4206,6 +4215,9 @@ async def main():
     # ⚖️ v24 · Apelaciones: desbaneo / enlaces con el clon de la comunidad o el maestro; barrido de enlaces y ofertas.
     ban_appeals.register_master_bot(master_bot)
     ban_appeals.register_bot_resolver(_clone_bot_for_chat)
+    # 🧾 v39 · Log Channel Hub: respaldo del disyuntor. Si el bot del evento (clon) no puede publicar en el canal de
+    #    registro, el Hub reintenta con el maestro; las tarjetas sin bot propio (expiraciones de membresía) salen por él.
+    register_audit_master_bot(master_bot)
     _spawn(ban_appeals.appeals_sweeper_loop(), name="ban_appeals_sweeper")
     try:
         master_info = await master_bot.get_me()
@@ -4362,6 +4374,7 @@ async def main():
         except Exception:
             pass
         master_bot_instance = None
+        register_audit_master_bot(None)   # 🧾 v39 · sin sesión HTTP cerrada como respaldo de la auditoría
         logger.info("✅ [Apagado]: Completado.")
 
 

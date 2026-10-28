@@ -2897,7 +2897,7 @@ async def enforce_warn_ladder(
     # 🧾 v39 · Datos comunes de las tarjetas de auditoría de esta advertencia.
     audit_fields: dict[str, Any] = {
         "user_id": target_id, "user_name": _plain_name(target_mention) or None, "username": target_username or None,
-        "reason": reason_loc, "strikes": strikes, "limit": limit,
+        "reason": html.unescape(reason_loc), "strikes": strikes, "limit": limit,   # el Hub escapa una sola vez
     }
     if is_manual:
         audit_fields["actor"] = actor

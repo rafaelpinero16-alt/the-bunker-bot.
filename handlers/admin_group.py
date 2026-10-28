@@ -27,7 +27,7 @@ from aiogram.types import (
 from aiogram.filters import Command, CommandObject
 import database.database as _db_module
 # 🧾 v39 · Log Channel Hub: auditoría de comandos del Dueño y de moderación manual en el canal de registro.
-from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
+from handlers.logger_hub import dispatch_audit_log, forget_audit_target, mark_audit_handled
 from database.database import (
     set_autolower_status, 
     get_autolower_status, 
@@ -571,6 +571,7 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
 
         if success:
             admin_caches.pop(chat_id, None)
+            forget_audit_target(chat_id)   # 🧾 v39 · el respaldo puede traer otro canal de registro
             _audit(bot, chat_id, "settings_imported", actor=message.from_user, chat_title=chat_title)   # 🧾 v39
 
             # Notificar al WebSocket de la sala (Live Radar)

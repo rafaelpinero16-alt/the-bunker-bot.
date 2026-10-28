@@ -107,6 +107,8 @@ from assistant import (
     SENTINEL_SETUP_GUIDE,   # 📖 v37 · guía paso a paso de moderación de Video Chat
 )
 import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purga v2, canal de registro, IA, soporte IA)
+# 🧾 v39 · Log Channel Hub: al vincular / cambiar / verificar / desactivar el canal de registro se invalida su caché.
+from handlers.logger_hub import dispatch_audit_log, forget_audit_target
 import micvip_audit    # 🎟️ v22 · auditoría MicVIP compartida con la Mini App
 import vip_roles       # 👑 v23 · roles y etiquetas VIP automáticos (compartido con la Mini App)
 import link_quotas     # 🔗 v23 · cuota diaria de enlaces por administrador (compartido con la Mini App)
@@ -5315,6 +5317,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
         if json_content:
             success, report = await import_group_configuration(group_id, json_content)
             if success:
+                forget_audit_target(int(group_id))   # 🧾 v39 · el respaldo puede traer otro canal de registro
                 resp = await message.answer(
                     f"✅ <b>{tr(lang, '¡Respaldo perimetral restaurado con éxito!', 'Perimeter backup restored successfully!')}</b>\n\n"
                     f"• <b>{tr(lang, 'Comunidad ID', 'Community ID')}:</b> <code>{group_id}</code>\n"
@@ -9316,10 +9319,28 @@ async def _logch_view(bot: Bot, group_id: int, lang: str) -> tuple:
 async def _save_log_channel(bot: Bot, group_id: int, value: str, user_id: int) -> None:
     from database.database import update_chat_operational_settings
     await update_chat_operational_settings(int(group_id), {"log_channel_id": value})
+    # 🧾 v39 · Justo tras escribir en la base: el Log Channel Hub olvida el canal cacheado (TTL 60 s) y cierra el
+    #    disyuntor del canal nuevo, así el siguiente evento ya se publica en el destino correcto.
+    forget_audit_target(int(group_id), value or None)
     if value:
         perimeter_ops.forget_log_channel_health(value)
+        # Tarjeta de confirmación en el canal recién vinculado (prueba real de escritura; nunca lanza).
+        _spawn_audit(bot, int(group_id), "log_channel_linked", actor_id=int(user_id), detail=str(value))
     emit_settings_updated_bg(group_id, "bot_console", ["log_channel_id"])
     logging.info(f"🧾 [Canal de Registro] {user_id} fijó {value or '(desactivado)'} en {group_id} desde el bot.")
+
+
+_AUDIT_BG_TASKS: set = set()
+
+
+def _spawn_audit(bot: Optional[Bot], group_id: int, event_type: str, **fields) -> None:
+    """🧾 v39 · Envío al Log Channel Hub en segundo plano con referencia fuerte (dispatch_audit_log nunca lanza)."""
+    try:
+        task = asyncio.get_running_loop().create_task(dispatch_audit_log(bot, group_id, event_type, **fields))
+    except RuntimeError:
+        return
+    _AUDIT_BG_TASKS.add(task)
+    task.add_done_callback(_AUDIT_BG_TASKS.discard)
 
 
 async def _handle_log_channel_input(message: Message, bot: Bot, st: dict, text_input: str) -> None:
@@ -9465,6 +9486,8 @@ async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
             await callback.answer("🚫 " + ("Canal de registro desactivado" if lang == "es" else "Log channel disabled"))
         elif sub == "check":
             current = (await _perimeter_status_for(bot, group_id)).get("log_channel_id")
+            # 🧾 v39 · «Verificar ahora» tras dar permisos al bot: la auditoría se reanuda sin esperar el disyuntor.
+            forget_audit_target(group_id, current or None)
             if current:
                 perimeter_ops.forget_log_channel_health(current)
             await callback.answer("🔄 " + ("Verificado" if lang == "es" else "Checked"))
