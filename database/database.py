@@ -1,6 +1,10 @@
 """
 database.py — The Bunker OS (Sqlite3 Async-Wrapper Pattern)
 Núcleo relacional de persistencia, canales, telemetría y seguridad perimetral.
+v42.1 · Inglés por defecto también en los mensajes que la capa de datos devuelve al operador: todas las validaciones
+         "campo: motivo" (errores 422 de la API y avisos del bot), los valores por defecto de chat_language ('EN') y
+         user_strikes.last_reason ('Rules violation'), «Deleted plan» en la auditoría de suscriptores y los estados
+         de respaldo del perímetro. Los nombres de campo y la forma "campo: motivo" no cambian.
 The Bunker Command OS © 2026 — Cloud Media Management
 
 Notas de despliegue (Railway / Python 3.12):
@@ -186,7 +190,7 @@ def db_async(fn: Callable[_P, _R]) -> AsyncDBFunction[_P, _R]:
 
 def _ident(name: str) -> str:
     if not isinstance(name, str) or not _IDENT_RE.match(name):
-        raise ValueError(f"Identificador SQL no permitido: {name!r}")
+        raise ValueError(f"SQL identifier not allowed: {name!r}")
     return name
 
 
@@ -561,7 +565,7 @@ def get_service_prefs(group_id: int) -> dict:
 def set_service_lang(group_id: int, lang: str) -> str:
     clean = str(lang or "").strip().lower()
     if clean not in SERVICE_LANGS:
-        raise ValueError(f"service_lang: usa {', '.join(SERVICE_LANGS)}.")
+        raise ValueError(f"service_lang: use {', '.join(SERVICE_LANGS)}.")
     _upsert_setting(int(group_id), "service_lang", clean)
     return clean
 
@@ -570,7 +574,7 @@ def set_service_lang(group_id: int, lang: str) -> str:
 def set_service_ttl(group_id: int, seconds: int) -> int:
     value = _as_int(seconds, -1)
     if value not in SERVICE_TTL_CHOICES:
-        raise ValueError(f"service_ttl_seconds: usa {', '.join(map(str, SERVICE_TTL_CHOICES))}.")
+        raise ValueError(f"service_ttl_seconds: use {', '.join(map(str, SERVICE_TTL_CHOICES))}.")
     _upsert_setting(int(group_id), "service_ttl_seconds", value)
     return value
 
@@ -606,29 +610,29 @@ def get_raid_config(group_id: int) -> dict:
 def validate_raid_patch(patch) -> dict:
     """Valida un cambio parcial → {columna: valor}. Lanza BunkerValidationError con 'campo: motivo'."""
     if not isinstance(patch, dict) or not patch:
-        raise BunkerValidationError({"raid": "se esperaba un objeto con al menos un campo."})
+        raise BunkerValidationError({"raid": "expected an object with at least one field."})
     clean: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
     for key, value in patch.items():
         if key in ("enabled", "new_account_only"):
             if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
-                errors[key] = "se esperaba true/false."
+                errors[key] = "expected true/false."
             else:
                 clean[key] = 1 if value else 0
         elif key in RAID_RANGES:
             lo, hi = RAID_RANGES[key]
             number = _as_int(value, -1)
             if not lo <= number <= hi:
-                errors[key] = f"entre {lo} y {hi}."
+                errors[key] = f"between {lo} and {hi}."
             else:
                 clean[key] = number
         elif key == "penalty":
             if value not in RAID_PENALTIES:
-                errors[key] = f"usa {', '.join(RAID_PENALTIES)}."
+                errors[key] = f"use {', '.join(RAID_PENALTIES)}."
             else:
                 clean[key] = value
         else:
-            errors[key] = "campo desconocido."
+            errors[key] = "unknown field."
     if errors:
         raise BunkerValidationError({f"raid.{k}": v for k, v in errors.items()})
     return clean
@@ -720,7 +724,7 @@ def raid_blacklist_list(group_id: int, status: str = "penalized", limit: int = 6
 def raid_blacklist_resolve(group_id: int, user_id: int, status: str, actor_id: Optional[int] = None) -> Optional[dict]:
     """Cierra un caso de la lista negra. Solo actúa sobre filas 'penalized'. None si no existía."""
     if status not in RAID_BLACKLIST_STATUSES or status == "penalized":
-        raise ValueError(f"Estado de lista negra no permitido: {status!r}")
+        raise ValueError(f"Blacklist status not allowed: {status!r}")
     with _write_transaction() as conn:
         try:
             cur = conn.execute("UPDATE raid_blacklist SET status = ?, resolved_by = ?, resolved_at = ? "
@@ -1038,7 +1042,7 @@ def init_db():
             ("log_channel_id", "TEXT"),
             ("spam_detection_mode", "TEXT DEFAULT 'smart'"),
             ("timezone", "TEXT DEFAULT 'Bogota (UTC-05)'"),
-            ("chat_language", "TEXT DEFAULT 'ES'"),
+            ("chat_language", "TEXT DEFAULT 'EN'"),
             ("active_modules_count", "INTEGER DEFAULT 11"),
             ("reputation_enabled", "INTEGER DEFAULT 1"),
             ("reputation_xp_multiplier", "REAL DEFAULT 1.0"),
@@ -1107,7 +1111,7 @@ def init_db():
         _ensure_columns(cursor, "owner_sessions", [("last_error", "TEXT")])
         cursor.execute("CREATE TABLE IF NOT EXISTS panic_snapshots (group_id INTEGER PRIMARY KEY, lock_media INTEGER DEFAULT 0, lock_links INTEGER DEFAULT 0, lock_stickers INTEGER DEFAULT 0, captcha_status INTEGER DEFAULT 0, captcha_mode INTEGER DEFAULT 1, captcha_time INTEGER DEFAULT 60, antispam INTEGER DEFAULT 0, antispam_delete INTEGER DEFAULT 0, antiflood_msgs INTEGER DEFAULT 10, antiflood_time INTEGER DEFAULT 15, antiflood_action TEXT DEFAULT 'kick', chat_permissions_json TEXT, activated_by INTEGER, activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE TABLE IF NOT EXISTS night_snapshots (group_id INTEGER PRIMARY KEY, lock_media INTEGER DEFAULT 0, lock_links INTEGER DEFAULT 0, lock_stickers INTEGER DEFAULT 0, lock_commands INTEGER DEFAULT 0, activated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
-        cursor.execute("CREATE TABLE IF NOT EXISTS user_strikes (group_id INTEGER, user_id INTEGER, strikes INTEGER DEFAULT 0, last_strike_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_reason TEXT DEFAULT 'Regla violada', PRIMARY KEY (group_id, user_id))")
+        cursor.execute("CREATE TABLE IF NOT EXISTS user_strikes (group_id INTEGER, user_id INTEGER, strikes INTEGER DEFAULT 0, last_strike_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_reason TEXT DEFAULT 'Rules violation', PRIMARY KEY (group_id, user_id))")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_strikes ON user_strikes (group_id, user_id)")
         cursor.execute("CREATE TABLE IF NOT EXISTS speaker_queue (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, user_id INTEGER, full_name TEXT, username TEXT, stars_paid INTEGER DEFAULT 0, status TEXT DEFAULT 'waiting', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_speaker_queue_group ON speaker_queue (group_id, status)")
@@ -2274,10 +2278,10 @@ def set_media_lock_rule(group_id: int, lock_key: str, action: str, delete_flag=N
     vector venía de Off). Devuelve el estado resultante de la matriz.
     """
     if lock_key not in MEDIA_LOCK_KEYS:
-        raise ValueError(f"Vector de bloqueo desconocido: {lock_key!r}")
+        raise ValueError(f"Unknown lock vector: {lock_key!r}")
     action = str(action or "").strip().lower()
     if action not in MEDIA_LOCK_ACTIONS:
-        raise ValueError(f"Acción no permitida: {action!r}")
+        raise ValueError(f"Action not allowed: {action!r}")
     with _write_transaction() as conn:
         conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
         previous = _media_locks_state_sync(conn, group_id)["rules"][lock_key]
@@ -2294,7 +2298,7 @@ def toggle_media_lock_delete(group_id: int, lock_key: str) -> dict:
     Warn/Kick/Mute/Ban → invierte el borrado del mensaje infractor.
     """
     if lock_key not in MEDIA_LOCK_KEYS:
-        raise ValueError(f"Vector de bloqueo desconocido: {lock_key!r}")
+        raise ValueError(f"Unknown lock vector: {lock_key!r}")
     with _write_transaction() as conn:
         conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (int(group_id),))
         current = _media_locks_state_sync(conn, group_id)["rules"][lock_key]
@@ -2324,7 +2328,7 @@ def validate_media_locks_payload(payload) -> tuple:
     "long_video_max_seconds": 300..600} (también acepta los vectores en plano). → (reglas, segundos|None).
     """
     if not isinstance(payload, dict):
-        raise ChatConfigError({"media_locks": "se esperaba un objeto JSON."})
+        raise ChatConfigError({"media_locks": "expected a JSON object."})
     rules_in = payload.get("rules") if isinstance(payload.get("rules"), dict) else {
         k: v for k, v in payload.items() if k in MEDIA_LOCK_KEYS}
     errors, rules = {}, {}
@@ -2334,7 +2338,7 @@ def validate_media_locks_payload(payload) -> tuple:
             continue
         rule = _normalize_media_rule(value)
         if rule is None:
-            errors[f"media_locks.{key}"] = f"acción no permitida (usa {', '.join(MEDIA_LOCK_ACTIONS)})."
+            errors[f"media_locks.{key}"] = f"action not allowed (use {', '.join(MEDIA_LOCK_ACTIONS)})."
             continue
         rules[key] = rule
     seconds = None
@@ -2345,11 +2349,11 @@ def validate_media_locks_payload(payload) -> tuple:
             errors["media_locks.long_video_max_seconds"] = str(exc)
     unknown = [k for k in payload if k not in ("rules", "long_video_max_seconds") and k not in MEDIA_LOCK_KEYS]
     for key in unknown:
-        errors[f"media_locks.{key}"] = "campo desconocido."
+        errors[f"media_locks.{key}"] = "unknown field."
     if errors:
         raise ChatConfigError(errors)
     if not rules and seconds is None:
-        raise ChatConfigError({"media_locks": "no hay ninguna regla que guardar."})
+        raise ChatConfigError({"media_locks": "there is no rule to save."})
     return rules, seconds
 
 
@@ -2477,7 +2481,7 @@ _SENTINEL_PAYLOAD_FIELDS = {
 @db_async
 def set_sentinel_payload_config(group_id: int, field: str, value):
     if field not in _SENTINEL_PAYLOAD_FIELDS:
-        raise ValueError(f"Campo de payload no permitido: {field!r}")
+        raise ValueError(f"Payload field not allowed: {field!r}")
     _upsert_setting(group_id, field, value)
 
 
@@ -3077,9 +3081,9 @@ def approve_group(group_id: int, tier: str = "free", duration_days: int = 30):
     try:
         group_id = int(group_id)
     except (TypeError, ValueError):
-        raise ValueError("approve_group: chat_id inválido")
+        raise ValueError("approve_group: invalid chat_id")
     if group_id >= 0:
-        raise ValueError(f"approve_group: {group_id} no es una comunidad (se requiere chat_id negativo)")
+        raise ValueError(f"approve_group: {group_id} is not a community (a negative chat_id is required)")
     tier = normalize_tier(tier)
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -4069,18 +4073,18 @@ def create_channel_plan(
     days = _as_int(duration_days, 0)
     price = _as_int(stars_price, 0)
     if not name or len(name) > PLAN_NAME_MAX:
-        raise ValueError(f"plan_name: entre 1 y {PLAN_NAME_MAX} caracteres.")
+        raise ValueError(f"plan_name: between 1 and {PLAN_NAME_MAX} characters.")
     if not PLAN_DAYS_RANGE[0] <= days <= PLAN_DAYS_RANGE[1]:
-        raise ValueError(f"duration_days: entre {PLAN_DAYS_RANGE[0]} y {PLAN_DAYS_RANGE[1]} días.")
+        raise ValueError(f"duration_days: between {PLAN_DAYS_RANGE[0]} and {PLAN_DAYS_RANGE[1]} days.")
     if not PLAN_PRICE_RANGE[0] <= price <= PLAN_PRICE_RANGE[1]:
-        raise ValueError(f"stars_price: entre {PLAN_PRICE_RANGE[0]} y {PLAN_PRICE_RANGE[1]} Stars.")
+        raise ValueError(f"stars_price: between {PLAN_PRICE_RANGE[0]} and {PLAN_PRICE_RANGE[1]} Stars.")
     promo = (promo_text or "").strip() or None
     if promo and len(promo) > PLAN_PROMO_MAX:
-        raise ValueError(f"promo_text: máximo {PLAN_PROMO_MAX} caracteres.")
+        raise ValueError(f"promo_text: maximum {PLAN_PROMO_MAX} characters.")
     if media_type is not None and media_type not in PLAN_MEDIA_TYPES:
-        raise ValueError("media_type: debe ser photo, video o animation.")
+        raise ValueError("media_type: must be photo, video or animation.")
     if (media_id is None) != (media_type is None):
-        raise ValueError("media_id y media_type van juntos.")
+        raise ValueError("media_id and media_type go together.")
 
     with _write_transaction() as conn:
         cursor = conn.cursor()
@@ -4731,7 +4735,7 @@ def get_chat_dashboard_data(chat_id: int) -> dict:
         log_id = row[0] if row and row[0] else None
         spam_mode = row[1] if row and row[1] else "smart"
         tz = row[2] if row and row[2] else "Bogota (UTC-05)"
-        lang = row[3] if row and row[3] else "ES"
+        lang = row[3] if row and row[3] else "EN"
         active_mods = row[4] if row and row[4] is not None else 11
 
         captcha_active = bool(row[5]) if row and row[5] is not None else False
@@ -4978,18 +4982,18 @@ def _coerce_bool(value):
         return True
     if isinstance(value, str) and value.strip().lower() in ("0", "false", "off", "no"):
         return False
-    raise ValueError("debe ser verdadero o falso.")
+    raise ValueError("must be true or false.")
 
 
 def _coerce_int_range(value, lo: int, hi: int, unit: str) -> int:
     if isinstance(value, bool):
-        raise ValueError(f"debe ser un número entero entre {lo} y {hi}{unit}.")
+        raise ValueError(f"must be a whole number between {lo} and {hi}{unit}.")
     try:
         number = int(str(value).strip())
     except (TypeError, ValueError):
-        raise ValueError(f"debe ser un número entero entre {lo} y {hi}{unit}.")
+        raise ValueError(f"must be a whole number between {lo} and {hi}{unit}.")
     if not lo <= number <= hi:
-        raise ValueError(f"debe estar entre {lo} y {hi}{unit}.")
+        raise ValueError(f"must be between {lo} and {hi}{unit}.")
     return number
 
 
@@ -4999,9 +5003,9 @@ def _coerce_tip_presets(value) -> list:
     elif isinstance(value, (list, tuple)):
         parts = list(value)
     else:
-        raise ValueError("usa una lista de montos separados por coma (ej. 15, 50, 100).")
+        raise ValueError("use a comma-separated list of amounts (e.g. 15, 50, 100).")
     if not 1 <= len(parts) <= 6:
-        raise ValueError("indica entre 1 y 6 montos.")
+        raise ValueError("enter between 1 and 6 amounts.")
     amounts = set()
     for part in parts:
         amounts.add(_coerce_int_range(part, 1, TIP_MAX_STARS, " Stars"))
@@ -5011,11 +5015,11 @@ def _coerce_tip_presets(value) -> list:
 def _coerce_welcome(value) -> str:
     text = "" if value is None else str(value).replace("\r\n", "\n").strip()
     if len(text) > WELCOME_MAX:
-        raise ValueError(f"máximo {WELCOME_MAX} caracteres.")
+        raise ValueError(f"maximum {WELCOME_MAX} characters.")
     unknown = sorted({v for v in _WELCOME_VAR_RE.findall(text) if v not in WELCOME_VARIABLES})
     if unknown:
         allowed = ", ".join("{" + v + "}" for v in WELCOME_VARIABLES)
-        raise ValueError(f"variable desconocida {{{unknown[0]}}}; usa solo {allowed}.")
+        raise ValueError(f"unknown variable {{{unknown[0]}}}; use only {allowed}.")
     return text
 
 
@@ -5069,25 +5073,25 @@ def _coerce_tips_thanks(value) -> str:
     if not text:
         return ""
     if len(text) > TIPS_THANKS_MAX:
-        raise ValueError(f"máximo {TIPS_THANKS_MAX} caracteres.")
+        raise ValueError(f"maximum {TIPS_THANKS_MAX} characters.")
     accepted = set(TIPS_THANKS_VARIABLES) | set(_TIPS_THANKS_VAR_ALIASES)
     unknown = sorted({v for v in _WELCOME_VAR_RE.findall(text) if v not in accepted})
     if unknown:
         allowed = ", ".join("{" + v + "}" for v in TIPS_THANKS_VARIABLES)
-        raise ValueError(f"variable desconocida {{{unknown[0]}}}; usa solo {allowed}.")
+        raise ValueError(f"unknown variable {{{unknown[0]}}}; use only {allowed}.")
     checker = _TelegramHTMLCheck()
     try:
         checker.feed(text)
         checker.close()
     except Exception:
-        raise ValueError("el formato HTML no es válido.")
+        raise ValueError("the HTML formatting is not valid.")
     if checker.error:
         raise ValueError(checker.error)
     if checker.stack:
-        raise ValueError(f"falta cerrar la etiqueta <{checker.stack[-1]}>.")
+        raise ValueError(f"the <{checker.stack[-1]}> tag is not closed.")
     # Un '<' o '&' suelto (p. ej. "1 < 2") haría fallar parse_mode=HTML: se exige escaparlo.
     if re.search(r"<(?![a-zA-Z/])", text) or re.search(r"&(?![a-zA-Z]+;|#\d+;|#x[0-9a-fA-F]+;)", text):
-        raise ValueError("escapa los símbolos sueltos: usa &lt; para '<' y &amp; para '&'.")
+        raise ValueError("escape stray symbols: use &lt; for '<' and &amp; for '&'.")
     return text
 
 
@@ -5099,7 +5103,7 @@ def validate_chat_configuration(payload: dict) -> dict:
     (un typo nunca debe "guardarse" en silencio sin efecto).
     """
     if not isinstance(payload, dict):
-        raise ChatConfigError({"configuration": "se esperaba un objeto JSON."})
+        raise ChatConfigError({"configuration": "expected a JSON object."})
     flat = {}
     for key, value in payload.items():
         if key in CHAT_CONFIG_SECTIONS and isinstance(value, dict):
@@ -5111,7 +5115,7 @@ def validate_chat_configuration(payload: dict) -> dict:
     for field, value in flat.items():
         spec = CHAT_CONFIG_FIELDS.get(field)
         if spec is None:
-            errors[field] = "campo desconocido."
+            errors[field] = "unknown field."
             continue
         kind = spec[2]
         try:
@@ -5120,7 +5124,7 @@ def validate_chat_configuration(payload: dict) -> dict:
             elif kind == "captcha_mode":
                 mode = str(value or "").strip().lower()
                 if mode not in CAPTCHA_MODE_CODES:
-                    raise ValueError("usa 'button' o 'math'.")
+                    raise ValueError("use 'button' or 'math'.")
                 clean[field] = mode
             elif kind == "captcha_timeout":
                 clean[field] = _coerce_int_range(value, *CAPTCHA_TIMEOUT_RANGE, " s")
@@ -5135,7 +5139,7 @@ def validate_chat_configuration(payload: dict) -> dict:
             elif kind == "tip_presets":
                 clean[field] = _coerce_tip_presets(value)
             elif kind == "antiflood_rate":
-                clean[field] = _coerce_int_range(value, *ANTIFLOOD_RATE_RANGE, " mensajes")
+                clean[field] = _coerce_int_range(value, *ANTIFLOOD_RATE_RANGE, " messages")
             elif kind == "antiflood_window":
                 clean[field] = _coerce_int_range(value, *ANTIFLOOD_WINDOW_RANGE, " s")
         except ValueError as exc:
@@ -5143,7 +5147,7 @@ def validate_chat_configuration(payload: dict) -> dict:
     if errors:
         raise ChatConfigError(errors)
     if not clean:
-        raise ChatConfigError({"configuration": "no hay ningún campo que guardar."})
+        raise ChatConfigError({"configuration": "there is no field to save."})
     return clean
 
 
@@ -5313,10 +5317,10 @@ def get_user_global_stats(user_id: int) -> dict:
             "expelled": 0,
             "purges": 0,
             "perimeter": {
-                "captcha": "Activo 🟢",
-                "autolower": "2% Activo 🟢",
-                "shield": "Blindado 🟢",
-                "broadcast": "Worker Activo 🟢",
+                "captcha": "Active 🟢",
+                "autolower": "2% Active 🟢",
+                "shield": "Shielded 🟢",
+                "broadcast": "Worker Active 🟢",
                 "captcha_active": True,
                 "autolower_active": True,
                 "shield_active": True,
@@ -5330,7 +5334,7 @@ def get_user_subscribers_audit(user_id: int) -> list:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT s.user_id, COALESCE(p.plan_name, 'Plan eliminado'), s.stars_paid,
+            SELECT s.user_id, COALESCE(p.plan_name, 'Deleted plan'), s.stars_paid,
                    CAST((julianday(s.expires_at) - julianday('now')) AS INTEGER) as days_left,
                    u.username
             FROM channel_subscriptions s
@@ -6172,25 +6176,25 @@ def get_log_report_config(group_id: int) -> dict:
 def validate_log_report_payload(payload) -> dict:
     """Valida forma y rangos. Errores → ValueError('campo: motivo')."""
     if not isinstance(payload, dict):
-        raise ValueError("log_report: se esperaba un objeto JSON.")
+        raise ValueError("log_report: expected a JSON object.")
     enabled = payload.get("enabled", False)
     if not isinstance(enabled, bool):
-        raise ValueError("enabled: debe ser true o false.")
+        raise ValueError("enabled: must be true or false.")
     try:
         interval = int(payload.get("interval_hours", 24))
     except (TypeError, ValueError):
         interval = -1
     if interval not in LOG_REPORT_INTERVALS:
-        raise ValueError(f"interval_hours: valores permitidos {', '.join(map(str, LOG_REPORT_INTERVALS))}.")
+        raise ValueError(f"interval_hours: allowed values {', '.join(map(str, LOG_REPORT_INTERVALS))}.")
     metrics = payload.get("metrics", list(LOG_REPORT_DEFAULT_METRICS))
     if not isinstance(metrics, list) or any(not isinstance(m, str) for m in metrics):
-        raise ValueError("metrics: se esperaba una lista de métricas.")
+        raise ValueError("metrics: expected a list of metrics.")
     unknown = [m for m in metrics if m not in LOG_REPORT_METRICS]
     if unknown:
-        raise ValueError(f"metrics: métrica desconocida '{unknown[0]}'.")
+        raise ValueError(f"metrics: unknown metric '{unknown[0]}'.")
     metrics = [m for m in LOG_REPORT_METRICS if m in set(metrics)]   # orden canónico, sin duplicados
     if enabled and not metrics:
-        raise ValueError("metrics: elige al menos una métrica para activar el informe.")
+        raise ValueError("metrics: choose at least one metric to enable the report.")
     return {"enabled": enabled, "interval_hours": interval, "metrics": metrics,
             "lang": _clean_broadcast_lang(payload.get("lang"))}
 
@@ -6634,13 +6638,13 @@ def grant_architect_license(scope: str, target_id: int, tier: str, duration_days
     La concesión activa previa del mismo objetivo pasa a 'replaced' en la misma transacción.
     """
     if scope not in ARCHITECT_LICENSE_SCOPES:
-        raise ValueError("scope: debe ser 'chat' o 'user'")
+        raise ValueError("scope: must be 'chat' or 'user'")
     tier = normalize_tier(tier)
     if tier not in ARCHITECT_LICENSE_TIERS:
-        raise ValueError("tier: debe ser 'pro' o 'ultra_pro'")
+        raise ValueError("tier: must be 'pro' or 'ultra_pro'")
     days = int(duration_days)
     if days not in ARCHITECT_LICENSE_DURATIONS:
-        raise ValueError("duration_days: usa 7, 30, 90, 365 o 0 (permanente)")
+        raise ValueError("duration_days: use 7, 30, 90, 365 or 0 (permanent)")
     now = _now_ts()
     expires_at = None if days == 0 else now + days * 86400
     with _write_transaction() as conn:
@@ -6762,7 +6766,7 @@ def architect_grant_xp(group_id: int, user_id: int, full_name: str = "", usernam
     if not xp and not levels:
         raise ValueError("Indica xp o levels mayores que cero.")
     if xp > 1_000_000 or levels > 100:
-        raise ValueError("Bonificación fuera de rango (máx. 1 000 000 XP o 100 niveles).")
+        raise ValueError("Bonus out of range (max. 1,000,000 XP or 100 levels).")
     with _write_transaction() as conn:
         row = conn.execute("SELECT xp, level FROM chat_user_reputation WHERE group_id = ? AND user_id = ?",
                            (int(group_id), int(user_id))).fetchone()
@@ -6981,9 +6985,9 @@ def get_shield_config(group_id: int) -> dict:
 def set_fwd_burst(group_id: int, limit=None, window=None) -> dict:
     errors = {}
     if limit is not None and _as_int(limit, -1) not in FWD_BURST_LIMITS:
-        errors["fwd_burst_limit"] = f"usa {', '.join(map(str, FWD_BURST_LIMITS))}."
+        errors["fwd_burst_limit"] = f"use {', '.join(map(str, FWD_BURST_LIMITS))}."
     if window is not None and _as_int(window, -1) not in FWD_BURST_WINDOWS:
-        errors["fwd_burst_window"] = f"usa {', '.join(map(str, FWD_BURST_WINDOWS))} s."
+        errors["fwd_burst_window"] = f"use {', '.join(map(str, FWD_BURST_WINDOWS))} s."
     if errors:
         raise BunkerValidationError(errors)
     with _write_transaction() as conn:
@@ -6999,13 +7003,13 @@ def set_fwd_burst(group_id: int, limit=None, window=None) -> dict:
 def add_authorized_bot(group_id: int, username: str, bot_id: Optional[int] = None, added_by: Optional[int] = None) -> list:
     clean = normalize_bot_username(username)
     if not clean:
-        raise BunkerValidationError({"username": "alias de bot inválido (debe terminar en 'bot')."})
+        raise BunkerValidationError({"username": "invalid bot username (it must end in 'bot')."})
     with _write_transaction() as conn:
         count = conn.execute("SELECT COUNT(*) FROM authorized_bots WHERE group_id = ?", (int(group_id),)).fetchone()[0]
         exists = conn.execute("SELECT 1 FROM authorized_bots WHERE group_id = ? AND bot_username = ?",
                               (int(group_id), clean)).fetchone()
         if not exists and count >= AUTHORIZED_BOTS_MAX:
-            raise BunkerValidationError({"username": f"máximo {AUTHORIZED_BOTS_MAX} bots autorizados."})
+            raise BunkerValidationError({"username": f"maximum {AUTHORIZED_BOTS_MAX} authorized bots."})
         conn.execute("""
             INSERT INTO authorized_bots (group_id, bot_username, bot_id, added_by, added_at) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(group_id, bot_username) DO UPDATE SET bot_id = COALESCE(excluded.bot_id, authorized_bots.bot_id)
@@ -7096,45 +7100,45 @@ def get_vip_role_config(group_id: int) -> dict:
 def validate_vip_role_patch(patch) -> dict:
     """Valida un cambio parcial de la configuración VIP → {columna: valor_db}. Lanza BunkerValidationError."""
     if not isinstance(patch, dict) or not patch:
-        raise BunkerValidationError({"vip_roles": "se esperaba un objeto con al menos un campo."})
+        raise BunkerValidationError({"vip_roles": "expected an object with at least one field."})
     clean, errors = {}, {}
     for key, value in patch.items():
         if key in ("enabled", "micvip_role", "autolower_immune", "announce"):
             if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
-                errors[key] = "se esperaba true/false."
+                errors[key] = "expected true/false."
             else:
                 clean[key] = 1 if value else 0
         elif key == "tag_text":
             tag = sanitize_vip_tag(value)
             if str(value or "").strip() and not tag:
-                errors[key] = "la etiqueta no puede ser solo emoji."
+                errors[key] = "the tag cannot be emoji only."
             else:
                 clean[key] = tag
         elif key == "donor_min_stars":
             stars = _as_int(value, -1)
             if not 1 <= stars <= TIP_MAX_STARS:
-                errors[key] = f"entre 1 y {TIP_MAX_STARS} Stars."
+                errors[key] = f"between 1 and {TIP_MAX_STARS} Stars."
             else:
                 clean[key] = stars
         elif key == "donor_days":
             days = _as_int(value, -1)
             if not 0 <= days <= 3650:
-                errors[key] = "entre 0 (permanente) y 3650 días."
+                errors[key] = "between 0 (permanent) and 3650 days."
             else:
                 clean[key] = days
         elif key == "flood_bonus":
             bonus = _as_int(value, -1)
             if not VIP_FLOOD_BONUS_RANGE[0] <= bonus <= VIP_FLOOD_BONUS_RANGE[1]:
-                errors[key] = f"entre {VIP_FLOOD_BONUS_RANGE[0]} y {VIP_FLOOD_BONUS_RANGE[1]}."
+                errors[key] = f"between {VIP_FLOOD_BONUS_RANGE[0]} and {VIP_FLOOD_BONUS_RANGE[1]}."
             else:
                 clean[key] = bonus
         elif key == "exempt_vectors":
             if not isinstance(value, list) or any(v not in VIP_EXEMPTIBLE_VECTORS for v in value):
-                errors[key] = f"lista de vectores eximibles ({', '.join(VIP_EXEMPTIBLE_VECTORS)})."
+                errors[key] = f"list of exemptible vectors ({', '.join(VIP_EXEMPTIBLE_VECTORS)})."
             else:
                 clean[key] = json.dumps([v for v in VIP_EXEMPTIBLE_VECTORS if v in set(value)])
         else:
-            errors[key] = "campo desconocido."
+            errors[key] = "unknown field."
     if errors:
         raise BunkerValidationError({f"vip_roles.{k}": v for k, v in errors.items()})
     return clean
@@ -7497,39 +7501,39 @@ def update_admin_link_quota_config(group_id: int, patch: dict, updated_by: Optio
     Todo o nada (BEGIN IMMEDIATE). Lanza BunkerValidationError con "campo: motivo".
     """
     if not isinstance(patch, dict) or not patch:
-        raise BunkerValidationError({"admin_link_quotas": "se esperaba un objeto con al menos un campo."})
+        raise BunkerValidationError({"admin_link_quotas": "expected an object with at least one field."})
     errors, cols, ov_changes = {}, {}, {}
     for key, value in patch.items():
         if key in ("enabled", "count_forwards"):
             if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
-                errors[key] = "se esperaba true/false."
+                errors[key] = "expected true/false."
             else:
                 cols["alq_enabled" if key == "enabled" else "alq_count_forwards"] = 1 if value else 0
         elif key == "default_limit":
             lim = _as_int(value, -999)
             if not ALQ_LIMIT_RANGE[0] <= lim <= ALQ_LIMIT_RANGE[1]:
-                errors[key] = f"entre {ALQ_LIMIT_RANGE[0]} y {ALQ_LIMIT_RANGE[1]}."
+                errors[key] = f"between {ALQ_LIMIT_RANGE[0]} and {ALQ_LIMIT_RANGE[1]}."
             else:
                 cols["alq_default_limit"] = lim
         elif key == "overrides":
             if not isinstance(value, dict):
-                errors[key] = "se esperaba {admin_id: límite}."
+                errors[key] = "expected {admin_id: limit}."
                 continue
             for admin_raw, lim_raw in value.items():
                 admin_id = _as_int(admin_raw, 0)
                 if admin_id <= 0:
-                    errors[f"overrides.{admin_raw}"] = "id de administrador inválido."
+                    errors[f"overrides.{admin_raw}"] = "invalid administrator id."
                     continue
                 if lim_raw is None:
                     ov_changes[admin_id] = None
                     continue
                 lim = _as_int(lim_raw, -999)
                 if lim != ALQ_UNLIMITED and not ALQ_LIMIT_RANGE[0] <= lim <= ALQ_LIMIT_RANGE[1]:
-                    errors[f"overrides.{admin_id}"] = f"entre {ALQ_LIMIT_RANGE[0]} y {ALQ_LIMIT_RANGE[1]}, o -1 (sin límite)."
+                    errors[f"overrides.{admin_id}"] = f"between {ALQ_LIMIT_RANGE[0]} and {ALQ_LIMIT_RANGE[1]}, or -1 (no limit)."
                 else:
                     ov_changes[admin_id] = lim
         else:
-            errors[key] = "campo desconocido."
+            errors[key] = "unknown field."
     if errors:
         raise BunkerValidationError({f"admin_link_quotas.{k}": v for k, v in errors.items()})
     now = _now_ts()
@@ -7547,7 +7551,7 @@ def update_admin_link_quota_config(group_id: int, patch: dict, updated_by: Optio
                              (int(group_id), admin_id, lim, now, updated_by))
         total = conn.execute("SELECT COUNT(*) FROM admin_link_quotas WHERE group_id = ?", (int(group_id),)).fetchone()[0]
         if total > ALQ_OVERRIDES_MAX:
-            raise BunkerValidationError({"admin_link_quotas.overrides": f"máximo {ALQ_OVERRIDES_MAX} excepciones."})
+            raise BunkerValidationError({"admin_link_quotas.overrides": f"maximum {ALQ_OVERRIDES_MAX} exceptions."})
         return _alq_config_sync(conn, group_id)
 
 
@@ -7664,40 +7668,40 @@ def get_appeal_config(group_id: int) -> dict:
 def update_appeal_config(group_id: int, patch: dict) -> dict:
     """{enabled?, price_stars?, link_ttl_min?, window_days?, max_per_user?} — todo o nada; "campo: motivo"."""
     if not isinstance(patch, dict) or not patch:
-        raise BunkerValidationError({"ban_appeals": "se esperaba un objeto con al menos un campo."})
+        raise BunkerValidationError({"ban_appeals": "expected an object with at least one field."})
     cols, errors = {}, {}
     for key, value in patch.items():
         if key == "enabled":
             if not isinstance(value, (bool, int)) or (isinstance(value, int) and value not in (0, 1)):
-                errors[key] = "se esperaba true/false."
+                errors[key] = "expected true/false."
             else:
                 cols["appeal_enabled"] = 1 if value else 0
         elif key == "price_stars":
             v = _as_int(value, -1)
             if not APPEAL_PRICE_RANGE[0] <= v <= APPEAL_PRICE_RANGE[1]:
-                errors[key] = f"entre {APPEAL_PRICE_RANGE[0]} y {APPEAL_PRICE_RANGE[1]} Stars."
+                errors[key] = f"between {APPEAL_PRICE_RANGE[0]} and {APPEAL_PRICE_RANGE[1]} Stars."
             else:
                 cols["appeal_price_stars"] = v
         elif key == "link_ttl_min":
             v = _as_int(value, -1)
             if v not in APPEAL_LINK_TTL_CHOICES:
-                errors[key] = f"usa {', '.join(map(str, APPEAL_LINK_TTL_CHOICES))} minutos."
+                errors[key] = f"use {', '.join(map(str, APPEAL_LINK_TTL_CHOICES))} minutes."
             else:
                 cols["appeal_link_ttl_min"] = v
         elif key == "window_days":
             v = _as_int(value, -1)
             if not APPEAL_WINDOW_RANGE[0] <= v <= APPEAL_WINDOW_RANGE[1]:
-                errors[key] = f"entre {APPEAL_WINDOW_RANGE[0]} y {APPEAL_WINDOW_RANGE[1]} días."
+                errors[key] = f"between {APPEAL_WINDOW_RANGE[0]} and {APPEAL_WINDOW_RANGE[1]} days."
             else:
                 cols["appeal_window_days"] = v
         elif key == "max_per_user":
             v = _as_int(value, -1)
             if not 0 <= v <= 100:
-                errors[key] = "entre 0 (sin tope) y 100."
+                errors[key] = "between 0 (no cap) and 100."
             else:
                 cols["appeal_max_per_user"] = v
         else:
-            errors[key] = "campo desconocido."
+            errors[key] = "unknown field."
     if errors:
         raise BunkerValidationError({f"ban_appeals.{k}": v for k, v in errors.items()})
     with _write_transaction() as conn:
@@ -7841,7 +7845,7 @@ def appeal_pending_for_user(user_id: int, limit: int = 5) -> list:
 def appeal_update(appeal_id: int, **fields) -> None:
     clean = {k: v for k, v in fields.items() if k in _APPEAL_MUTABLE}
     if "status" in clean and clean["status"] not in APPEAL_STATUSES:
-        raise ValueError(f"Estado de apelación desconocido: {clean['status']!r}")
+        raise ValueError(f"Unknown appeal status: {clean['status']!r}")
     if "error" in clean and clean["error"]:
         clean["error"] = str(clean["error"])[:300]
     if not clean:
@@ -7985,7 +7989,7 @@ def tier_allows(tier, required) -> bool:
 
 def feature_min_tier(feature: str) -> str:
     if feature not in FEATURE_MIN_TIER:
-        raise KeyError(f"Función sin nivel registrado: {feature!r}")
+        raise KeyError(f"Feature without a registered tier: {feature!r}")
     return FEATURE_MIN_TIER[feature]
 
 

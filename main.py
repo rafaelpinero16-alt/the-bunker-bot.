@@ -24,6 +24,10 @@ v42: Sincronía con assistant.py v42 — init_db() y la verificación WAL salen 
      mientras se prepara SQLite en el arranque), /health informa de los Centinelas en vivo, nuevo diagnóstico
      GET /api/system/ai-status (solo Arquitectos: Mistral, disyuntores y captura de voz, sin secretos) y apagado
      ordenado: el oyente de activos se retira antes de cerrar los Centinelas y close_all_sentinels() tiene tope.
+v42.1: Inglés por defecto en TODAS las respuestas de la API: los `detail` de los errores HTTP (401/402/403/404/409/
+     422/429/503/504), los mensajes de éxito y los valores de respaldo. Los nombres de campo y el formato
+     "campo: motivo" no cambian (la Mini App solo lee el prefijo del campo). Los avisos que ya eligen idioma
+     (Soporte IA, botones caducados, cobros bloqueados) siguen bilingües.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from __future__ import annotations
@@ -552,7 +556,7 @@ class StartupGateMiddleware:
         if kind == "websocket":
             await send({"type": "websocket.close", "code": 1013, "reason": "starting"})
             return
-        body = json.dumps({"detail": "Servicio iniciando, reintenta en unos segundos."}).encode("utf-8")
+        body = json.dumps({"detail": "Service starting, try again in a few seconds."}).encode("utf-8")
         await send({"type": "http.response.start", "status": 503,
                     "headers": [(b"content-type", b"application/json"), (b"retry-after", b"5"),
                                 (b"content-length", str(len(body)).encode("ascii"))]})
@@ -636,7 +640,7 @@ async def _validation_error_as_field_reason(request: Any, exc: RequestValidation
     first = errors[0] if errors else {}
     loc = [str(part) for part in (first.get("loc") or []) if str(part) not in ("body", "query", "path", "header")]
     field = re.sub(r"[^a-z_]", "_", (loc[-1] if loc else "body").lower()).strip("_") or "body"
-    message = str(first.get("msg") or "valor no válido").rstrip(".")
+    message = str(first.get("msg") or "invalid value").rstrip(".")
     return JSONResponse(status_code=422, content={"detail": f"{field}: {message}."})
 
 api_router = APIRouter()
@@ -730,15 +734,15 @@ def resolve_user_id(x_telegram_init_data: Optional[str] = None, authorization: O
 def require_authenticated_user(x_telegram_init_data: Optional[str] = None, authorization: Optional[str] = None) -> int:
     uid = resolve_user_id(x_telegram_init_data, authorization)
     if not uid:
-        raise HTTPException(status_code=401, detail="Autenticación requerida: initData o sesión inválida.")
+        raise HTTPException(status_code=401, detail="Authentication required: invalid initData or session.")
     return uid
 
 
 # 👑 v12 · REGLA DE ORO: solo el CREADOR (en vivo) y los Arquitectos operan los paneles. Un administrador común,
 # con todos o algunos permisos, recibe 403 aunque figure en el registro de dueños.
 OWNER_LIVE_ROLES = ("creator",)
-_OWNER_DENIED_DETAIL = ("⛔ Acceso Denegado: este panel está reservado única y exclusivamente al Dueño (creador) "
-                        "de la comunidad o canal. Los administradores no tienen acceso.")
+_OWNER_DENIED_DETAIL = ("⛔ Access Denied: this panel is reserved exclusively for the Owner (creator) "
+                        "of the community or channel. Administrators do not have access.")
 # Último rango CONFIRMADO por Telegram; ante una caída de la Bot API impide que un no-creador ya conocido
 # entre por la vía del registro.
 _OWNER_LAST_KNOWN: Dict[tuple, str] = {}
@@ -807,7 +811,7 @@ async def is_legitimate_chat_owner(user_id: int, chat_id: int) -> bool:
 async def assert_chat_ownership(user_id: int, chat_id: int):
     """Exige al dueño legítimo (is_legitimate_chat_owner). 401 sin sesión, 403 si no es el dueño."""
     if not user_id:
-        raise HTTPException(status_code=401, detail="Autenticación requerida.")
+        raise HTTPException(status_code=401, detail="Authentication required.")
     if not await is_legitimate_chat_owner(int(user_id), int(chat_id)):
         raise HTTPException(status_code=403, detail=_OWNER_DENIED_DETAIL)
 
@@ -862,7 +866,7 @@ async def assert_chat_access(user_id: int, chat_id: int):
     Arquitecto activó `can_view_analytics` en la Matriz (v13). Un administrador común sigue recibiendo 403.
     """
     if not user_id:
-        raise HTTPException(status_code=401, detail="Autenticación requerida.")
+        raise HTTPException(status_code=401, detail="Authentication required.")
     if await is_legitimate_chat_owner(int(user_id), int(chat_id)):
         return
     try:
@@ -1074,21 +1078,21 @@ def _get_groups_count_sync():
 @api_router.post("/auth/telegram-widget")
 async def api_auth_telegram_widget(payload: dict = Body(...)):
     if not verify_telegram_widget_login(payload):
-        raise HTTPException(status_code=401, detail="Firma de autenticación inválida.")
+        raise HTTPException(status_code=401, detail="Invalid authentication signature.")
 
     try:
         user_id = int(payload.get("id", 0))
     except (TypeError, ValueError):
         user_id = 0
     if not user_id:
-        raise HTTPException(status_code=400, detail="ID de usuario ausente.")
+        raise HTTPException(status_code=400, detail="Missing user ID.")
 
     first_name = payload.get("first_name", "") or ""
     username = payload.get("username", "") or ""
     photo_url = payload.get("photo_url", "") or ""
 
     try:
-        await get_or_create_user(user_id, username or "Sin username", first_name or "Operador")
+        await get_or_create_user(user_id, username or "Sin username", first_name or "Operator")
     except Exception as e:
         logger.warning(f"⚠️ [Auth Widget] Aviso BD: {e}")
 
@@ -1104,17 +1108,17 @@ async def api_auth_telegram_widget(payload: dict = Body(...)):
 async def api_exchange_web_token(payload: dict = Body(...)):
     temp_token = payload.get("token")
     if not temp_token:
-        raise HTTPException(status_code=400, detail="Token no proporcionado.")
+        raise HTTPException(status_code=400, detail="Token not provided.")
 
     if not isinstance(temp_token, str) or len(temp_token) > 128:
-        raise HTTPException(status_code=422, detail="token: formato no válido.")
+        raise HTTPException(status_code=422, detail="token: invalid format.")
     # v41 · Consumo ATÓMICO: el enlace de /login es de un solo uso de verdad (antes podía canjearse varias veces
     #       durante sus 5 minutos, p. ej. si quedaba en el historial o se reenviaba).
     user_id = await consume_web_session(temp_token)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Token temporal inválido, ya usado o expirado.")
+        raise HTTPException(status_code=401, detail="Temporary token invalid, already used or expired.")
 
-    first_name, username = "Operador", ""
+    first_name, username = "Operator", ""
     with contextlib.suppress(Exception):
         profile = await asyncio.to_thread(_sync_user_profile, int(user_id))
         first_name, username = profile.get("first_name") or first_name, profile.get("username") or ""
@@ -1138,11 +1142,11 @@ def _sync_user_profile(user_id: int) -> dict:
 @api_router.get("/auth/session-check")
 async def api_auth_session_check(authorization: str = Header(None)):
     if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Falta encabezado Authorization.")
+        raise HTTPException(status_code=401, detail="Missing Authorization header.")
     token = authorization.split(" ", 1)[1].strip()
     payload = verify_session_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail="Sesión inválida o expirada.")
+        raise HTTPException(status_code=401, detail="Invalid or expired session.")
     return {
         "status": "success",
         "user_id": payload.get("uid"),
@@ -1166,7 +1170,7 @@ async def api_stats(
         return {
             "subscribers": 0, "revenue_stars": 0, "verified": 0, "expelled": 0, "purges": 0,
             "perimeter": {
-                "captcha": "Activo 🟢", "autolower": "2% Activo 🟢", "shield": "Blindado 🟢", "broadcast": "Worker Activo 🟢",
+                "captcha": "Active 🟢", "autolower": "2% Active 🟢", "shield": "Shielded 🟢", "broadcast": "Worker Active 🟢",
                 "captcha_active": True, "autolower_active": True, "shield_active": True, "linklock_active": False
             }
         }
@@ -1345,7 +1349,7 @@ async def api_chat_dashboard(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+        raise HTTPException(status_code=400, detail="chat_id must be an integer.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1361,7 +1365,7 @@ async def api_chat_assets_status(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+        raise HTTPException(status_code=400, detail="chat_id must be an integer.")
     await assert_chat_ownership(user_id, numeric_id)
     payload = {"status": "success", "chat_id": str(numeric_id), **(await build_assets_status(numeric_id))}
     # v19 · Estado en vivo: el WebView de Telegram (iOS/Android) y los proxies no deben cachear esta respuesta.
@@ -1383,7 +1387,7 @@ def _parse_chat_id(chat_id: str) -> int:
     try:
         return int(chat_id)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+        raise HTTPException(status_code=400, detail="chat_id must be an integer.")
 
 
 async def _read_log_channel_id(chat_id: int):
@@ -1420,7 +1424,7 @@ async def _require_ultra_for_ai(user_id: int, chat_id: int) -> None:
     except Exception:
         tier = "free"
     if not perimeter_ops._is_ultra(tier):
-        raise HTTPException(status_code=402, detail="El Centinela de IA requiere licencia ULTRA PRO.")
+        raise HTTPException(status_code=402, detail="The AI Sentinel requires an ULTRA PRO license.")
 
 
 # ==========================================
@@ -1467,7 +1471,7 @@ async def require_chat_feature(user_id: int, chat_id: int, feature: str) -> str:
         "required_tier": required,
         "current_tier": tier,
         "chat_id": str(chat_id),
-        "message": f"Esta función requiere licencia {_V29_TIER_LABELS[required]} en esta comunidad.",
+        "message": f"This feature requires a {_V29_TIER_LABELS[required]} license in this community.",
     })
 
 
@@ -1575,12 +1579,12 @@ async def api_update_ghost_purge(
     body = (payload or {}).get("ghost_purge") or {}
     action, criteria = body.get("action"), body.get("criteria")
     if action is not None and str(action).strip().lower() not in perimeter_ops._PURGE_ACTION_ALIASES:
-        raise HTTPException(status_code=422, detail="action: usa 'ban' o 'kick'.")
+        raise HTTPException(status_code=422, detail="action: use 'ban' or 'kick'.")
     if criteria is not None:
         if not isinstance(criteria, list) or any(str(c) not in perimeter_ops.PURGE_CRITERIA for c in criteria):
-            raise HTTPException(status_code=422, detail=f"criteria: valores válidos {', '.join(perimeter_ops.PURGE_CRITERIA)}.")
+            raise HTTPException(status_code=422, detail=f"criteria: valid values {', '.join(perimeter_ops.PURGE_CRITERIA)}.")
         if not criteria:
-            raise HTTPException(status_code=422, detail="criteria: activa al menos un criterio.")
+            raise HTTPException(status_code=422, detail="criteria: enable at least one criterion.")
     settings = await perimeter_ops.save_purge_settings(numeric_id, action=action, criteria=criteria)
     settings["running"] = _assistant_runtime_is_purging(numeric_id)
     return {"status": "success", "ghost_purge": settings}
@@ -1699,10 +1703,10 @@ async def api_update_chat_shield(
                                    set_fwd_burst)
     body = payload.get("shield", payload) if isinstance(payload, dict) else {}
     if not isinstance(body, dict) or not body:
-        raise HTTPException(status_code=422, detail="shield: se esperaba un objeto con al menos un campo.")
+        raise HTTPException(status_code=422, detail="shield: expected an object with at least one field.")
     unknown = [k for k in body if k not in ("fwd_burst_limit", "fwd_burst_window", "add_bot", "remove_bot")]
     if unknown:
-        raise HTTPException(status_code=422, detail=f"shield.{unknown[0]}: campo desconocido.")
+        raise HTTPException(status_code=422, detail=f"shield.{unknown[0]}: unknown field.")
     changed = []
     try:
         if "fwd_burst_limit" in body or "fwd_burst_window" in body:
@@ -1784,28 +1788,28 @@ async def api_vip_role_member(
     try:
         target = int(cast(Any, (payload or {}).get("user_id")))   # None / texto → TypeError / ValueError (422)
     except (TypeError, ValueError):
-        raise HTTPException(status_code=422, detail="user_id: se esperaba un id numérico.")
+        raise HTTPException(status_code=422, detail="user_id: expected a numeric id.")
     if target <= 0:
-        raise HTTPException(status_code=422, detail="user_id: se esperaba un id de usuario positivo.")
+        raise HTTPException(status_code=422, detail="user_id: expected a positive user id.")
     if action == "grant":
         try:
             days = int((payload or {}).get("days", 30))
         except (TypeError, ValueError):
-            raise HTTPException(status_code=422, detail="days: se esperaba un entero.")
+            raise HTTPException(status_code=422, detail="days: expected an integer.")
         if not 0 <= days <= 3650:
-            raise HTTPException(status_code=422, detail="days: entre 0 (permanente) y 3650.")
+            raise HTTPException(status_code=422, detail="days: between 0 (permanent) and 3650.")
         result = await vip_roles.grant_manual(numeric_id, target, days, actor_id=user_id)
         member = result.get("member")
     elif action == "revoke":
         member = await vip_roles.revoke(numeric_id, target, actor_id=user_id)
         if not member:
-            raise HTTPException(status_code=404, detail="Ese usuario no tiene rol VIP en esta comunidad.")
+            raise HTTPException(status_code=404, detail="That user has no VIP role in this community.")
     elif action == "retag":
         await vip_roles.retag(numeric_id, target)
         from database.database import vip_role_member_get
         member = await vip_role_member_get(numeric_id, target)
     else:
-        raise HTTPException(status_code=422, detail="action: usa grant, revoke o retag.")
+        raise HTTPException(status_code=422, detail="action: use grant, revoke or retag.")
     _v23_emit(numeric_id, ["vip_members"])
     logger.info(f"👑 [VIP Roles] {action} manual en {numeric_id} para {target} por {user_id}.")
     return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "member": member}, headers=_NO_STORE)
@@ -1823,7 +1827,7 @@ async def api_get_admin_link_quotas(
     await assert_chat_access(user_id, numeric_id)
     await require_chat_feature(user_id, numeric_id, "link_quotas")
     if master_bot_instance is None:
-        raise HTTPException(status_code=503, detail="Bot no disponible todavía.")
+        raise HTTPException(status_code=503, detail="Bot not available yet.")
     overview = await link_quotas.get_overview(master_bot_instance, numeric_id)
     return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "admin_link_quotas": overview},
                         headers=_NO_STORE)
@@ -1941,7 +1945,7 @@ async def _v37_can_promote(user_id: int, chat_id: int) -> bool:
 async def assert_config_admin(user_id: int, chat_id: int) -> None:
     """401 sin sesión · 403 si no es dueño, delegado anti-spam ni administrador con «Añadir administradores»."""
     if not user_id:
-        raise HTTPException(status_code=401, detail="Autenticación requerida.")
+        raise HTTPException(status_code=401, detail="Authentication required.")
     if await is_legitimate_chat_owner(int(user_id), int(chat_id)):
         return
     try:
@@ -2078,15 +2082,15 @@ async def api_resolve_raid_blacklist(
     await assert_config_admin(user_id, numeric_id)
     action = str((payload or {}).get("action") or "").lower()
     if action not in _V37_BL_ACTIONS:
-        raise HTTPException(status_code=422, detail="action: usa unban, unmute o keep.")
+        raise HTTPException(status_code=422, detail="action: use unban, unmute or keep.")
     from database.database import raid_blacklist_get, raid_blacklist_resolve
     record = await raid_blacklist_get(numeric_id, int(target_id))
     if not record or record.get("status") != "penalized":
-        raise HTTPException(status_code=409, detail="Este caso ya no está pendiente en la lista negra de raid.")
+        raise HTTPException(status_code=409, detail="This case is no longer pending in the raid blacklist.")
     if action != "keep":
         bot = await _v37_action_bot(numeric_id)
         if bot is None:
-            raise HTTPException(status_code=503, detail="El bot aún no está listo.")
+            raise HTTPException(status_code=503, detail="The bot is not ready yet.")
         try:
             if action == "unban":
                 await bot.unban_chat_member(chat_id=numeric_id, user_id=int(target_id), only_if_banned=True)
@@ -2099,10 +2103,10 @@ async def api_resolve_raid_blacklist(
                     can_send_other_messages=True, can_add_web_page_previews=True)
                 await bot.restrict_chat_member(chat_id=numeric_id, user_id=int(target_id), permissions=perms)
         except Exception as ex:
-            raise HTTPException(status_code=502, detail=f"Telegram rechazó la acción: {str(ex)[:150]}")
+            raise HTTPException(status_code=502, detail=f"Telegram rejected the action: {str(ex)[:150]}")
     resolved = await raid_blacklist_resolve(numeric_id, int(target_id), _V37_BL_ACTIONS[action], user_id)
     if resolved is None:
-        raise HTTPException(status_code=409, detail="Este caso ya no está pendiente en la lista negra de raid.")
+        raise HTTPException(status_code=409, detail="This case is no longer pending in the raid blacklist.")
     _v23_emit(numeric_id, ["raid_blacklist"])
     logger.info(f"🗂️ [Anti-Raid] Caso {target_id} en {numeric_id} cerrado como '{_V37_BL_ACTIONS[action]}' por {user_id}.")
     return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "record": resolved}, headers=_NO_STORE)
@@ -2140,20 +2144,20 @@ async def api_update_service_prefs(
                                    set_service_ttl)
     body = payload.get("service_prefs", payload) if isinstance(payload, dict) else {}
     if not isinstance(body, dict) or not body:
-        raise HTTPException(status_code=422, detail="service_prefs: se esperaba un objeto con al menos un campo.")
+        raise HTTPException(status_code=422, detail="service_prefs: expected an object with at least one field.")
     unknown = [k for k in body if k not in ("lang", "ttl_seconds")]
     if unknown:
-        raise HTTPException(status_code=422, detail=f"service_prefs.{unknown[0]}: campo desconocido.")
+        raise HTTPException(status_code=422, detail=f"service_prefs.{unknown[0]}: unknown field.")
     # Todo o nada: se valida antes de escribir para no guardar el idioma si el TTL es inválido.
     if "lang" in body and str(body["lang"]).strip().lower() not in SERVICE_LANGS:
-        raise HTTPException(status_code=422, detail=f"lang: usa {', '.join(SERVICE_LANGS)}.")
+        raise HTTPException(status_code=422, detail=f"lang: use {', '.join(SERVICE_LANGS)}.")
     if "ttl_seconds" in body:
         try:
             ttl_ok = int(body["ttl_seconds"]) in SERVICE_TTL_CHOICES
         except (TypeError, ValueError):
             ttl_ok = False
         if not ttl_ok:
-            raise HTTPException(status_code=422, detail=f"ttl_seconds: usa {', '.join(map(str, SERVICE_TTL_CHOICES))}.")
+            raise HTTPException(status_code=422, detail=f"ttl_seconds: use {', '.join(map(str, SERVICE_TTL_CHOICES))}.")
     changed = []
     try:
         if "lang" in body:
@@ -2195,7 +2199,7 @@ async def api_set_user_language(
     from database.database import set_user_lang, normalize_lang
     lang = normalize_lang((payload or {}).get("lang"))
     if lang is None:
-        raise HTTPException(status_code=422, detail="lang: usa 'en' o 'es'.")
+        raise HTTPException(status_code=422, detail="lang: use 'en' or 'es'.")
     saved = await set_user_lang(user_id, lang)
     try:
         from handlers.user_private import forget_user_lang_cache
@@ -2216,10 +2220,10 @@ async def api_system_ai_status(
     """
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     if not is_super_admin(user_id):
-        raise HTTPException(status_code=403, detail="Solo el Arquitecto puede ver el diagnóstico del núcleo IA.")
+        raise HTTPException(status_code=403, detail="Only the Architect can view the AI core diagnostics.")
     status_fn = getattr(_assistant_runtime, "mistral_status", None)
     try:
-        mistral = status_fn() if callable(status_fn) else {"client_ready": False, "init_error": "mistral_status no disponible"}
+        mistral = status_fn() if callable(status_fn) else {"client_ready": False, "init_error": "mistral_status unavailable"}
     except Exception as ex:
         mistral = {"client_ready": False, "init_error": f"{type(ex).__name__}"}
     sentinels = getattr(_assistant_runtime, "active_sentinels", {}) or {}
@@ -2238,7 +2242,7 @@ async def api_get_support_directives(
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     if not is_super_admin(user_id):
-        raise HTTPException(status_code=403, detail="Solo el Arquitecto puede ver las directivas del soporte IA.")
+        raise HTTPException(status_code=403, detail="Only the Architect can view the AI support directives.")
     return {"status": "success", "directives": await perimeter_ops.get_support_directives(force=True)}
 
 
@@ -2250,7 +2254,7 @@ async def api_set_support_directives(
 ):
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     if not is_super_admin(user_id):
-        raise HTTPException(status_code=403, detail="Solo el Arquitecto puede editar las directivas del soporte IA.")
+        raise HTTPException(status_code=403, detail="Only the Architect can edit the AI support directives.")
     saved = await perimeter_ops.set_support_directives((payload or {}).get("directives", ""), updated_by=user_id)
     return {"status": "success", "directives": saved}
 
@@ -2270,7 +2274,7 @@ async def api_chat_stats(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         return {"months": [], "mau": [], "messages": [], "messages_per_user": []}
 
@@ -2290,7 +2294,7 @@ async def api_chat_admin_stats(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2310,7 +2314,7 @@ async def api_chat_top_users(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         return {"top_users": []}
 
@@ -2332,7 +2336,7 @@ async def api_chat_heatmap(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2353,7 +2357,7 @@ async def api_chat_top_reputation(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2373,7 +2377,7 @@ async def api_chat_user_reputation(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2396,7 +2400,7 @@ async def api_export_backup(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2425,7 +2429,7 @@ async def api_import_backup(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2525,15 +2529,15 @@ async def api_update_chat_settings(
             logger.warning(f"⛔ [Activos] {user_id} intentó vincular credenciales desde la Mini App en {numeric_id}: rechazado.")
             raise HTTPException(
                 status_code=410,
-                detail="Las credenciales del Bot Clon y del Centinela se vinculan solo en el chat privado del bot "
-                       "(🧬 Clon & Centinela). La Mini App únicamente muestra su estado."
+                detail="Bot Clone and Sentinel credentials are linked only in the bot's private chat "
+                       "(🧬 Clone & Sentinel). The Mini App only shows their status."
             )
 
         # 1. Despliegue de Bot Clon (ruta heredada; inalcanzable desde v17: se rechaza arriba)
         if action == "deploy_clone":
             bot_token = (payload.get("bot_token") or "").strip()
             if not bot_token:
-                raise HTTPException(status_code=400, detail="Token de bot no proporcionado.")
+                raise HTTPException(status_code=400, detail="Bot token not provided.")
             if bot_token == BOT_TOKEN:
                 raise HTTPException(status_code=400, detail="No puedes usar el token del bot maestro como clon.")
             test_bot = None
@@ -2541,7 +2545,7 @@ async def api_update_chat_settings(
                 test_bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
                 bot_info = await test_bot.get_me()
             except Exception as ex:
-                raise HTTPException(status_code=400, detail=f"Token inválido o bot inaccesible: {ex}")
+                raise HTTPException(status_code=400, detail=f"Invalid token or unreachable bot: {ex}")
             finally:
                 if test_bot is not None:
                     with contextlib.suppress(Exception):
@@ -2560,15 +2564,15 @@ async def api_update_chat_settings(
         elif action == "connect_sentinel":
             session_str = (payload.get("session_string") or "").strip()
             if not session_str:
-                raise HTTPException(status_code=400, detail="String Session no proporcionada.")
+                raise HTTPException(status_code=400, detail="String Session not provided.")
 
             await save_owner_session(user_id, numeric_id, session_str)
             connected = await register_or_update_sentinel(user_id, numeric_id, session_str)
             if not connected:
                 # Evita que una sesión rota quede marcada como activa y se reintente en cada arranque.
                 with contextlib.suppress(Exception):
-                    await revoke_owner_session(user_id, numeric_id, reason="Conexión MTProto fallida al registrar")
-                raise HTTPException(status_code=400, detail="No se pudo conectar la sesión MTProto. Verifica que la sesión sea válida.")
+                    await revoke_owner_session(user_id, numeric_id, reason="MTProto connection failed on registration")
+                raise HTTPException(status_code=400, detail="Could not connect the MTProto session. Check that the session is valid.")
             return {
                 "status": "success",
                 "action": "connect_sentinel",
@@ -2580,7 +2584,7 @@ async def api_update_chat_settings(
             # v20 · Directiva guardada de la comunidad (ban / expulsión suave + criterios), salvo que la petición la
             # fije. Antes siempre era "ban" y solo detectaba cuentas eliminadas.
             if _assistant_runtime_is_purging(numeric_id):
-                raise HTTPException(status_code=409, detail="Ya hay una Ghost Purge en curso en esta comunidad.")
+                raise HTTPException(status_code=409, detail="A Ghost Purge is already running in this community.")
             purge_action = payload.get("purge_action")
             purge_criteria = payload.get("criteria")
             _spawn(execute_ghost_purge(
@@ -2593,11 +2597,11 @@ async def api_update_chat_settings(
                 "status": "success",
                 "action": "run_ghost_purge",
                 "chat_id": chat_id,
-                "message": "Ghost Purge iniciada en segundo plano."
+                "message": "Ghost Purge started in the background."
             }
 
         if action:
-            raise HTTPException(status_code=400, detail=f"Acción desconocida: {action}")
+            raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
 
         payload = dict(payload or {})
         response_extra: Dict[str, Any] = {}
@@ -2611,7 +2615,7 @@ async def api_update_chat_settings(
         broadcast_keys = ("broadcast_target", "broadcast_interval", "promo_text", "broadcast_lang")
         if any(k in payload for k in broadcast_keys):
             if save_broadcast_config is None:
-                raise HTTPException(status_code=503, detail="Difusión personalizada no disponible en este despliegue.")
+                raise HTTPException(status_code=503, detail="Custom broadcast is not available in this deployment.")
             broadcast_fields = {k: payload.pop(k) for k in broadcast_keys if k in payload}
             try:
                 response_extra["broadcast"] = await save_broadcast_config(
@@ -2636,7 +2640,7 @@ async def api_update_chat_settings(
     except HTTPException:
         raise
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     except Exception as e:
         logger.error(f"❌ [Settings API Error]: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -2659,7 +2663,7 @@ async def api_get_chat_configuration(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+        raise HTTPException(status_code=400, detail="chat_id must be an integer.")
     await assert_chat_ownership(user_id, numeric_id)
     configuration = await get_chat_full_configuration(numeric_id)
     return {"status": "success", "chat_id": str(numeric_id), "configuration": configuration}
@@ -2681,19 +2685,19 @@ async def api_update_chat_configuration(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id debe ser un entero.")
+        raise HTTPException(status_code=400, detail="chat_id must be an integer.")
     await assert_chat_ownership(user_id, numeric_id)
 
     body = payload.get("configuration", payload) if isinstance(payload, dict) else payload
     if isinstance(body, dict) and sum(len(v) if isinstance(v, dict) else 1 for v in body.values()) > _CONFIG_MAX_BODY_FIELDS:
-        raise HTTPException(status_code=413, detail="configuration: demasiados campos.")
+        raise HTTPException(status_code=413, detail="configuration: too many fields.")
     try:
         configuration = await update_chat_full_configuration(numeric_id, body, updated_by=user_id)
     except ChatConfigError as err:
         raise HTTPException(status_code=422, detail=str(err))
     except Exception as e:
         logger.error(f"❌ [Configuration API Error] chat={numeric_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="No se pudo guardar la configuración.")
+        raise HTTPException(status_code=500, detail="The configuration could not be saved.")
 
     changed = sorted({field
                       for key, value in body.items()
@@ -2722,7 +2726,7 @@ async def api_get_log_report(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     await assert_chat_ownership(user_id, numeric_id)
     return {"status": "success", "chat_id": str(numeric_id), "log_report": await get_log_report_config(numeric_id)}
 
@@ -2739,7 +2743,7 @@ async def api_save_log_report(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     await assert_chat_ownership(user_id, numeric_id)
     body = payload.get("log_report", payload) if isinstance(payload, dict) else payload
     if isinstance(body, dict) and body.get("enabled"):
@@ -2764,14 +2768,14 @@ async def api_send_log_report(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     await assert_chat_ownership(user_id, numeric_id)
     if master_bot_instance is None:
-        raise HTTPException(status_code=503, detail="El bot no está disponible en este momento.")
+        raise HTTPException(status_code=503, detail="The bot is not available right now.")
     now = time.monotonic()
     last = _LOG_REPORT_LAST_SEND.get(numeric_id)
     if last is not None and now - last < LOG_REPORT_SEND_COOLDOWN_S:
-        raise HTTPException(status_code=429, detail=f"Espera {int(LOG_REPORT_SEND_COOLDOWN_S - (now - last)) + 1} s para enviar otro informe.")
+        raise HTTPException(status_code=429, detail=f"Wait {int(LOG_REPORT_SEND_COOLDOWN_S - (now - last)) + 1} s before sending another report.")
     _LOG_REPORT_LAST_SEND[numeric_id] = now
     try:
         result = await ecosystem.send_log_report_now(master_bot_instance, numeric_id)
@@ -2781,7 +2785,7 @@ async def api_send_log_report(
     except Exception as ex:
         _LOG_REPORT_LAST_SEND.pop(numeric_id, None)
         logger.warning(f"⚠️ [Log Report] Envío manual fallido en {numeric_id}: {ex}")
-        raise HTTPException(status_code=502, detail="Telegram rechazó el informe. Verifica que el bot pueda publicar en el canal de registro.")
+        raise HTTPException(status_code=502, detail="Telegram rejected the report. Check that the bot can post in the log channel.")
     return {"status": "success", "chat_id": str(numeric_id), **result}
 
 
@@ -2887,7 +2891,7 @@ async def api_community_full_analytics(
     try:
         numeric_id = int(chat_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail="chat_id inválido.")
+        raise HTTPException(status_code=400, detail="invalid chat_id.")
     await assert_chat_access(user_id, numeric_id)
 
     try:
@@ -2896,10 +2900,10 @@ async def api_community_full_analytics(
             timeout=ANALYTICS_API_TIMEOUT
         )
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="La compilación analítica excedió el tiempo límite.")
+        raise HTTPException(status_code=504, detail="Analytics compilation exceeded the time limit.")
     except Exception as e:
         logger.error(f"❌ [API Analytics Error] {numeric_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=503, detail="Analítica temporalmente no disponible.")
+        raise HTTPException(status_code=503, detail="Analytics temporarily unavailable.")
 
     payload = await _decorate_analytics_full(numeric_id, data)
     elapsed_ms = (time.perf_counter() - started) * 1000.0

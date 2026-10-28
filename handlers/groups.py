@@ -13,6 +13,8 @@ v40:    Fase 3 — etapa Auto-Mod (handlers/automod.py) dentro de la matriz peri
 v39:    Log Channel Hub — entradas/salidas (enlace, solicitud, añadido, directo), captcha, Anti-Spam, Anti-Flood,
         userbots, CAS, Anti-Raid, escalera de advertencias, pánico, interruptores del Dueño y turnos de speaker
         se auditan en el canal de registro vía handlers/logger_hub.py (siempre en segundo plano con _spawn).
+v42.1 · El origen de la detección de userbots («join request», «join», «membership change», «message») que se
+       publica en la tarjeta del canal de registro sale en inglés (antes siempre en español).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import time
@@ -1503,7 +1505,7 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
             pass
         return
 
-    if await enforce_userbot_flag(bot, group_id, user_id, event.from_user.username or "", source="solicitud de ingreso"):
+    if await enforce_userbot_flag(bot, group_id, user_id, event.from_user.username or "", source="join request"):
         try:
             await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
         except Exception:
@@ -1605,7 +1607,7 @@ async def handle_new_members(message: Message, bot: Bot):
 
             await registry_track(group_id, new_user.id, force=True)
 
-            if await enforce_userbot_flag(bot, group_id, new_user.id, new_user.username or "", source="ingreso"):
+            if await enforce_userbot_flag(bot, group_id, new_user.id, new_user.username or "", source="join"):
                 continue
 
         forced = bool(verdict.get("isolated")) and bool(verdict.get("is_new"))
@@ -1659,7 +1661,7 @@ async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
         return
 
     await registry_track(group_id, user.id, force=True)
-    await enforce_userbot_flag(bot, group_id, user.id, user.username or "", source="cambio de membresía")
+    await enforce_userbot_flag(bot, group_id, user.id, user.username or "", source="membership change")
 
 
 @router.callback_query(F.data.startswith("cap_ver_") | F.data.startswith("cap_simple_"))
@@ -2664,7 +2666,7 @@ async def enforce_userbot_flag(
     user_id: int,
     username: str = "",
     message: Optional[Message] = None,
-    source: str = "mensaje"
+    source: str = "message"
 ) -> bool:
     if is_super_admin(user_id) or user_id in SERVICE_ACCOUNT_IDS:
         return False
@@ -2712,7 +2714,7 @@ async def enforce_userbot_flag(
             track_security(group_id, user_id, "antispam", "delete", False)
         logger.warning(
             f"[UserbotHunter] Cuenta fichada {user_id} neutralizada en {group_id} "
-            f"(acción: {USERBOT_ACTION}, origen: {source})."
+            f"(action: {USERBOT_ACTION}, source: {source})."
         )
         # 🧾 v39 · Auditoría: userbot neutralizado.
         _audit_claim(group_id, user_id, "removal", "restrict")
@@ -3461,7 +3463,7 @@ async def group_security_matrix(message: Message, bot: Bot):
 
     await registry_track(group_id, user_id)
 
-    if await enforce_userbot_flag(bot, group_id, user_id, username, message=message, source="mensaje"):
+    if await enforce_userbot_flag(bot, group_id, user_id, username, message=message, source="message"):
         return
 
     tier = await get_privilege_tier(bot, group_id, user_id, username)
