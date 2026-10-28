@@ -179,7 +179,7 @@ import assistant as _assistant_runtime   # v17 · lectura del estado EN VIVO de 
 import perimeter_ops                      # v20 · purga v2, canal de registro, IA, estado del perímetro y soporte IA
 import micvip_audit                       # v22 · auditoría MicVIP de extremo a extremo (cobro → pase → Centinela)
 import vip_roles                          # v23 · roles y etiquetas VIP automáticos post-donación / pase
-import link_quotas                        # v23 · cuota diaria de enlaces por administrador
+import handlers.link_quotas as link_quotas  # v23 · cuota diaria de enlaces por administrador
 from assistant import (
     close_all_sentinels,
     execute_ghost_purge,
