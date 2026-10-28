@@ -4,6 +4,8 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
 Fase 5: Cambios de la sala de audio (inicio/fin de llamada, altas/bajas, micrófonos) emitidos al radar WebSocket.
+v42.1: Mensajes de servicio en INGLÉS por defecto también en los botones automáticos de enlaces de los avisos del
+     Centinela (antes «Ver Enlace Oficial» / «Enlace N» / «Acceder» salían siempre en español).
 v42: Sesiones MTProto con lista fatal validada (sin UserBannedInChannel), Mistral con filtro de parámetros por firma,
      backoff con jitter y semáforo liberado entre reintentos, trampa unificada de llamada terminada con backoff dinámico
      (5 → 60 s) y mapa SSRC continuo para la captura de voz.
@@ -1199,10 +1201,19 @@ def _is_time_in_window(current_hm: str, start_hm: str, end_hm: str) -> bool:
         return current_hm >= start_hm or current_hm < end_hm
 
 
-def _extract_urls_to_markup(text: str, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None):
+# v42.1 · Etiquetas de los botones que se generan a partir de los enlaces del aviso. Inglés por defecto.
+URL_BUTTON_LABELS: dict[str, dict[str, str]] = {
+    "en": {"official": "🌐 View official link", "numbered": "🔗 Link {n}", "open": "🌐 Open"},
+    "es": {"official": "🌐 Ver Enlace Oficial", "numbered": "🔗 Enlace {n}", "open": "🌐 Acceder"},
+}
+
+
+def _extract_urls_to_markup(text: str, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None,
+                            lang: str = "en"):
+    labels = URL_BUTTON_LABELS.get(_norm_lang(lang), URL_BUTTON_LABELS["en"])
     buttons = []
     if custom_btn_url:
-        label = custom_btn_text if custom_btn_text else "🌐 Ver Enlace Oficial"
+        label = custom_btn_text if custom_btn_text else labels["official"]
         buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
 
     url_pattern = re.compile(r'(?<!href=["\'])(https?://[^\s<>"\']+)')
@@ -1212,7 +1223,8 @@ def _extract_urls_to_markup(text: str, custom_btn_text: Optional[str] = None, cu
     for i, u in enumerate(found_urls):
         cleaned_text = cleaned_text.replace(u, "").strip()
         if not custom_btn_url or u != custom_btn_url:
-            btn_title = f"🔗 Enlace {i + 1}" if len(found_urls) > 1 else (custom_btn_text if custom_btn_text else "🌐 Acceder")
+            btn_title = (labels["numbered"].format(n=i + 1) if len(found_urls) > 1
+                         else (custom_btn_text if custom_btn_text else labels["open"]))
             buttons.append([InlineKeyboardButton(text=btn_title, url=u)])
 
     cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
@@ -1538,7 +1550,7 @@ async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, la
         )
 
     markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, price, custom_btn, custom_url)
-    cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
+    cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url, lang=lang)
     final_markup = _merge_markups(markup, extracted_markup)
 
     sent = await _dispatch_radar_notice(
@@ -1572,7 +1584,7 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
         markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, custom_btn_text=custom_btn, custom_btn_url=custom_url)
         text = custom_text if (tier in ("pro", "ultra_pro") and custom_text) else VC_START_TEXTS.get(lang, VC_START_TEXTS["en"])
 
-        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url)
+        cleaned_text, extracted_markup = _extract_urls_to_markup(text, custom_btn, custom_url, lang=lang)
         final_markup = _merge_markups(markup, extracted_markup)
 
         sent = await _dispatch_radar_notice(
@@ -1626,7 +1638,8 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
     if last_sent is not None and now - last_sent < SENTINEL_PAYLOAD_MIN_GAP_SECONDS:
         return None
 
-    cleaned_text, markup = _extract_urls_to_markup(text, payload_cfg.get("button_text"), payload_cfg.get("button_url"))
+    cleaned_text, markup = _extract_urls_to_markup(text, payload_cfg.get("button_text"), payload_cfg.get("button_url"),
+                                                   lang=await _group_service_lang(chat_id))
     sent = await _dispatch_radar_notice(
         chat_id=chat_id, text=cleaned_text, media_id=payload_cfg.get("media_id"),
         media_type=payload_cfg.get("media_type"), auto_delete_after=payload_cfg.get("auto_delete_after"),
@@ -3886,7 +3899,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                         custom_btn_text=btn_text,
                                         custom_btn_url=btn_url
                                     )
-                                cleaned_text, extracted_markup = _extract_urls_to_markup(text, btn_text, btn_url)
+                                cleaned_text, extracted_markup = _extract_urls_to_markup(
+                                    text, btn_text, btn_url, lang=await _group_service_lang(chat_id))
                                 final_reset_markup = _merge_markups(reset_markup, extracted_markup)
 
                                 await _dispatch_radar_notice(
@@ -4296,7 +4310,8 @@ async def vc_scheduler_loop():
                                 sched_media_type = svc_cfg.get("sched_start_media_type")
                                 sched_autodel = int(svc_cfg.get("sched_start_autodel", 0) or 0)
                                 cleaned_sched_text, sched_markup = _extract_urls_to_markup(
-                                    sched_text, svc_cfg.get("sched_start_btn"), svc_cfg.get("sched_start_btn_url")
+                                    sched_text, svc_cfg.get("sched_start_btn"), svc_cfg.get("sched_start_btn_url"),
+                                    lang=svc_lang
                                 )
 
                                 await _dispatch_radar_notice(

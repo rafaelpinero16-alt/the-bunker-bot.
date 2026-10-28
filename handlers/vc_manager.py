@@ -3,6 +3,9 @@ vc_manager.py — The Bunker OS (Aiogram 3.x)
 
 Módulo de gestión y supervisión acústica de videochats (Voice Rooms).
 Integrado con Centinela MTProto, pasarela de Telegram Stars, telemetría CAMS y botoneras bilingües.
+v42.1 · Inglés por defecto en TODO lo que ve el usuario: la etiqueta del Centinela («Dedicated / Master Sentinel»)
+      y los nombres de respaldo seguían fijos en español. /micvip descarta el comando ANTES de consultar precio o
+      Bot API si el aviso está desactivado, y las plantillas propias admiten {price}.
 v42 · «Sincronizar sala» limpia TODO el estado en caché del radar (igual que /reload del Centinela: permisos de
       videochat, administradores, reintento de unión, enfriamiento y strikes de AutoLower, caché IA e idioma/TTL) y el
       panel muestra el porcentaje REAL de AutoLower configurado (antes siempre decía 2 %).
@@ -322,22 +325,37 @@ async def auto_delete_msg(msg: Message, delay: int = 15):
         pass
 
 
-async def get_active_sentinel_label(group_id: int) -> str:
-    """Devuelve la etiqueta del centinela activo para el grupo (Dedicado o Maestro)."""
+SENTINEL_LABELS = {
+    "en": {"own": "Dedicated Sentinel 💎", "master": "Master Sentinel (@Alphacentinel) 🤖"},
+    "es": {"own": "Centinela Dedicado Propio 💎", "master": "Centinela Maestro (@Alphacentinel) 🤖"},
+}
+FALLBACK_NAMES = {
+    "en": {"user": "User", "operator": "Operator", "member": "Member"},
+    "es": {"user": "Usuario", "operator": "Operador", "member": "Miembro"},
+}
+
+
+def _fallback_name(lang: str, key: str) -> str:
+    return FALLBACK_NAMES.get(lang, FALLBACK_NAMES["en"]).get(key, FALLBACK_NAMES["en"][key])
+
+
+async def get_active_sentinel_label(group_id: int, lang: str = "en") -> str:
+    """Etiqueta del centinela activo para el grupo (Dedicado o Maestro), en el idioma pedido (inglés por defecto)."""
+    labels = SENTINEL_LABELS.get(lang, SENTINEL_LABELS["en"])
     try:
         session_data = await get_session_by_group(group_id)
         if session_data:
-            return "Centinela Dedicado Propio 💎"
+            return labels["own"]
     except Exception:
         pass
-    return "Centinela Maestro (@Alphacentinel) 🤖"
+    return labels["master"]
 
 
 def get_user_mention_html(user) -> str:
     """Genera una mención válida en formato HTML con protección de caracteres."""
     if getattr(user, "username", None):
         return f"@{user.username}"
-    name = getattr(user, "full_name", getattr(user, "first_name", "Usuario"))
+    name = getattr(user, "full_name", None) or getattr(user, "first_name", None) or "User"
     return f'<a href="tg://user?id={user.id}">{html.escape(name)}</a>'
 
 
@@ -383,7 +401,7 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
     except Exception:
         night_cfg = {"status": 0}
 
-    sentinel_label = await get_active_sentinel_label(chat_id)
+    sentinel_label = await get_active_sentinel_label(chat_id, lang)
     try:
         pct = int(await get_autolower_pct(chat_id) or 2)
     except Exception:
@@ -512,7 +530,8 @@ async def send_private_response(message: Message, text: str, reply_markup=None):
 
     if not sent_dm:
         bot_info = await message.bot.get_me()
-        name = (message.from_user.username or message.from_user.first_name) if message.from_user else "Operador"
+        name = ((message.from_user.username or message.from_user.first_name) if message.from_user
+                else _fallback_name(lang, "operator"))
         try:
             temp_msg = await message.bot.send_message(
                 chat_id=message.chat.id,
@@ -591,7 +610,7 @@ async def cb_vclang_toggle(callback: CallbackQuery, bot: Bot):
         lines = current_text.split("\n")
         user_line = next((l for l in lines if "@" in l or "volumen" in l or "volume" in l), "")
         # El texto se reconstruye como HTML: el nombre recuperado del mensaje plano se escapa.
-        user_ref = html.escape(user_line.split(",")[0].replace("🔇", "").strip() or "Miembro")
+        user_ref = html.escape(user_line.split(",")[0].replace("🔇", "").strip() or _fallback_name(new_lang, "member"))
         text_template = VC_MEMBER_JOIN_TEXTS.get(new_lang, VC_MEMBER_JOIN_TEXTS.get("en") or VC_MEMBER_JOIN_TEXTS["es"])
         new_text = text_template.format(user_name=user_ref)
     else:
@@ -905,6 +924,16 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
     if not await is_group_approved(chat_id):
         return
 
+    # v42.1 · Descarte temprano: con el aviso MicVIP desactivado solo se retira el comando, sin consultar la tarifa
+    # ni la Bot API (antes se calculaban precio, teclado y get_me para nada).
+    svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
+    if svc_cfg.get("micvip_enabled", 1) == 0:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
     bot_info = await bot.get_me()
     bot_username = bot_info.username or "thebunkerapp_bot"
 
@@ -912,8 +941,7 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
     custom_cfg = await get_mic_vip_custom_config(chat_id)
     price = custom_cfg.get("price") or (await get_mic_vip_price(chat_id)) or 50
 
-    # Lectura de personalizaciones de Sentinel Settings
-    svc_cfg = await get_sentinel_service_messages_config(chat_id)
+    # Personalizaciones de Sentinel Settings
     custom_text = svc_cfg.get("micvip_text") or svc_cfg.get("vc_text")
     custom_btn = svc_cfg.get("micvip_btn") or svc_cfg.get("vc_btn")
     custom_url = svc_cfg.get("micvip_btn_url") or svc_cfg.get("vc_btn_url")
@@ -926,8 +954,10 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
             .replace("{user}", mention)
             .replace("{user_name}", mention)
             .replace("{name}", mention)
+            .replace("{price}", str(price))
         )
     else:
+        # Sin plantilla propia: texto oficial en el idioma de servicio del grupo (inglés por defecto).
         text = t["micvip_msg"].format(mention=mention)
 
     keyboard = build_vc_moderation_keyboard(
@@ -938,13 +968,6 @@ async def trigger_mic_vip_offer(message: Message, bot: Bot):
         custom_btn_text=custom_btn,
         custom_btn_url=custom_url
     )
-
-    if svc_cfg.get("micvip_enabled", 1) == 0:
-        try:
-            await message.delete()
-        except Exception:
-            pass
-        return
 
     sent_msg = await message.answer(
         text,
