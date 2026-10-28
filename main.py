@@ -7,6 +7,9 @@ Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints d
 Fase 5: Analítica en Caliente nivel Combot (GET /api/community/{chat_id}/analytics + /ws/radar/{chat_id} blindado).
 v37: Anti-Raid configurable (API /chat/{id}/raid + lista negra), idioma/TTL de servicio (/chat/{id}/service-prefs),
      rehidratación del escudo al arrancar y avisos del núcleo en inglés por defecto.
+v41.1: Logs en TIEMPO REAL — el informe periódico deja de ser la única vía: pulsos de actividad de administradores,
+     destacados / inactivos, vigía de expiraciones MicVIP (handlers/realtime_audit.py) y API del canal de registro
+     con vectores activables y auditoría de pases MicVIP activos (api/routes/audit_log.py).
 v41: Auditoría de contratos Mini App ↔ backend — autenticación centralizada en auth.py (JWT HS256 con exp/jti,
      tokens heredados aceptados hasta caducar, initData con caducidad configurable y rechazo de fechas futuras),
      enlace /login de UN SOLO USO de verdad, CORS y origen del WebSocket restringidos al dominio de la Mini App
@@ -358,6 +361,9 @@ from handlers.logger_hub import forget_audit_target, register_master_bot as regi
 from handlers import automod, telegram_ops
 from database import crud_fase3
 from api.routes.dashboard import build_dashboard_router
+# 🧾 v41.1 · Logs en tiempo real: canal de registro + vectores (API) y vigías (pulsos de admins, MicVIP).
+from api.routes.audit_log import build_audit_log_router
+from handlers import realtime_audit
 
 
 def _ban_appeals_module():
@@ -3180,6 +3186,17 @@ api_router.include_router(build_dashboard_router(
 logger.info("🏆 [Dashboard] Endpoints /api/chat/{id}/(users|admin-leaderboard|mass-action|automod|sanctions) montados.")
 
 
+# 🧾 v41.1 · Canal de registro en tiempo real: vincular canal, vectores activables, prueba y pases MicVIP activos.
+api_router.include_router(build_audit_log_router(
+    require_user=require_authenticated_user,
+    assert_owner=assert_chat_ownership,
+    get_bot=lambda: master_bot_instance,
+    validate_log_channel=lambda uid, cid, raw: _validate_log_channel(uid, cid, raw),
+    check_health=lambda bot, log_id: perimeter_ops.check_log_channel_health(bot, log_id),
+))
+logger.info("🧾 [Audit] Endpoints /api/chat/{id}/audit-log(+/test) y /api/chat/{id}/micvip/active montados.")
+
+
 app.include_router(api_router, prefix="/api")
 
 
@@ -4281,6 +4298,8 @@ async def main():
     register_audit_master_bot(master_bot)
     # 🤖 v40 · Auto-Mod, falsos positivos y Gestión Masiva actúan con el clon de la comunidad si está en el grupo.
     telegram_ops.register_bot_resolver(_clone_bot_for_chat)
+    # 🧾 v41.1 · Auditoría en tiempo real: pulsos de administradores, destacados e inactivos, expiraciones MicVIP.
+    realtime_audit.start()
     _spawn(ban_appeals.appeals_sweeper_loop(), name="ban_appeals_sweeper")
     try:
         master_info = await master_bot.get_me()
@@ -4433,6 +4452,9 @@ async def main():
             await close_all_sentinels()
         except Exception:
             pass
+        # 3b. 🧾 v41.1 · Últimos pulsos de actividad de administradores antes de cerrar la sesión HTTP
+        with contextlib.suppress(Exception):
+            await realtime_audit.stop()
         # 4. Cerrar la sesión HTTP del bot maestro
         try:
             await master_bot.session.close()

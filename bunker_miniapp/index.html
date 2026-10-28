@@ -11,14 +11,14 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <meta name="bunker-build" content="40.0">
+    <meta name="bunker-build" content="41.0">
     <link rel="icon" type="image/jpeg" href="logo.jpg">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         /* Tipografía display de la Mini App: Urbanist (respaldo Outfit) para todas las utilidades font-sans */
         /* v30 · Build desplegado: debe coincidir con los ?v= del import map y del script principal. */
-        window.BUNKER_BUILD = '40.0';
+        window.BUNKER_BUILD = '41.0';
         tailwind.config = {
             theme: {
                 extend: {
@@ -39,12 +39,13 @@
     <script type="importmap">
     {
         "imports": {
-            "./js/api.js": "./js/api.js?v=40.0",
-            "./js/ui.js": "./js/ui.js?v=40.0",
-            "./js/config.js": "./js/config.js?v=40.0",
-            "./js/state.js": "./js/state.js?v=40.0",
-            "./js/telegram.js": "./js/telegram.js?v=40.0",
-            "./js/moderation.js": "./js/moderation.js?v=40.0"
+            "./js/api.js": "./js/api.js?v=41.0",
+            "./js/ui.js": "./js/ui.js?v=41.0",
+            "./js/config.js": "./js/config.js?v=41.0",
+            "./js/state.js": "./js/state.js?v=41.0",
+            "./js/telegram.js": "./js/telegram.js?v=41.0",
+            "./js/moderation.js": "./js/moderation.js?v=41.0",
+            "./js/auditlog.js": "./js/auditlog.js?v=41.0"
         }
     }
     </script>
@@ -52,7 +53,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@600;700;800;900&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=40.0">
+    <link rel="stylesheet" href="styles.css?v=41.0">
 </head>
 <body class="min-h-screen flex flex-col justify-between p-4 max-w-md mx-auto selection:bg-[#00f3ff] selection:text-black relative pb-16">
     <div class="tron-grid"></div>
@@ -1238,6 +1239,17 @@
                             <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="apl_hint">Only automatic warn-limit bans are appealable. The bot needs ban and invite rights; if it cannot unban, the payment is refunded automatically.</p>
                         </div>
 
+                        <!-- 🧾 v41.1 · CANAL DE REGISTRO EN TIEMPO REAL (vectores) + PASES MICVIP ACTIVOS. Lo pinta js/auditlog.js. -->
+                        <div id="audit-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
+                            <h4 class="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                                <i class="fa-solid fa-satellite-dish"></i> <span id="audit-title">Real-time Log Channel</span>
+                            </h4>
+                            <p id="audit-desc" class="text-[10px] text-theme-muted leading-snug">Every enabled event is posted instantly to your log channel: no 24-hour wait.</p>
+                            <div id="audit-root" class="space-y-2">
+                                <p class="text-center text-[11px] text-neutral-500 font-mono py-2">Select a community.</p>
+                            </div>
+                        </div>
+
                         <!-- 🏆 v40 · FASE 3 · DASHBOARD DE MODERACIÓN (Auto-Mod · Leaderboard · Historial · Gestión Masiva). Lo pinta js/moderation.js. -->
                         <div id="mod-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
                             <h4 class="text-xs font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -1749,6 +1761,6 @@
     <div id="toast-stack" aria-live="polite" class="fixed inset-x-0 z-[300] flex flex-col items-center gap-2 px-4 pointer-events-none" style="top: calc(env(safe-area-inset-top, 0px) + 12px)"></div>
 
     <!-- Módulo Central de Orquestación -->
-    <script type="module" src="js/app.js?v=40.0"></script>
+    <script type="module" src="js/app.js?v=41.0"></script>
 </body>
 </html>

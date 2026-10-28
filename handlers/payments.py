@@ -2235,11 +2235,11 @@ async def process_successful_payment(message: Message, bot: Bot):
         try:
             chat_id = int(payload.split("_")[2])
 
+            purchased_at = int(time.time())
             await grant_vip_mic(user_id=user_id, group_id=chat_id)
             benefit_granted = True
-            _audit_payment(bot, chat_id, "micvip_purchase", user=buyer, amount=paid_amount, duration_days=1,
-                           detail=f"charge {charge_id}")   # 🧾 v39
 
+            volume_requested = False
             try:
                 await set_participant_mic(
                     chat_id=chat_id,
@@ -2247,8 +2247,21 @@ async def process_successful_payment(message: Message, bot: Bot):
                     muted=False,
                     volume=10000
                 )
+                volume_requested = True
             except Exception as radar_err:
                 logger.warning(f"Aviso Centinela al restaurar volumen de pase VIP: {radar_err}")
+
+            # 🧾 v41 · Prueba legal en tiempo real: comprador, Stars, fecha/hora EXACTA de compra y de expiración del
+            #    pase real (con renovaciones acumuladas) y orden de volumen al 100 % enviada al Centinela. La
+            #    confirmación de que el Centinela lo aplicó llega aparte (#MICVIP_GRANTED) y la expiración (#MICVIP_EXPIRED).
+            expires_at_ts = None
+            with contextlib.suppress(Exception):
+                expires_at_ts = await _call_db_fn("get_vip_mic_expiry_ts", user_id, chat_id)
+            _audit_payment(bot, chat_id, "micvip_purchase", user=buyer, amount=paid_amount, duration_days=1,
+                           purchased_at=purchased_at, expires_at=expires_at_ts, detail=f"charge {charge_id}",
+                           extra={("Volume", "Volumen"): "100 % → Sentinel ✅" if volume_requested else
+                                  "100 % queued (Sentinel offline) / en cola (Centinela sin conexión)",
+                                  ("Granted", "Concedido"): "automatic / automático"})
 
             try:
                 custom_cfg = await get_mic_vip_custom_config(chat_id)

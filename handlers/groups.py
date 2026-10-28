@@ -7,6 +7,8 @@ Fase 4: Gamificación Tokenizada (XP / Niveles / /rank / /top) + Analítica Heat
 Fase 5: Ascensos de nivel emitidos en caliente al radar WebSocket de la Mini App.
 Fase 6: Aduana sin DMs fríos — el captcha privado solo se envía en ChatJoinRequest (ventana legal
         de 5 min vía user_chat_id); los ingresos directos se verifican únicamente en el grupo.
+v41:    Logs en tiempo real — pulsos de actividad de administradores, LinkLock / cuota de enlaces de admins y
+        MediaLocks con tarjeta propia (vector links_media) en el canal de registro.
 v40:    Fase 3 — etapa Auto-Mod (handlers/automod.py) dentro de la matriz perimetral, una vez por mensaje.
 v39:    Log Channel Hub — entradas/salidas (enlace, solicitud, añadido, directo), captcha, Anti-Spam, Anti-Flood,
         userbots, CAS, Anti-Raid, escalera de advertencias, pánico, interruptores del Dueño y turnos de speaker
@@ -100,6 +102,8 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
 # 🤖 v40 · Fase 3: motor Auto-Mod (phishing / estafas / flooding con escalado 3 infracciones / 24 h → ban permanente).
 from handlers import automod
+# 👮 v41 · Auditoría en tiempo real: pulsos de actividad de administradores (sin esperar al informe periódico).
+from handlers import realtime_audit
 
 try:
     from middlewares.anti_spam import check_global_cas_spam
@@ -169,6 +173,21 @@ def _audit_claim(chat_id: int, user_id: int, *kinds: str) -> None:
     """
     for kind in kinds:
         mark_audit_handled(f"{int(chat_id)}:{kind}:{int(user_id)}", 30.0)
+
+
+def _media_kind(message: Message) -> str:
+    """Tipo de contenido para la tarjeta de MediaLocks (foto, sticker, reenvío, botones, spoiler…)."""
+    kind = str(getattr(getattr(message, "content_type", ""), "value", getattr(message, "content_type", "")) or "message")
+    flags = []
+    if getattr(message, "forward_origin", None) is not None:
+        flags.append("forward")
+    if getattr(message, "reply_markup", None) is not None:
+        flags.append("inline buttons")
+    if getattr(message, "has_media_spoiler", False):
+        flags.append("spoiler")
+    if getattr(message, "via_bot", None) is not None:
+        flags.append("via bot")
+    return f"MediaLocks · {kind}" + (f" ({', '.join(flags)})" if flags else "")
 
 
 def _plain_name(mention_html: str) -> str:
@@ -3434,8 +3453,14 @@ async def group_security_matrix(message: Message, bot: Bot):
 
     tier = await get_privilege_tier(bot, group_id, user_id, username)
     if _tier_is_privileged(tier):
+        # 👮 v41 · Pulso de actividad del administrador / dueño (O(1) en memoria; la tarjeta sale al cerrar la ventana).
+        realtime_audit.track_admin_message(bot, message, tier)
         # 🔗 v23 · Los administradores comunes siguen sujetos a su cuota diaria de enlaces (si el dueño la activó).
         if tier == "admin" and await link_quotas.enforce_admin_link_quota(bot, message, tier, is_edit=is_edit):
+            # 🧾 v41 · Auditoría: enlace de un administrador bloqueado por su cuota diaria.
+            _audit(bot, group_id, "link_blocked", user=message.from_user, automatic=True, system="link_quota",
+                   reason="Admin daily link quota reached", excerpt=text_content or None,
+                   detail="edited message" if is_edit else None)
             return
         # Miembros inmunes también registran densidad horaria
         _spawn(record_hourly_chat_activity(group_id))
@@ -3487,6 +3512,10 @@ async def group_security_matrix(message: Message, bot: Bot):
         bot, message, is_edit=is_edit, blacklist=(await get_blacklist()) if is_edit else None,
         exempt=vip_perks["exempt"] if vip_perks else None,
     ):
+        # 🧾 v41 · Auditoría: contenido restringido por MediaLocks (la advertencia, si la hubo, llega en su tarjeta).
+        _audit(bot, group_id, "media_blocked", user=message.from_user, automatic=True, system="medialocks",
+               reason=_media_kind(message), excerpt=(message.caption or message.text or None),
+               detail="edited message" if is_edit else None)
         return
 
     # 3. Lista Negra (Blacklist Alfanumérica)
@@ -3539,8 +3568,11 @@ async def group_security_matrix(message: Message, bot: Bot):
         except Exception: 
             pass
         # 🧾 v39 · Auditoría: mensaje eliminado y fragmento del contenido (la advertencia llega en su propia tarjeta).
-        _audit(bot, group_id, "spam_deleted", user=message.from_user, automatic=True, system="antispam",
-               action="delete", reason=threat_kind or "Anti-Spam filter", excerpt=text_content or None,
+        #    v41 · Los enlaces bloqueados (LinkLock) van a su propio vector (links_media).
+        is_link = threat_kind in ("Telegram link", "Web link", "Quoted link")
+        _audit(bot, group_id, "link_blocked" if is_link else "spam_deleted", user=message.from_user, automatic=True,
+               system="linklock" if is_link else "antispam", action="delete",
+               reason=threat_kind or "Anti-Spam filter", excerpt=text_content or None,
                detail="edited message" if is_edit else None)
 
         await enforce_warn_ladder(

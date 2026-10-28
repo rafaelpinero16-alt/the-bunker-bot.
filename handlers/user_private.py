@@ -108,7 +108,7 @@ from assistant import (
 )
 import perimeter_ops   # 🛰️ v20 · lógica compartida con la Mini App (purga v2, canal de registro, IA, soporte IA)
 # 🧾 v39 · Log Channel Hub: al vincular / cambiar / verificar / desactivar el canal de registro se invalida su caché.
-from handlers.logger_hub import dispatch_audit_log, forget_audit_target
+from handlers.logger_hub import AUDIT_VECTORS, dispatch_audit_log, forget_audit_target
 import micvip_audit    # 🎟️ v22 · auditoría MicVIP compartida con la Mini App
 import vip_roles       # 👑 v23 · roles y etiquetas VIP automáticos (compartido con la Mini App)
 import link_quotas     # 🔗 v23 · cuota diaria de enlaces por administrador (compartido con la Mini App)
@@ -9311,9 +9311,36 @@ async def _logch_view(bot: Bot, group_id: int, lang: str) -> tuple:
         [InlineKeyboardButton(text="✏️ " + ("Vincular / cambiar" if lang == "es" else "Link / change"), callback_data=f"logch_set_{group_id}_{lang}")],
         [InlineKeyboardButton(text="🔄 " + ("Verificar ahora" if lang == "es" else "Check now"), callback_data=f"logch_check_{group_id}_{lang}"),
          InlineKeyboardButton(text="🚫 " + ("Desactivar" if lang == "es" else "Disable"), callback_data=f"logch_off_{group_id}_{lang}")],
+        # 🎚️ v41.1 · Vectores en tiempo real (qué eventos se publican en el canal de registro)
+        [InlineKeyboardButton(text="🎚️ " + ("Vectores de registro" if lang == "es" else "Log vectors"), callback_data=f"logch_vec_{group_id}_{lang}"),
+         InlineKeyboardButton(text="🧪 " + ("Enviar prueba" if lang == "es" else "Send test"), callback_data=f"logch_test_{group_id}_{lang}")],
         [InlineKeyboardButton(text="⬅️ " + ("Panel del grupo" if lang == "es" else "Group panel"), callback_data=f"gpanel_{group_id}_{lang}")],
     ])
     return text + PERIMETER_SIGNATURE, kb
+
+
+async def _logch_vectors_view(group_id: int, lang: str) -> tuple:
+    """🎚️ v41.1 · Interruptor por vector: lo que se activa aquí se publica AL INSTANTE en el canal de registro."""
+    from database.database import get_audit_log_target
+    disabled = set((await get_audit_log_target(int(group_id))).get("disabled") or [])
+    rows = []
+    for index, (key, icon, label_en, label_es) in enumerate(AUDIT_VECTORS):
+        on = key not in disabled
+        label = label_es if lang == "es" else label_en
+        rows.append([InlineKeyboardButton(text=f"{'🟢' if on else '⚪'} {icon} {label}"[:64],
+                                          callback_data=f"logch_t{index}_{group_id}_{lang}")])
+    rows.append([InlineKeyboardButton(text="⬅️ " + ("Canal de Registro" if lang == "es" else "Log Channel"),
+                                      callback_data=f"logch_menu_{group_id}_{lang}")])
+    active = len(AUDIT_VECTORS) - len(disabled & {v[0] for v in AUDIT_VECTORS})
+    text = (f"🎚️ <b>Vectores de registro</b> · {active}/{len(AUDIT_VECTORS)} activos\n\n"
+            "Cada evento activo se publica <b>en tiempo real</b> en el canal de registro. Toca un vector para "
+            "activarlo o silenciarlo." if lang == "es" else
+            f"🎚️ <b>Log vectors</b> · {active}/{len(AUDIT_VECTORS)} active\n\n"
+            "Every active event is posted <b>in real time</b> to the log channel. Tap a vector to enable or mute it.")
+    return text + PERIMETER_SIGNATURE, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+_LOGCH_TEST_LAST: dict = {}
 
 
 async def _save_log_channel(bot: Bot, group_id: int, value: str, user_id: int) -> None:
@@ -9484,6 +9511,39 @@ async def cb_perimeter_v20(callback: CallbackQuery, bot: Bot):
         if sub == "off":
             await _save_log_channel(bot, group_id, "", uid)
             await callback.answer("🚫 " + ("Canal de registro desactivado" if lang == "es" else "Log channel disabled"))
+        elif sub == "vec":
+            text, kb = await _logch_vectors_view(group_id, lang)
+            await _safe_edit(callback, text, kb)
+            await callback.answer()
+            return
+        elif sub.startswith("t") and sub[1:].isdigit() and int(sub[1:]) < len(AUDIT_VECTORS):
+            from database.database import get_audit_log_target, set_audit_log_disabled
+            key = AUDIT_VECTORS[int(sub[1:])][0]
+            disabled = set((await get_audit_log_target(group_id)).get("disabled") or [])
+            enabling = key in disabled
+            (disabled.discard if enabling else disabled.add)(key)
+            await set_audit_log_disabled(group_id, sorted(disabled))
+            forget_audit_target(group_id)
+            emit_settings_updated_bg(group_id, "bot_console", ["audit_log_vectors"])
+            await callback.answer(("🟢 " if enabling else "⚪ ") + (("Activado" if enabling else "Silenciado") if lang == "es"
+                                                                   else ("Enabled" if enabling else "Muted")))
+            text, kb = await _logch_vectors_view(group_id, lang)
+            await _safe_edit(callback, text, kb)
+            return
+        elif sub == "test":
+            last = _LOGCH_TEST_LAST.get(group_id, 0.0)
+            if time.time() - last < 30:
+                await callback.answer("⏳ " + ("Espera unos segundos" if lang == "es" else "Wait a few seconds"), show_alert=False)
+                return
+            _LOGCH_TEST_LAST[group_id] = time.time()
+            current = (await _perimeter_status_for(bot, group_id)).get("log_channel_id")
+            if not current:
+                await callback.answer("⚠️ " + ("Vincula primero un canal" if lang == "es" else "Link a channel first"), show_alert=True)
+                return
+            forget_audit_target(group_id, current)
+            _spawn_audit(bot, group_id, "log_channel_test", actor_id=uid,
+                         detail="Real-time delivery check / Comprobación de entrega en tiempo real")
+            await callback.answer("🧪 " + ("Prueba enviada al canal" if lang == "es" else "Test sent to the channel"))
         elif sub == "check":
             current = (await _perimeter_status_for(bot, group_id)).get("log_channel_id")
             # 🧾 v39 · «Verificar ahora» tras dar permisos al bot: la auditoría se reanuda sin esperar el disyuntor.

@@ -789,12 +789,28 @@ AUDIT_LOG_CATEGORIES: tuple[str, ...] = (
     "owner",          # /panic, /night, /screenshield, /duckvolume, respaldos, idioma…
     "monetization",   # Stars: speakers, membresías, propinas, MicVIP, licencias, expiraciones, reembolsos
     "plans",          # planes de membresía de canal (crear, pausar, eliminar, programar, difundir)
+    # v41 · vectores en tiempo real
+    "raid",           # Escudo Anti-Raid: activación por picos de ingresos y penalizaciones masivas
+    "links_media",    # LinkLock, cuotas de enlaces de administradores y MediaLocks (contenido prohibido)
+    "admin_activity", # pulsos de actividad de administradores (mensajes / respuestas) y destacados / inactivos
 )
 
 
 def _ensure_v39_schema(cursor) -> None:
     """v39 · Categorías silenciadas del Log Channel Hub (CSV). Vacío / NULL = todas activas."""
     _ensure_columns(cursor, "group_settings", [("audit_log_disabled", "TEXT DEFAULT ''")])
+    _ensure_v41_schema(cursor)
+
+
+def _ensure_v41_schema(cursor) -> None:
+    """
+    v41 · Auditoría MicVIP en tiempo real: marca de expiración ya publicada en el canal de registro
+    (NULL = pendiente · >0 = publicada · -1 = superada por una renovación, no hay expiración que publicar).
+    """
+    try:
+        _ensure_columns(cursor, "micvip_audit", [("expiry_logged_at", "INTEGER")])
+    except sqlite3.OperationalError:   # instalaciones sin la tabla v22 (se crea en init_db antes de llamar aquí)
+        pass
 
 
 def _parse_audit_disabled(raw) -> list[str]:
@@ -1864,15 +1880,11 @@ def consume_web_session(token: str) -> Optional[int]:
     if not token or not isinstance(token, str) or len(token) > 128:
         return None
     with _write_transaction() as conn:
-        row = conn.execute(
-            "SELECT user_id FROM web_sessions WHERE token = ? AND expires_at > datetime('now')",
-            (token,)
-        ).fetchone()
-        conn.execute(
-            "DELETE FROM web_sessions WHERE token = ? OR expires_at <= datetime('now')",
-            (token,)
-        )
+        row = conn.execute("SELECT user_id FROM web_sessions WHERE token = ? AND expires_at > datetime('now')",
+                           (token,)).fetchone()
+        conn.execute("DELETE FROM web_sessions WHERE token = ? OR expires_at <= datetime('now')", (token,))
         return int(row[0]) if row else None
+
 
 @db_async
 def get_user_by_web_session(token: str) -> Optional[int]:
@@ -3272,8 +3284,15 @@ def micvip_audit_mark_sentinel(group_id: int, user_id: int, applied: bool = True
     (sentinel_applied_at), última comprobación (sentinel_last_seen_at) o un fallo de la RPC. Devuelve filas tocadas.
     """
     now = _now_ts()
+    first_applied: list = []
     with _write_transaction() as conn:
         if applied:
+            # v41 · Compras cuyo 100 % aplica el Centinela por PRIMERA vez: prueba legal en el canal de registro.
+            first_applied = conn.execute("""
+                SELECT charge_id, amount_stars, purchased_at, expires_at FROM micvip_audit
+                WHERE group_id = ? AND user_id = ? AND purchased_at <= ? AND grant_status != 'missing'
+                  AND (expires_at IS NULL OR expires_at > ?) AND sentinel_applied_at IS NULL
+            """, (int(group_id), int(user_id), now, now)).fetchall()
             cur = conn.execute("""
                 UPDATE micvip_audit SET sentinel_applied_at = COALESCE(sentinel_applied_at, ?), sentinel_last_seen_at = ?
                 WHERE group_id = ? AND user_id = ? AND purchased_at <= ? AND grant_status != 'missing'
@@ -3285,7 +3304,12 @@ def micvip_audit_mark_sentinel(group_id: int, user_id: int, applied: bool = True
                 WHERE group_id = ? AND user_id = ? AND purchased_at <= ? AND grant_status != 'missing'
                   AND (expires_at IS NULL OR expires_at > ?)
             """, (int(group_id), int(user_id), now, now))
-        return cur.rowcount
+        rowcount = cur.rowcount
+    for charge_id, amount, purchased_at, expires_at in first_applied:
+        _notify_audit("micvip_volume_applied", int(group_id), user_id=int(user_id), amount=int(amount or 0),
+                      purchased_at=purchased_at, expires_at=expires_at, applied_at=now, charge_id=str(charge_id),
+                      automatic=True, system="sentinel")
+    return rowcount
 
 
 _MICVIP_COLUMNS = ("id", "charge_id", "group_id", "user_id", "username", "full_name", "amount_stars", "currency",
@@ -3346,6 +3370,97 @@ def micvip_audit_legacy_payments(markers: tuple, limit: int = 5000) -> list:
         except sqlite3.OperationalError:
             return []
     return [{"charge_id": r[0], "user_id": r[1], "payload": r[2] or "", "processed_at": _sqlite_utc_to_ts(r[3])} for r in rows]
+
+
+# ==========================================
+# 🧾 v41 · AUDITORÍA MICVIP EN TIEMPO REAL (pases activos y expiraciones publicadas al instante)
+# ==========================================
+@db_async
+def micvip_active_passes(group_id: int, limit: int = 200) -> list:
+    """
+    Pases MicVIP VIGENTES de la comunidad (fuente: vip_mic_passes, la misma que consulta el Centinela) con la última
+    compra auditada: importe, fecha de compra, estado de la concesión y cuándo aplicó el Centinela el 100 %.
+    """
+    now = _now_ts()
+    with get_db_connection() as conn:
+        passes = conn.execute("SELECT user_id, expires_at FROM vip_mic_passes WHERE group_id = ? AND expires_at > datetime('now') "
+                              "ORDER BY expires_at ASC LIMIT ?", (int(group_id), max(1, min(int(limit), 500)))).fetchall()
+        out = []
+        for user_id, expires_raw in passes:
+            expires_ts = _sqlite_utc_to_ts(expires_raw)
+            row = None
+            try:
+                row = conn.execute(
+                    "SELECT username, full_name, amount_stars, purchased_at, grant_status, sentinel_applied_at, "
+                    "sentinel_last_seen_at, charge_id FROM micvip_audit WHERE group_id = ? AND user_id = ? "
+                    "ORDER BY purchased_at DESC LIMIT 1", (int(group_id), int(user_id))).fetchone()
+                total = conn.execute("SELECT COUNT(*), COALESCE(SUM(amount_stars), 0) FROM micvip_audit "
+                                     "WHERE group_id = ? AND user_id = ?", (int(group_id), int(user_id))).fetchone()
+            except sqlite3.OperationalError:
+                total = (0, 0)
+            out.append({
+                "user_id": int(user_id), "expires_at": expires_ts,
+                "remaining_seconds": max(0, int(expires_ts or 0) - now) if expires_ts else None,
+                "username": row[0] if row else None, "full_name": row[1] if row else None,
+                "last_amount_stars": int(row[2] or 0) if row else 0, "last_purchased_at": row[3] if row else None,
+                "grant_status": row[4] if row else "granted", "sentinel_applied_at": row[5] if row else None,
+                "sentinel_last_seen_at": row[6] if row else None, "last_charge_id": row[7] if row else None,
+                "purchases": int(total[0] or 0) if total else 0, "stars_total": int(total[1] or 0) if total else 0,
+            })
+    return out
+
+
+@db_async
+def micvip_due_expiries(limit: int = 100) -> list:
+    """
+    Compras con expiración vencida aún sin publicar. Las que una renovación dejó atrás (el pase real sigue vigente)
+    se marcan como superadas (-1) en la misma transacción: no hay expiración que anunciar.
+    """
+    now = _now_ts()
+    due: list = []
+    with _write_transaction() as conn:
+        try:
+            rows = conn.execute(
+                "SELECT id, group_id, user_id, username, full_name, amount_stars, purchased_at, expires_at, "
+                "sentinel_applied_at, charge_id FROM micvip_audit WHERE expiry_logged_at IS NULL "
+                "AND grant_status = 'granted' AND expires_at IS NOT NULL AND expires_at <= ? "
+                "ORDER BY expires_at ASC LIMIT ?", (now, max(1, min(int(limit), 500)))).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        for rid, gid, uid, username, full_name, amount, purchased_at, expires_at, applied_at, charge_id in rows:
+            live = conn.execute("SELECT expires_at FROM vip_mic_passes WHERE group_id = ? AND user_id = ?",
+                                (int(gid), int(uid))).fetchone()
+            live_ts = _sqlite_utc_to_ts(live[0]) if live else None
+            if live_ts and live_ts > now:
+                conn.execute("UPDATE micvip_audit SET expiry_logged_at = -1 WHERE id = ?", (int(rid),))
+                continue
+            due.append({"id": int(rid), "group_id": int(gid), "user_id": int(uid), "username": username,
+                        "full_name": full_name, "amount_stars": int(amount or 0), "purchased_at": purchased_at,
+                        "expires_at": expires_at, "sentinel_applied_at": applied_at, "charge_id": charge_id})
+    return due
+
+
+@db_async
+def micvip_mark_expiry_logged(ids: list) -> int:
+    clean = [int(i) for i in (ids or [])][:500]
+    if not clean:
+        return 0
+    with _write_transaction() as conn:
+        cur = conn.execute(f"UPDATE micvip_audit SET expiry_logged_at = ? WHERE id IN ({','.join('?' for _ in clean)})",
+                           (_now_ts(), *clean))
+        return int(cur.rowcount or 0)
+
+
+@db_async
+def groups_with_log_channel() -> list:
+    """Comunidades con canal de registro configurado (para los destacados periódicos de administradores)."""
+    with get_db_connection() as conn:
+        try:
+            rows = conn.execute("SELECT group_id FROM group_settings WHERE log_channel_id IS NOT NULL "
+                                "AND TRIM(log_channel_id) != ''").fetchall()
+        except sqlite3.OperationalError:
+            return []
+    return [int(r[0]) for r in rows]
 
 
 @db_async

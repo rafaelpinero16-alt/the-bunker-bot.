@@ -132,8 +132,20 @@ EVENTS: Dict[str, Tuple[str, str, str, str, str]] = {
     "flood_sanction": ("security", "🌊", "ANTIFLOOD", "Anti-Flood sanction", "Sanción Anti-Flood"),
     "userbot_detected": ("security", "🕵️", "USERBOT", "Userbot neutralized", "Userbot neutralizado"),
     "cas_blocked": ("security", "🌐", "CAS", "Global spammer blocked (CAS)", "Spammer global bloqueado (CAS)"),
-    "raid_shield_on": ("security", "🚨", "RAID", "Anti-Raid shield engaged", "Escudo Anti-Raid activado"),
-    "raid_penalty": ("security", "🚧", "RAID_PENALTY", "Raid account penalized", "Cuenta de raid penalizada"),
+    "raid_shield_on": ("raid", "🚨", "RAID", "Anti-Raid shield engaged", "Escudo Anti-Raid activado"),
+    "raid_penalty": ("raid", "🚧", "RAID_PENALTY", "Raid account penalized", "Cuenta de raid penalizada"),
+    # 🔗🖼️ v41 · Enlaces y multimedia (LinkLock, cuotas de enlaces de administradores, MediaLocks)
+    "link_blocked": ("links_media", "🔗", "LINKLOCK", "Link blocked", "Enlace bloqueado"),
+    "media_blocked": ("links_media", "🖼️", "MEDIALOCK", "Restricted content blocked", "Contenido restringido bloqueado"),
+    # 👮 v41 · Actividad de administradores en tiempo real
+    "admin_activity": ("admin_activity", "👮", "ADMIN_ACTIVITY", "Admin activity", "Actividad de administrador"),
+    "admin_highlights": ("admin_activity", "🏅", "ADMIN_REPORT", "Admin highlights", "Destacados de administradores"),
+    # 🎙️ v41 · Prueba legal de MicVIP: concesión automática del 100 % y expiración exacta
+    "micvip_volume_applied": ("monetization", "🔊", "MICVIP_GRANTED", "MicVIP: 100% volume applied automatically",
+                              "MicVIP: volumen al 100 % aplicado automáticamente"),
+    "micvip_expired": ("monetization", "⌛", "MICVIP_EXPIRED", "MicVIP pass expired", "Pase MicVIP vencido"),
+    "log_vectors_changed": ("owner", "🎚️", "LOG_VECTORS", "Log channel vectors updated", "Vectores del canal de registro actualizados"),
+    "log_channel_test": ("owner", "🧪", "LOG_TEST", "Log channel test", "Prueba del canal de registro"),
     # 👮 Moderación
     "warn": ("moderation", "⚠️", "WARN", "Warning issued", "Advertencia registrada"),
     "sanction": ("moderation", "⚖️", "SANCTION", "Warning limit reached — sanction applied", "Límite de advertencias — sanción aplicada"),
@@ -197,7 +209,25 @@ EVENTS: Dict[str, Tuple[str, str, str, str, str]] = {
 }
 _GENERIC_EVENT = ("other", "📌", "EVENT", "Audit event", "Evento de auditoría")
 # Categorías de bajo riesgo: se publican sin sonido para no saturar a los administradores.
-SILENT_CATEGORIES = frozenset({"membership", "captcha", "plans"})
+SILENT_CATEGORIES = frozenset({"membership", "captcha", "plans", "admin_activity", "links_media"})
+
+# v41.1 · Vectores activables por la comunidad (orden y textos EN / ES): bot, API y Mini App usan esta lista.
+AUDIT_VECTORS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("membership", "👥", "Member cycle: joins, leaves, removals", "Ciclo de miembros: entradas, salidas y expulsiones"),
+    ("moderation", "⚖️", "Moderation: bans, warns, mutes, kicks", "Moderación: baneos, advertencias, silencios y expulsiones"),
+    ("security", "🛡️", "Automatic security: Anti-Spam, Anti-Flood, userbots, CAS, Auto-Mod",
+     "Seguridad automática: Anti-Spam, Anti-Flood, userbots, CAS, Auto-Mod"),
+    ("captcha", "🧩", "Captcha checkpoint: passed, failed, timed out", "Aduana Captcha: superados, fallidos y vencidos"),
+    ("raid", "🚨", "Anti-Raid shield: activation and mass penalties", "Escudo Anti-Raid: activación y penalizaciones masivas"),
+    ("links_media", "🔗", "LinkLock, admin link quotas and MediaLocks", "LinkLock, cuotas de enlaces de admins y MediaLocks"),
+    ("monetization", "⭐", "Economy: MicVIP (purchase, 100% volume, expiry), tips, Stars payments",
+     "Economía: MicVIP (compra, volumen 100 %, expiración), propinas y pagos con Stars"),
+    ("admin_activity", "👮", "Admin activity: messages, replies, highlights and inactive admins",
+     "Actividad de admins: mensajes, respuestas, destacados e inactivos"),
+    ("owner", "👑", "Owner commands and settings changes", "Comandos del Dueño y cambios de ajustes"),
+    ("plans", "💎", "Channel membership plans", "Planes de membresía de canal"),
+)
+
 
 _LABELS: Dict[str, Tuple[str, str]] = {
     "community": ("Community", "Comunidad"),
@@ -213,6 +243,8 @@ _LABELS: Dict[str, Tuple[str, str]] = {
     "validity": ("Validity", "Vigencia"),
     "expires": ("Expired on", "Venció el"),
     "until": ("Until", "Hasta"),
+    "purchased": ("Purchased", "Comprado"),
+    "applied": ("100% volume applied", "Volumen 100 % aplicado"),
     "evidence": ("Evidence trail", "Rastro de evidencias"),
     "via": ("Joined via", "Ingreso por"),
     "level": ("Level", "Nivel"),
@@ -249,6 +281,10 @@ _SYSTEMS: Dict[str, Tuple[str, str]] = {
     "userbot": ("Userbot hunter", "Cazador de userbots"), "cas": ("CAS global blocklist", "Lista global CAS"),
     "warn_ladder": ("Warning ladder", "Escalera de advertencias"), "panic": ("Raid Lockdown", "Raid Lockdown"),
     "payments": ("Telegram Stars", "Telegram Stars"), "memberships": ("Membership worker", "Gestor de membresías"),
+    "linklock": ("LinkLock", "LinkLock"), "medialocks": ("MediaLocks", "MediaLocks"),
+    "link_quota": ("Admin link quota", "Cuota de enlaces de admins"), "sentinel": ("MTProto Sentinel", "Centinela MTProto"),
+    "micvip": ("MicVIP watcher", "Vigía MicVIP"), "admin_monitor": ("Admin monitor", "Monitor de administradores"),
+    "automod": ("Auto-Mod", "Auto-Mod"),
 }
 
 
@@ -558,7 +594,7 @@ def _fmt_stamp(value: Any) -> str:
             dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
         else:
             return _esc(str(value).replace("T", " ").replace("Z", "")[:19] + " UTC", 40)
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     except (TypeError, ValueError, OverflowError, OSError):
         return _esc(value, 40)
 
@@ -662,6 +698,10 @@ def build_audit_card(chat_id: int, event_type: str, lang: str = "en", chat_title
     if kwargs.get("duration_days") is not None:
         lines.append(f"🗓️ <b>{_t(lang, _LABELS['validity'])}:</b> {_esc(kwargs.get('duration_days'), 10)} "
                      + ("días" if lang == "es" else "days"))
+    if kwargs.get("purchased_at"):
+        lines.append(f"🧾 <b>{_t(lang, _LABELS['purchased'])}:</b> {_fmt_stamp(kwargs.get('purchased_at'))}")
+    if kwargs.get("applied_at"):
+        lines.append(f"🔊 <b>{_t(lang, _LABELS['applied'])}:</b> {_fmt_stamp(kwargs.get('applied_at'))}")
     if kwargs.get("expires_at"):
         label = _LABELS["until"] if _stamp_is_future(kwargs.get("expires_at"), now) else _LABELS["expires"]
         lines.append(f"📅 <b>{_t(lang, label)}:</b> {_fmt_stamp(kwargs.get('expires_at'))}")
