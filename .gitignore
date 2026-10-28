@@ -9,3 +9,5 @@ __pycache__/
 sesion_fresca.py
 # Local Netlify folder
 .netlify
+
+.vercel
