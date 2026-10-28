@@ -11,3 +11,4 @@ sesion_fresca.py
 .netlify
 
 .vercel
+.env*
