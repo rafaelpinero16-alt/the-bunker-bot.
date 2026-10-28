@@ -34,6 +34,8 @@ level, signals, count, window_seconds      Escudo Anti-Raid.
 detail, excerpt, extra={etiqueta: valor}   Texto libre, fragmento del mensaje eliminado y campos adicionales.
 chat_title                                 Evita una llamada a get_chat si el llamador ya conoce el título.
 dedupe_key, dedupe_ttl, defer              Control de duplicados (ver arriba).
+evidence=[str, …]                          v40 · Rastro de evidencias (Auto-Mod): lista numerada y plegable.
+buttons=[(texto_en, texto_es, callback)]   v40 · Botones inline bajo la tarjeta (p. ej. «Reportar falso positivo»).
 
 The Bunker Command OS © 2026 — Cloud Media Management
 """
@@ -148,6 +150,14 @@ EVENTS: Dict[str, Tuple[str, str, str, str, str]] = {
     "member_restricted": ("moderation", "🔇", "MUTE", "Member restricted", "Miembro restringido"),
     "member_unrestricted": ("moderation", "🔊", "UNMUTE", "Restrictions lifted", "Restricciones retiradas"),
     # 👑 Comandos del Dueño
+    # 💸🤖↩️📦 v40 · Fase 3: apelación pagada, Auto-Mod, falsos positivos y gestión masiva
+    "unban_paid": ("monetization", "💸", "UNBAN_PAGADO", "Paid unban (Stars appeal)", "Desbaneo pagado (apelación con Stars)"),
+    "automod_infraction": ("security", "🤖", "AUTOMOD", "Auto-Mod infraction", "Infracción Auto-Mod"),
+    "automod_action": ("security", "🤖", "AUTOMOD_ACTION", "Auto-Mod escalation: permanent ban",
+                       "Auto-Mod: escalado a baneo permanente"),
+    "automod_config": ("owner", "🤖", "AUTOMOD_CONFIG", "Auto-Mod settings changed", "Ajustes de Auto-Mod cambiados"),
+    "false_positive": ("moderation", "↩️", "FALSO_POSITIVO", "False positive reverted", "Falso positivo revertido"),
+    "mass_action": ("moderation", "📦", "MASS_ACTION", "Mass moderation action", "Acción de moderación masiva"),
     "panic_on": ("owner", "🚨", "PANIC", "Raid Lockdown ENGAGED", "Raid Lockdown ACTIVADO"),
     "panic_off": ("owner", "🟢", "PANIC", "Raid Lockdown lifted", "Raid Lockdown desactivado"),
     "night_on": ("owner", "🌙", "NIGHT", "Night Mode enabled", "Modo Nocturno activado"),
@@ -203,6 +213,7 @@ _LABELS: Dict[str, Tuple[str, str]] = {
     "validity": ("Validity", "Vigencia"),
     "expires": ("Expired on", "Venció el"),
     "until": ("Until", "Hasta"),
+    "evidence": ("Evidence trail", "Rastro de evidencias"),
     "via": ("Joined via", "Ingreso por"),
     "level": ("Level", "Nivel"),
     "signals": ("Signals", "Señales"),
@@ -251,6 +262,7 @@ class _Item:
     silent: bool
     chat_id: int
     parse_mode: Optional[str] = "HTML"   # None = texto plano (último recurso ante un error de parseo)
+    reply_markup: Any = None             # v40 · InlineKeyboardMarkup (p. ej. «Reportar falso positivo»)
 
 
 @dataclass
@@ -271,7 +283,10 @@ _TARGET_CACHE: Dict[int, Tuple[float, Optional[Union[int, str]], frozenset]] = {
 _LANG_CACHE: Dict[int, Tuple[float, str]] = {}
 _TITLE_CACHE: Dict[int, Tuple[float, str]] = {}
 _DEDUPE: Dict[str, float] = {}
-_BG_TASKS: set = set()
+# v40 · Registro ÚNICO de tareas de auditoría en segundo plano (Hub, Auto-Mod, Gestión Masiva de la Mini App):
+#       referencia fuerte para que el GC no las cancele a medias y un solo sitio para inspeccionarlas al apagar.
+_AUDIT_BG_TASKS: "set[asyncio.Task[Any]]" = set()
+_BG_TASKS = _AUDIT_BG_TASKS   # alias histórico (v39)
 _STATS: Dict[str, int] = {"queued": 0, "sent": 0, "dropped": 0, "failed": 0, "deduped": 0, "no_target": 0}
 _MASTER_BOT: Any = None
 _LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -280,9 +295,34 @@ _LOOP: Optional[asyncio.AbstractEventLoop] = None
 def _spawn(coro) -> asyncio.Task:
     """Tarea en segundo plano con referencia fuerte (evita que el GC la cancele)."""
     task = asyncio.create_task(coro)
-    _BG_TASKS.add(task)
-    task.add_done_callback(_BG_TASKS.discard)
+    _AUDIT_BG_TASKS.add(task)
+    task.add_done_callback(_AUDIT_BG_TASKS.discard)
     return task
+
+
+def spawn_audit_task(coro: Any, name: Optional[str] = None) -> "asyncio.Task[Any]":
+    """
+    v40 · API pública: lanza `coro` en segundo plano dentro de _AUDIT_BG_TASKS (referencia fuerte + registro de
+    excepciones no capturadas). La usan Auto-Mod y la Gestión Masiva para no bloquear el event loop.
+    """
+    task = asyncio.ensure_future(coro)
+    if name:
+        with contextlib.suppress(Exception):
+            task.set_name(name)
+    _AUDIT_BG_TASKS.add(task)
+
+    def _done(t: "asyncio.Task[Any]") -> None:
+        _AUDIT_BG_TASKS.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            logger.error(f"❌ [Audit] Tarea en segundo plano '{t.get_name()}' falló: {t.exception()!r}")
+
+    task.add_done_callback(_done)
+    return task
+
+
+def pending_audit_tasks() -> int:
+    """Diagnóstico: tareas de auditoría aún en curso."""
+    return sum(1 for t in _AUDIT_BG_TASKS if not t.done())
 
 
 def register_master_bot(bot: Any) -> None:
@@ -307,6 +347,11 @@ def _reset_lane_circuit(target: Any) -> None:
     if lane is not None:
         lane.circuit_until = 0.0
         lane.warned = False
+
+
+def master_bot() -> Any:
+    """v40 · Bot maestro registrado (o el master_bot_instance de main.py). None si aún no arrancó."""
+    return _master_bot()
 
 
 def forget_audit_target(chat_id: int, new_target: Any = None) -> None:
@@ -629,6 +674,11 @@ def build_audit_card(chat_id: int, event_type: str, lang: str = "en", chat_title
                 continue
             shown_label = _t(lang, label) if isinstance(label, tuple) and len(label) == 2 else str(label)
             lines.append(f"• <b>{_esc(shown_label, 40)}:</b> {_esc(value, 200)}")
+    evidence = kwargs.get("evidence")
+    if isinstance(evidence, (list, tuple)) and evidence:
+        trail = "\n".join(f"{index}. {_esc(entry, 160)}" for index, entry in enumerate(list(evidence)[:10], start=1))
+        lines.append(f"🧾 <b>{_t(lang, _LABELS['evidence'])}:</b>")
+        lines.append(f"<blockquote expandable>{trail}</blockquote>")
     if kwargs.get("excerpt"):
         lines.append(f"🗒️ <b>{_t(lang, _LABELS['message'])}:</b>")
         lines.append(f"<blockquote expandable>{_esc(kwargs.get('excerpt'), AUDIT_EXCERPT_MAX)}</blockquote>")
@@ -642,6 +692,29 @@ def build_audit_card(chat_id: int, event_type: str, lang: str = "en", chat_title
         text = re.sub(r"<blockquote expandable>.*?</blockquote>", "<blockquote expandable>…</blockquote>", text, flags=re.S)
         text = text[:4090]
     return text
+
+
+def _build_markup(buttons: Any, lang: str) -> Any:
+    """
+    v40 · [(texto_en, texto_es, callback_data), …] → InlineKeyboardMarkup (un botón por fila). callback_data ≤ 64
+    bytes (límite de Telegram): los que no caben se descartan. aiogram.types se importa aquí para que el Hub siga
+    siendo importable en pruebas sin aiogram completo.
+    """
+    if not isinstance(buttons, (list, tuple)) or not buttons:
+        return None
+    try:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    except Exception:   # pragma: no cover - entorno sin aiogram.types
+        return None
+    rows = []
+    for entry in list(buttons)[:4]:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+            continue
+        text_en, text_es, data = (str(x) for x in entry)
+        if not data or len(data.encode("utf-8")) > 64:
+            continue
+        rows.append([InlineKeyboardButton(text=(text_es if lang == "es" else text_en)[:64], callback_data=data)])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def event_category(event_type: str) -> str:
@@ -669,7 +742,8 @@ def _plain(text: str) -> str:
 async def _send_once(bot: Any, target: Union[int, str], item: _Item) -> None:
     await asyncio.wait_for(
         bot.send_message(chat_id=target, text=item.text, parse_mode=item.parse_mode,
-                         disable_web_page_preview=True, disable_notification=item.silent),
+                         disable_web_page_preview=True, disable_notification=item.silent,
+                         **({"reply_markup": item.reply_markup} if item.reply_markup is not None else {})),
         timeout=AUDIT_SEND_TIMEOUT,
     )
 
@@ -709,6 +783,7 @@ async def _deliver(lane: _Lane, item: _Item) -> bool:
                     break
                 if "parse" in str(ex).lower() and item.parse_mode:   # último recurso: texto plano sin parse_mode
                     item = _Item(bot=item.bot, text=_plain(item.text)[:4096], silent=item.silent, chat_id=item.chat_id,
+                                 reply_markup=item.reply_markup,
                                  parse_mode=None)
                     continue
                 logger.debug(f"[Audit] Telegram rechazó una tarjeta para {lane.target}: {ex}")
@@ -842,8 +917,10 @@ async def dispatch_audit_log(bot: Optional["Bot"], chat_id: int, event_type: str
             return False
         lang = await _resolve_lang(chat_id)
         title = await _resolve_title(sender, chat_id, kwargs.pop("chat_title", None))
+        buttons = kwargs.pop("buttons", None)
         text = build_audit_card(chat_id, event_type, lang=lang, chat_title=title, **kwargs)
-        return _enqueue(target, _Item(bot=sender, text=text, silent=category in SILENT_CATEGORIES, chat_id=chat_id))
+        return _enqueue(target, _Item(bot=sender, text=text, silent=category in SILENT_CATEGORIES, chat_id=chat_id,
+                                      reply_markup=_build_markup(buttons, lang)))
     except asyncio.CancelledError:
         raise
     except Exception as ex:

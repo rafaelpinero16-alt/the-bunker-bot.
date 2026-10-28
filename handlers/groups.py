@@ -7,6 +7,7 @@ Fase 4: Gamificación Tokenizada (XP / Niveles / /rank / /top) + Analítica Heat
 Fase 5: Ascensos de nivel emitidos en caliente al radar WebSocket de la Mini App.
 Fase 6: Aduana sin DMs fríos — el captcha privado solo se envía en ChatJoinRequest (ventana legal
         de 5 min vía user_chat_id); los ingresos directos se verifican únicamente en el grupo.
+v40:    Fase 3 — etapa Auto-Mod (handlers/automod.py) dentro de la matriz perimetral, una vez por mensaje.
 v39:    Log Channel Hub — entradas/salidas (enlace, solicitud, añadido, directo), captcha, Anti-Spam, Anti-Flood,
         userbots, CAS, Anti-Raid, escalera de advertencias, pánico, interruptores del Dueño y turnos de speaker
         se auditan en el canal de registro vía handlers/logger_hub.py (siempre en segundo plano con _spawn).
@@ -97,6 +98,8 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 # 🧾 v39 · Log Channel Hub: auditoría forense de cada evento crítico en el canal de registro de la comunidad.
 from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
+# 🤖 v40 · Fase 3: motor Auto-Mod (phishing / estafas / flooding con escalado 3 infracciones / 24 h → ban permanente).
+from handlers import automod
 
 try:
     from middlewares.anti_spam import check_global_cas_spam
@@ -3452,6 +3455,11 @@ async def group_security_matrix(message: Message, bot: Bot):
             bot, group_id, user_id, username, message.from_user.mention_html(),
             reply_to=message, reason="command", silent=True
         )
+        return
+
+    # 🤖 v40 · Auto-Mod: UNA sola etapa por mensaje, tras las exenciones (admins, whitelist, VIP) y antes de los filtros
+    #    clásicos. Si detecta algo, el mensaje ya está borrado y la sanción / auditoría siguen en segundo plano.
+    if await automod.inspect_message(bot, message, is_edit=is_edit):
         return
 
     is_threat_detected = False

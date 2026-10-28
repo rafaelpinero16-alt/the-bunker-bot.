@@ -7,6 +7,9 @@ Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints d
 Fase 5: Analítica en Caliente nivel Combot (GET /api/community/{chat_id}/analytics + /ws/radar/{chat_id} blindado).
 v37: Anti-Raid configurable (API /chat/{id}/raid + lista negra), idioma/TTL de servicio (/chat/{id}/service-prefs),
      rehidratación del escudo al arrancar y avisos del núcleo en inglés por defecto.
+v40: Fase 3 — Dashboard de Moderación (api/routes/dashboard.py: historial, leaderboard, gestión masiva, Auto-Mod,
+     falsos positivos), router /automod antes de la matriz de grupos, esquema f3 al arrancar y trabajos masivos
+     interrumpidos marcados como tales tras un reinicio.
 v39: Log Channel Hub — el bot maestro se registra como remitente de respaldo de la auditoría (si un clon pierde los
      permisos en el canal de registro, publica el maestro antes de abrir el disyuntor) y los cambios del canal de
      registro desde la Mini App (ajustes o restauración de respaldo) invalidan su caché al instante.
@@ -342,6 +345,10 @@ from handlers import (
 from handlers import metrics as community_metrics
 # 🧾 v39 · Log Channel Hub (auditoría perimetral en el canal de registro de cada comunidad).
 from handlers.logger_hub import forget_audit_target, register_master_bot as register_audit_master_bot
+# 🏆🤖 v40 · Fase 3: Auto-Mod, operaciones Telegram compartidas, capa de datos y API del dashboard de moderación.
+from handlers import automod, telegram_ops
+from database import crud_fase3
+from api.routes.dashboard import build_dashboard_router
 
 
 def _ban_appeals_module():
@@ -3127,6 +3134,17 @@ else:
     logger.warning("⚠️ [Planes] channel_plans_api no disponible: /api/channel/{id}/plan* responderá 404.")
 
 
+# 🏆 v40 · Dashboard de Moderación de la Mini App (historial de usuario, leaderboard de administradores, gestión masiva,
+#    Auto-Mod y falsos positivos). Mismas dependencias de seguridad: initData firmado / sesión web + dueño legítimo.
+api_router.include_router(build_dashboard_router(
+    require_user=require_authenticated_user,
+    assert_owner=assert_chat_ownership,
+    get_bot=lambda: master_bot_instance,
+    resolve_chat_bot=lambda chat_id: _clone_bot_for_chat(chat_id),
+))
+logger.info("🏆 [Dashboard] Endpoints /api/chat/{id}/(users|admin-leaderboard|mass-action|automod|sanctions) montados.")
+
+
 app.include_router(api_router, prefix="/api")
 
 
@@ -4177,6 +4195,14 @@ async def main():
     init_db()
     _verify_sqlite_wal()
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
+    # 🏆 v40 · Esquema de la Fase 3 (aditivo) y trabajos masivos que un reinicio dejó a medias.
+    try:
+        await crud_fase3.ensure_schema()
+        interrupted = await crud_fase3.mark_interrupted_jobs()
+        if interrupted:
+            logger.warning(f"📦 [Gestión Masiva]: {interrupted} trabajo(s) interrumpido(s) por el reinicio.")
+    except Exception as e:
+        logger.error(f"❌ [Fase 3]: No se pudo preparar el esquema f3: {e}")
     # 🚨 v37 · Rehidrata los escudos Anti-Raid vigentes antes de recibir updates: un redeploy en pleno raid no
     #    puede dejar la comunidad sin aislamiento hasta la siguiente activación.
     try:
@@ -4218,6 +4244,8 @@ async def main():
     # 🧾 v39 · Log Channel Hub: respaldo del disyuntor. Si el bot del evento (clon) no puede publicar en el canal de
     #    registro, el Hub reintenta con el maestro; las tarjetas sin bot propio (expiraciones de membresía) salen por él.
     register_audit_master_bot(master_bot)
+    # 🤖 v40 · Auto-Mod, falsos positivos y Gestión Masiva actúan con el clon de la comunidad si está en el grupo.
+    telegram_ops.register_bot_resolver(_clone_bot_for_chat)
     _spawn(ban_appeals.appeals_sweeper_loop(), name="ban_appeals_sweeper")
     try:
         master_info = await master_bot.get_me()
@@ -4274,6 +4302,8 @@ async def main():
     # 4. ecosystem y vc_manager: telemetría y directivas de videollamada
     dp.include_router(ecosystem.router)
     dp.include_router(vc_manager.router)
+    # 4b. 🤖 v40 · /automod (comando del Dueño) antes de la matriz, que consume todos los mensajes de grupo
+    dp.include_router(automod.router)
     # 5. groups: aduana captcha, anti-flood, gamificación y matriz perimetral
     dp.include_router(groups.router)
     # 6. fallback_router: salvaguarda de callbacks huérfanos

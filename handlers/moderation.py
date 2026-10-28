@@ -22,6 +22,15 @@ v39 · Log Channel Hub (fase 2):
     no duplicar (mark_audit_handled).
   • /warn pasa actor + manual=True a la escalera (sin métrica de sistema ni oferta de apelación pagada).
   • Tipado estricto: message.bot / message.from_user / callback.message (InaccessibleMessage) protegidos.
+
+v40 · Fase 3 (Leaderboard y Falsos Positivos):
+  • Cada /ban, /kick y /mute ejecutado (y el baneo por /blacklist) queda en el libro f3_sanctions; las sanciones
+    manuales suman puntos al administrador que pulsó el botón (f3_admin_stats → leaderboard de la Mini App).
+  • Su tarjeta del canal de registro lleva el botón «↩️ Reportar falso positivo» (callback fp_<id>, ≤ 64 bytes).
+    Solo el DUEÑO de la comunidad puede pulsarlo: se revierte la sanción en Telegram (desbaneo / fin del silencio,
+    marca global retirada si la puso esta comunidad, strikes y apelaciones abiertas cerradas), se restan al
+    administrador los puntos sumados + la penalización, se marca la tarjeta y se publica #FALSO_POSITIVO.
+  • revert_sanction() es el mismo servicio que usa la Mini App (POST /api/chat/{id}/sanctions/{sid}/false-positive).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -31,14 +40,15 @@ import time
 import html
 import logging
 import re
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Literal, Optional, Tuple
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup,
     InlineKeyboardButton, CallbackQuery
 )
 from aiogram.filters import Command, CommandObject
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from database.database import (
     check_command_limit, get_group_tier,
     add_to_whitelist, remove_from_whitelist,
@@ -50,6 +60,10 @@ import database.database as _db_module   # v25 · origen de la marca global y ap
 from assistant import set_participant_mic
 # 🧾 v39 · Log Channel Hub: auditoría de la moderación manual en el canal de registro de la comunidad.
 from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
+# 🏆 v40 · Fase 3: libro de sanciones, AdminStats y reversión de falsos positivos.
+from database import crud_fase3 as crud_f3
+from database.models_fase3 import FALSE_POSITIVE_PENALTY, AdminStatsRow, SanctionRow
+from handlers import telegram_ops
 
 logger = logging.getLogger("moderation_handler")
 router = Router()
@@ -164,6 +178,30 @@ def _order_fields(executor_id: int, ordered_by_id: Optional[int], ordered_by_nam
         return {}
     label = f"{ordered_by_name or 'ID'} · {ordered_by_id}"
     return {"extra": {("Ordered by", "Ordenado por"): label}}
+
+
+def _fp_button(sanction_id: int) -> Tuple[str, str, str]:
+    return ("↩️ Report false positive", "↩️ Reportar falso positivo", f"fp_{int(sanction_id)}")
+
+
+async def _ledger(group_id: int, target_id: int, action: str, *, source: str = "manual", admin: Any = None,
+                  user_name: Optional[str] = None, reason: Optional[str] = None, minutes: Optional[int] = None,
+                  until_ts: Optional[int] = None, global_set: bool = False) -> Dict[str, Any]:
+    """
+    🏆 v40 · Anota la sanción ya aplicada en f3_sanctions (y suma puntos al admin si es manual). Devuelve los campos
+    extra de la tarjeta: el botón «Reportar falso positivo». Un fallo de base de datos nunca deshace la sanción.
+    """
+    try:
+        sanction_id = await crud_f3.record_sanction(
+            int(group_id), int(target_id), action, source,
+            admin_id=getattr(admin, "id", None) if source == "manual" else None,
+            admin_name=(getattr(admin, "full_name", None) or getattr(admin, "title", None)) if admin is not None else None,
+            user_name=user_name, reason=reason, duration_minutes=minutes or None, until_ts=until_ts,
+            global_ban_set=global_set)
+    except Exception as ex:
+        logger.error(f"❌ [Fase3] Sanción {action} de {target_id} en {group_id} aplicada pero no registrada: {ex}")
+        return {}
+    return {"buttons": [_fp_button(sanction_id)]}
 
 
 async def _edit_cb(callback: CallbackQuery, text: str) -> None:
@@ -863,14 +901,18 @@ async def cb_mod_execution(callback: CallbackQuery, bot: Bot):
                 await ban_user(target_id)
                 if not already_global:
                     await _record_ban_origin(target_id, group_id, "manual_ban")
+                ledger = await _ledger(group_id, target_id, "ban", admin=callback.from_user, user_name=raw_name,
+                                       reason=reason, global_set=not already_global)   # 🏆 v40
                 _audit(bot, group_id, "ban", duration_minutes=0,
-                       detail="Global ban flag set" if not already_global else None, **audit_fields)   # 🧾 v39
+                       detail="Global ban flag set" if not already_global else None, **audit_fields, **ledger)   # 🧾 v39
                 await _edit_cb(callback, t["ban_success"].format(name=target_name))
             else:
                 until_timestamp = int(time.time() + (minutes * 60))
                 await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=until_timestamp)
+                ledger = await _ledger(group_id, target_id, "ban", admin=callback.from_user, user_name=raw_name,
+                                       reason=reason, minutes=minutes, until_ts=until_timestamp)   # 🏆 v40
                 _audit(bot, group_id, "ban", duration_minutes=minutes, expires_at=until_timestamp,
-                       **audit_fields)   # 🧾 v39
+                       **audit_fields, **ledger)   # 🧾 v39
                 dur = format_duration(minutes, lang)
                 await _edit_cb(callback, t["ban_timed_success"].format(name=target_name, duration=dur))
 
@@ -885,7 +927,9 @@ async def cb_mod_execution(callback: CallbackQuery, bot: Bot):
             _audit_claim(group_id, target_id, "removal")
             await bot.ban_chat_member(chat_id=group_id, user_id=target_id, until_date=int(time.time() + 35))
             await bot.unban_chat_member(chat_id=group_id, user_id=target_id, only_if_banned=True)
-            _audit(bot, group_id, "kick", **audit_fields)   # 🧾 v39
+            ledger = await _ledger(group_id, target_id, "kick", admin=callback.from_user, user_name=raw_name,
+                                   reason=reason)   # 🏆 v40
+            _audit(bot, group_id, "kick", **audit_fields, **ledger)   # 🧾 v39
             await _edit_cb(callback, t["kick_success"].format(name=target_name))
 
             try:
@@ -910,13 +954,17 @@ async def cb_mod_execution(callback: CallbackQuery, bot: Bot):
             _audit_claim(group_id, target_id, "restrict")
             if minutes == 0:
                 await bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms)
-                _audit(bot, group_id, "mute", duration_minutes=0, **audit_fields)   # 🧾 v39
+                ledger = await _ledger(group_id, target_id, "mute", admin=callback.from_user, user_name=raw_name,
+                                       reason=reason)   # 🏆 v40
+                _audit(bot, group_id, "mute", duration_minutes=0, **audit_fields, **ledger)   # 🧾 v39
                 await _edit_cb(callback, t["mute_perm"].format(name=target_name))
             else:
                 until_timestamp = int(time.time() + (minutes * 60))
                 await bot.restrict_chat_member(chat_id=group_id, user_id=target_id, permissions=perms, until_date=until_timestamp)
+                ledger = await _ledger(group_id, target_id, "mute", admin=callback.from_user, user_name=raw_name,
+                                       reason=reason, minutes=minutes, until_ts=until_timestamp)   # 🏆 v40
                 _audit(bot, group_id, "mute", duration_minutes=minutes, expires_at=until_timestamp,
-                       **audit_fields)   # 🧾 v39
+                       **audit_fields, **ledger)   # 🧾 v39
                 dur = format_duration(minutes, lang)
                 await _edit_cb(callback, t["mute_success"].format(name=target_name, duration=dur))
 
@@ -1140,9 +1188,12 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
                     _spawn(auto_delete_pair(message, msg, delay=10))
                     return
                 # 🧾 v39 · Auditoría: baneo permanente desde /blacklist (respuesta a un mensaje sin texto).
+                ledger = await _ledger(message.chat.id, target.id, "ban", source="blacklist", admin=_operator_of(message),
+                                       user_name=getattr(target, "full_name", None), reason="Blacklist",
+                                       global_set=not already_global)   # 🏆 v40
                 _audit(bot, message.chat.id, "ban", user=target, actor=_operator_of(message), action="ban",
                        reason="Blacklist", duration_minutes=0, chat_title=message.chat.title,
-                       detail="Global ban flag set" if not already_global else None)
+                       detail="Global ban flag set" if not already_global else None, **ledger)
                 try:
                     await set_participant_mic(chat_id=message.chat.id, user_id=target.id, muted=True, volume=0)
                 except Exception:
@@ -1169,3 +1220,135 @@ async def cb_help_lists(callback: CallbackQuery):
     lang = get_lang(callback.from_user.language_code)
     cmd_type = "whitelist" if callback.data == "help_wl" else "blacklist"
     await callback.answer(TEXTS[lang]["help_add_list"].format(cmd=cmd_type), show_alert=True)
+
+
+# ==========================================
+# ↩️ v40 · FALSOS POSITIVOS (botón del canal de registro y Mini App)
+# ==========================================
+RevertStatus = Literal["ok", "missing", "already", "forbidden", "telegram_failed"]
+
+
+@dataclass(frozen=True)
+class RevertOutcome:
+    status: RevertStatus
+    sanction: Optional[SanctionRow] = None
+    stats: Optional[AdminStatsRow] = None
+    code: Optional[str] = None
+    detail: Optional[str] = None
+
+
+async def _is_group_owner(group_id: int, user_id: int, bot: Optional[Bot]) -> bool:
+    """Solo el creador REAL de la comunidad (en vivo, no la caché de administradores)."""
+    return await telegram_ops.member_status(group_id, user_id, preferred=bot) == "creator"
+
+
+async def revert_sanction(sanction_id: int, owner_id: int, *, bot: Optional[Bot] = None, owner: Any = None,
+                          owner_verified: bool = False, origin: str = "log_channel") -> RevertOutcome:
+    """
+    Revierte una sanción del libro f3 como FALSO POSITIVO. Atómico frente a dobles pulsaciones (claim en BD antes de
+    tocar Telegram); si Telegram no permite revertir, el claim y la penalización se deshacen. Nunca lanza.
+    `owner_verified=True` cuando el llamador ya comprobó al dueño (la API de la Mini App usa assert_chat_ownership).
+    """
+    try:
+        sanction = await crud_f3.get_sanction(int(sanction_id))
+    except Exception as ex:
+        return RevertOutcome("missing", detail=str(ex)[:200])
+    if sanction is None:
+        return RevertOutcome("missing")
+    group_id, user_id = sanction["group_id"], sanction["user_id"]
+    if not owner_verified and not await _is_group_owner(group_id, owner_id, bot):
+        return RevertOutcome("forbidden", sanction=sanction)
+    status, claimed, stats = await crud_f3.claim_false_positive(int(sanction_id), int(owner_id),
+                                                                f"false_positive:{origin}")
+    if status != "ok" or claimed is None:
+        return RevertOutcome("already" if status == "already" else "missing", sanction=claimed or sanction)
+
+    action = sanction["action"]
+    result: telegram_ops.OpResult
+    if action == "ban":
+        mark_audit_handled(f"{group_id}:unban:{user_id}", 60.0)
+        result = await telegram_ops.unban_member(group_id, user_id, preferred=bot)
+        if result.ok:
+            with contextlib.suppress(Exception):
+                if sanction["global_ban_set"]:
+                    await _db_module.lift_global_ban_if_origin(user_id, group_id)
+            with contextlib.suppress(Exception):
+                await reset_user_strikes(group_id, user_id)
+            with contextlib.suppress(Exception):
+                await _db_module.appeal_cancel_open(group_id, user_id)
+    elif action == "mute":
+        _audit_claim(group_id, user_id, "unrestrict")
+        result = await telegram_ops.unmute_member(group_id, user_id, preferred=bot)
+        if result.ok:
+            with contextlib.suppress(Exception):
+                await set_participant_mic(chat_id=group_id, user_id=user_id, muted=False, volume=10000)
+    else:   # kick: no hay estado que deshacer en Telegram (el usuario ya puede volver); se corrige el historial
+        result = telegram_ops.OpResult(ok=True)
+
+    if not result.ok:
+        with contextlib.suppress(Exception):
+            await crud_f3.release_false_positive(int(sanction_id))
+        logger.warning(f"[Fase3] Falso positivo #{sanction_id} no revertido en Telegram: {result.code} {result.detail}")
+        return RevertOutcome("telegram_failed", sanction=sanction, code=result.code, detail=result.detail)
+
+    extra: Dict[Any, Any] = {("Sanction", "Sanción"): f"#{sanction_id} · {action}",
+                             ("Origin", "Origen"): "Mini App" if origin == "miniapp" else "Log channel"}
+    if stats is not None:
+        penalty = int(sanction["points_awarded"]) + FALSE_POSITIVE_PENALTY
+        extra[("Admin penalized", "Admin penalizado")] = (f"{stats['admin_name'] or stats['admin_id']} · "
+                                                          f"-{penalty} pts → {stats['points']} pts")
+    elif sanction["source"] == "automod":
+        extra[("Auto-Mod evidence", "Evidencia Auto-Mod")] = "cleared / limpiada"
+    _audit(bot, group_id, "false_positive", user_id=user_id, user_name=sanction["user_name"],
+           actor=owner if owner is not None else owner_id, action="unban" if action == "ban" else
+           ("unmute" if action == "mute" else "none"), reason=sanction["reason"], extra=extra)
+    return RevertOutcome("ok", sanction=claimed, stats=stats)
+
+
+_FP_TEXTS: Dict[str, Dict[str, str]] = {
+    "en": {"ok": "✅ Reverted as a false positive.", "missing": "⚠️ This sanction no longer exists.",
+           "already": "ℹ️ It was already reverted.", "forbidden": "⛔ Only the community owner can report false positives.",
+           "telegram_failed": "❌ Telegram refused the revert ({code}). Check the bot's admin rights.",
+           "stamp": "↩️ <b>False positive</b> — reverted by {name} · {date} UTC"},
+    "es": {"ok": "✅ Revertido como falso positivo.", "missing": "⚠️ Esta sanción ya no existe.",
+           "already": "ℹ️ Ya estaba revertida.", "forbidden": "⛔ Solo el Dueño de la comunidad puede reportar falsos positivos.",
+           "telegram_failed": "❌ Telegram rechazó la reversión ({code}). Revisa los permisos del bot.",
+           "stamp": "↩️ <b>Falso positivo</b> — revertido por {name} · {date} UTC"},
+}
+
+
+@router.callback_query(F.data.startswith("fp_"))
+async def cb_false_positive(callback: CallbackQuery, bot: Bot) -> None:
+    """Botón «Reportar falso positivo» de las tarjetas del canal de registro (restringido al Dueño)."""
+    raw = (callback.data or "")[3:]
+    if not raw.isdigit():
+        await callback.answer()
+        return
+    sanction_id = int(raw)
+    sanction = await crud_f3.get_sanction(sanction_id)
+    lang = "en"
+    if sanction is not None:
+        with contextlib.suppress(Exception):
+            prefs = await _db_module.get_service_prefs(sanction["group_id"])
+            lang = "es" if str(prefs.get("lang")) == "es" else "en"
+    texts = _FP_TEXTS[lang]
+    outcome = await revert_sanction(sanction_id, callback.from_user.id, bot=bot, owner=callback.from_user)
+    message_text = texts[outcome.status].format(code=outcome.code or "?")
+    with contextlib.suppress(TelegramAPIError):
+        await callback.answer(message_text, show_alert=outcome.status != "ok")
+    if outcome.status not in ("ok", "already"):
+        return
+    card = callback.message
+    if not isinstance(card, Message):   # InaccessibleMessage (muy antiguo): no se puede editar
+        return
+    name = html.escape(callback.from_user.full_name or str(callback.from_user.id))
+    stamp = texts["stamp"].format(name=name, date=time.strftime("%Y-%m-%d %H:%M", time.gmtime()))
+    try:
+        body = card.html_text if outcome.status == "ok" else ""
+        if body and len(body) + len(stamp) + 2 <= 4096:
+            await card.edit_text(f"{body}\n\n{stamp}", parse_mode="HTML", reply_markup=None,
+                                 disable_web_page_preview=True)
+        else:
+            await card.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError as ex:
+        logger.debug(f"[Fase3] No se pudo marcar la tarjeta del falso positivo #{sanction_id}: {ex}")

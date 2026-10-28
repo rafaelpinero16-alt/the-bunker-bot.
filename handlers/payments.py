@@ -18,6 +18,10 @@ Fase 3 · Exclusividad financiera y SLA de pagos:
 v25 · Apelación de baneos (familia `appeal_<grupo>_<usuario>_<id>`): payments es la única puerta de entrada (deep link
 /start appeal_<grupo>, pre-checkout y pago); la lógica vive en handlers/ban_appeals.py y reutiliza la emisión de facturas,
 el libro mayor, la idempotencia y los reembolsos de este módulo.
+
+v40 · Fase 3: el desbaneo pagado (outcome 'reinstated') lo audita ban_appeals con la tarjeta #UNBAN_PAGADO, que incluye
+la limpieza del historial negativo; aquí solo se auditan los resultados SIN desbaneo (reembolso, cobro inválido y
+cualquier estado intermedio), para que cada pago produzca exactamente una tarjeta.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -2070,7 +2074,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             if str(outcome) in ("refunded", "failed"):
                 _audit_refund(bot, payload, buyer, charge_id, paid_amount, str(outcome) == "refunded",
                               "Ban appeal could not be completed")
-            elif str(outcome) != "duplicate":
+            elif str(outcome) not in ("duplicate", "reinstated", "rejoined"):   # v40 · 'reinstated' → #UNBAN_PAGADO
                 _audit_payment(bot, _payload_chat_id(payload), "appeal_paid", user=buyer, amount=paid_amount,
                                detail=f"charge {charge_id}", extra={("Outcome", "Resultado"): str(outcome or "—")},
                                dedupe_key=f"appeal_paid:{charge_id}", dedupe_ttl=3600)

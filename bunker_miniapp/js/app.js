@@ -14,6 +14,8 @@ import { state } from './state.js';
 import { tgApp } from './telegram.js';
 import { api, session, BunkerWebSocketClient } from './api.js';
 import { ui } from './ui.js';
+// 🏆 v40 · Fase 3: Dashboard de Moderación (Auto-Mod, leaderboard, historial de usuario, gestión masiva).
+import { moderationConsole } from './moderation.js';
 
 const STUDIO_ALIAS_RE = /^@[A-Za-z][A-Za-z0-9_]{4,31}$/;
 const CHAT_ID_RE = /^-?\d{5,20}$/;
@@ -959,7 +961,10 @@ export const app = {
                 });
             }
         }
-        if (changed) this.rerenderForLanguage();
+        if (changed) {
+            this.rerenderForLanguage();
+            moderationConsole.render();   // 🏆 v40 · el dashboard de moderación usa sus propios textos EN/ES
+        }
         if (announce) ui.showToast({ key: 'lang', force: true, icon: '🌐', tone: 'info', ttl: 1800, title: ui.t('i18n_lang_toast') });
         return next;
     },
@@ -3707,6 +3712,7 @@ export const app = {
         this.loadAdminQuotas();
         ui.renderBanAppeals(null, { loading: true });
         this.loadBanAppeals({ reset: true });
+        moderationConsole.start(id);   // 🏆 v40
     },
 
     stopV23Console() {
@@ -3722,6 +3728,7 @@ export const app = {
         ui.renderShield(null, { idle: true });
         ui.renderVipRoles(null, { idle: true });
         ui.renderAdminQuotas(null, { idle: true });
+        moderationConsole.stop();   // 🏆 v40
     },
 
     /** Respuesta de escritura: aviso de error (403 = solo el dueño) y háptica. Devuelve true si fue bien. */
