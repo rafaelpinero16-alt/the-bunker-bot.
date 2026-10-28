@@ -7,6 +7,9 @@ Fase 4: Gamificación Tokenizada (XP / Niveles / /rank / /top) + Analítica Heat
 Fase 5: Ascensos de nivel emitidos en caliente al radar WebSocket de la Mini App.
 Fase 6: Aduana sin DMs fríos — el captcha privado solo se envía en ChatJoinRequest (ventana legal
         de 5 min vía user_chat_id); los ingresos directos se verifican únicamente en el grupo.
+v39:    Log Channel Hub — entradas/salidas (enlace, solicitud, añadido, directo), captcha, Anti-Spam, Anti-Flood,
+        userbots, CAS, Anti-Raid, escalera de advertencias, pánico, interruptores del Dueño y turnos de speaker
+        se auditan en el canal de registro vía handlers/logger_hub.py (siempre en segundo plano con _spawn).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import time
@@ -20,6 +23,7 @@ import inspect
 import logging
 import contextlib
 import html
+import re
 import types
 from typing import Any, Optional
 
@@ -91,6 +95,9 @@ except ImportError:  # pragma: no cover - optional runtime dependency
     def publish_radar_event(*args, **kwargs):
         return None
 
+# 🧾 v39 · Log Channel Hub: auditoría forense de cada evento crítico en el canal de registro de la comunidad.
+from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
+
 try:
     from middlewares.anti_spam import check_global_cas_spam
 except ImportError:
@@ -142,6 +149,166 @@ SUPER_ADMIN_IDS.update([8269470905, 1738976493])
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+# ==========================================
+# 🧾 v39 · LOG CHANNEL HUB (AUDITORÍA EN SEGUNDO PLANO)
+# ==========================================
+def _audit(bot: Optional[Bot], chat_id: int, event_type: str, **fields: Any) -> None:
+    """Publica un evento en el canal de registro de la comunidad SIN bloquear el handler (vía _spawn)."""
+    _spawn(dispatch_audit_log(bot, chat_id, event_type, **fields))
+
+
+def _audit_claim(chat_id: int, user_id: int, *kinds: str) -> None:
+    """
+    Marca acciones que el propio bot acaba de ejecutar (expulsión, silencio…) y que ya tienen su tarjeta específica,
+    para que el observador de chat_member no publique además la tarjeta genérica.
+    """
+    for kind in kinds:
+        mark_audit_handled(f"{int(chat_id)}:{kind}:{int(user_id)}", 30.0)
+
+
+def _plain_name(mention_html: str) -> str:
+    """Nombre legible a partir de una mención HTML (<a href=…>Nombre</a>) para las tarjetas de auditoría."""
+    return html.unescape(re.sub(r"<[^>]+>", "", str(mention_html or ""))).strip()
+
+
+def _captcha_measure(cfg: dict, is_join_req: bool, session_data: dict) -> str:
+    """La misma medida que aplicará _apply_captcha_sanction (para la tarjeta de auditoría)."""
+    if is_join_req:
+        return "decline"
+    return "mute" if (session_data.get("action_override") or cfg.get("action")) == "mute" else "kick"
+
+
+def _member_is_in(member: Any) -> bool:
+    status = str(getattr(getattr(member, "status", ""), "value", getattr(member, "status", "")) or "")
+    if status in ("member", "administrator", "creator"):
+        return True
+    return status == "restricted" and bool(getattr(member, "is_member", False))
+
+
+def _join_method(event: ChatMemberUpdated) -> dict:
+    """Forma de ingreso según Telegram: solicitud, enlace (apelación / retorno post-pago), carpeta, añadido o directo."""
+    user = event.new_chat_member.user
+    info: dict[str, Any] = {}
+    invite = event.invite_link
+    if invite is not None:
+        name = str(invite.name or "")
+        info["link_name"] = name or None
+        info["inviter"] = invite.creator
+    if event.via_join_request:
+        info["via"] = "request"
+    elif invite is not None:
+        name = str(invite.name or "")
+        info["via"] = "appeal" if name.startswith("appeal-") else ("return" if name.startswith("Bunker · one-time") else "link")
+    elif event.via_chat_folder_invite_link:
+        info["via"] = "folder"
+    elif event.from_user.id != user.id:
+        info["via"] = "added"
+        info["inviter"] = event.from_user
+    else:
+        info["via"] = "direct"
+    return info
+
+
+async def _audit_bot_member_change(bot: Bot, group_id: int, user: Any, event_type: str, kind: str, actor: Any) -> None:
+    """
+    Cambios ejecutados por el propio bot (p. ej. /mute o /ban de handlers/moderation.py): se espera unos segundos y solo
+    se registran si ninguna vía específica (captcha, anti-flood, escalera…) ya publicó su tarjeta.
+    """
+    await asyncio.sleep(3.0)
+    key = (group_id, user.id)
+    if kind in ("restrict", "unrestrict") and (key in CAPTCHA_SESSIONS or time.time() - RECENTLY_VERIFIED.get(key, 0) < 300):
+        return   # restricción / liberación propia de la aduana
+    await dispatch_audit_log(bot, group_id, event_type, user=user, actor=actor, dedupe_key=f"{kind}:{user.id}")
+
+
+# Telegram no tiene "expulsar": una expulsión es ban + desbaneo inmediato. El baneo se publica tras una breve ventana;
+# si llega el desbaneo dentro de ella, se publica UNA tarjeta de expulsión (como hace AdminActionTrackerMiddleware).
+_AUDIT_KICK_WINDOW = 6.0
+_PENDING_AUDIT_BANS: dict[tuple[int, int], asyncio.Task] = {}
+
+
+async def _audit_ban_later(bot: Bot, group_id: int, user: Any, actor: Any, title: Optional[str], by_bot: bool) -> None:
+    try:
+        await asyncio.sleep(_AUDIT_KICK_WINDOW)
+    except asyncio.CancelledError:
+        return   # llegó el desbaneo: era una expulsión
+    _PENDING_AUDIT_BANS.pop((group_id, user.id), None)
+    if by_bot:
+        await _audit_bot_member_change(bot, group_id, user, "member_banned", "removal", actor)
+    else:
+        await dispatch_audit_log(bot, group_id, "member_banned", user=user, actor=actor, chat_title=title,
+                                 action="ban", dedupe_key=f"removal:{user.id}")
+
+
+def _mute_action(member: Any) -> Optional[str]:
+    return "mute" if getattr(member, "can_send_messages", True) is False else None
+
+
+def _audit_member_update(bot: Bot, event: ChatMemberUpdated) -> None:
+    """🧾 v39 · Entradas, salidas, expulsiones, baneos y restricciones vistas en chat_member (fuente más fiable)."""
+    old, new = event.old_chat_member, event.new_chat_member
+    user, actor = new.user, event.from_user
+    group_id = event.chat.id
+    old_status = str(getattr(old.status, "value", old.status) or "")
+    new_status = str(getattr(new.status, "value", new.status) or "")
+    was_in, now_in = _member_is_in(old), _member_is_in(new)
+    by_self = actor.id == user.id
+    by_bot = actor.id == bot.id
+    title = event.chat.title
+
+    if not was_in and now_in:
+        if user.is_bot:
+            _audit(bot, group_id, "bot_joined", user=user, actor=None if by_self else actor, chat_title=title)
+        else:
+            _audit(bot, group_id, "member_joined", user=user, chat_title=title, dedupe_key=f"join:{user.id}",
+                   **_join_method(event))
+        return
+    if new_status == "kicked" and old_status != "kicked":   # también el baneo preventivo de quien ya no estaba
+        key = (group_id, user.id)
+        previous = _PENDING_AUDIT_BANS.pop(key, None)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        _PENDING_AUDIT_BANS[key] = _spawn(_audit_ban_later(bot, group_id, user, actor, title, by_bot))
+        if len(_PENDING_AUDIT_BANS) > 2000:   # higiene: tareas ya resueltas
+            for k in [k for k, t in _PENDING_AUDIT_BANS.items() if t.done()]:
+                _PENDING_AUDIT_BANS.pop(k, None)
+        return
+    if was_in and not now_in:
+        if by_self:
+            _audit(bot, group_id, "member_left", user=user, chat_title=title, dedupe_key=f"leave:{user.id}")
+        elif by_bot:
+            _spawn(_audit_bot_member_change(bot, group_id, user, "member_removed", "removal", actor))
+        else:
+            _audit(bot, group_id, "member_removed", user=user, actor=actor, chat_title=title,
+                   dedupe_key=f"removal:{user.id}")
+        return
+    if old_status == "kicked" and new_status == "left":
+        pending = _PENDING_AUDIT_BANS.pop((group_id, user.id), None)
+        if pending is not None and not pending.done():
+            pending.cancel()   # ban + desbaneo inmediato = expulsión: una sola tarjeta
+            if by_bot:
+                _spawn(_audit_bot_member_change(bot, group_id, user, "member_removed", "removal", actor))
+            else:
+                _audit(bot, group_id, "member_removed", user=user, actor=actor, chat_title=title, action="kick",
+                       dedupe_key=f"removal:{user.id}")
+        elif not by_bot:   # el desbaneo propio del bot (apelación pagada, retorno…) ya tiene su tarjeta específica
+            _audit(bot, group_id, "member_unbanned", user=user, actor=actor, chat_title=title)
+        return
+    if was_in and now_in and old_status != "restricted" and new_status == "restricted":
+        if by_bot:
+            _spawn(_audit_bot_member_change(bot, group_id, user, "member_restricted", "restrict", actor))
+        else:
+            _audit(bot, group_id, "member_restricted", user=user, actor=actor, chat_title=title,
+                   action=_mute_action(new), dedupe_key=f"restrict:{user.id}")
+        return
+    if was_in and now_in and old_status == "restricted" and new_status == "member":
+        if by_bot:
+            _spawn(_audit_bot_member_change(bot, group_id, user, "member_unrestricted", "unrestrict", actor))
+        else:
+            _audit(bot, group_id, "member_unrestricted", user=user, actor=actor, chat_title=title,
+                   dedupe_key=f"unrestrict:{user.id}")
 
 
 # ==========================================
@@ -737,6 +904,9 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
 
     await approve_group(group_id, tier="free")
     await register_user_group(owner_to_register, group_id, group_name, chat_type=chat_type_str)
+    # 🧾 v39 · Auditoría: The Bunker conectado (solo se publica si la comunidad ya tenía canal de registro).
+    _audit(bot, group_id, "bunker_connected", actor=user, chat_title=chat.title,
+           detail="channel" if is_channel else "group")
     # 🛡️ v37 · El Anti-Rogue deja de tratar el chat como ajeno al instante (sin esperar a su caché de 5 min).
     try:
         from middlewares.anti_spam import forget_chat_approval
@@ -922,6 +1092,14 @@ async def captcha_timeout_task(bot: Bot, group_id: int, user_id: int, timeout: i
     lang = session_data.get("lang") or await group_lang(group_id)
     custom_msg = cfg["text"] if cfg["text"] else gtx(lang, "captcha_expired_default", signed=False)
 
+    # 🧾 v39 · Auditoría: captcha expirado y medida que se aplica a continuación.
+    measure = _captcha_measure(cfg, is_join_req, session_data)
+    if measure == "kick":
+        _audit_claim(group_id, user_id, "removal")
+    _audit(bot, group_id, "captcha_expired", user_id=user_id, user_name=session_data.get("full_name") or None,
+           automatic=True, system="raid_shield" if session_data.get("raid_gate") else "captcha", action=measure,
+           via="request" if is_join_req else None, duration_seconds=timeout)
+
     if is_join_req:
         # Aviso privado dentro de la ventana legal y ANTES de rechazar (el rechazo la cierra).
         await _send_join_request_dm(bot, session_data, gtx(lang, "captcha_expired_dm", text=custom_msg),
@@ -989,32 +1167,21 @@ async def _send_raid_shield_alert(bot: Bot, group_id: int, verdict: dict) -> Non
         "new": verdict.get("new_joins"), "reasons": verdict.get("reasons"),
         "until": verdict.get("active_until"),
     })
-    try:
-        log_id = await asyncio.to_thread(_db_module._get_setting, group_id, "log_channel_id", None)
-    except Exception:
-        log_id = None
-    if not log_id:
-        return
-    try:
-        title = (await bot.get_chat(group_id)).title or str(group_id)
-    except Exception:
-        title = str(group_id)
+    # 🧾 v39 · La alerta al canal de registro pasa por el Log Channel Hub (formato unificado, cola con ritmo y
+    #    disyuntor de permisos). Mismo contenido que v37: nivel, señales, ingresos, cuentas nuevas y duración.
     lang = await group_lang(group_id)
     rs = verdict.get("reasons") or []
     level = int(verdict.get("level") or 1)
     minutes = max(1, raid_shield.shield_remaining(group_id) // 60)
     signals = ", ".join(gtx(lang, f"sig_{r}", signed=False) if f"sig_{r}" in GROUP_SVC_TEXTS["en"] else str(r) for r in rs) or "—"
-    text = gtx(
-        lang, "raid_log", title=html.escape(title),
+    await dispatch_audit_log(
+        bot, group_id, "raid_shield_on", automatic=True, system="raid_shield",
         level=gtx(lang, "level_critical" if level >= 2 else "level_elevated", signed=False),
-        signals=html.escape(signals),
-        window=int(verdict.get("window") or raid_shield.RAID_WINDOW_SECONDS),   # v37 · ventana configurada
-        joins=int(verdict.get("joins") or 0), new=int(verdict.get("new_joins") or 0), minutes=minutes,
+        signals=signals, count=int(verdict.get("joins") or 0),
+        window_seconds=int(verdict.get("window") or raid_shield.RAID_WINDOW_SECONDS),   # v37 · ventana configurada
+        duration_minutes=minutes,
+        extra={("New accounts", "Cuentas nuevas"): int(verdict.get("new_joins") or 0)},
     )
-    try:
-        await bot.send_message(chat_id=int(log_id) if str(log_id).lstrip("-").isdigit() else log_id, text=text, parse_mode="HTML")
-    except Exception as e:
-        logger.debug(f"Aviso enviando alerta anti-raid al canal de registro de {group_id}: {e}")
 
 
 # ==========================================
@@ -1130,6 +1297,11 @@ async def _apply_raid_penalty(bot: Bot, group_id: int, user, *, is_join_req: boo
         await raid_blacklist_add(group_id, user.id, penalty,
                                  penalty_until=until if penalty in ("mute", "ban") else None, **common)
     track_security(group_id, user.id, "raid_shield", action, bool(getattr(user, "is_bot", False)))
+    # 🧾 v39 · Auditoría de la penalización de raid.
+    _audit_claim(group_id, user.id, "removal", "restrict")
+    _audit(bot, group_id, "raid_penalty", user=user, automatic=True, system="raid_shield", action=action,
+           via="request" if is_join_req else None,
+           duration_minutes=minutes if penalty in ("mute", "ban") else None)
     return True
 
 async def _quarantine_recent_joiners(bot: Bot, group_id: int, exclude_user_id: int) -> None:
@@ -1285,6 +1457,10 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     group_id = event.chat.id
     user_id = event.from_user.id
     is_bot = bool(event.from_user.is_bot)
+    # 🧾 v39 · Auditoría: solicitud recibida (la aprobación se registra como ingreso «por solicitud»).
+    _audit(bot, group_id, "join_request", user=event.from_user, chat_title=event.chat.title,
+           link_name=(event.invite_link.name if event.invite_link is not None else None),
+           detail=(event.bio[:200] if event.bio else None))
 
     # 🚨 v9/v37 · Detector de picos coordinados: las solicitudes tienen su propio umbral configurable.
     verdict = await _register_join_and_alert(bot, group_id, user_id, event.from_user.full_name or "", is_bot,
@@ -1299,6 +1475,8 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
             await bot.decline_chat_join_request(chat_id=group_id, user_id=user_id)
             track_security(group_id, user_id, "antispam", "decline", is_bot)
             logger.warning(f"🚨 [Anti-Spam Global CAS] Solicitud de spammer global {user_id} rechazada en {group_id}.")
+            _audit(bot, group_id, "cas_blocked", user=event.from_user, automatic=True, system="cas",
+                   action="decline", via="request")
         except Exception:
             pass
         return
@@ -1354,6 +1532,13 @@ async def handle_new_members(message: Message, bot: Bot):
         if new_user.id == bot_me.id:
             continue
 
+        # 🧾 v39 · Respaldo del registro de entradas: si chat_member ya lo publicó (con el enlace exacto), se omite.
+        if not new_user.is_bot:
+            added_by_other = adder is not None and adder.id != new_user.id
+            _audit(bot, group_id, "member_joined", user=new_user, chat_title=message.chat.title,
+                   via="added" if added_by_other else "direct", inviter=adder if added_by_other else None,
+                   dedupe_key=f"join:{new_user.id}", defer=4.0)
+
         # 🚨 v9 · Detector de picos coordinados (cuentas nuevas, bots y nombres clonados).
         verdict = await _register_join_and_alert(bot, group_id, new_user.id, new_user.full_name or "", bool(new_user.is_bot))
 
@@ -1366,6 +1551,10 @@ async def handle_new_members(message: Message, bot: Bot):
                     await bot.ban_chat_member(chat_id=group_id, user_id=new_user.id)
                     track_security(group_id, new_user.id, "raid_shield", "ban", True)
                     logger.warning(f"🚨 [RaidShield] Bot {new_user.id} añadido durante un raid en {group_id}: retirado.")
+                    _audit_claim(group_id, new_user.id, "removal")
+                    _audit(bot, group_id, "raid_penalty", user=new_user, automatic=True, system="raid_shield",
+                           action="ban", inviter=adder, via="added",
+                           detail="Bot added by a non-admin during an active raid")
                 except Exception as e:
                     logger.warning(f"[RaidShield] No se pudo retirar el bot {new_user.id} de {group_id}: {e}")
                 continue
@@ -1386,6 +1575,8 @@ async def handle_new_members(message: Message, bot: Bot):
                     await bot.ban_chat_member(chat_id=group_id, user_id=new_user.id)
                     track_security(group_id, new_user.id, "antispam", "ban", False)
                     logger.warning(f"🚨 [Anti-Spam Global CAS] Miembro spammer global {new_user.id} expulsado en {group_id}.")
+                    _audit_claim(group_id, new_user.id, "removal")
+                    _audit(bot, group_id, "cas_blocked", user=new_user, automatic=True, system="cas", action="ban")
                 except Exception as e:
                     logger.error(f"Error expulsando spammer global {new_user.id}: {e}")
                 continue
@@ -1408,6 +1599,11 @@ async def handle_new_members(message: Message, bot: Bot):
 
 @router.chat_member(F.chat.type.in_({"group", "supergroup"}))
 async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
+    # 🧾 v39 · Auditoría de membresía ANTES del filtro de bots (la entrada de un bot también se registra).
+    try:
+        _audit_member_update(bot, event)
+    except Exception as audit_err:
+        logger.debug(f"[Audit] Cambio de membresía no clasificado en {event.chat.id}: {audit_err}")
     user = event.new_chat_member.user
     if user.is_bot:
         return
@@ -1516,6 +1712,10 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
         await callback.answer(gtx(lang, "captcha_verified_toast", signed=False), show_alert=False)
         RECENTLY_VERIFIED[(group_id, target_user_id)] = time.time()
         track_security(group_id, target_user_id, "captcha", "verified", False)
+        # 🧾 v39 · Auditoría: captcha superado.
+        _audit(bot, group_id, "captcha_passed", user=callback.from_user, automatic=True,
+               system="raid_shield" if session_data.get("raid_gate") else "captcha",
+               action="approve" if is_join_req else "release", via="request" if is_join_req else None)
         # 🗂️ v37 · Si estaba en la lista negra de raid (captcha estricto), el caso se cierra como liberado.
         _spawn(raid_blacklist_resolve(group_id, target_user_id, "released", None))
 
@@ -1557,6 +1757,13 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
     else:
         await callback.answer(gtx(lang, "captcha_wrong_toast", signed=False), show_alert=True)
         custom_fail = cfg["text"] if cfg["text"] else gtx(lang, "captcha_fail_default", signed=False)
+        # 🧾 v39 · Auditoría: captcha fallido (código erróneo) y medida aplicada.
+        measure = _captcha_measure(cfg, is_join_req, session_data)
+        if measure == "kick":
+            _audit_claim(group_id, target_user_id, "removal")
+        _audit(bot, group_id, "captcha_failed", user=callback.from_user, automatic=True,
+               system="raid_shield" if session_data.get("raid_gate") else "captcha", action=measure,
+               via="request" if is_join_req else None)
 
         if is_join_req:
             # Aviso privado dentro de la ventana legal, ANTES de rechazar la solicitud.
@@ -1622,6 +1829,14 @@ async def purge_left_member(message: Message):
     left_user = message.left_chat_member
     if left_user and not left_user.is_bot:
         await registry_forget(message.chat.id, left_user.id)
+        # 🧾 v39 · Respaldo del registro de salidas (si chat_member ya lo publicó, se omite).
+        remover = message.from_user
+        if remover is None or remover.id == left_user.id:
+            _audit(message.bot, message.chat.id, "member_left", user=left_user, chat_title=message.chat.title,
+                   dedupe_key=f"leave:{left_user.id}", defer=4.0)
+        else:
+            _audit(message.bot, message.chat.id, "member_removed", user=left_user, actor=remover,
+                   chat_title=message.chat.title, dedupe_key=f"removal:{left_user.id}", defer=4.0)
 
     cfg = await get_captcha_config(message.chat.id)
     srv_mode = await get_service_msgs_mode(message.chat.id)
@@ -1896,6 +2111,13 @@ async def purge_ghosts_command(message: Message, bot: Bot):
 
         await _edit_status(status_msg, "\n".join(lines))
         _spawn(auto_delete_msg(status_msg, 60))
+        # 🧾 v39 · Auditoría. El motor MTProto ya publica su propio informe cuando encuentra fantasmas: no se duplica.
+        engine = str(res.get("engine", "Hybrid"))
+        if not (engine == gtx(lang, "engine_mtproto", signed=False) and int(res.get("found", 0) or 0) > 0):
+            _audit(bot, group_id, "ghost_purge", actor=message.from_user, action=action,
+                   detail="dry run" if dry_run else None,
+                   extra={("Engine", "Motor"): engine, ("Ghosts detected", "Fantasmas detectados"): res.get("found", 0),
+                          ("Ghosts purged", "Fantasmas depurados"): res.get("purged", 0)})
 
     except Exception as e:
         logger.error(f"Error ejecutando Ghost Purge en {group_id}: {e}")
@@ -1926,7 +2148,7 @@ def _lockdown_permissions() -> ChatPermissions:
     return ChatPermissions(**{field: False for field in _FULL_PERMISSION_FIELDS})
 
 
-async def _engage_panic(bot: Bot, chat, activated_by: int):
+async def _engage_panic(bot: Bot, chat, activated_by: int, actor: Any = None):
     group_id = chat.id
 
     try:
@@ -1939,6 +2161,9 @@ async def _engage_panic(bot: Bot, chat, activated_by: int):
     was_activated = await activate_panic(group_id, activated_by, snapshot_json)
     if not was_activated:
         return False
+    # 🧾 v39 · Auditoría: Raid Lockdown activado (manual por el Dueño o automático por el escudo).
+    _audit(bot, group_id, "panic_on", actor=actor if actor is not None else (activated_by or None),
+           automatic=not activated_by, system="panic", chat_title=getattr(chat, "title", None))
     # El protocolo eleva captcha, cerraduras y anti-spam: la Mini App lo refleja al instante.
     _sync_miniapp(group_id, ["panic", "captcha_enabled", "linklock_enabled", "antiflood_enabled"], source="panic")
 
@@ -1985,7 +2210,7 @@ async def panic_command(message: Message, bot: Bot):
         await message.answer(gtx(lang, "panic_already"), reply_markup=kb, parse_mode="HTML")
         return
 
-    engaged = await _engage_panic(bot, message.chat, user_id)
+    engaged = await _engage_panic(bot, message.chat, user_id, actor=message.from_user)
     if engaged:
         await message.answer(gtx(lang, "panic_on"), reply_markup=kb, parse_mode="HTML")
 
@@ -2009,6 +2234,7 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
     result = await deactivate_panic(group_id)
     if result:
         _sync_miniapp(group_id, ["panic", "captcha_enabled", "linklock_enabled", "antiflood_enabled"], source="panic")
+        _audit(bot, group_id, "panic_off", actor=callback.from_user)   # 🧾 v39
     perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
     if perms_json:
         try:
@@ -2043,6 +2269,7 @@ async def lift_raid_lockdown(bot: Bot, group_id: int) -> bool:
     if not result:
         return False
     _sync_miniapp(group_id, ["panic", "captcha_enabled", "linklock_enabled", "antiflood_enabled"], source="panic")
+    _audit(bot, group_id, "panic_off", automatic=True, system="panic")   # 🧾 v39
 
     perms_json = result.get("chat_permissions_json") if isinstance(result, dict) else None
     if perms_json:
@@ -2076,6 +2303,7 @@ async def screenshield_toggle(message: Message, bot: Bot):
     status = _parse_on_off(args)
     await set_screen_shield_status(group_id, status)
     _sync_miniapp(group_id, ["shield_enabled"])
+    _audit(bot, group_id, "screenshield_on" if status else "screenshield_off", actor=message.from_user)   # 🧾 v39
     lang = await group_lang(group_id)
     reply = await message.answer(
         gtx(lang, "screenshield", state=gtx(lang, "activated" if status else "deactivated", signed=False)), parse_mode="HTML"
@@ -2097,6 +2325,7 @@ async def duck_volume_command(message: Message, bot: Bot):
     pct = max(1, min(100, int(args[0].strip())))
     await set_podcast_duck_volume(group_id, pct * 100)
     _sync_miniapp(group_id, ["podcast_duck_volume"])
+    _audit(bot, group_id, "duckvolume", actor=message.from_user, detail=f"{pct}%")   # 🧾 v39
     reply = await message.answer(gtx(lang, "duck_ok", pct=pct), parse_mode="HTML")
     _spawn(auto_delete_msg(reply, await service_ttl(group_id, 20)))
 
@@ -2110,6 +2339,7 @@ async def noiseshield_toggle(message: Message, bot: Bot):
     status = _parse_on_off(args)
     await set_noise_shield_status(group_id, status)
     _sync_miniapp(group_id, ["noise_shield"])
+    _audit(bot, group_id, "noiseshield_on" if status else "noiseshield_off", actor=message.from_user)   # 🧾 v39
     lang = await group_lang(group_id)
     reply = await message.answer(
         gtx(lang, "noiseshield", state=gtx(lang, "activated" if status else "deactivated", signed=False)), parse_mode="HTML"
@@ -2163,6 +2393,7 @@ async def speakers_command(message: Message, bot: Bot):
             new_price = int(args[1].strip())
             await set_speaker_price(group_id, new_price)
             _sync_miniapp(group_id, ["speaker_price"])
+            _audit(bot, group_id, "speaker_price", actor=message.from_user, amount=new_price)   # 🧾 v39
             await message.answer(gtx(lang, "spk_price_ok", price=new_price), parse_mode="HTML")
         else:
             await message.answer(html.escape(gtx(lang, "spk_price_usage", signed=False)), parse_mode="HTML")
@@ -2250,6 +2481,9 @@ async def speakers_successful_payment(message: Message, bot: Bot):
     username = message.from_user.username or ""
 
     await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
+    # 🧾 v39 · Auditoría: turno prioritario comprado con Stars.
+    _audit(bot, group_id, "speaker_purchase", user=message.from_user, amount=stars_paid,
+           detail=f"charge {payment.telegram_payment_charge_id}")
 
     lang = await group_lang(group_id)
     await message.answer(gtx(lang, "spk_paid_dm", stars=stars_paid), parse_mode="HTML")
@@ -2445,6 +2679,12 @@ async def enforce_userbot_flag(
             f"[UserbotHunter] Cuenta fichada {user_id} neutralizada en {group_id} "
             f"(acción: {USERBOT_ACTION}, origen: {source})."
         )
+        # 🧾 v39 · Auditoría: userbot neutralizado.
+        _audit_claim(group_id, user_id, "removal", "restrict")
+        _audit(bot, group_id, "userbot_detected", user_id=user_id, username=username or None,
+               user=message.from_user if message is not None else None, automatic=True, system="userbot",
+               action=USERBOT_ACTION, detail=source,
+               excerpt=((message.text or message.caption or "") if message is not None else None))
     except TelegramAPIError as e:
         logger.error(f"[UserbotHunter] No se pudo aplicar '{USERBOT_ACTION}' a {user_id} en {group_id}: {e}")
 
@@ -2615,8 +2855,17 @@ async def enforce_warn_ladder(
     target_mention: str,
     reply_to: Optional[Message] = None,
     reason: str = "filter",
-    silent: bool = False
+    silent: bool = False,
+    *,
+    actor: Any = None,
+    manual: bool = False
 ) -> dict:
+    """
+    v39 · `actor` = administrador que ordenó la advertencia (para la auditoría) y `manual=True` marca una advertencia
+    manual con motivo libre: no cuenta como bloqueo del sistema ni genera oferta de apelación por Stars (igual que
+    reason="manual"; antes /warn con motivo libre se trataba como automático).
+    """
+    is_manual = bool(manual) or reason == "manual"
     tier = await get_privilege_tier(bot, chat_id, target_id, target_username)
     if _tier_is_privileged(tier):
         return {"status": "immune", "tier": tier, "strikes": 0, "limit": 0, "action": None}
@@ -2645,6 +2894,16 @@ async def enforce_warn_ladder(
         es_txt = en_txt = reason
     lang = await group_lang(chat_id)
     reason_loc = es_txt if lang == "es" else en_txt
+    # 🧾 v39 · Datos comunes de las tarjetas de auditoría de esta advertencia.
+    audit_fields: dict[str, Any] = {
+        "user_id": target_id, "user_name": _plain_name(target_mention) or None, "username": target_username or None,
+        "reason": reason_loc, "strikes": strikes, "limit": limit,
+    }
+    if is_manual:
+        audit_fields["actor"] = actor
+    else:
+        audit_fields.update(automatic=True, system={"flood": "antiflood", "filter": "antispam",
+                                                    "command": "antispam"}.get(reason, "warn_ladder"))
 
     # CASO A: EL USUARIO AÚN NO ALCANZA EL LÍMITE PUNITIVO
     if strikes < limit:
@@ -2667,6 +2926,7 @@ async def enforce_warn_ladder(
                 notice = gtx(lang, "warn", strikes=strikes, limit=limit, mention=target_mention, reason=reason_loc)
                 await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to)
 
+        _audit(bot, chat_id, "warn", action="warn", **audit_fields)   # 🧾 v39
         return {"status": "warned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
     # CASO B: SE ALCANZÓ EL LÍMITE DE ADVERTENCIAS (APLICACIÓN DE CASTIGO)
@@ -2710,7 +2970,7 @@ async def enforce_warn_ladder(
 
     await _reset_warnings_safe(chat_id, target_id)
 
-    if reason != "manual":     # las advertencias manuales son decisiones del administrador, no del sistema
+    if not is_manual:     # las advertencias manuales son decisiones del administrador, no del sistema
         track_security(chat_id, target_id, "antiflood" if reason == "flood" else "antispam", action, False)
 
     if action in ("kick", "ban"):
@@ -2718,7 +2978,7 @@ async def enforce_warn_ladder(
 
     # ⚖️ v24 · Baneo AUTOMÁTICO por warns_limit (enlaces, lista negra, anti-spam, matriz…): DM privado con el motivo y
     # la oferta de apelación por Stars. Las advertencias manuales de un administrador no son apelables por pago.
-    if action == "ban" and reason != "manual":
+    if action == "ban" and not is_manual:
         _spawn(ban_appeals.on_ladder_ban(
             bot, group_id=chat_id,
             user=types.SimpleNamespace(id=target_id, username=target_username or None, full_name=None, language_code=None),
@@ -2733,6 +2993,9 @@ async def enforce_warn_ladder(
         use_type = media_type if group_tier in ("ultra_pro", "ultra") else None
         await _send_temp(bot, chat_id, sanction_notice, ttl=25, reply_to=reply_to, media_id=use_media, media_type=use_type)
 
+    # 🧾 v39 · Auditoría: límite alcanzado y sanción aplicada.
+    _audit_claim(chat_id, target_id, "removal", "restrict")
+    _audit(bot, chat_id, "sanction", action=action, **audit_fields)
     return {"status": "sanctioned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
 
 
@@ -3132,6 +3395,7 @@ async def group_lang_callback(callback: CallbackQuery, bot: Bot):
     if await has_config_rights(bot, group_id, user.id):
         await set_service_lang(group_id, code)
         invalidate_service_prefs(group_id)
+        _audit(bot, group_id, "service_lang", actor=user, detail=code.upper())   # 🧾 v39
         _sync_miniapp(group_id, ["service_lang"], source="group_command")
         await callback.answer(gtx(code, "lang_set_group", signed=False), show_alert=True)
         if isinstance(callback.message, Message):
@@ -3191,6 +3455,7 @@ async def group_security_matrix(message: Message, bot: Bot):
         return
 
     is_threat_detected = False
+    threat_kind = ""   # 🧾 v39 · qué filtro saltó (para la tarjeta de auditoría)
     lower_text = text_content.lower()
 
     # Extracción profunda de enlaces dentro de entidades para evitar evasiones con hipervínculos
@@ -3222,15 +3487,18 @@ async def group_security_matrix(message: Message, bot: Bot):
         for b_word in blacklist:
             if b_word and b_word in lower_text:
                 is_threat_detected = True
+                threat_kind = "Blacklisted word"
                 break
 
     # 4. Filtros Perimetrales Anti-Spam
     if not is_threat_detected:
         if await get_antispam_filter(group_id, "tg_links") == 1 and ("t.me/" in lower_text or "telegram.me/" in lower_text):
             is_threat_detected = True
+            threat_kind = "Telegram link"
         elif await get_antispam_filter(group_id, "web_links") == 1 and (has_link_entity or "http://" in lower_text or "https://" in lower_text or "www." in lower_text):
             if "t.me/" not in lower_text and "telegram.me/" not in lower_text:
                 is_threat_detected = True
+                threat_kind = "Web link"
         elif await get_antispam_filter(group_id, "quotes") == 1 and (message.quote or message.reply_to_message):
             if message.quote is not None:
                 quoted_text = message.quote.text or ""
@@ -3240,16 +3508,21 @@ async def group_security_matrix(message: Message, bot: Bot):
                 quoted_text = ""
             if "http://" in quoted_text.lower() or "https://" in quoted_text.lower() or "t.me/" in quoted_text.lower():
                 is_threat_detected = True
+                threat_kind = "Quoted link"
         elif await get_antispam_filter(group_id, "forwards") == 1 and message.forward_origin:
             origin_type = type(message.forward_origin).__name__
             if "Channel" in origin_type and await get_antispam_filter(group_id, "fwd_channels") == 1: 
                 is_threat_detected = True
+                threat_kind = "Forward from a channel"
             elif "User" in origin_type and await get_antispam_filter(group_id, "fwd_users") == 1: 
                 is_threat_detected = True
+                threat_kind = "Forward from a user"
             elif "Chat" in origin_type and await get_antispam_filter(group_id, "fwd_groups") == 1: 
                 is_threat_detected = True
+                threat_kind = "Forward from a group"
             elif "Bot" in origin_type and await get_antispam_filter(group_id, "fwd_bots") == 1: 
                 is_threat_detected = True
+                threat_kind = "Forward from a bot"
 
     if is_threat_detected:
         try: 
@@ -3257,6 +3530,10 @@ async def group_security_matrix(message: Message, bot: Bot):
             track_security(group_id, user_id, "antispam", "delete", False)
         except Exception: 
             pass
+        # 🧾 v39 · Auditoría: mensaje eliminado y fragmento del contenido (la advertencia llega en su propia tarjeta).
+        _audit(bot, group_id, "spam_deleted", user=message.from_user, automatic=True, system="antispam",
+               action="delete", reason=threat_kind or "Anti-Spam filter", excerpt=text_content or None,
+               detail="edited message" if is_edit else None)
 
         await enforce_warn_ladder(
             bot, group_id, user_id, username, message.from_user.mention_html(),
@@ -3307,6 +3584,10 @@ async def group_security_matrix(message: Message, bot: Bot):
 
                 if af_action in ("kick", "mute", "ban"):
                     await _acoustic_attenuate(bot, group_id, user_id, username, strikes=1, limit=1, force_mute=True)
+                    # 🧾 v39 · Auditoría: sanción anti-flood directa (la de tipo «warn» la registra la escalera).
+                    _audit_claim(group_id, user_id, "removal", "restrict")
+                    _audit(bot, group_id, "flood_sanction", user=message.from_user, automatic=True, system="antiflood",
+                           action=af_action, extra={("Threshold", "Umbral"): f"{max_msgs} msgs / {time_window}s"})
 
                 if af_action == "kick":
                     await bot.ban_chat_member(chat_id=group_id, user_id=user_id, until_date=int(time.time() + 35))

@@ -5,6 +5,8 @@ v37: inglés por defecto + idioma/TTL de servicio por grupo, Anti-Rogue silencio
      /reload sin choque con el /reload del Centinela (Pyrogram).
 v38.1: tipado estricto (Pylance/Pyright): todo valor Optional de aiogram (callback.data, callback.message,
        message.from_user, reply_to_message.text/caption, File.file_path) se protege antes de usarse.
+v39: Log Channel Hub — /warn, /resetwarns, /delvip, /night, respaldos y paneles del Dueño se auditan en el canal de
+     registro; /warn pasa manual=True a la escalera (sin métrica de sistema ni oferta de apelación pagada).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -15,7 +17,8 @@ import asyncio
 import time
 import html
 import logging
-from typing import Callable, Optional
+import re
+from typing import Any, Callable, Optional
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, 
@@ -23,6 +26,8 @@ from aiogram.types import (
 )
 from aiogram.filters import Command, CommandObject
 import database.database as _db_module
+# 🧾 v39 · Log Channel Hub: auditoría de comandos del Dueño y de moderación manual en el canal de registro.
+from handlers.logger_hub import dispatch_audit_log, mark_audit_handled
 from database.database import (
     set_autolower_status, 
     get_autolower_status, 
@@ -70,6 +75,20 @@ def _spawn(coro) -> asyncio.Task:
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+# ==========================================================
+# 🧾 v39 · LOG CHANNEL HUB (AUDITORÍA EN SEGUNDO PLANO)
+# ==========================================================
+def _audit(bot: Optional[Bot], chat_id: int, event_type: str, **fields: Any) -> None:
+    """Publica el evento en el canal de registro sin bloquear el handler (vía _spawn); nunca lanza."""
+    _spawn(dispatch_audit_log(bot, chat_id, event_type, **fields))
+
+
+def _tag_name(target_tag: Optional[str]) -> Optional[str]:
+    """Nombre legible a partir de la etiqueta HTML que devuelve resolve_target (para la tarjeta de auditoría)."""
+    clean = html.unescape(re.sub(r"<[^>]+>", "", str(target_tag or ""))).strip()
+    return clean or None
 
 
 # v38 · regla canónica de idioma (database.resolve_lang) y autodetección centralizada.
@@ -457,6 +476,8 @@ async def cmd_export_settings(message: Message, bot: Bot):
         clean_filename = f"bunker_backup_{abs(chat_id)}_{int(time.time())}.bunker"
 
         file_data = BufferedInputFile(package_json_str.encode("utf-8"), filename=clean_filename)
+        _audit(bot, chat_id, "settings_exported", actor=message.from_user, chat_title=message.chat.title,
+               detail=clean_filename)   # 🧾 v39
         caption_text = t["backup_export_caption"].format(
             title=html.escape(chat_title),
             chat_id=chat_id
@@ -550,6 +571,7 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
 
         if success:
             admin_caches.pop(chat_id, None)
+            _audit(bot, chat_id, "settings_imported", actor=message.from_user, chat_title=chat_title)   # 🧾 v39
 
             # Notificar al WebSocket de la sala (Live Radar)
             try:
@@ -567,6 +589,9 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
             )
             _spawn(auto_delete_pair(message, succ_msg, await _svc_ttl(message.chat.id, 30, 20)))
         else:
+            # 🧾 v39 · Un intento de restauración rechazado (firma HMAC inválida, formato…) es un evento de seguridad.
+            _audit(bot, chat_id, "settings_import_failed", actor=message.from_user, chat_title=chat_title,
+                   reason=_localize_report(report, lang)[:300])
             fail_msg = await message.reply(
                 t["backup_import_failed"].format(error=html.escape(_localize_report(report, lang))),
                 parse_mode="HTML"
@@ -832,6 +857,7 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
 
     new_status = 1 if action == "on" else 0
     await set_autolower_status(group_id, new_status)
+    _audit(bot, group_id, "autolower_on" if new_status else "autolower_off", actor=callback.from_user)   # 🧾 v39
     
     status_text = t["status_active"] if new_status == 1 else t["status_inactive"]
     panel_msg = callback.message
@@ -895,6 +921,7 @@ async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
 
     new_status = 1 if action == "on" else 0
     await set_podcast_status(group_id, new_status)
+    _audit(bot, group_id, "podcast_on" if new_status else "podcast_off", actor=callback.from_user)   # 🧾 v39
     
     if new_status == 1:
         await engage_podcast_ducking(group_id)
@@ -963,6 +990,7 @@ async def process_shield_callback(callback: CallbackQuery, bot: Bot):
 
     new_status = 1 if action == "on" else 0
     await set_screen_shield_status(group_id, new_status)
+    _audit(bot, group_id, "screenshield_on" if new_status else "screenshield_off", actor=callback.from_user)   # 🧾 v39
 
     if new_status == 1:
         await engage_screen_shield(group_id)
@@ -998,9 +1026,11 @@ async def cmd_toggle_night(message: Message, bot: Bot):
     cfg = await get_night_mode_config(chat_id)
     if cfg["status"] == 0:
         await activate_universal_night_mode(chat_id)
+        _audit(bot, chat_id, "night_on", actor=message.from_user)    # 🧾 v39
         msg = await message.reply(t["night_on_msg"], parse_mode="HTML")
     else:
         await deactivate_universal_night_mode(chat_id)
+        _audit(bot, chat_id, "night_off", actor=message.from_user)   # 🧾 v39
         msg = await message.reply(t["night_off_msg"], parse_mode="HTML")
 
     _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
@@ -1051,7 +1081,11 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             target_username=clean_username,
             target_mention=target_tag,
             reply_to=message,
-            reason=reason
+            reason=reason,
+            # v39 · advertencia MANUAL: el administrador queda en la auditoría y, como decisión humana, no cuenta como
+            # bloqueo del sistema ni genera oferta de apelación pagada (antes un motivo libre se trataba como automático).
+            actor=message.from_user,
+            manual=True
         )
         if outcome.get("status") in ("warned", "sanctioned", "immune"):
             try:
@@ -1066,6 +1100,9 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
     limit = cfg.get("limit", 3)
     action = cfg.get("action", "mute")
     current_strikes = await add_user_strike(message.chat.id, target_id, reason)
+    # 🧾 v39 · Ruta de respaldo (sin escalera disponible): la auditoría se registra aquí.
+    audit_fields: dict[str, Any] = {"user_id": target_id, "user_name": _tag_name(target_tag), "actor": message.from_user,
+                                    "reason": reason, "strikes": current_strikes, "limit": limit}
 
     if current_strikes >= limit:
         await reset_user_strikes(message.chat.id, target_id)
@@ -1092,6 +1129,9 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
                 await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=0)
             except Exception:
                 pass
+            for kind in ("removal", "restrict"):
+                mark_audit_handled(f"{message.chat.id}:{kind}:{target_id}", 30.0)
+            _audit(bot, message.chat.id, "sanction", action=action, **audit_fields)   # 🧾 v39
             msg = await message.reply(t["warn_punished"].format(target_tag=target_tag, limit=limit, action_name=action.upper()), parse_mode="HTML")
         except Exception as ex:
             msg = await message.reply(f"❌ Error: {ex}", parse_mode="HTML")
@@ -1101,6 +1141,7 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
             await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=vol)
         except Exception:
             pass
+        _audit(bot, message.chat.id, "warn", action="warn", **audit_fields)   # 🧾 v39
         msg = await message.reply(t["warn_issued"].format(target_tag=target_tag, current=current_strikes, limit=limit, reason=reason), parse_mode="HTML")
 
     _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
@@ -1132,6 +1173,10 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
                 await res
         except Exception:
             pass
+    # 🧾 v39 · Auditoría: historial de advertencias a cero (la liberación de permisos que sigue no genera otra tarjeta).
+    mark_audit_handled(f"{message.chat.id}:unrestrict:{target_id}", 30.0)
+    _audit(bot, message.chat.id, "warns_reset", user_id=target_id, user_name=_tag_name(target_tag),
+           actor=message.from_user)
 
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=False, volume=10000)
@@ -1190,6 +1235,8 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
         return
         
     await revoke_vip_mic(target_id, message.chat.id)
+    _audit(bot, message.chat.id, "vip_revoked", user_id=target_id, user_name=_tag_name(target_tag),
+           actor=message.from_user)   # 🧾 v39
     
     try:
         await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=200)

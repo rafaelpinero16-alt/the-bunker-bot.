@@ -109,6 +109,42 @@ except ModuleNotFoundError as _th_err:                                 # pragma:
 
 logger = logging.getLogger("bunker.channel_plans")
 
+
+# ==========================================
+# 🧾 v39 · LOG CHANNEL HUB (auditoría de los cambios hechos desde la Mini App)
+# ==========================================
+# Este módulo es una capa de servicio pura (no importa aiogram al cargar): el Hub se importa de forma diferida y
+# cualquier fallo de auditoría queda contenido aquí; jamás altera la respuesta HTTP.
+_BG_TASKS: set = set()
+
+
+def _spawn(coro: Awaitable[Any]) -> "asyncio.Task[Any]":
+    """Tarea en segundo plano con referencia fuerte (el recolector no la cancela a medio envío)."""
+    task = asyncio.ensure_future(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+    return task
+
+
+async def _dispatch_plan_audit(bot: Any, channel_id: int, event_type: str, fields: Dict[str, Any]) -> None:
+    try:
+        from handlers.logger_hub import dispatch_audit_log   # import diferido: capa de servicio sin aiogram
+    except Exception as ex:                                   # pragma: no cover - según el despliegue
+        logger.debug("[Planes] Log Channel Hub no disponible: %s", ex)
+        return
+    try:
+        await dispatch_audit_log(bot, int(channel_id), event_type, **fields)
+    except Exception as ex:   # dispatch_audit_log ya no lanza; defensa en profundidad
+        logger.debug("[Planes] Auditoría %s omitida para %s: %s", event_type, channel_id, ex)
+
+
+def _audit_plan(bot: Any, channel_id: int, event_type: str, **fields: Any) -> None:
+    """Publica el evento del plan en el canal de registro del canal sin retrasar la respuesta de la API."""
+    try:
+        _spawn(_dispatch_plan_audit(bot, channel_id, event_type, fields))
+    except RuntimeError:   # sin bucle de eventos (pruebas síncronas): la auditoría simplemente se omite
+        pass
+
 PERIMETER_SIGNATURE = "\n\n🛡️ <i>Cloud Media Management</i>"
 MEDIA_TYPES = ("photo", "video", "animation")
 CAPTION_LIMIT = 1024
@@ -303,7 +339,7 @@ async def list_plans(channel_id: int, deps: PlanDeps) -> Dict[str, Any]:
 # 🔄 ACTIVAR / PAUSAR · 🗑️ ELIMINAR
 # ==========================================
 async def toggle_plan(channel_id: int, plan_id: int, deps: PlanDeps) -> Dict[str, Any]:
-    await _load_owned_plan(channel_id, plan_id, deps)
+    plan = await _load_owned_plan(channel_id, plan_id, deps)
     returned = await deps.toggle_channel_plan_status(int(plan_id))
     _invalidate(deps, plan_id)   # un plan pausado debe dejar de cobrarse YA, no al vencer el TTL de 10 s
 
@@ -312,15 +348,18 @@ async def toggle_plan(channel_id: int, plan_id: int, deps: PlanDeps) -> Dict[str
     else:
         fresh = await deps.get_channel_plan(int(plan_id))
         new_status = _norm_status((fresh or {}).get("status"))
-    return {"status": "success", "plan_id": int(plan_id), "new_status": new_status, "is_active": new_status == "active"}
+    return {"status": "success", "plan_id": int(plan_id), "new_status": new_status, "is_active": new_status == "active",
+            "plan_name": str(plan.get("plan_name") or "")}
 
 
 async def delete_plan(channel_id: int, plan_id: int, deps: PlanDeps) -> Dict[str, Any]:
-    await _load_owned_plan(channel_id, plan_id, deps)
+    plan = await _load_owned_plan(channel_id, plan_id, deps)
     await deps.delete_channel_plan(int(plan_id))
     _invalidate(deps, plan_id)
     _BROADCAST_LAST.pop((int(channel_id), int(plan_id)), None)
-    return {"status": "success", "plan_id": int(plan_id), "deleted": True}
+    return {"status": "success", "plan_id": int(plan_id), "deleted": True,
+            "plan_name": str(plan.get("plan_name") or ""), "stars_price": int(plan.get("stars_price") or 0),
+            "duration_days": int(plan.get("duration_days") or 0)}
 
 
 # ==========================================
@@ -519,7 +558,8 @@ async def schedule_plan(channel_id: int, plan_id: int, payload: Any, deps: PlanD
     _invalidate(deps, plan_id)   # v37 · una edición también se refleja YA en el pre-checkout (no al vencer el TTL)
     fresh = await deps.get_channel_plan(int(plan_id)) or plan
     logger.info("⏰ [Planes] Canal %s: plan %s difusión %s.", channel_id, plan_id, f"cada {interval} h" if interval else "desactivada")
-    return {"status": "success", "plan_id": int(plan_id), **serialize_schedule(fresh)}
+    return {"status": "success", "plan_id": int(plan_id), **serialize_schedule(fresh),
+            "plan_name": str((fresh or {}).get("plan_name") or "")}
 
 
 # ==========================================
@@ -1127,11 +1167,24 @@ def build_channel_plans_router(
             state["deps"] = get_deps()
         return state["deps"]  # type: ignore[return-value]
 
-    async def authorize(channel_id: str, init_data: Optional[str], authorization: Optional[str]) -> int:
+    async def authorize_actor(channel_id: str, init_data: Optional[str], authorization: Optional[str]) -> Tuple[int, int]:
+        """Como authorize, pero devuelve también el user_id firmado (para el Log Channel Hub)."""
         user_id = require_user(init_data, authorization)
         cid = _parse_channel_id(channel_id)
         await assert_owner(user_id, cid)
+        return cid, int(user_id)
+
+    async def authorize(channel_id: str, init_data: Optional[str], authorization: Optional[str]) -> int:
+        cid, _user_id = await authorize_actor(channel_id, init_data, authorization)
         return cid
+
+    def audit(cid: int, user_id: int, event_type: str, result: Dict[str, Any], **fields: Any) -> Dict[str, Any]:
+        """🧾 v39 · Registra la acción ya confirmada y devuelve la respuesta intacta."""
+        try:
+            _audit_plan(get_bot(), cid, event_type, actor_id=user_id, **fields)
+        except Exception as ex:
+            logger.debug("[Planes] Auditoría %s no programada: %s", event_type, ex)
+        return result
 
     async def guarded(action: Callable[[], Awaitable[Dict[str, Any]]]) -> Dict[str, Any]:
         try:
@@ -1163,8 +1216,12 @@ def build_channel_plans_router(
         authorization: str = Header(None),
     ):
         async def run():
-            cid = await authorize(channel_id, x_telegram_init_data, authorization)
-            return await toggle_plan(cid, plan_id, deps())
+            cid, user_id = await authorize_actor(channel_id, x_telegram_init_data, authorization)
+            result = await toggle_plan(cid, plan_id, deps())
+            return audit(cid, user_id, "plan_toggled", result, plan_name=result.get("plan_name") or None,
+                         detail=("active" if result.get("is_active") else "paused"),
+                         extra={("Plan ID", "ID del plan"): plan_id,
+                                ("New status", "Nuevo estado"): result.get("new_status")})
         return await guarded(run)
 
     @router.delete("/channel/{channel_id}/plan/{plan_id}")
@@ -1175,8 +1232,11 @@ def build_channel_plans_router(
         authorization: str = Header(None),
     ):
         async def run():
-            cid = await authorize(channel_id, x_telegram_init_data, authorization)
-            return await delete_plan(cid, plan_id, deps())
+            cid, user_id = await authorize_actor(channel_id, x_telegram_init_data, authorization)
+            result = await delete_plan(cid, plan_id, deps())
+            return audit(cid, user_id, "plan_deleted", result, plan_name=result.get("plan_name") or None,
+                         amount=result.get("stars_price") or None, duration_days=result.get("duration_days") or None,
+                         extra={("Plan ID", "ID del plan"): plan_id})
         return await guarded(run)
 
     @router.post("/channel/{channel_id}/plan/{plan_id}/broadcast")
@@ -1188,9 +1248,11 @@ def build_channel_plans_router(
         authorization: str = Header(None),
     ):
         async def run():
-            cid = await authorize(channel_id, x_telegram_init_data, authorization)
+            cid, user_id = await authorize_actor(channel_id, x_telegram_init_data, authorization)
             lang = (payload or {}).get("lang", "es") if isinstance(payload, dict) else "es"
-            return await broadcast_plan(cid, plan_id, deps(), get_bot(), lang=lang)
+            result = await broadcast_plan(cid, plan_id, deps(), get_bot(), lang=lang)
+            return audit(cid, user_id, "plan_broadcast", result,
+                         extra={("Plan ID", "ID del plan"): plan_id, ("Message", "Mensaje"): result.get("message_id")})
         return await guarded(run)
 
     @router.post("/channel/{channel_id}/plan/create")
@@ -1201,8 +1263,12 @@ def build_channel_plans_router(
         authorization: str = Header(None),
     ):
         async def run():
-            cid = await authorize(channel_id, x_telegram_init_data, authorization)
-            return await create_plan(cid, payload, deps(), get_bot())
+            cid, user_id = await authorize_actor(channel_id, x_telegram_init_data, authorization)
+            result = await create_plan(cid, payload, deps(), get_bot())
+            plan = result.get("plan") or {}
+            return audit(cid, user_id, "plan_created", result, plan_name=plan.get("name") or None,
+                         amount=plan.get("stars_price") or None, duration_days=plan.get("duration_days") or None,
+                         extra={("Plan ID", "ID del plan"): plan.get("plan_id")})
         return await guarded(run)
 
     @router.post("/channel/{channel_id}/plan/{plan_id}/schedule")
@@ -1214,8 +1280,12 @@ def build_channel_plans_router(
         authorization: str = Header(None),
     ):
         async def run():
-            cid = await authorize(channel_id, x_telegram_init_data, authorization)
-            return await schedule_plan(cid, plan_id, payload, deps())
+            cid, user_id = await authorize_actor(channel_id, x_telegram_init_data, authorization)
+            result = await schedule_plan(cid, plan_id, payload, deps())
+            interval = int(result.get("broadcast_interval_hours") or 0)
+            return audit(cid, user_id, "plan_scheduled", result, plan_name=result.get("plan_name") or None,
+                         detail=(f"every {interval} h" if interval else "off"),
+                         extra={("Plan ID", "ID del plan"): plan_id})
         return await guarded(run)
 
     @router.get("/channel/{channel_id}/broadcast-config")
@@ -1237,9 +1307,12 @@ def build_channel_plans_router(
         authorization: str = Header(None),
     ):
         async def run():
-            cid = await authorize(channel_id, x_telegram_init_data, authorization)
+            cid, user_id = await authorize_actor(channel_id, x_telegram_init_data, authorization)
             lang = (payload or {}).get("lang", "es") if isinstance(payload, dict) else "es"
-            return await broadcast_custom_now(cid, deps(), get_bot(), lang=lang)
+            result = await broadcast_custom_now(cid, deps(), get_bot(), lang=lang)
+            return audit(cid, user_id, "plan_broadcast", result, detail="custom promotion",
+                         extra={("Target", "Destino"): result.get("target_label"),
+                                ("Message", "Mensaje"): result.get("message_id")})
         return await guarded(run)
 
     @router.post("/channel/{channel_id}/plan/{plan_id}/invite-link")

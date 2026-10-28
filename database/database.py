@@ -775,6 +775,77 @@ def consume_return_ticket(token: str, user_id: int, ttl_seconds: int = RETURN_TI
         return {"status": "ok", "chat_id": int(row[1]), "message_id": row[4]}
 
 
+# ==========================================================================================
+# 🧾 v39 · LOG CHANNEL HUB (CENTRO DE AUDITORÍA PERIMETRAL)
+# ==========================================================================================
+# handlers/logger_hub.py publica cada evento crítico en el canal de registro de la comunidad
+# (group_settings.log_channel_id, el mismo que validan la consola del bot y la Mini App).
+# Esquema ADITIVO: una sola columna con las categorías que el dueño SILENCIÓ (vacío = se registra todo).
+AUDIT_LOG_CATEGORIES: tuple[str, ...] = (
+    "membership",     # entradas y salidas
+    "captcha",        # aduana: superado, fallido, expirado
+    "security",       # Anti-Spam, Anti-Flood, userbots, Anti-Raid, CAS
+    "moderation",     # /warn, /resetwarns, /mute, /kick, /ban, /delvip y acciones nativas de administradores
+    "owner",          # /panic, /night, /screenshield, /duckvolume, respaldos, idioma…
+    "monetization",   # Stars: speakers, membresías, propinas, MicVIP, licencias, expiraciones, reembolsos
+    "plans",          # planes de membresía de canal (crear, pausar, eliminar, programar, difundir)
+)
+
+
+def _ensure_v39_schema(cursor) -> None:
+    """v39 · Categorías silenciadas del Log Channel Hub (CSV). Vacío / NULL = todas activas."""
+    _ensure_columns(cursor, "group_settings", [("audit_log_disabled", "TEXT DEFAULT ''")])
+
+
+def _parse_audit_disabled(raw) -> list[str]:
+    return [c for c in (str(raw or "").replace(";", ",").split(",")) if c.strip() in AUDIT_LOG_CATEGORIES]
+
+
+@db_async
+def get_audit_log_target(group_id: int) -> dict:
+    """{"log_channel_id": str | None, "disabled": [categorías silenciadas]} de la comunidad."""
+    with get_db_connection() as conn:
+        try:
+            row = conn.execute("SELECT log_channel_id, audit_log_disabled FROM group_settings WHERE group_id = ?",
+                               (int(group_id),)).fetchone()
+        except sqlite3.OperationalError:
+            try:
+                row = conn.execute("SELECT log_channel_id, '' FROM group_settings WHERE group_id = ?",
+                                   (int(group_id),)).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+    log_id = str(row[0]).strip() if row and row[0] not in (None, "") else None
+    return {"log_channel_id": log_id, "disabled": [c.strip() for c in _parse_audit_disabled(row[1] if row else "")]}
+
+
+@db_async
+def set_audit_log_disabled(group_id: int, categories) -> list[str]:
+    """Guarda las categorías silenciadas (las desconocidas se descartan). Devuelve la lista normalizada."""
+    clean = sorted({str(c).strip() for c in (categories or []) if str(c).strip() in AUDIT_LOG_CATEGORIES})
+    _upsert_setting(int(group_id), "audit_log_disabled", ",".join(clean))
+    return clean
+
+
+# Observadores de eventos de la capa de datos: el Hub se registra aquí para enterarse de cambios que ocurren en
+# workers que no conocen Telegram (p. ej. la expiración de membresías). Se invocan en el hilo del event loop,
+# DESPUÉS de confirmar la transacción, y nunca pueden romper la operación de base de datos.
+_AUDIT_LISTENERS: list = []
+
+
+def register_audit_listener(listener) -> None:
+    """listener(event_type: str, chat_id: int, **fields) — síncrono y rápido (programa su propio trabajo async)."""
+    if callable(listener) and listener not in _AUDIT_LISTENERS:
+        _AUDIT_LISTENERS.append(listener)
+
+
+def _notify_audit(event_type: str, chat_id: int, **fields) -> None:
+    for listener in list(_AUDIT_LISTENERS):
+        try:
+            listener(event_type, int(chat_id), **fields)
+        except Exception as ex:   # un observador defectuoso nunca afecta a la base de datos
+            logger.debug(f"[Audit] Observador falló para {event_type} ({chat_id}): {ex}")
+
+
 def init_db():
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
@@ -1008,6 +1079,8 @@ def init_db():
         _ensure_micvip_tag_schema(cursor)
         # v37 · Anti-Raid configurable, idioma/TTL de servicio y retorno post-pago de un solo uso.
         _ensure_v37_schema(cursor)
+        # v39 · Log Channel Hub: categorías de auditoría silenciadas por la comunidad.
+        _ensure_v39_schema(cursor)
         cursor.execute("CREATE TABLE IF NOT EXISTS user_groups (user_id INTEGER, group_id INTEGER, group_name TEXT, chat_type TEXT DEFAULT 'supergroup', PRIMARY KEY (user_id, group_id))")
         _ensure_columns(cursor, "user_groups", [("chat_type", "TEXT DEFAULT 'supergroup'")])
         cursor.execute("CREATE TABLE IF NOT EXISTS group_tip_targets (id INTEGER PRIMARY KEY AUTOINCREMENT, group_id INTEGER, target_value TEXT, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, UNIQUE(group_id, target_value))")
@@ -4222,18 +4295,51 @@ def mark_subscription_warned(channel_id: int, user_id: int):
         conn.commit()
 
 
-@db_async
-def update_subscription_status(channel_id: int, user_id: int, status: str):
-    valid_statuses = ["active", "grace", "expired", "kicked"]
-    if status not in valid_statuses:
-        return
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
+_SUBSCRIPTION_STATUSES = ("active", "grace", "expired", "kicked")
+_SUBSCRIPTION_AUDIT_EVENTS = {"grace": "membership_grace", "expired": "membership_expired", "kicked": "membership_kicked"}
+
+
+def _update_subscription_status_core(channel_id: int, user_id: int, status: str):
+    """Cambia el estado (BEGIN IMMEDIATE) y devuelve (estado_anterior, plan_id, stars_paid, expires_at, plan_name)."""
+    if status not in _SUBSCRIPTION_STATUSES:
+        return None
+    with _write_transaction() as conn:
+        prev = conn.execute("""
+            SELECT s.status, s.plan_id, s.stars_paid, s.expires_at, p.plan_name
+            FROM channel_subscriptions s
+            LEFT JOIN channel_plans p ON p.plan_id = s.plan_id
+            WHERE s.channel_id = ? AND s.user_id = ?
+        """, (channel_id, user_id)).fetchone()
+        conn.execute("""
             UPDATE channel_subscriptions SET status = ?
             WHERE channel_id = ? AND user_id = ?
         """, (status, channel_id, user_id))
-        conn.commit()
+    return prev
+
+
+def _notify_subscription_transition(channel_id: int, user_id: int, status: str, prev) -> None:
+    """v39 · Solo una TRANSICIÓN real a gracia / expirada / expulsada genera evento de auditoría."""
+    if prev and prev[0] != status and status in _SUBSCRIPTION_AUDIT_EVENTS:
+        _notify_audit(_SUBSCRIPTION_AUDIT_EVENTS[status], int(channel_id), user_id=int(user_id), plan_id=prev[1],
+                      amount=prev[2], expires_at=prev[3], plan_name=prev[4], previous_status=prev[0])
+
+
+def _update_subscription_status_sync(channel_id: int, user_id: int, status: str) -> None:
+    # Vía síncrona (workers en hilo): el Hub reenvía el evento al bucle principal de forma segura entre hilos.
+    prev = _update_subscription_status_core(channel_id, user_id, status)
+    _notify_subscription_transition(channel_id, user_id, status, prev)
+
+
+async def update_subscription_status(channel_id: int, user_id: int, status: str) -> None:
+    """
+    Misma firma y efecto que antes. v39 · Si la membresía PASA a gracia / expirada / expulsada, avisa al Log Channel Hub
+    (el worker de expiraciones vive en otro módulo y no necesita conocer el sistema de auditoría).
+    """
+    prev = await asyncio.to_thread(_update_subscription_status_core, channel_id, user_id, status)
+    _notify_subscription_transition(channel_id, user_id, status, prev)
+
+
+setattr(update_subscription_status, "sync", _update_subscription_status_sync)
 
 
 @db_async

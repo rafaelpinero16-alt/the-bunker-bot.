@@ -65,6 +65,8 @@ from aiogram.types import (
 from aiogram.filters import Command, CommandObject
 
 import vip_roles   # v28 · etiqueta nativa del pase MicVIP (sin ascenso a administrador)
+# 🧾 v39 · Log Channel Hub: cada cobro en Stars (y cada reembolso) queda en el canal de registro de la comunidad.
+from handlers.logger_hub import dispatch_audit_log
 
 # ==========================================
 # 🧠 ESTADOS Y CONFIGURACIÓN BASE
@@ -1026,6 +1028,22 @@ async def send_stars_invoice(bot: Bot, chat_id: int, title: str, description: st
 # 📒 FASE 3 · LIBRO MAYOR DE PAGOS STARS (TRAZABILIDAD)
 # ==========================================
 _LEDGER_SCHEMA_READY = False
+
+
+def _audit_payment(bot: Bot, chat_id: int, event_type: str, **fields: Any) -> None:
+    """🧾 v39 · Publica el evento monetario en el canal de registro sin retrasar la entrega (vía _spawn)."""
+    if not chat_id:
+        return
+    _spawn(dispatch_audit_log(bot, int(chat_id), event_type, **fields))
+
+
+def _audit_refund(bot: Bot, payload: str, user: Any, charge_id: str, amount: int, refunded: Any, reason: str) -> None:
+    """🧾 v39 · Reembolso automático tras una entrega fallida (o intento de reembolso no confirmado por Telegram)."""
+    _audit_payment(
+        bot, _payload_chat_id(payload), "payment_refunded", user=user, amount=amount, automatic=True, system="payments",
+        reason=reason[:300], detail=f"charge {charge_id}",
+        extra={("Refund confirmed", "Reembolso confirmado"): ("✅" if refunded else "⚠️ pending / pendiente")},
+    )
 
 
 def _payload_chat_id(payload: str) -> int:
@@ -2020,11 +2038,16 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 # ==========================================
 @router.message(F.successful_payment, F.successful_payment.invoice_payload.regexp(r"^(sub_|chan_sub_|vip_mic_|speaker_|tip_|appeal_)"))
 async def process_successful_payment(message: Message, bot: Bot):
-    lang = await resolve_user_lang(message.from_user)
+    payment = message.successful_payment
+    buyer = message.from_user
+    if payment is None or buyer is None:   # v39 · Pylance: ambos son Optional en aiogram
+        return
+    lang = await resolve_user_lang(buyer)
     t = TEXTS[lang]
-    payload = message.successful_payment.invoice_payload
-    user_id = message.from_user.id
-    charge_id = message.successful_payment.telegram_payment_charge_id
+    payload = payment.invoice_payload
+    user_id = buyer.id
+    charge_id = payment.telegram_payment_charge_id
+    paid_amount = int(payment.total_amount or 0)
 
     # 🛡️ Blindaje de Idempotencia: evita pagos duplicados ante reintentos de red o reinicios
     if not await mark_payment_processed(charge_id, user_id, payload):
@@ -2035,17 +2058,26 @@ async def process_successful_payment(message: Message, bot: Bot):
     await record_star_payment(message)
     logger.info(
         f"💳 [Pago Stars] charge_id={charge_id} user_id={user_id} "
-        f"chat_id={_payload_chat_id(payload)} stars={message.successful_payment.total_amount} payload={payload!r}"
+        f"chat_id={_payload_chat_id(payload)} stars={payment.total_amount} payload={payload!r}"
     )
 
     # CASO 0: ⚖️ v25 · APELACIÓN DE BANEO — claim atómico por charge_id, desbaneo, marca global, strikes y enlace de
     # un solo uso; si el desbaneo no es posible, reembolso vía process_star_refund (queda en el libro mayor).
     if payload.startswith("appeal_"):
         try:
-            await _ban_appeals_module().process_payment(bot, message)
+            outcome = await _ban_appeals_module().process_payment(bot, message)
+            # 🧾 v39 · Auditoría: apelación pagada (el reembolso interno de ban_appeals se refleja como tal).
+            if str(outcome) in ("refunded", "failed"):
+                _audit_refund(bot, payload, buyer, charge_id, paid_amount, str(outcome) == "refunded",
+                              "Ban appeal could not be completed")
+            elif str(outcome) != "duplicate":
+                _audit_payment(bot, _payload_chat_id(payload), "appeal_paid", user=buyer, amount=paid_amount,
+                               detail=f"charge {charge_id}", extra={("Outcome", "Resultado"): str(outcome or "—")},
+                               dedupe_key=f"appeal_paid:{charge_id}", dedupe_ttl=3600)
         except Exception as e:
             logger.error(f"Error procesando la apelación {payload!r} (reembolso automático): {e}")
             refunded = await process_star_refund(bot, user_id, charge_id, reason=f"Apelación de baneo fallida: {e}")
+            _audit_refund(bot, payload, buyer, charge_id, paid_amount, refunded, f"Apelación de baneo fallida: {e}")   # 🧾 v39
             with contextlib.suppress(Exception):
                 await message.answer(t["err_sub_refund"] if refunded else
                                      t["err_sub_refund_failed"].format(charge_id=html.escape(charge_id or "")), parse_mode="HTML")
@@ -2065,6 +2097,8 @@ async def process_successful_payment(message: Message, bot: Bot):
                 await approve_group(group_id=chat_id, tier=granted_tier, duration_days=granted_days)
             license_granted = True
             logger.info(f"⭐ [Licencia] {chat_id} → {granted_tier} por {granted_days} días (compra: {tier_db}).")
+            _audit_payment(bot, chat_id, "license_purchase", user=buyer, amount=paid_amount, plan_name=granted_tier.upper(),
+                           duration_days=granted_days, detail=f"charge {charge_id}")   # 🧾 v39
             if granted_tier != tier_db:
                 plan_type = "ultra"
 
@@ -2100,7 +2134,8 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Licencia {payload!r} concedida pero falló la confirmación al usuario {user_id}: {e}")
             else:
                 logger.error(f"Error procesando la entrega de suscripción adquirida (Iniciando reembolso automático): {e}")
-                await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de licencia fallida: {e}")
+                refund_ok = await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de licencia fallida: {e}")
+                _audit_refund(bot, payload, buyer, charge_id, paid_amount, refund_ok, f"Entrega de licencia fallida: {e}")   # 🧾 v39
                 with contextlib.suppress(Exception):
                     await message.answer(t["err_inv"], parse_mode="HTML")
 
@@ -2112,7 +2147,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             channel_id = int(parts[2])
             plan_id = int(parts[3])
             duration_days = int(parts[4])
-            stars_paid = message.successful_payment.total_amount
+            stars_paid = payment.total_amount
 
             target_plan = await get_channel_plan(plan_id)
             if not target_plan or target_plan.get("channel_id") != channel_id:
@@ -2142,6 +2177,10 @@ async def process_successful_payment(message: Message, bot: Bot):
             # Desde aquí la membresía EXISTE (registro + enlace): un fallo al notificar no debe
             # reembolsar, o el usuario quedaría con acceso y con su dinero.
             membership_delivered = True
+            # 🧾 v39 · Auditoría: suscripción pagada al canal.
+            _audit_payment(bot, channel_id, "channel_subscription", user=buyer, amount=stars_paid,
+                           plan_name=str(target_plan.get("plan_name") or f"#{plan_id}"), duration_days=duration_days,
+                           detail=f"charge {charge_id}", extra={("Plan ID", "ID del plan"): plan_id})
 
             kb_rows = [
                 [InlineKeyboardButton(text=t["btn_join_channel"], url=invite_link)]
@@ -2180,6 +2219,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             else:
                 logger.error(f"Error procesando el pago de membresía para canal (Iniciando reembolso automático): {e}")
                 refunded = await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de membresía fallida: {e}")
+                _audit_refund(bot, payload, buyer, charge_id, paid_amount, refunded, f"Entrega de membresía fallida: {e}")   # 🧾 v39
                 # Solo se afirma el reembolso si Telegram lo confirmó; si no, se da la referencia del cargo.
                 notice = t["err_sub_refund"] if refunded else t["err_sub_refund_failed"].format(charge_id=html.escape(charge_id or ""))
                 with contextlib.suppress(Exception):
@@ -2193,6 +2233,8 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             await grant_vip_mic(user_id=user_id, group_id=chat_id)
             benefit_granted = True
+            _audit_payment(bot, chat_id, "micvip_purchase", user=buyer, amount=paid_amount, duration_days=1,
+                           detail=f"charge {charge_id}")   # 🧾 v39
 
             try:
                 await set_participant_mic(
@@ -2232,7 +2274,8 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Pase VIP {payload!r} concedido; falló un paso posterior no crítico para {user_id}: {e}")
                 return
             logger.error(f"Error procesando la entrega del pase VIP de micrófono (Iniciando reembolso automático): {e}")
-            await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de pase VIP fallida: {e}")
+            refund_ok = await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de pase VIP fallida: {e}")
+            _audit_refund(bot, payload, buyer, charge_id, paid_amount, refund_ok, f"Entrega de pase VIP fallida: {e}")   # 🧾 v39
             with contextlib.suppress(Exception):
                 await message.answer(t["err_inv"], parse_mode="HTML")
 
@@ -2241,13 +2284,15 @@ async def process_successful_payment(message: Message, bot: Bot):
         benefit_granted = False
         try:
             chat_id = int(payload.split("_")[1])
-            stars_paid = message.successful_payment.total_amount
-            full_name = message.from_user.full_name or "Usuario"
-            username = message.from_user.username or ""
+            stars_paid = payment.total_amount
+            full_name = buyer.full_name or "Usuario"
+            username = buyer.username or ""
 
             await add_to_speaker_queue(chat_id, user_id, full_name, username, stars_paid)
             benefit_granted = True
             position = await get_user_speaker_position(chat_id, user_id)
+            _audit_payment(bot, chat_id, "speaker_purchase", user=buyer, amount=stars_paid, detail=f"charge {charge_id}",
+                           extra={("Queue position", "Posición en la cola"): f"#{position}"})   # 🧾 v39
 
             # v37 · Confirmación con un ÚNICO botón de retorno efímero (un solo uso, solo el comprador).
             title = ""
@@ -2263,7 +2308,8 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Turno de speaker {payload!r} registrado; falló un paso posterior no crítico para {user_id}: {e}")
                 return
             logger.error(f"Error procesando turno de speaker (Iniciando reembolso automático): {e}")
-            await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de speaker fallida: {e}")
+            refund_ok = await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de speaker fallida: {e}")
+            _audit_refund(bot, payload, buyer, charge_id, paid_amount, refund_ok, f"Entrega de speaker fallida: {e}")   # 🧾 v39
             with contextlib.suppress(Exception):
                 await message.answer(t["err_inv"], parse_mode="HTML")
 
@@ -2273,10 +2319,12 @@ async def process_successful_payment(message: Message, bot: Bot):
         try:
             parts = payload.split("_")
             chat_id = int(parts[1])
-            stars_paid = message.successful_payment.total_amount
+            stars_paid = payment.total_amount
 
             await record_group_tip(chat_id, user_id, stars_paid)
             benefit_granted = True
+            _audit_payment(bot, chat_id, "tip_received", user=buyer, amount=stars_paid,
+                           detail=f"charge {charge_id}")   # 🧾 v39
 
             # Un único mensaje privado de agradecimiento, con botón de retorno a la comunidad.
             delivered = await send_tip_thanks(
@@ -2285,7 +2333,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 stars=stars_paid,
                 group_id=chat_id,
                 lang=lang,
-                full_name=message.from_user.full_name or "",
+                full_name=buyer.full_name or "",
                 chat_id=message.chat.id,
             )
             if not delivered:
@@ -2299,7 +2347,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                     with contextlib.suppress(Exception):
                         group_prefs = await _call_db_fn("get_service_prefs", chat_id)
                     group_lang = group_prefs.get("lang") or "en"
-                    buyer_name = html.escape(message.from_user.full_name or ("Usuario" if group_lang == "es" else "User"))
+                    buyer_name = html.escape(buyer.full_name or ("Usuario" if group_lang == "es" else "User"))
                     public_notice = (
                         f"⭐ <a href='tg://user?id={user_id}'>{buyer_name}</a> acaba de enviar una propina "
                         f"de <b>{stars_paid} Stars (XTR)</b>. ¡Gracias por respaldar el proyecto!\n\n"
@@ -2320,6 +2368,7 @@ async def process_successful_payment(message: Message, bot: Bot):
                 logger.error(f"Propina {payload!r} registrada; falló un paso posterior no crítico para {user_id}: {e}")
                 return
             logger.error(f"Error procesando propina (Iniciando reembolso automático): {e}")
-            await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de propina fallida: {e}")
+            refund_ok = await process_star_refund(bot, user_id, charge_id, reason=f"Entrega de propina fallida: {e}")
+            _audit_refund(bot, payload, buyer, charge_id, paid_amount, refund_ok, f"Entrega de propina fallida: {e}")   # 🧾 v39
             with contextlib.suppress(Exception):
                 await message.answer(t["err_inv"], parse_mode="HTML")
