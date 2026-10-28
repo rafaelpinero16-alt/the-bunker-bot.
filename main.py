@@ -7,6 +7,10 @@ Fase 3: Telemetría Reactiva en Vivo mediante WebSockets (FastAPI) + Endpoints d
 Fase 5: Analítica en Caliente nivel Combot (GET /api/community/{chat_id}/analytics + /ws/radar/{chat_id} blindado).
 v37: Anti-Raid configurable (API /chat/{id}/raid + lista negra), idioma/TTL de servicio (/chat/{id}/service-prefs),
      rehidratación del escudo al arrancar y avisos del núcleo en inglés por defecto.
+v41: Auditoría de contratos Mini App ↔ backend — autenticación centralizada en auth.py (JWT HS256 con exp/jti,
+     tokens heredados aceptados hasta caducar, initData con caducidad configurable y rechazo de fechas futuras),
+     enlace /login de UN SOLO USO de verdad, CORS y origen del WebSocket restringidos al dominio de la Mini App
+     (WEBAPP_URL + vistas previas de Vercel, ampliable por entorno) y todo 422 en formato "campo: motivo".
 v40: Fase 3 — Dashboard de Moderación (api/routes/dashboard.py: historial, leaderboard, gestión masiva, Auto-Mod,
      falsos positivos), router /automod antes de la matriz de grupos, esquema f3 al arrancar y trabajos masivos
      interrumpidos marcados como tales tras un reinicio.
@@ -72,7 +76,11 @@ try:
     )
     from fastapi.middleware.cors import CORSMiddleware  # type: ignore[import-not-found]
     from fastapi.responses import JSONResponse  # type: ignore[import-not-found]
+    from fastapi.exceptions import RequestValidationError  # type: ignore[import-not-found]
 except ImportError:
+    class RequestValidationError(Exception):  # type: ignore[no-redef]
+        def errors(self) -> list: return []
+
     class _FastAPIStub:
         def __init__(self, *args, **kwargs): pass
         def add_middleware(self, *args, **kwargs): pass
@@ -187,6 +195,7 @@ from database.database import (
     get_group_tier,
     get_or_create_user,
     get_user_by_web_session,
+    consume_web_session,   # v41 · canje atómico del enlace /login (un solo uso)
     get_user_channels,
     get_user_global_stats,
     get_user_groups,
@@ -370,6 +379,7 @@ from handlers.user_private import (
     set_master_bot_username
 )
 from middlewares.anti_spam import AntiSpamMiddleware
+import auth as _auth   # 🔐 v41 · autenticación dual estricta (initData + JWT de sesión web)
 
 # ==========================================
 # ⚙️ CONFIGURACIÓN Y VARIABLES GLOBALES
@@ -544,13 +554,80 @@ app = FastAPI(title="The Bunker OS Backend API", version="2.0")
 # Orden: en Starlette el ÚLTIMO middleware añadido es el más externo. La compuerta se añade ANTES que CORS para que
 # CORS la envuelva y también firme las respuestas 503 del arranque (la Mini App ve "iniciando", no un error CORS).
 app.add_middleware(StartupGateMiddleware)
+
+
+def _origin_of(url: str) -> Optional[str]:
+    try:
+        parts = urllib.parse.urlsplit(str(url or "").strip())
+    except ValueError:
+        return None
+    if parts.scheme in ("http", "https") and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}".lower()
+    return None
+
+
+def _cors_policy() -> tuple:
+    """
+    🌐 v41 · Orígenes permitidos (REST y WebSocket):
+      • CORS_ALLOWED_ORIGINS="https://a.vercel.app,https://b.com" (lista explícita) o "*" (sin restricción).
+      • Por defecto: el origen de WEBAPP_URL (el mismo dominio que abre el bot) + sus vistas previas de Vercel
+        (<proyecto>-<hash>.vercel.app) + https://web.telegram.org. CORS_ORIGIN_REGEX sustituye la expresión.
+    → (lista de orígenes, regex o None, ¿todo permitido?)
+    """
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+    if raw == "*":
+        return ["*"], None, True
+    origins = {o for o in (_origin_of(x) for x in raw.split(",")) if o} if raw else set()
+    webapp_origin = _origin_of(WEBAPP_URL)
+    if not raw:
+        origins |= {o for o in (webapp_origin, "https://web.telegram.org") if o}
+    regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or None
+    if regex is None and webapp_origin and webapp_origin.endswith(".vercel.app") and not raw:
+        project = webapp_origin.split("://", 1)[1][: -len(".vercel.app")]
+        regex = rf"https://{re.escape(project)}(-[a-z0-9-]+)?\.vercel\.app"
+    return sorted(origins), regex, False
+
+
+CORS_ORIGINS, CORS_ORIGIN_REGEX, CORS_ALLOW_ALL = _cors_policy()
+_CORS_ORIGIN_RE = re.compile(CORS_ORIGIN_REGEX) if CORS_ORIGIN_REGEX else None
+# Autenticación SOLO por cabeceras (X-Telegram-Init-Data / Authorization: Bearer): sin cookies → sin credenciales CORS.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Telegram-Init-Data"],
+    max_age=600,
 )
+logger.info(f"🌐 [CORS] Orígenes permitidos: {'*' if CORS_ALLOW_ALL else ', '.join(CORS_ORIGINS) or '—'}"
+            + (f" · regex {CORS_ORIGIN_REGEX}" if CORS_ORIGIN_REGEX else ""))
+
+
+def is_allowed_origin(origin: str) -> bool:
+    """Misma política que CORS, reutilizada por el WebSocket del radar."""
+    clean = (origin or "").rstrip("/").lower()
+    if CORS_ALLOW_ALL:
+        return True
+    if not clean:
+        return False
+    return clean in CORS_ORIGINS or bool(_CORS_ORIGIN_RE and _CORS_ORIGIN_RE.fullmatch(clean))
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_as_field_reason(request: Any, exc: RequestValidationError) -> Any:
+    """
+    📐 v41 · Contrato de errores 422 de TODA la API: {"detail": "campo: motivo"} (la Mini App lo mapea con
+    /^([a-z_]+):\\s*(.+)$/). Sustituye la lista de pydantic de FastAPI (cuerpo no JSON, tipo erróneo, falta Body…).
+    """
+    errors = []
+    with contextlib.suppress(Exception):
+        errors = list(exc.errors())
+    first = errors[0] if errors else {}
+    loc = [str(part) for part in (first.get("loc") or []) if str(part) not in ("body", "query", "path", "header")]
+    field = re.sub(r"[^a-z_]", "_", (loc[-1] if loc else "body").lower()).strip("_") or "body"
+    message = str(first.get("msg") or "valor no válido").rstrip(".")
+    return JSONResponse(status_code=422, content={"detail": f"{field}: {message}."})
 
 api_router = APIRouter()
 
@@ -574,94 +651,29 @@ async def health_check():
     }
 
 
+# 🔐 v41 · Criptografía centralizada en auth.py (initData, widget y JWT de sesión). Estas funciones conservan los
+#    nombres y firmas que usaba el resto de main.py: ningún llamador cambia.
 def parse_telegram_user_id(init_data: str) -> int:
-    """Valida la firma HMAC del initData de Telegram WebApp y extrae el user_id legítimo."""
-    if not init_data:
-        return 0
-    try:
-        parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
-        received_hash = parsed.pop("hash", None)
-        if not received_hash:
-            return 0
-
-        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
-        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
-        computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-        if not hmac.compare_digest(computed_hash, received_hash):
-            logger.warning("⚠️ [initData] Firma inválida rechazada.")
-            return 0
-
-        auth_date = int(parsed.get("auth_date", 0))
-        if time.time() - auth_date > 86400:
-            return 0
-
-        user_json = json.loads(parsed.get("user", "{}") or "{}")
-        return int(user_json.get("id", 0))
-    except Exception as e:
-        logger.debug(f"Error parseando initData: {e}")
-        return 0
+    """Valida la firma HMAC y la vigencia del initData de Telegram WebApp y devuelve el user_id (0 si no es válido)."""
+    return _auth.parse_telegram_user_id(init_data, BOT_TOKEN)
 
 
-SESSION_SECRET = hashlib.sha256(f"bunker-web-session::{BOT_TOKEN}".encode()).digest()
-SESSION_TTL_SECONDS = 60 * 60 * 24 * 30  # 30 días
+SESSION_TTL_SECONDS = _auth.SESSION_TTL_SECONDS
 
 
 def issue_session_token(user_id: int, first_name: str = "", username: str = "", photo_url: str = "") -> str:
-    payload = {
-        "uid": int(user_id),
-        "fn": first_name or "",
-        "un": username or "",
-        "ph": photo_url or "",
-        "iat": int(time.time())
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    raw_b64 = base64.urlsafe_b64encode(raw).decode("utf-8").rstrip("=")
-    signature = hmac.new(SESSION_SECRET, raw_b64.encode("utf-8"), hashlib.sha256).hexdigest()
-    return f"{raw_b64}.{signature}"
+    """JWT HS256 de sesión web (Authorization: Bearer). Ver auth.py."""
+    return _auth.issue_session_token(user_id, BOT_TOKEN, first_name, username, photo_url)
 
 
 def verify_session_token(token: str):
-    try:
-        if not token or "." not in token:
-            return None
-        raw_b64, signature = token.rsplit(".", 1)
-        expected_signature = hmac.new(SESSION_SECRET, raw_b64.encode("utf-8"), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(signature, expected_signature):
-            return None
-        padded = raw_b64 + "=" * (-len(raw_b64) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")))
-        if int(time.time()) - int(payload.get("iat", 0)) > SESSION_TTL_SECONDS:
-            return None
-        return payload
-    except Exception:
-        return None
+    """Claims del JWT (o del token heredado vigente) o None."""
+    claims = _auth.verify_session_token(token, BOT_TOKEN)
+    return dict(claims) if claims else None
 
 
 def verify_telegram_widget_login(data: dict) -> bool:
-    if not isinstance(data, dict):
-        return False
-    received_hash = data.get("hash")
-    if not received_hash:
-        return False
-
-    check_fields = {k: v for k, v in data.items() if k != "hash" and v is not None}
-    data_check_string = "\n".join(f"{k}={check_fields[k]}" for k in sorted(check_fields.keys()))
-
-    secret_key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
-    computed_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    if not hmac.compare_digest(computed_hash, str(received_hash)):
-        return False
-
-    try:
-        auth_date = int(data.get("auth_date", 0))
-    except (TypeError, ValueError):
-        return False
-    if time.time() - auth_date > 86400:
-        return False
-
-    return True
+    return _auth.verify_widget_login(data, BOT_TOKEN)
 
 
 def resolve_user_id(x_telegram_init_data: Optional[str] = None, authorization: Optional[str] = None) -> int:
@@ -1079,16 +1091,33 @@ async def api_exchange_web_token(payload: dict = Body(...)):
     if not temp_token:
         raise HTTPException(status_code=400, detail="Token no proporcionado.")
 
-    user_id = await get_user_by_web_session(temp_token)
+    if not isinstance(temp_token, str) or len(temp_token) > 128:
+        raise HTTPException(status_code=422, detail="token: formato no válido.")
+    # v41 · Consumo ATÓMICO: el enlace de /login es de un solo uso de verdad (antes podía canjearse varias veces
+    #       durante sus 5 minutos, p. ej. si quedaba en el historial o se reenviaba).
+    user_id = await consume_web_session(temp_token)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Token temporal inválido o expirado.")
+        raise HTTPException(status_code=401, detail="Token temporal inválido, ya usado o expirado.")
 
-    session_token = issue_session_token(user_id, first_name="Operador", username="", photo_url="")
+    first_name, username = "Operador", ""
+    with contextlib.suppress(Exception):
+        profile = await asyncio.to_thread(_sync_user_profile, int(user_id))
+        first_name, username = profile.get("first_name") or first_name, profile.get("username") or ""
+    session_token = issue_session_token(user_id, first_name=first_name, username=username, photo_url="")
     return {
         "status": "success",
         "session_token": session_token,
-        "user": {"id": user_id, "first_name": "Operador", "username": "", "photo_url": ""}
+        "user": {"id": user_id, "first_name": first_name, "username": username, "photo_url": ""}
     }
+
+
+def _sync_user_profile(user_id: int) -> dict:
+    """Nombre y alias guardados del operador (tabla users) para la tarjeta de sesión del dashboard web."""
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT full_name, username FROM users WHERE user_id = ?", (int(user_id),)).fetchone()
+    if not row:
+        return {}
+    return {"first_name": str(row[0] or "").strip()[:64], "username": str(row[1] or "").lstrip("@")[:64]}
 
 
 @api_router.get("/auth/session-check")
@@ -2850,7 +2879,7 @@ WS_RATE_REFILL_PER_SEC = 2.0
 WS_RATE_MAX_VIOLATIONS = 10
 WS_REFRESH_COOLDOWN = 2.0
 WS_ALLOWED_ORIGINS = {
-    o.strip().rstrip("/") for o in os.getenv("WS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+    o.strip().rstrip("/").lower() for o in os.getenv("WS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 }
 RADAR_EVENTS = {
     "message", "level_up", "voice_call_started", "voice_call_ended", "voice_presence",
@@ -2976,7 +3005,13 @@ async def websocket_radar(
     await websocket.accept()
 
     origin = (websocket.headers.get("origin") or "").rstrip("/")
-    if WS_ALLOWED_ORIGINS and origin not in WS_ALLOWED_ORIGINS:
+    # v41 · WS_ALLOWED_ORIGINS (si se define) manda; si no, la misma política que CORS. Sin cabecera Origin
+    #       (clientes nativos / scripts del servidor) se permite: la autenticación firmada sigue siendo obligatoria.
+    if WS_ALLOWED_ORIGINS:
+        origin_ok = "*" in WS_ALLOWED_ORIGINS or origin.lower() in WS_ALLOWED_ORIGINS
+    else:
+        origin_ok = not origin or is_allowed_origin(origin)
+    if not origin_ok:
         await _ws_reject(websocket, WS_CLOSE_FORBIDDEN, "origin_not_allowed")
         return
 

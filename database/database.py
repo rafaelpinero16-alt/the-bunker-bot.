@@ -1856,6 +1856,25 @@ def create_web_session(user_id: int) -> str:
 
 
 @db_async
+def consume_web_session(token: str) -> Optional[int]:
+    """
+    v41 · Canje ATÓMICO (BEGIN IMMEDIATE) del token temporal de /login: devuelve el user_id y BORRA el token en la
+    misma transacción, de modo que un enlace reenviado, guardado en el historial o abierto dos veces solo sirve una.
+    """
+    if not token or not isinstance(token, str) or len(token) > 128:
+        return None
+    with _write_transaction() as conn:
+        row = conn.execute(
+            "SELECT user_id FROM web_sessions WHERE token = ? AND expires_at > datetime('now')",
+            (token,)
+        ).fetchone()
+        conn.execute(
+            "DELETE FROM web_sessions WHERE token = ? OR expires_at <= datetime('now')",
+            (token,)
+        )
+        return int(row[0]) if row else None
+
+@db_async
 def get_user_by_web_session(token: str) -> Optional[int]:
     if not token:
         return None
