@@ -2417,6 +2417,10 @@ async def api_import_backup(
         if not success:
             raise HTTPException(status_code=400, detail=msg)
         forget_audit_target(numeric_id)   # 🧾 v39 · el respaldo puede traer otro canal de registro
+        # v42 · Las demás sesiones abiertas (Mini App, dashboard web) se repintan con el estado restaurado.
+        _spawn(emit_radar_event(numeric_id, "backup_restored", {"chat_id": str(numeric_id), "source": "miniapp"}),
+               name=f"backup_restored:{numeric_id}")
+        _spawn(emit_settings_updated(numeric_id, "backup", ["backup_restored"]), name=f"settings_updated:{numeric_id}")
         return {"status": "success", "message": msg}
     except HTTPException:
         raise
@@ -2926,6 +2930,7 @@ RADAR_EVENTS = {
     "message", "level_up", "voice_call_started", "voice_call_ended", "voice_presence",
     "stars_payment", "settings_updated", "security_block", "raid_shield",
     "assets_status",   # v18 · supervisión en vivo del Bot Clon y del Centinela (sin credenciales)
+    "backup_restored",   # v42 · respaldo .bunker restaurado (bot o Mini App)
 }
 
 # Códigos de cierre de aplicación (4000-4999) legibles por la Mini App.

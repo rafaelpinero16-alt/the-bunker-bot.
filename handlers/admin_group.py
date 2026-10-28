@@ -14,6 +14,8 @@ v42: Sincronía con assistant.py v42 —
        etiqueta nativa (sin ascenso). Solo se degrada a quien ESTE bot ascendió en versiones antiguas
        (vip_badge_promotions) y la etiqueta MicVIP vence en el acto para que el barrido la retire.
      • /delvip y los paneles de AutoLower muestran el porcentaje REAL configurado (antes siempre 2 %).
+     • Los paneles de AutoLower / Podcast / Escudo, /night y /importsettings emiten 'settings_updated' al radar
+       WebSocket: la Mini App abierta se repinta al instante (antes quedaba desactualizada hasta recargar).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -83,6 +85,20 @@ def _spawn(coro) -> asyncio.Task:
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+def _emit_settings(chat_id: int, changed: list) -> None:
+    """
+    v42 · Avisa a la Mini App (radar WebSocket) de un cambio hecho desde el grupo. Usa main.emit_settings_updated vía
+    sys.modules (sin importar main: cero ciclos), que adjunta el estado REAL guardado. Nunca lanza.
+    """
+    try:
+        main_mod = sys.modules.get("main")
+        fn = getattr(main_mod, "emit_settings_updated", None) if main_mod else None
+        if callable(fn):
+            _spawn(fn(int(chat_id), "group_console", list(changed)))
+    except Exception as ex:
+        logger.debug(f"[Radar] settings_updated no emitido para {chat_id}: {ex}")
 
 
 def _master_client():
@@ -618,15 +634,17 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
             forget_audit_target(chat_id)   # 🧾 v39 · el respaldo puede traer otro canal de registro
             _audit(bot, chat_id, "settings_imported", actor=message.from_user, chat_title=chat_title)   # 🧾 v39
 
-            # Notificar al WebSocket de la sala (Live Radar)
+            # Notificar al WebSocket de la sala (Live Radar): 'backup_restored' (compatibilidad) y, v42,
+            # 'settings_updated' con el estado completo restaurado para que la Mini App se repinte sola.
             try:
                 main_mod = sys.modules.get("main")
                 if main_mod:
                     fn = getattr(main_mod, "emit_radar_event", None)
                     if callable(fn):
-                        _spawn(fn(chat_id, "backup_restored", {"chat_id": chat_id}))
+                        _spawn(fn(chat_id, "backup_restored", {"chat_id": str(chat_id), "source": "bot"}))
             except Exception:
                 pass
+            _emit_settings(chat_id, ["backup_restored"])
 
             succ_msg = await message.reply(
                 t["backup_import_success"].format(title=html.escape(chat_title), chat_id=chat_id),
@@ -908,6 +926,7 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
     new_status = 1 if action == "on" else 0
     await set_autolower_status(group_id, new_status)
     _audit(bot, group_id, "autolower_on" if new_status else "autolower_off", actor=callback.from_user)   # 🧾 v39
+    _emit_settings(group_id, ["autolower_enabled"])   # v42
     
     status_text = t["status_active"].format(pct=await _autolower_pct(group_id)) if new_status == 1 else t["status_inactive"]
     panel_msg = callback.message
@@ -972,6 +991,7 @@ async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
     new_status = 1 if action == "on" else 0
     await set_podcast_status(group_id, new_status)
     _audit(bot, group_id, "podcast_on" if new_status else "podcast_off", actor=callback.from_user)   # 🧾 v39
+    _emit_settings(group_id, ["podcast_mode_status"])   # v42
     
     if new_status == 1:
         await engage_podcast_ducking(group_id)
@@ -1041,6 +1061,7 @@ async def process_shield_callback(callback: CallbackQuery, bot: Bot):
     new_status = 1 if action == "on" else 0
     await set_screen_shield_status(group_id, new_status)
     _audit(bot, group_id, "screenshield_on" if new_status else "screenshield_off", actor=callback.from_user)   # 🧾 v39
+    _emit_settings(group_id, ["shield_enabled"])   # v42
 
     if new_status == 1:
         await engage_screen_shield(group_id)
@@ -1082,6 +1103,7 @@ async def cmd_toggle_night(message: Message, bot: Bot):
         await deactivate_universal_night_mode(chat_id)
         _audit(bot, chat_id, "night_off", actor=message.from_user)   # 🧾 v39
         msg = await message.reply(t["night_off_msg"], parse_mode="HTML")
+    _emit_settings(chat_id, ["night_mode_status", "lock_media", "lock_links", "lock_stickers"])   # v42
 
     _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))
 

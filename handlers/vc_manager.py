@@ -851,6 +851,15 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
             # en vivo permisos de videochat, administradores, idioma/TTL y configuración IA, y vuelve a intentar
             # unirse a la llamada sin esperar al enfriamiento.
             _resync_radar_state(chat_id)
+            # v42 · La Mini App abierta recibe el estado recalculado del Bot Clon y del Centinela al instante.
+            try:
+                import sys as _sys
+                main_mod = _sys.modules.get("main")
+                push = getattr(main_mod, "request_assets_push", None) if main_mod else None
+                if callable(push):
+                    push(chat_id)
+            except Exception as push_err:
+                logger.debug(f"Aviso pidiendo empuje de activos en {chat_id}: {push_err}")
             synced = t["sync_done"]
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]

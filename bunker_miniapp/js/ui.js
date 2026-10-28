@@ -1630,7 +1630,15 @@ export const ui = {
             el.classList.toggle('text-neutral-400', !on);
         });
         const run = byId('btn-ghost-purge');
-        if (run) run.disabled = Boolean(idle || settings?.running);
+        if (run) {
+            run.disabled = Boolean(idle || settings?.running);
+            run.setAttribute('aria-busy', settings?.running ? 'true' : 'false');   // v42 · lector de pantalla
+        }
+        // v42 · Purga en curso (Mini App, bot u otra sesión): indicador visible en lugar de un botón mudo.
+        if (!idle && settings?.running) {
+            this.setText('gp-last-scan', `⏳ ${this.t('gp_running')}`);
+            return;
+        }
         const last = settings?.last_scan ? String(settings.last_scan).replace('T', ' ').slice(0, 16) : '';
         this.setText('gp-last-scan', last ? this.tf('gp_last_scan', { time: last }) : '');
     },

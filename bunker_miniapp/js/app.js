@@ -6,6 +6,9 @@
    v8.2: modal nativo del canal de registro, sincronización real de chats, difusión personalizada con
    acciones rápidas (vista previa · difundir · limpiar) y consola de control de grupos operativa.
    v8.3: generador CRUD de planes (channel_plans) y consola de programación 1:1 del bot por módulos.
+   v42: la Ghost Purge lanzada desde la Mini App (o desde el bot) se sigue hasta que el servidor confirma que terminó
+   (antes se recargaba UNA vez a los 15 s y el botón quedaba bloqueado en purgas largas) y el evento 'backup_restored'
+   del radar repinta la consola al restaurar un respaldo .bunker desde el bot o desde otra sesión.
    The Bunker Command OS © 2026 — Cloud Media Management
    ========================================================================== */
 
@@ -187,7 +190,7 @@ export const app = {
     // v20 · Perímetro, Centinela IA, Ghost Purge v2 y Soporte IA (cada respuesta se ata a su comunidad y secuencia)
     _perimeter: { chatId: null, data: null, loading: false, seq: 0, timer: null },
     _ai: { chatId: null, data: null, licensed: false, busy: false, seq: 0 },
-    _ghost: { chatId: null, data: null, busy: false, seq: 0 },
+    _ghost: { chatId: null, data: null, busy: false, seq: 0, pollTimer: null, pollSince: 0 },
     _support: { busy: false, greeted: false },
     // v22 · Auditoría MicVIP (paginada; cada respuesta se ata a su comunidad, filtro y secuencia)
     _micvip: { chatId: null, filter: 'all', records: [], data: null, loading: false, seq: 0, timer: null },
@@ -2608,6 +2611,14 @@ export const app = {
             this.onRemoteSettingsUpdated(chatId, data);
             this.onPerimeterSignal(chatId, data);   // v20 · IA, purga y perímetro siguen a la consola del bot
         });
+        // v42 · Respaldo .bunker restaurado (bot o Mini App): el estado completo llega además en 'settings_updated';
+        // aquí se refrescan los paneles que no viajan en ese árbol (purga, IA, perímetro y consolas v23).
+        client.on('backup_restored', (data, envelope) => {
+            if (!isCurrent()) return;
+            if (envelope && typeof client._trackSeq === 'function') client._trackSeq(envelope);
+            this.scheduleDashboardReload(chatId);
+            this.onPerimeterSignal(chatId, { changed: ['ai_backup', 'purge_backup', 'shield_backup'] });
+        });
         client.on('assets_status', (data, envelope) => {
             if (!isCurrent()) return;
             // Evento fuera de LIVE_EVENTS en api.js: se registra su seq para no provocar falsos huecos ('gap').
@@ -3309,8 +3320,11 @@ export const app = {
         tgApp.hapticNotification('success');
         this.consoleToast('success', '⚡', ui.t('gc_purge_toast_ok'));
         if (this._ghost.data && String(this._ghost.chatId) === String(chatId)) {
-            ui.renderGhostPurge({ ...this._ghost.data, running: true });
-            setTimeout(() => { if (String(this._ghost.chatId) === String(chatId)) this.loadGhostPurge(chatId); }, 15000);
+            // v42 · Se marca en curso y se sigue hasta que el servidor confirme el final (no una sola recarga).
+            this._ghost.data = { ...this._ghost.data, running: true };
+            ui.renderGhostPurge(this._ghost.data);
+            this._ghost.pollSince = Date.now();
+            this.syncGhostPoll(chatId);
         }
         return true;
     },
@@ -3343,7 +3357,8 @@ export const app = {
         // Las secuencias SUBEN: cualquier respuesta en vuelo de la comunidad anterior se descarta.
         this._perimeter = { chatId: null, data: null, loading: false, seq: this._perimeter.seq + 1, timer: null };
         this._ai = { chatId: null, data: null, licensed: false, busy: false, seq: this._ai.seq + 1 };
-        this._ghost = { chatId: null, data: null, busy: false, seq: this._ghost.seq + 1 };
+        clearTimeout(this._ghost.pollTimer);   // v42 · sin sondeos huérfanos de la comunidad anterior
+        this._ghost = { chatId: null, data: null, busy: false, seq: this._ghost.seq + 1, pollTimer: null, pollSince: 0 };
         ui.renderPerimeterStatus(null, { idle: true });
         ui.renderAiSentinel(null, { idle: true });
         ui.renderGhostPurge(null, { idle: true });
@@ -3499,9 +3514,44 @@ export const app = {
         const epoch = session.epoch;
         const res = await api.fetchGhostPurge(chatId);
         if (seq !== g.seq || epoch !== session.epoch || res?.__stale || res?.__error) return false;
+        const wasRunning = Boolean(g.data && g.data.running);
         g.data = res.ghost_purge;
         ui.renderGhostPurge(g.data);
+        if (wasRunning && g.data && !g.data.running) this.onGhostPurgeFinished(chatId);
+        this.syncGhostPoll(chatId);
         return true;
+    },
+
+    /**
+     * v42 · Sondeo de la Ghost Purge mientras el servidor diga running=true (también si la lanzó el bot o otra
+     * sesión). Intervalo CONFIG.GHOST_PURGE.POLL_MS (10 s) con tope CONFIG.GHOST_PURGE.POLL_MAX_MS (30 min):
+     * el servidor libera siempre el estado al terminar, el tope solo protege de un backend antiguo.
+     */
+    syncGhostPoll(chatId) {
+        const g = this._ghost;
+        clearTimeout(g.pollTimer);
+        g.pollTimer = null;
+        if (!chatId || String(g.chatId) !== String(chatId) || !g.data || !g.data.running) {
+            g.pollSince = 0;
+            return;
+        }
+        if (!g.pollSince) g.pollSince = Date.now();
+        const maxMs = CONFIG.GHOST_PURGE?.POLL_MAX_MS || 30 * 60 * 1000;
+        if (Date.now() - g.pollSince > maxMs) return;
+        g.pollTimer = setTimeout(async () => {
+            g.pollTimer = null;
+            if (String(this._ghost.chatId) !== String(chatId)) return;
+            const loaded = await this.loadGhostPurge(chatId);
+            // loadGhostPurge no reprograma si salió antes (guardia busy / respuesta descartada): se reintenta aquí.
+            if (!loaded && !this._ghost.pollTimer) this.syncGhostPoll(chatId);
+        }, CONFIG.GHOST_PURGE?.POLL_MS || 10000);
+    },
+
+    /** v42 · La purga terminó: se refrescan el perímetro y la analítica (los bloqueos ya llegaron por el radar). */
+    onGhostPurgeFinished(chatId) {
+        tgApp.hapticNotification('success');
+        this.schedulePerimeterRefresh(chatId);
+        this.scheduleAnalyticsRefresh(500);
     },
 
     async saveGhostPurge(patch) {
