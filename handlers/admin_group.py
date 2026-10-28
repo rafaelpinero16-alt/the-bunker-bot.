@@ -7,6 +7,13 @@ v38.1: tipado estricto (Pylance/Pyright): todo valor Optional de aiogram (callba
        message.from_user, reply_to_message.text/caption, File.file_path) se protege antes de usarse.
 v39: Log Channel Hub — /warn, /resetwarns, /delvip, /night, respaldos y paneles del Dueño se auditan en el canal de
      registro; /warn pasa manual=True a la escalera (sin métrica de sistema ni oferta de apelación pagada).
+v42: Sincronía con assistant.py v42 —
+     • El Centinela Maestro se lee EN VIVO (assistant.assistant_app): antes se importaba por valor y, si la v42 lo
+       desactivaba en caliente (MASTER_SESSION revocada/duplicada), /reload seguía usando un cliente ya detenido.
+     • /delvip ya no degrada a nadie que sea administrador por derecho propio: desde la v28 el pase MicVIP usa la
+       etiqueta nativa (sin ascenso). Solo se degrada a quien ESTE bot ascendió en versiones antiguas
+       (vip_badge_promotions) y la etiqueta MicVIP vence en el acto para que el barrido la retire.
+     • /delvip y los paneles de AutoLower muestran el porcentaje REAL configurado (antes siempre 2 %).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -41,12 +48,13 @@ from database.database import (
     set_vc_monitor_status, get_vc_monitor_status,
     export_group_configuration, import_group_configuration
 )
+import assistant as _assistant_live   # v42 · lectura en vivo de assistant_app (puede pasar a None en caliente)
 from assistant import (
     set_participant_mic,
     engage_podcast_ducking, disengage_podcast_ducking,
     engage_screen_shield, disengage_screen_shield,
     active_sentinels, register_or_update_sentinel, admin_caches,
-    assistant_app, get_assistant_bot_id, monitor_single_group
+    get_assistant_bot_id, monitor_single_group
 )
 
 logger = logging.getLogger("admin_group_handler")
@@ -75,6 +83,42 @@ def _spawn(coro) -> asyncio.Task:
 
 def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
+
+
+def _master_client():
+    """v42 · Centinela Maestro ACTUAL (None si nunca existió o la v42 lo desactivó por sesión inválida)."""
+    return getattr(_assistant_live, "assistant_app", None)
+
+
+async def _autolower_pct(chat_id: int) -> int:
+    """Porcentaje real de AutoLower (1-10 %) configurado por el Dueño; 2 % si no se puede leer."""
+    try:
+        from database.database import get_autolower_pct
+        return max(1, min(10, int(await get_autolower_pct(int(chat_id)) or 2)))
+    except Exception:
+        return 2
+
+
+def _sync_micvip_cleanup(chat_id: int, user_id: int) -> bool:
+    """
+    v42 · Tras /delvip: vence la etiqueta MicVIP nativa en el acto (el barrido de etiquetas la retira) y devuelve
+    True si ESTE bot ascendió al usuario en una versión anterior a la v28 (fila en vip_badge_promotions), que es el
+    único caso en que procede degradarlo. Se ejecuta en un hilo (asyncio.to_thread): nunca bloquea el event loop.
+    """
+    legacy = False
+    with _db_module.get_db_connection() as conn:
+        try:
+            conn.execute("UPDATE micvip_tags SET expires_at = ? WHERE group_id = ? AND user_id = ? "
+                         "AND tag_status != 'expired'", (int(time.time()), int(chat_id), int(user_id)))
+        except Exception as ex:
+            logger.debug(f"[delvip] Etiqueta MicVIP no vencida ({chat_id}/{user_id}): {ex}")
+        try:
+            row = conn.execute("SELECT 1 FROM vip_badge_promotions WHERE group_id = ? AND user_id = ?",
+                               (int(chat_id), int(user_id))).fetchone()
+            legacy = row is not None
+        except Exception:
+            legacy = False
+    return legacy
 
 
 # ==========================================================
@@ -157,7 +201,7 @@ def _is_sentinel_account(chat_id: int, user_id: int) -> bool:
     """
     if not user_id:
         return False
-    clients = [assistant_app, (active_sentinels.get(chat_id) or {}).get("client")]
+    clients = [_master_client(), (active_sentinels.get(chat_id) or {}).get("client")]
     for client in clients:
         me = getattr(client, "me", None)
         if me is not None and getattr(me, "id", None) == int(user_id):
@@ -246,9 +290,9 @@ TEXTS = {
             "Select an action to change microphone attenuation in real-time:\n\n"
             "🛡️️ <i>Cloud Media Management</i>"
         ),
-        "autolower_on_btn": "✅ Enable AutoLower (2%)",
+        "autolower_on_btn": "✅ Enable AutoLower ({pct}%)",
         "autolower_off_btn": "❌ Disable AutoLower (Free)",
-        "status_active": "🟢 ACTIVE (Mics dialed down to 2% for unverified users)",
+        "status_active": "🟢 ACTIVE (Mics dialed down to {pct}% for unverified users)",
         "status_inactive": "🔴 DEACTIVATED (Open Mics at 100%)",
         "podcast_panel": (
             "🎙️ <b>Radar Console: Podcast Mode (Ducking)</b>\n\n"
@@ -272,7 +316,7 @@ TEXTS = {
         "status_inactive_shield": "🔴 DEACTIVATED",
         "night_on_msg": "🌙 <b>Universal Night Mode:</b> 🟢 ACTIVATED. Perimeter restrictions applied.",
         "night_off_msg": "☀️ <b>Universal Night Mode:</b> 🔴 DEACTIVATED. Standard permissions restored.",
-        "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to 2%.\n\n🛡️ <i>Cloud Media Management</i>",
+        "vip_revoked": "✅ VIP Pass revoked for {target_tag}. Mic volume reset to {pct}%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Target required. Reply to a user, mention them or provide their ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_warn": "⚠️ Target required. Reply to a message or use: <code>/warn [@user or ID] [reason]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_issued": "⚠️ <b>Warning Issued:</b> {target_tag} has received a formal strike ({current}/{limit}).\n• <b>Reason:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
@@ -342,9 +386,9 @@ TEXTS = {
             "Selecciona una directiva para alterar la atenuación de micrófonos en vivo:\n\n"
             "🛡️ <i>Cloud Media Management</i>"
         ),
-        "autolower_on_btn": "✅ Activar AutoLower (2%)",
+        "autolower_on_btn": "✅ Activar AutoLower ({pct}%)",
         "autolower_off_btn": "❌ Desactivar AutoLower (Libre)",
-        "status_active": "🟢 ACTIVO (Reduciendo a 2% a no autorizados)",
+        "status_active": "🟢 ACTIVO (Reduciendo a {pct}% a no autorizados)",
         "status_inactive": "🔴 DESACTIVADO (Micrófonos Libres al 100%)",
         "podcast_panel": (
             "🎙️ <b>Panel de Control: Modo Podcast (Ducking)</b>\n\n"
@@ -368,7 +412,7 @@ TEXTS = {
         "status_inactive_shield": "🔴 DESACTIVADO",
         "night_on_msg": "🌙 <b>Modo Nocturno Universal:</b> 🟢 ACTIVADO. Restricciones perimetrales aplicadas.",
         "night_off_msg": "☀️ <b>Modo Nocturno Universal:</b> 🔴 DESACTIVADO. Permisos previos restaurados.",
-        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al 2%.\n\n🛡️ <i>Cloud Media Management</i>",
+        "vip_revoked": "✅ Pase VIP revocado para {target_tag}. Micrófono restablecido al {pct}%.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_vip": "⚠️ Objetivo requerido. Responde a un usuario, menciónalo con @ o pasa su ID.\n\n🛡️ <i>Cloud Media Management</i>",
         "target_needed_warn": "⚠️ Objetivo requerido. Responde a un mensaje o usa: <code>/warn [@usuario o ID] [motivo]</code>\n\n🛡️ <i>Cloud Media Management</i>",
         "warn_issued": "⚠️ <b>Advertencia Registrada:</b> {target_tag} ha acumulado una falta formal ({current}/{limit}).\n• <b>Motivo:</b> {reason}\n\n🛡️ <i>Cloud Media Management</i>",
@@ -660,7 +704,7 @@ async def cmd_reload_group(message: Message, bot: Bot):
                 sentinel_status = "Centinela Dedicado Reconectado 💎" if lang == "es" else "Dedicated Sentinel Reconnected 💎"
             else:
                 sentinel_status = "Error en Sesión Dedicada ⚠️" if lang == "es" else "Dedicated Session Error ⚠️"
-        elif assistant_app and assistant_app.is_connected:
+        elif (_master_client() is not None) and getattr(_master_client(), "is_connected", False):
             sentinel_status = await _reload_master_monitor(chat_id, lang, t)
         else:
             sentinel_status = "Modo Pasivo (Sin Sesión MTProto)" if lang == "es" else "Passive Mode (No MTProto Session)"
@@ -715,12 +759,15 @@ def _refresh_v37_caches(chat_id: int) -> None:
         logger.debug(f"[Reload] Cachés de groups no invalidadas en {chat_id}: {ex}")
     try:
         import assistant as _assistant
-        fn = getattr(_assistant, "_invalidate_call_rights", None)
-        if callable(fn):
-            fn(chat_id)
-        cache = getattr(_assistant, "_SVC_PREFS_CACHE_A", None)
-        if isinstance(cache, dict):
-            cache.pop(chat_id, None)
+        for fn_name in ("_invalidate_call_rights", "invalidate_ai_sentinel_cache"):
+            fn = getattr(_assistant, fn_name, None)
+            if callable(fn):
+                fn(chat_id)
+        # v42 · mismo alcance que el /reload del Centinela: enfriamiento, strikes y reintento de unión del radar.
+        for store_name in ("_SVC_PREFS_CACHE_A", "_autolower_cooldowns", "_forbidden_strikes", "_last_join_attempt"):
+            cache = getattr(_assistant, store_name, None)
+            if isinstance(cache, dict):
+                cache.pop(chat_id, None)
     except Exception as ex:
         logger.debug(f"[Reload] Cachés del Centinela no invalidadas en {chat_id}: {ex}")
     try:
@@ -737,9 +784,12 @@ async def _reload_master_monitor(chat_id: int, lang: str, t: dict) -> str:
     sano ni desplaza a un Centinela dedicado). Sin esa función (assistant anterior a v37) se conserva el método v36.
     """
     import assistant as _assistant
+    master = _master_client()
+    if master is None:
+        return t["sentinel_master_standby"].format(error="no MTProto session")
     ensure = getattr(_assistant, "_ensure_monitor_for", None)
     if callable(ensure):
-        outcome = await ensure(assistant_app, chat_id)
+        outcome = await ensure(master, chat_id)
         labels = {
             "running": ("Centinela Maestro Activo 🤖", "Master Sentinel Active 🤖"),
             "started": ("Centinela Maestro Reconectado 🤖", "Master Sentinel Reconnected 🤖"),
@@ -748,10 +798,8 @@ async def _reload_master_monitor(chat_id: int, lang: str, t: dict) -> str:
         if outcome in labels:
             return labels[outcome][0 if lang == "es" else 1]
         return t["sentinel_master_standby"].format(error=outcome)
-    if assistant_app is None:
-        return t["sentinel_master_standby"].format(error="no MTProto session")
     try:
-        peer = await assistant_app.resolve_peer(chat_id)
+        peer = await master.resolve_peer(chat_id)
         if chat_id in active_sentinels:
             old_info = active_sentinels.pop(chat_id)
             try:
@@ -759,8 +807,8 @@ async def _reload_master_monitor(chat_id: int, lang: str, t: dict) -> str:
             except Exception:
                 pass
         master_bot_id = get_assistant_bot_id()
-        task = asyncio.create_task(monitor_single_group(chat_id, peer, assistant_app, master_bot_id))
-        active_sentinels[chat_id] = {"client": assistant_app, "task": task, "user_id": 0}
+        task = asyncio.create_task(monitor_single_group(chat_id, peer, master, master_bot_id))
+        active_sentinels[chat_id] = {"client": master, "task": task, "user_id": 0}
         return "Centinela Maestro Reconectado 🤖" if lang == "es" else "Master Sentinel Reconnected 🤖"
     except Exception as master_err:
         return t["sentinel_master_standby"].format(error=str(master_err)[:80])
@@ -822,14 +870,15 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
     current_status = await get_autolower_status(chat_id)
     lang = await _svc_lang(message.chat.id)
     t = TEXTS[lang]
-    
+    pct = await _autolower_pct(chat_id)
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=t["autolower_on_btn"], callback_data=f"gautolower_on_{chat_id}_{lang}"),
+            InlineKeyboardButton(text=t["autolower_on_btn"].format(pct=pct), callback_data=f"gautolower_on_{chat_id}_{lang}"),
             InlineKeyboardButton(text=t["autolower_off_btn"], callback_data=f"gautolower_off_{chat_id}_{lang}")
         ]
     ])
-    status_text = t["status_active"] if current_status == 1 else t["status_inactive"]
+    status_text = t["status_active"].format(pct=pct) if current_status == 1 else t["status_inactive"]
     msg = await message.answer(t["autolower_panel"].format(status=status_text), reply_markup=keyboard, parse_mode="HTML")
     _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 20, 20)))
 
@@ -860,7 +909,7 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
     await set_autolower_status(group_id, new_status)
     _audit(bot, group_id, "autolower_on" if new_status else "autolower_off", actor=callback.from_user)   # 🧾 v39
     
-    status_text = t["status_active"] if new_status == 1 else t["status_inactive"]
+    status_text = t["status_active"].format(pct=await _autolower_pct(group_id)) if new_status == 1 else t["status_inactive"]
     panel_msg = callback.message
     if isinstance(panel_msg, Message):   # un mensaje inaccesible (muy antiguo) no se puede editar
         try:
@@ -1213,7 +1262,7 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
 # ==========================================
 @router.message(Command("delvip"))
 async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
-    """Revoca la inmunidad acústica de un miembro, retira el título de administrador y resetea volumen al 2%."""
+    """Revoca el pase VIP, vence su etiqueta nativa y devuelve el micrófono al porcentaje de AutoLower configurado."""
     if message.chat.type == "private": 
         return
         
@@ -1238,21 +1287,33 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
     await revoke_vip_mic(target_id, message.chat.id)
     _audit(bot, message.chat.id, "vip_revoked", user_id=target_id, user_name=_tag_name(target_tag),
            actor=message.from_user)   # 🧾 v39
-    
+
+    pct = await _autolower_pct(message.chat.id)
     try:
-        await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=200)
+        await set_participant_mic(chat_id=message.chat.id, user_id=target_id, muted=True, volume=pct * 100)
     except Exception as e:
         logger.warning(f"Aviso Centinela al revocar VIP en grupo {message.chat.id}: {e}")
 
+    # v42 · Solo se degrada a quien ESTE bot ascendió por el pase en versiones anteriores a la v28. Un administrador
+    #       real conserva sus permisos aunque tuviera pase VIP.
     try:
-        await bot.promote_chat_member(
-            chat_id=message.chat.id, user_id=target_id,
-            can_manage_chat=False, can_change_info=False, can_delete_messages=False,
-            can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
-            can_promote_members=False, can_manage_video_chats=False
-        )
-    except Exception:
-        pass
+        legacy_promoted = await asyncio.to_thread(_sync_micvip_cleanup, message.chat.id, target_id)
+    except Exception as cleanup_err:
+        logger.debug(f"[delvip] Limpieza MicVIP fallida ({message.chat.id}/{target_id}): {cleanup_err}")
+        legacy_promoted = False
+    if legacy_promoted:
+        try:
+            await bot.promote_chat_member(
+                chat_id=message.chat.id, user_id=target_id,
+                can_manage_chat=False, can_change_info=False, can_delete_messages=False,
+                can_invite_users=False, can_restrict_members=False, can_pin_messages=False,
+                can_promote_members=False, can_manage_video_chats=False
+            )
+            micvip_legacy_resolve = getattr(_db_module, "micvip_legacy_resolve", None)
+            if callable(micvip_legacy_resolve):
+                await micvip_legacy_resolve(message.chat.id, target_id, True)
+        except Exception as demote_err:
+            logger.debug(f"[delvip] Degradación del ascenso antiguo fallida ({target_id}): {demote_err}")
 
-    msg = await message.answer(t["vip_revoked"].format(target_tag=target_tag), parse_mode="HTML")
+    msg = await message.answer(t["vip_revoked"].format(target_tag=target_tag, pct=pct), parse_mode="HTML")
     _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 12)))

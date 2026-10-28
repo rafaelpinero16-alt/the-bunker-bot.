@@ -4,6 +4,9 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
 Fase 5: Cambios de la sala de audio (inicio/fin de llamada, altas/bajas, micrófonos) emitidos al radar WebSocket.
+v42: Sesiones MTProto con lista fatal validada (sin UserBannedInChannel), Mistral con filtro de parámetros por firma,
+     backoff con jitter y semáforo liberado entre reintentos, trampa unificada de llamada terminada con backoff dinámico
+     (5 → 60 s) y mapa SSRC continuo para la captura de voz.
 Fase 6: Blindaje técnico y legal — Token-Bucket MTProto (anti-FloodWait), Capa 0 de minimización PII
         antes de Mistral AI y Centinela restringido a escritura exclusiva en grupos (sin DMs).
 The Bunker Command OS © 2026 — Cloud Media Management
@@ -18,6 +21,7 @@ import contextlib
 import time
 import json
 import html
+import inspect
 import re
 import weakref
 from datetime import datetime
@@ -188,22 +192,48 @@ import pyrogram.errors as _pyro_errors
 
 # v30 · Errores de autenticación MTProto definitivos. Los opcionales se resuelven por nombre: no todas las versiones
 # de Pyrogram los exponen (en todas son subclases de Unauthorized/401, así que la tupla base ya los cubre).
-_OPTIONAL_FATAL_NAMES = ("SessionRevoked", "SessionExpired", "AuthKeyInvalid", "AuthKeyPermEmpty", "UserBannedInChannel_")
-FATAL_SESSION_ERRORS = (Unauthorized, AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan) + tuple(
-    cls for cls in (getattr(_pyro_errors, n, None) for n in _OPTIONAL_FATAL_NAMES)
+# v42 · La tupla se construye con una lista VALIDADA (isinstance(cls, type) + issubclass(BaseException)) y excluye de
+#       forma explícita UserBannedInChannel: es una restricción de escritura de la cuenta (400), NO una sesión revocada.
+#       Antes figuraba como opcional y, en versiones de Pyrogram que la exponen, provocaba revocaciones falsas.
+_OPTIONAL_FATAL_NAMES = ("SessionRevoked", "SessionExpired", "AuthKeyInvalid", "AuthKeyPermEmpty")
+_NON_FATAL_SESSION_NAMES = frozenset({"UserBannedInChannel", "UserBannedInChannel_"})
+NON_FATAL_SESSION_ERRORS: tuple = tuple(
+    cls for cls in (getattr(_pyro_errors, n, None) for n in sorted(_NON_FATAL_SESSION_NAMES))
     if isinstance(cls, type) and issubclass(cls, BaseException)
 )
+
+
+def _build_fatal_session_errors() -> tuple:
+    """Tupla de clases de excepción fatales, sin duplicados ni objetos que no sean clases de excepción."""
+    candidates: list = [Unauthorized, AuthKeyUnregistered, AuthKeyDuplicated, UserDeactivated, UserDeactivatedBan]
+    candidates.extend(getattr(_pyro_errors, name, None) for name in _OPTIONAL_FATAL_NAMES)
+    validated: list = []
+    for cls in candidates:
+        if not isinstance(cls, type) or not issubclass(cls, BaseException):
+            continue
+        if cls.__name__ in _NON_FATAL_SESSION_NAMES or cls in validated:
+            continue
+        validated.append(cls)
+    return tuple(validated)
+
+
+FATAL_SESSION_ERRORS: tuple = _build_fatal_session_errors()
 # Huella textual de los mismos fallos cuando llegan envueltos (OSError, RPCError genérico, ConnectionError…).
 _FATAL_SESSION_MARKERS = ("AUTH_KEY_UNREGISTERED", "AUTH_KEY_INVALID", "AUTH_KEY_PERM_EMPTY", "AUTH_KEY_DUPLICATED",
                           "SESSION_REVOKED", "SESSION_EXPIRED", "USER_DEACTIVATED", "UNAUTHORIZED")
+_NON_FATAL_SESSION_MARKERS = ("USER_BANNED_IN_CHANNEL",)
 
 
 def is_fatal_session_error(exc: BaseException) -> bool:
     """True si la sesión MTProto quedó inservible (revocada, caducada, cuenta borrada o clave duplicada)."""
+    if NON_FATAL_SESSION_ERRORS and isinstance(exc, NON_FATAL_SESSION_ERRORS):
+        return False
+    text = f"{type(exc).__name__} {getattr(exc, 'ID', '') or ''} {exc}".upper()
+    if any(marker in text for marker in _NON_FATAL_SESSION_MARKERS):
+        return False
     if isinstance(exc, FATAL_SESSION_ERRORS):
         # SessionPasswordNeeded también es 401, pero solo aparece al iniciar sesión: nunca invalida una sesión viva.
         return not isinstance(exc, SessionPasswordNeeded)
-    text = f"{type(exc).__name__} {exc}".upper()
     return any(marker in text for marker in _FATAL_SESSION_MARKERS)
 
 logger = logging.getLogger("assistant_radar")
@@ -1902,11 +1932,95 @@ def _strip_mentions(text: str, usernames: set) -> str:
 def _is_transient_mistral_error(exc: Exception) -> bool:
     if isinstance(exc, (asyncio.TimeoutError, ConnectionError)):
         return True
-    status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
-    if isinstance(status, int) and (status == 429 or status >= 500):
-        return True
+    status = mistral_error_status(exc)
+    if isinstance(status, int):
+        if status in (408, 409, 425, 429) or status >= 500:
+            return True
+        if 400 <= status < 500:
+            return False          # 400/401/403/404/422: reintentar solo gasta presupuesto y cuota
     text = str(exc).lower()
     return any(marker in text for marker in _MISTRAL_TRANSIENT_MARKERS)
+
+
+MISTRAL_BACKOFF_BASE = _env_float("MISTRAL_BACKOFF_BASE", 0.8)
+MISTRAL_BACKOFF_MAX = _env_float("MISTRAL_BACKOFF_MAX", 8.0)
+
+
+def _mistral_retry_after(exc: BaseException) -> Optional[float]:
+    """Segundos de Retry-After si la API los indica (cabecera HTTP de la respuesta del SDK)."""
+    for obj in (getattr(exc, "response", None), getattr(exc, "raw_response", None)):
+        headers = getattr(obj, "headers", None) if obj is not None else None
+        if not headers:
+            continue
+        try:
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+        except Exception:
+            raw = None
+        if raw is None:
+            continue
+        try:
+            value = float(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            return value
+    return None
+
+
+def _mistral_retry_delay(attempt: int, exc: BaseException) -> float:
+    """Backoff exponencial con jitter (0.8 s → 1.6 s → 3.2 s…, tope MISTRAL_BACKOFF_MAX) o el Retry-After de la API."""
+    base = min(MISTRAL_BACKOFF_MAX, MISTRAL_BACKOFF_BASE * (2 ** max(0, int(attempt))))
+    delay = base + random.uniform(0.0, base * 0.5)
+    hinted = _mistral_retry_after(exc)
+    if hinted is not None:
+        delay = max(delay, min(hinted, MISTRAL_BACKOFF_MAX * 2))
+    return delay
+
+
+# v42 · Filtro de parámetros por firma del SDK. Las versiones de mistralai cambian los argumentos admitidos por
+# chat.complete(_async); un argumento desconocido lanzaba TypeError y consumía un intento completo.
+_MISTRAL_SIGNATURE_CACHE: dict = {}
+_MISTRAL_DROPPED_LOGGED: set = set()
+
+
+def _mistral_signature_params(fn: Any) -> Optional[frozenset]:
+    """Parámetros admitidos por la función (None = acepta **kwargs o la firma no es inspeccionable)."""
+    target = getattr(fn, "__func__", fn)
+    key = id(target)
+    if key in _MISTRAL_SIGNATURE_CACHE:
+        return _MISTRAL_SIGNATURE_CACHE[key]
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        result: Optional[frozenset] = None
+    else:
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+            result = None
+        else:
+            result = frozenset(params)
+    if len(_MISTRAL_SIGNATURE_CACHE) > 64:
+        _MISTRAL_SIGNATURE_CACHE.clear()
+    _MISTRAL_SIGNATURE_CACHE[key] = result
+    return result
+
+
+def _fit_mistral_kwargs(fn: Any, kwargs: dict, purpose: str = "default") -> dict:
+    """
+    Deja solo los argumentos que la función del SDK admite. Nunca descarta 'model' ni 'messages' (si la firma no
+    los acepta, la llamada debe fallar de forma visible). Los descartes se registran una vez por propósito.
+    """
+    allowed = _mistral_signature_params(fn)
+    clean = {k: v for k, v in kwargs.items() if v is not None}
+    if allowed is None:
+        return clean
+    kept = {k: v for k, v in clean.items() if k in allowed or k in ("model", "messages")}
+    dropped = sorted(set(clean) - set(kept))
+    if dropped:
+        marker = (purpose, tuple(dropped))
+        if marker not in _MISTRAL_DROPPED_LOGGED:
+            _MISTRAL_DROPPED_LOGGED.add(marker)
+            logger.warning(f"⚠️ [Mistral:{purpose}] El SDK instalado no admite {dropped}; se omiten en la llamada.")
+    return kept
 
 
 # v31 · Disyuntor POR PROPÓSITO: antes era uno global, así que unos cuantos fallos del Guardián (p. ej. JSON
@@ -2017,8 +2131,11 @@ async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **req
     if not callable(async_complete) and not callable(sync_complete):
         raise RuntimeError("SDK de Mistral sin chat.complete / complete_async (versión no compatible)")
 
+    complete_fn: Any = async_complete if callable(async_complete) else sync_complete
+    fitted_kwargs = _fit_mistral_kwargs(complete_fn, request_kwargs, purpose)
+
     async def _call_once():
-        kwargs = dict(request_kwargs)
+        kwargs = dict(fitted_kwargs)
         for _ in range(2):
             try:
                 if callable(async_complete):
@@ -2026,28 +2143,33 @@ async def _mistral_complete(purpose: str, timeout: Optional[float] = None, **req
                     return await pending
                 return await asyncio.to_thread(sync_complete, **kwargs)
             except TypeError as exc:
-                # Firma distinta en otra versión del SDK: se reintenta UNA vez solo con lo imprescindible.
-                optional = [k for k in ("response_format", "temperature", "max_tokens", "safe_prompt") if k in kwargs]
+                # Firma no inspeccionable que aun así rechaza algo: se reintenta UNA vez solo con lo imprescindible.
+                optional = [k for k in kwargs if k not in ("model", "messages")]
                 if not optional or "argument" not in str(exc):
                     raise
                 logger.error(f"❌ [Mistral:{purpose}] El SDK rechazó parámetros {optional} ({exc}); reintento sin ellos.")
-                kwargs = {k: v for k, v in kwargs.items() if k not in optional}
+                kwargs = {k: v for k, v in kwargs.items() if k in ("model", "messages")}
         raise RuntimeError("SDK de Mistral: llamada no compatible")
 
     async def _run():
-        async with _MISTRAL_SEMAPHORE:
-            for attempt in range(MISTRAL_MAX_RETRIES + 1):
-                try:
+        # v42 · El semáforo se toma POR INTENTO y se libera durante el backoff: una llamada en espera de reintento
+        #       ya no bloquea al Guardián, al Copiloto ni al Soporte IA de otras comunidades.
+        total_attempts = MISTRAL_MAX_RETRIES + 1
+        for attempt in range(total_attempts):
+            delay = 0.0
+            try:
+                async with _MISTRAL_SEMAPHORE:
                     return await _call_once()
-                except asyncio.CancelledError:
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if attempt >= total_attempts - 1 or not _is_transient_mistral_error(exc):
                     raise
-                except Exception as exc:
-                    if attempt < MISTRAL_MAX_RETRIES and _is_transient_mistral_error(exc):
-                        backoff = 0.8 * (2 ** attempt) + random.uniform(0, 0.4)
-                        logger.debug(f"[Mistral:{purpose}] Fallo transitorio ({exc}); reintento en {backoff:.1f}s.")
-                        await asyncio.sleep(backoff)
-                        continue
-                    raise
+                delay = _mistral_retry_delay(attempt, exc)
+                logger.debug(f"[Mistral:{purpose}] Fallo transitorio ({describe_mistral_error(exc)}); "
+                             f"reintento {attempt + 1}/{MISTRAL_MAX_RETRIES} en {delay:.1f}s.")
+            await asyncio.sleep(delay)   # fuera del semáforo
+        raise RuntimeError(f"Mistral:{purpose} sin intentos disponibles")
 
     try:
         response = await asyncio.wait_for(_run(), timeout=timeout or MISTRAL_TIMEOUT_SECONDS)
@@ -3121,6 +3243,8 @@ _audio_needs_rejoin: set[int] = set()                  # chats donde el monitor 
 _audio_ssrc_map: dict[int, dict[int, int]] = {}        # chat_id → {ssrc: user_id}
 _audio_self_ids: dict[int, int] = {}                   # chat_id → user_id de la cuenta que captura (se excluye)
 _audio_flushers: dict[int, asyncio.Task] = {}
+_audio_ssrc_synced_at: dict[int, float] = {}           # chat_id → monotonic de la última lectura SSRC (v42)
+AUDIO_SSRC_SYNC_INTERVAL = _env_float("AUDIO_SSRC_SYNC_INTERVAL", 2.5)
 
 
 class _SpeechBuffer:
@@ -3150,6 +3274,34 @@ def update_audio_ssrc_map(chat_id: int, participants: Any) -> None:
         if isinstance(peer_obj, PeerUser) and isinstance(source, int) and source:
             mapping[source & 0xFFFFFFFF] = int(peer_obj.user_id)
     _audio_ssrc_map[chat_id] = mapping
+    _audio_ssrc_synced_at[chat_id] = time.monotonic()
+
+
+async def _sync_ssrc_map(client: Client, chat_id: int, call: Any, force: bool = False) -> Optional[tuple]:
+    """
+    v42 · Mantiene el mapa SSRC → user_id de la captura de voz en CADA ciclo del monitor, también durante el
+    enfriamiento del AutoLower, sin permiso de videochat o con AutoLower desactivado (antes solo se actualizaba en el
+    camino de moderación y la captura descartaba las tramas de quien entraba en esos periodos).
+    Solo consulta a Telegram si la captura está activa y la última lectura tiene más de AUDIO_SSRC_SYNC_INTERVAL s.
+    Devuelve (participantes, usuarios) si leyó, None si no hizo falta. Los errores de llamada terminada, FloodWait y
+    sesión se propagan al monitor (que los trata); el resto se registra y no interrumpe el ciclo.
+    """
+    if call is None or chat_id not in _audio_capture_active:
+        return None
+    if not force and time.monotonic() - _audio_ssrc_synced_at.get(chat_id, 0.0) < AUDIO_SSRC_SYNC_INTERVAL:
+        return None
+    try:
+        participants, users_map = await _fetch_all_participants(client, call)
+    except (FloodWait, MTProtoRateLimited, asyncio.CancelledError):
+        raise
+    except Exception as exc:
+        if is_fatal_session_error(exc) or _is_call_gone_error(exc):
+            raise
+        logger.debug(f"[Audio IA] Lectura SSRC fallida en {chat_id}: {exc}")
+        _audio_ssrc_synced_at[chat_id] = time.monotonic()   # no reintentar en el mismo segundo
+        return None
+    update_audio_ssrc_map(chat_id, participants)
+    return participants, users_map
 
 
 def _pcm_rms(pcm: bytes) -> float:
@@ -3315,6 +3467,7 @@ async def bunker_audio_capture_backend(chat_id: int, start: bool) -> bool:
         if task is not None and not task.done():
             task.cancel()
         _audio_ssrc_map.pop(chat_id, None)
+        _audio_ssrc_synced_at.pop(chat_id, None)
         _audio_self_ids.pop(chat_id, None)
         client = _capture_client_for(chat_id)
         call_client = _tgcalls_clients.get(id(client)) if client is not None else None
@@ -3582,6 +3735,27 @@ def _publish_voice_presence(chat_id: int, participants, users_map, state: dict) 
     })
 
 
+# ==========================================
+# 📞 v42 · LLAMADA TERMINADA / PEER INVÁLIDO: TRAMPA UNIFICADA CON BACKOFF DINÁMICO
+# ==========================================
+_CALL_GONE_MARKERS = ("GROUPCALL_INVALID", "CALL_ALREADY_ENDED", "PEER_ID_INVALID")
+CALL_GONE_BACKOFF_STEPS = (5.0, 10.0, 20.0, 40.0, 60.0)
+
+
+def _is_call_gone_error(exc: BaseException) -> bool:
+    """La llamada de grupo ya no existe (o el peer quedó inválido): el estado local de la llamada es huérfano."""
+    if isinstance(exc, PeerIdInvalid):
+        return True
+    text = f"{type(exc).__name__} {getattr(exc, 'ID', '') or ''} {exc}".upper()
+    return any(marker in text for marker in _CALL_GONE_MARKERS)
+
+
+def _call_gone_delay(strikes: int) -> float:
+    """5 s → 10 s → 20 s → 40 s → 60 s (tope) + jitter: evita el spin-lock de CPU ante errores persistentes."""
+    step = CALL_GONE_BACKOFF_STEPS[max(0, min(int(strikes), len(CALL_GONE_BACKOFF_STEPS) - 1))]
+    return step + random.uniform(0.0, 1.0)
+
+
 async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id: int, user_id: int = 0):
     alerted_users = set()
     current_call = None
@@ -3593,6 +3767,38 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
     seen_users: set = set()
     announced_call_id = None
     voice_state: dict = {"present": set(), "unmuted": -1, "last_fetch": 0.0}
+    call_gone_strikes = 0
+
+    async def _handle_call_gone(reason: BaseException) -> None:
+        """
+        v42 · Trampa única para GROUPCALL_INVALID, CALL_ALREADY_ENDED y PeerIdInvalid: limpia al instante el estado
+        huérfano de la llamada (sin moderar sobre una llamada muerta), fuerza la re-detección en el próximo ciclo
+        (que emite 'voice_call_ended' y detiene la captura si la llamada desapareció) y espera con backoff dinámico.
+        """
+        nonlocal current_call, is_joined_audio, call_start_time, last_channel_check, call_gone_strikes, peer
+        current_call = None
+        is_joined_audio = False
+        call_start_time = 0
+        last_channel_check = 0
+        _reset_call_moderation_state(chat_id)
+        _last_join_attempt.pop(chat_id, None)
+        delay = _call_gone_delay(call_gone_strikes)
+        call_gone_strikes += 1
+        peer_invalid = isinstance(reason, PeerIdInvalid) or "PEER_ID_INVALID" in str(reason).upper()
+        log = logger.warning if call_gone_strikes >= len(CALL_GONE_BACKOFF_STEPS) else logger.info
+        log(f"📞 [Radar] Llamada no disponible en {chat_id} ({type(reason).__name__}: {str(reason)[:120]}); "
+            f"estado limpiado, reintento en {delay:.0f}s (intento {call_gone_strikes}).")
+        await asyncio.sleep(delay)
+        if peer_invalid:
+            # El access_hash del peer pudo quedar obsoleto (migración a supergrupo, caché vacía tras reconexión).
+            try:
+                peer = await asyncio.wait_for(client.resolve_peer(chat_id), timeout=MTPROTO_RPC_TIMEOUT)
+            except (FloodWait, MTProtoRateLimited):
+                pass
+            except Exception as resolve_err:
+                # Un fallo de sesión aquí se vuelve a producir en la siguiente RPC del ciclo, donde el monitor
+                # lo trata (revocación + aviso); la trampa nunca lanza para no matar la tarea sin limpiar.
+                logger.debug(f"[Radar] No se pudo re-resolver el peer de {chat_id}: {resolve_err}")
 
     while True:
         if not client.is_connected:
@@ -3659,6 +3865,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     current_call = None
                     is_joined_audio = False
                     call_start_time = 0
+                    call_gone_strikes = 0      # estado limpio confirmado por Telegram
                 last_channel_check = current_time
 
             # Protocolo de reinicio preventivo audiovisual cada 3.5 horas de transmisión continua
@@ -3719,6 +3926,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                     continue
 
             if current_call:
+                # v42 · Mapa SSRC continuo para la captura de voz (independiente de AutoLower, permisos y enfriamientos).
+                ssrc_read = await _sync_ssrc_map(client, chat_id, current_call)
+                if ssrc_read is not None:
+                    call_gone_strikes = 0
                 night_active, _ = await _is_night_active(chat_id)
                 autolower_enabled = await get_autolower_status(chat_id)
                 # v8.3: Dinamizar porcentaje según la configuración del grupo (1 a 10%)
@@ -3736,9 +3947,12 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         try:
                             live_parts, live_users = await _fetch_all_participants(client, current_call)
                             _publish_voice_presence(chat_id, live_parts, live_users, voice_state)
+                            call_gone_strikes = 0
                         except asyncio.CancelledError:
                             raise
                         except Exception as presence_err:
+                            if _is_call_gone_error(presence_err) or is_fatal_session_error(presence_err):
+                                raise
                             logger.debug(f"Aviso leyendo presencia de voz en {chat_id}: {presence_err}")
                     await asyncio.sleep(8)
                     continue
@@ -3772,10 +3986,14 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         _forbidden_strikes[chat_id] = 0
                     except (FloodWait, MTProtoRateLimited):
                         raise
-                    except Exception:
+                    except Exception as join_err:
                         is_joined_audio = False
+                        if _is_call_gone_error(join_err) or is_fatal_session_error(join_err):
+                            raise
 
                 participants, users_map = await _fetch_all_participants(client, current_call)
+                call_gone_strikes = 0
+                call_gone_reason: Optional[BaseException] = None
                 active_users = set()
                 _publish_voice_presence(chat_id, participants, users_map, voice_state)
 
@@ -3946,9 +4164,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 _register_forbidden_strike(chat_id, "silenciar")
                                 await asyncio.sleep(25)
                                 break
-                            elif "GROUPCALL_INVALID" in err_msg or "CALL_ALREADY_ENDED" in err_msg:
-                                current_call = None
-                                is_joined_audio = False
+                            elif _is_call_gone_error(e):
+                                call_gone_reason = e
                                 break
                             continue
 
@@ -3974,6 +4191,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                                                       lang=await _group_service_lang(chat_id)))
                             except Exception:
                                 pass
+
+                if call_gone_reason is not None:
+                    await _handle_call_gone(call_gone_reason)
+                    continue
 
                 alerted_users.intersection_update(active_users)
 
@@ -4005,8 +4226,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
         except MTProtoRateLimited as rl:
             logger.warning(f"🚦 [Radar] Grupo {chat_id}: cuenta en penalización FloodWait, pausa de {rl.value}s.")
             await asyncio.sleep(rl.value + random.uniform(*MTPROTO_FLOOD_JITTER))
-        except PeerIdInvalid:
-            await asyncio.sleep(60)
+        except PeerIdInvalid as peer_err:
+            await _handle_call_gone(peer_err)
+            continue
         except asyncio.TimeoutError:
             logger.debug(f"⏱️ [Radar] RPC excedió el time-out en grupo {chat_id}; se reintenta.")
             await asyncio.sleep(5)
@@ -4016,6 +4238,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 logger.error(f"🔒 [Sesión Inválida en operación] Grupo {chat_id}: {loop_err}")
                 await _retire_sentinel(chat_id, client, user_id, reason=str(loop_err), revoke=True)
                 return
+            if _is_call_gone_error(loop_err):
+                await _handle_call_gone(loop_err)
+                continue
             logger.debug(f"Aviso en ciclo de radar del grupo {chat_id}: {loop_err}")
             await asyncio.sleep(3)
         await asyncio.sleep(3)
@@ -4397,6 +4622,7 @@ def _purge_group_state(group_id: int) -> None:
     """
     admin_caches.pop(group_id, None)
     _SVC_PREFS_CACHE_A.pop(group_id, None)   # v37 · idioma/TTL de servicio
+    _audio_ssrc_synced_at.pop(group_id, None)   # v42 · lectura SSRC continua
     purge_audio_state(group_id)   # v33 · cooldowns y reincidencias del Guardián Acústico
     if group_id in _audio_capture_active:   # v36 · el Centinela se fue: se cierra la captura y se descarta el audio
         _spawn(bunker_audio_capture_backend(group_id, False), name=f"audio_stop:{group_id}")

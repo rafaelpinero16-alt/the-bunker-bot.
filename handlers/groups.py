@@ -2071,17 +2071,26 @@ async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", 
 
 async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
     lang = await group_lang(group_id)
-    try:
-        mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action, lang=lang)
-        if mtproto_res.get("status") == "success" and not dry_run:
-            return {
-                "engine": gtx(lang, "engine_mtproto", signed=False),
-                "found": mtproto_res.get("found", 0),
-                "purged": mtproto_res.get("purged", 0),
-                "action": action
-            }
-    except Exception as ex:
-        logger.warning(f"Aviso MTProto Purge en {group_id}, pasando a Bot API: {ex}")
+    # v42 · El motor MTProto (assistant.execute_ghost_purge) SIEMPRE expulsa: no tiene modo simulación. Antes se
+    #       invocaba también con dry_run=True y un «/purgeghosts scan» expulsaba miembros reales. La simulación usa
+    #       solo el motor Bot API, que sí respeta dry_run.
+    if not dry_run:
+        try:
+            mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action, lang=lang)
+            mtproto_status = mtproto_res.get("status")
+            if mtproto_status == "success":
+                return {
+                    "engine": gtx(lang, "engine_mtproto", signed=False),
+                    "found": mtproto_res.get("found", 0),
+                    "purged": mtproto_res.get("purged", 0),
+                    "action": action
+                }
+            if mtproto_status == "busy":
+                # Otra purga (p. ej. lanzada desde la Mini App) está en curso: no se abre una segunda en paralelo.
+                return {"engine": gtx(lang, "engine_mtproto", signed=False), "found": 0, "purged": 0,
+                        "action": action, "busy": True}
+        except Exception as ex:
+            logger.warning(f"Aviso MTProto Purge en {group_id}, pasando a Bot API: {ex}")
 
     bot_api_res = await run_bot_api_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
     bot_api_res["engine"] = gtx(lang, "engine_botapi", signed=False)
@@ -2127,6 +2136,10 @@ async def purge_ghosts_command(message: Message, bot: Bot):
         )
 
         res = await execute_unified_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
+        if res.get("busy"):
+            await _edit_status(status_msg, gtx(lang, "ghost_busy"))
+            _spawn(auto_delete_msg(status_msg, await service_ttl(group_id, 8)))
+            return
         lines = [gtx(lang, "ghost_done", sim=gtx(lang, "ghost_sim_done", signed=False) if dry_run else "",
                      engine=res.get("engine", "Hybrid"), found=res.get("found", 0), purged=res.get("purged", 0),
                      action=action.upper())]

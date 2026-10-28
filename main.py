@@ -20,6 +20,10 @@ v40: Fase 3 — Dashboard de Moderación (api/routes/dashboard.py: historial, le
 v39: Log Channel Hub — el bot maestro se registra como remitente de respaldo de la auditoría (si un clon pierde los
      permisos en el canal de registro, publica el maestro antes de abrir el disyuntor) y los cambios del canal de
      registro desde la Mini App (ajustes o restauración de respaldo) invalidan su caché al instante.
+v42: Sincronía con assistant.py v42 — init_db() y la verificación WAL salen del event loop (/health ya no se congela
+     mientras se prepara SQLite en el arranque), /health informa de los Centinelas en vivo, nuevo diagnóstico
+     GET /api/system/ai-status (solo Arquitectos: Mistral, disyuntores y captura de voz, sin secretos) y apagado
+     ordenado: el oyente de activos se retira antes de cerrar los Centinelas y close_all_sentinels() tiene tope.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from __future__ import annotations
@@ -647,12 +651,17 @@ async def health_check():
         clients = int(ws_manager.total_connections())
     except Exception:
         clients = 0
+    try:
+        sentinels = len(getattr(_assistant_runtime, "active_sentinels", {}) or {})   # lectura en memoria, sin E/S
+    except Exception:
+        sentinels = 0
     return {
         "status": "online",
         "ready": _STARTUP_READY,
         "service": "The Bunker Command OS API",
         "bot_connected": master_bot_instance is not None,
         "active_clones": len(active_clone_tasks),
+        "active_sentinels": sentinels,
         "websocket_clients": clients
     }
 
@@ -2196,6 +2205,32 @@ async def api_set_user_language(
     return {"status": "success", "lang": saved}
 
 
+@api_router.get("/system/ai-status")
+async def api_system_ai_status(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """
+    🧠 v42 · Diagnóstico del núcleo IA (solo Arquitectos): SDK y modelo de Mistral, disyuntores abiertos por propósito,
+    pipeline de audio / captura de voz y Centinelas en vivo. Nunca incluye la API key ni sesiones MTProto.
+    """
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    if not is_super_admin(user_id):
+        raise HTTPException(status_code=403, detail="Solo el Arquitecto puede ver el diagnóstico del núcleo IA.")
+    status_fn = getattr(_assistant_runtime, "mistral_status", None)
+    try:
+        mistral = status_fn() if callable(status_fn) else {"client_ready": False, "init_error": "mistral_status no disponible"}
+    except Exception as ex:
+        mistral = {"client_ready": False, "init_error": f"{type(ex).__name__}"}
+    sentinels = getattr(_assistant_runtime, "active_sentinels", {}) or {}
+    return JSONResponse(content={
+        "status": "success",
+        "mistral": mistral,
+        "sentinels": {"active": len(sentinels), "own": sum(1 for v in sentinels.values() if v.get("user_id"))},
+        "master_sentinel": getattr(_assistant_runtime, "assistant_app", None) is not None,
+    }, headers=_NO_STORE)
+
+
 @api_router.get("/support/directives")
 async def api_get_support_directives(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
@@ -2394,7 +2429,7 @@ async def api_import_backup(
 # v8.2: servicio de difusión personalizada y planes de canal (channel_plans_api.py).
 # v10: el módulo vive en el paquete handlers/ (handlers/channel_plans_api.py). Se mantiene el respaldo a la
 # raíz del proyecto para que un despliegue a medio migrar no pierda los endpoints de planes ni el programador.
-import importlib
+# (importlib ya está importado al inicio del módulo.)
 
 
 def _import_channel_plans_api():
@@ -4244,8 +4279,9 @@ async def main():
 
     # 0. Base de datos primero: todo lo demás depende del esquema.
     await _enforce_single_instance()
-    init_db()
-    _verify_sqlite_wal()
+    # v42 · Fuera del event loop: con el puerto ya abierto, una migración lenta de SQLite no congela /health.
+    await asyncio.to_thread(init_db)
+    await asyncio.to_thread(_verify_sqlite_wal)
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
     # 🏆 v40 · Esquema de la Fase 3 (aditivo) y trabajos masivos que un reinicio dejó a medias.
     try:
@@ -4422,6 +4458,11 @@ async def main():
         await dp.start_polling(master_bot, allowed_updates=allowed_updates)
     finally:
         logger.info("🛑 [Apagado]: Liberando recursos...")
+        # 0. v42 · assistant deja de avisar cambios de activos: los Centinelas que se cierran abajo no deben programar
+        #    empujes WebSocket nuevos con el bucle ya en apagado (quedarían tareas pendientes huérfanas).
+        if callable(_register_assets_listener):
+            with contextlib.suppress(Exception):
+                _register_assets_listener(None)
         # 1. Cerrar salas WebSocket y la API para no aceptar más tráfico
         with contextlib.suppress(Exception):
             await radar_hub.close_all()
@@ -4449,9 +4490,11 @@ async def main():
             except Exception:
                 pass
         try:
-            await close_all_sentinels()
-        except Exception:
-            pass
+            await asyncio.wait_for(close_all_sentinels(), timeout=float(os.getenv("SENTINEL_SHUTDOWN_TIMEOUT", "30") or 30))
+        except asyncio.TimeoutError:
+            logger.warning("⏱️ [Apagado]: close_all_sentinels() excedió el tope; se continúa con el cierre.")
+        except Exception as ex:
+            logger.warning(f"⚠️ [Apagado]: Error cerrando Centinelas: {ex}")
         # 3b. 🧾 v41.1 · Últimos pulsos de actividad de administradores antes de cerrar la sesión HTTP
         with contextlib.suppress(Exception):
             await realtime_audit.stop()

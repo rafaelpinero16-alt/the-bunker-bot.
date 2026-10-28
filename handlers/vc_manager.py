@@ -3,6 +3,9 @@ vc_manager.py — The Bunker OS (Aiogram 3.x)
 
 Módulo de gestión y supervisión acústica de videochats (Voice Rooms).
 Integrado con Centinela MTProto, pasarela de Telegram Stars, telemetría CAMS y botoneras bilingües.
+v42 · «Sincronizar sala» limpia TODO el estado en caché del radar (igual que /reload del Centinela: permisos de
+      videochat, administradores, reintento de unión, enfriamiento y strikes de AutoLower, caché IA e idioma/TTL) y el
+      panel muestra el porcentaje REAL de AutoLower configurado (antes siempre decía 2 %).
 v37 · Inglés por defecto: en grupos manda el idioma de servicio de la comunidad y en privado la preferencia del
       usuario; los avisos usan el TTL de servicio; /start en grupos se ignora en silencio (Anti-Rogue).
 The Bunker Command OS © 2026 — Cloud Media Management
@@ -25,7 +28,8 @@ from database.database import (
     get_night_mode_config,
     get_community_live_telemetry,
     get_vc_monitor_status, set_vc_monitor_status,
-    is_whitelisted, get_sentinel_service_messages_config
+    is_whitelisted, get_sentinel_service_messages_config,
+    get_autolower_pct
 )
 from assistant import (
     set_participant_mic,
@@ -127,6 +131,27 @@ async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
         return member.status in ["creator", "administrator"]
     except Exception:
         return False
+
+
+def _resync_radar_state(chat_id: int) -> None:
+    """Invalida las cachés del radar de assistant.py v42 para esta comunidad (todo vía getattr: nunca rompe)."""
+    try:
+        import assistant as _assistant_mod
+    except Exception as import_err:
+        logger.debug(f"Aviso importando assistant para sincronizar {chat_id}: {import_err}")
+        return
+    for fn_name in ("_invalidate_call_rights", "invalidate_ai_sentinel_cache"):
+        fn = getattr(_assistant_mod, fn_name, None)
+        if callable(fn):
+            try:
+                fn(chat_id)
+            except Exception as fn_err:
+                logger.debug(f"Aviso en {fn_name}({chat_id}): {fn_err}")
+    for store_name in ("admin_caches", "_last_join_attempt", "_autolower_cooldowns", "_forbidden_strikes",
+                       "_SVC_PREFS_CACHE_A"):
+        store = getattr(_assistant_mod, store_name, None)
+        if isinstance(store, dict):
+            store.pop(chat_id, None)
 
 
 # ==========================================
@@ -359,16 +384,20 @@ async def get_telemetry_context(chat_id: int, lang: str) -> dict:
         night_cfg = {"status": 0}
 
     sentinel_label = await get_active_sentinel_label(chat_id)
+    try:
+        pct = int(await get_autolower_pct(chat_id) or 2)
+    except Exception:
+        pct = 2
 
     if lang == "en":
         shield = "🟢 Active" if telem.get("shield_status") == 1 else "🔴 Inactive"
-        autolower = "🟢 Active at 2%" if telem.get("autolower_status") == 1 else "🔴 Inactive"
+        autolower = f"🟢 Active at {pct}%" if telem.get("autolower_status") == 1 else "🔴 Inactive"
         podcast = "🟢 Active" if telem.get("podcast_status") == 1 else "🔴 Inactive"
         panic = "🚨 RAID LOCKDOWN ACTIVE" if telem.get("panic_active") == 1 else "🟢 Normal"
         night = "🟢 Active" if night_cfg and night_cfg.get("status") == 1 else "🔴 Inactive"
     else:
         shield = "🟢 Activo" if telem.get("shield_status") == 1 else "🔴 Inactivo"
-        autolower = "🟢 Activo al 2%" if telem.get("autolower_status") == 1 else "🔴 Inactivo"
+        autolower = f"🟢 Activo al {pct}%" if telem.get("autolower_status") == 1 else "🔴 Inactivo"
         podcast = "🟢 Activo" if telem.get("podcast_status") == 1 else "🔴 Inactivo"
         panic = "🚨 BLOQUEO ACTIVO" if telem.get("panic_active") == 1 else "🟢 Normal"
         night = "🟢 Activo" if night_cfg and night_cfg.get("status") == 1 else "🔴 Inactivo"
@@ -818,21 +847,10 @@ async def process_vc_callback(callback: CallbackQuery, bot: Bot):
             await callback.message.edit_text(report, reply_markup=back_kb, parse_mode="HTML")
 
         elif action == "vc_reset":
-            # Sincronización real: se invalidan las cachés del Radar MTProto (permisos de
-            # videochat y administradores) para que el próximo ciclo las relea en vivo.
-            try:
-                import assistant as _assistant_mod
-                invalidate = getattr(_assistant_mod, "_invalidate_call_rights", None)
-                if callable(invalidate):
-                    invalidate(chat_id)
-                admin_cache = getattr(_assistant_mod, "admin_caches", None)
-                if isinstance(admin_cache, dict):
-                    admin_cache.pop(chat_id, None)
-                join_attempts = getattr(_assistant_mod, "_last_join_attempt", None)
-                if isinstance(join_attempts, dict):
-                    join_attempts.pop(chat_id, None)
-            except Exception as sync_err:
-                logger.debug(f"Aviso sincronizando radar en {chat_id}: {sync_err}")
+            # Sincronización real (v42): mismo alcance que /reload del Centinela. El próximo ciclo del radar relee
+            # en vivo permisos de videochat, administradores, idioma/TTL y configuración IA, y vuelve a intentar
+            # unirse a la llamada sin esperar al enfriamiento.
+            _resync_radar_state(chat_id)
             synced = t["sync_done"]
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=t["btn_back_vc"], callback_data=f"vc_status_{chat_id}")]

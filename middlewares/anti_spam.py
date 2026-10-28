@@ -6,6 +6,9 @@ Motor Híbrido: Detección proactiva CAS (Combot Anti-Spam) + Blacklist alfanum�
                Escudo Semántico en el Borde (Fase 2: Mistral AI Guardián) + Inmunidad táctica.
 v37 · Anti-Rogue: en grupos, el bot ignora EN SILENCIO los comandos de quien no tiene rango para invocarlo
       (o enviados en grupos que el bot no aprobó). Avisos de respaldo en el idioma de servicio del grupo.
+v42 · Escudo semántico alineado con assistant.py v42: solo consulta a Mistral si la comunidad tiene ULTRA PRO Y el
+      Guardián IA activado (antes: cualquier ULTRA PRO aunque lo tuviera apagado, y TODO canal externo incluso en
+      grupos Free), y el motivo de la infracción sale en el idioma de servicio del grupo.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import asyncio
@@ -33,6 +36,7 @@ from database.database import (
     get_warns_config,
     get_group_tier,
     get_ai_sentinel_config,
+    normalize_tier,
     is_vip_mic_active,
     is_whitelisted,
     reset_user_strikes,
@@ -249,6 +253,25 @@ async def _service_lang_ttl(chat_id: int) -> tuple[str, int]:
         return "en", 20
 
 
+async def _semantic_guard_config(chat_id: int) -> Optional[dict]:
+    """
+    v42 · Configuración IA si el escudo semántico debe actuar en esta comunidad (ULTRA PRO + Guardián IA activado,
+    la misma regla que aplica assistant.py), o None. Fallo cerrado: ante un error de lectura no se llama a Mistral.
+    """
+    try:
+        if normalize_tier(await get_group_tier(chat_id)) != "ultra_pro":
+            return None
+        ai_cfg = await get_ai_sentinel_config(chat_id)
+    except Exception as cfg_err:
+        logger.debug(f"Aviso leyendo la configuración del Guardián IA en {chat_id}: {cfg_err}")
+        return None
+    try:
+        enabled = int(ai_cfg.get("guardian_status") or 0) == 1
+    except (TypeError, ValueError):
+        enabled = False
+    return ai_cfg if enabled else None
+
+
 # ==========================================
 # 🌐 NÚCLEO ANTISPAM GLOBAL (CAS - Combot Anti-Spam)
 # ==========================================
@@ -393,10 +416,14 @@ class AntiSpamMiddleware(BaseMiddleware):
                         break
 
                 if not channel_threat:
-                    # Escaneo semántico heurístico para canales externos
-                    semantic_check = await semantic_scan_content(text_content)
-                    if semantic_check.get("flagged"):
-                        channel_threat = True
+                    # Escaneo semántico de canales externos: solo con ULTRA PRO + Guardián IA activado (v42).
+                    channel_ai_cfg = await _semantic_guard_config(event.chat.id)
+                    if channel_ai_cfg is not None:
+                        channel_lang, _ttl = await _service_lang_ttl(event.chat.id)
+                        semantic_check = await semantic_scan_content(
+                            text_content, custom_prompt=channel_ai_cfg.get("custom_prompt", ""), lang=channel_lang)
+                        if semantic_check.get("flagged"):
+                            channel_threat = True
 
                 if channel_threat:
                     try:
@@ -479,14 +506,13 @@ class AntiSpamMiddleware(BaseMiddleware):
             # B) Escudo Semántico de IA (Detección de Leetspeak, Phishing y Violaciones Evasivas)
             if not threat_found:
                 try:
-                    ai_cfg = await get_ai_sentinel_config(chat_id)
-                    tier = (await get_group_tier(chat_id) or "free").lower()
-                    is_ultra = tier in ("ultra_pro", "ultra")
-
-                    if is_ultra or ai_cfg.get("guardian_status") == 1:
+                    ai_cfg = await _semantic_guard_config(chat_id)
+                    if ai_cfg is not None:
+                        scan_lang, _ttl = await _service_lang_ttl(chat_id)
                         semantic_res = await semantic_scan_content(
-                            text_content, 
-                            custom_prompt=ai_cfg.get("custom_prompt", "")
+                            text_content,
+                            custom_prompt=ai_cfg.get("custom_prompt", ""),
+                            lang=scan_lang
                         )
                         if semantic_res.get("flagged"):
                             threat_found = True
