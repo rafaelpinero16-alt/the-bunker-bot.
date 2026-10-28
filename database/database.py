@@ -1041,7 +1041,7 @@ def init_db():
                 btn_text_es TEXT,
                 btn_text_en TEXT,
                 btn_url TEXT,
-                card_lang TEXT DEFAULT 'es',
+                card_lang TEXT DEFAULT 'en',
                 auto_delete_after INTEGER DEFAULT 0,
                 last_sent_at TIMESTAMP,
                 next_send_at TIMESTAMP,
@@ -1053,7 +1053,7 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_gami_due ON gamification_announcements (status, next_send_at)")
         _ensure_columns(cursor, "gamification_announcements", [
-            ("card_lang", "TEXT DEFAULT 'es'"), ("auto_delete_after", "INTEGER DEFAULT 0"),
+            ("card_lang", "TEXT DEFAULT 'en'"), ("auto_delete_after", "INTEGER DEFAULT 0"),
             ("last_message_id", "INTEGER"), ("fail_count", "INTEGER DEFAULT 0"),
             ("created_by", "INTEGER"), ("updated_at", "TIMESTAMP"),
         ])
@@ -1063,7 +1063,7 @@ def init_db():
             ("next_broadcast_at", "TIMESTAMP"), ("broadcast_enabled", "INTEGER DEFAULT 0"),
             # v9 · Programador recurrente: el intervalo se mide desde el último envío REAL.
             ("last_broadcast_at", "TIMESTAMP"), ("broadcast_failures", "INTEGER DEFAULT 0"),
-            ("broadcast_lang", "TEXT DEFAULT 'es'"),
+            ("broadcast_lang", "TEXT DEFAULT 'en'"),
         ])
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_channel_plans_broadcast ON channel_plans (broadcast_enabled, next_broadcast_at)")
 
@@ -1106,7 +1106,7 @@ def init_db():
                 enabled INTEGER NOT NULL DEFAULT 0,
                 interval_hours INTEGER NOT NULL DEFAULT 24,
                 metrics TEXT NOT NULL DEFAULT '[]',
-                lang TEXT NOT NULL DEFAULT 'es',
+                lang TEXT NOT NULL DEFAULT 'en',
                 anchor_at INTEGER,
                 last_sent_at INTEGER,
                 retry_at INTEGER,
@@ -1186,10 +1186,18 @@ def get_or_create_user(user_id: int, username: str, full_name: str):
 
 
 # ==========================================
-# 🌐 v21 · PREFERENCIA DE IDIOMA (por defecto inglés; español latino opcional y persistente)
+# 🌐 v21/v38 · PREFERENCIA DE IDIOMA (inglés por defecto ABSOLUTO; español latino opcional y persistente)
 # ==========================================
-DEFAULT_LANG = "en" if str(os.getenv("BUNKER_DEFAULT_LANG", "en")).strip().lower() != "es" else "es"
+# v38 · El idioma por defecto del ecosistema es SIEMPRE inglés. BUNKER_DEFAULT_LANG ya no puede cambiarlo (se avisa
+#       en el arranque si alguien lo fija en 'es'): el español solo se usa cuando un usuario o un grupo lo ELIGE.
+DEFAULT_LANG = "en"
 SUPPORTED_LANGS = ("en", "es")
+# Autodetección por el idioma de la app de Telegram: apagada salvo BUNKER_LANG_AUTODETECT=1 (única fuente de verdad;
+# los demás módulos la importan de aquí en vez de releer la variable de entorno).
+LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+if str(os.getenv("BUNKER_DEFAULT_LANG", "") or "").strip().lower().startswith("es"):
+    logger.warning("⚠️ [i18n] BUNKER_DEFAULT_LANG=es se ignora desde v38: el idioma por defecto es inglés. "
+                   "Cada usuario elige el suyo con /lang y cada grupo su idioma de servicio.")
 
 
 def normalize_lang(value, default: Optional[str] = None):
@@ -1200,6 +1208,40 @@ def normalize_lang(value, default: Optional[str] = None):
     if raw.startswith("es") or raw in ("español", "espanol", "spanish"):
         return "es"
     return default
+
+
+def resolve_lang(stored=None, language_code=None) -> str:
+    """
+    v38 · Regla ÚNICA de idioma para todo el ecosistema (bot, clones, Centinela y Mini App):
+      1) preferencia guardada (users.lang o el idioma de servicio del grupo) →
+      2) idioma de Telegram SOLO si BUNKER_LANG_AUTODETECT=1 →
+      3) inglés.
+    Nunca devuelve otro valor que 'en' o 'es'.
+    """
+    pref = normalize_lang(stored)
+    if pref:
+        return pref
+    if LANG_AUTODETECT:
+        detected = normalize_lang(language_code)
+        if detected:
+            return detected
+    return DEFAULT_LANG
+
+
+@db_async
+def get_effective_user_lang(user_id: int, language_code: Optional[str] = None) -> str:
+    """v38 · Idioma con el que se escribe por PRIVADO a un usuario (preferencia guardada → autodetección → inglés)."""
+    stored = get_user_lang.sync(int(user_id)) if user_id else None
+    return resolve_lang(stored, language_code)
+
+
+@db_async
+def get_effective_group_lang(group_id: int) -> str:
+    """v38 · Idioma de los mensajes de servicio de un GRUPO (lo fija /lang o el panel «Language & TTL»; inglés si no)."""
+    try:
+        return resolve_lang(get_service_prefs.sync(int(group_id)).get("lang"))
+    except Exception:
+        return DEFAULT_LANG
 
 
 @db_async
@@ -1441,7 +1483,7 @@ def set_warns_config(group_id: int, field: str, value):
 
 
 @db_async
-def add_user_strike(group_id: int, user_id: int, reason: str = "Infracción de reglas") -> int:
+def add_user_strike(group_id: int, user_id: int, reason: str = "Rules violation") -> int:
     with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3657,7 +3699,7 @@ def set_noise_shield_status(group_id: int, status: int):
 
 
 @db_async
-def flag_userbot(user_id: int, group_id: int, reason: str = "Patrón sospechoso de Userbot"):
+def flag_userbot(user_id: int, group_id: int, reason: str = "Suspicious userbot pattern"):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3838,9 +3880,9 @@ def create_channel_plan(
         cursor.execute("""
             INSERT INTO channel_plans (
                 channel_id, plan_name, duration_days, stars_price, status,
-                promo_text, media_id, media_type, target_link
+                promo_text, media_id, media_type, target_link, broadcast_lang
             )
-            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 'en')
         """, (
             int(channel_id), name, days, price,
             promo, media_id, media_type, _sanitize_target_link(target_link)
@@ -3960,7 +4002,8 @@ def _plan_retry_minutes(failures: int) -> int:
 
 
 def _clean_broadcast_lang(lang) -> str:
-    return "en" if str(lang or "").lower().startswith("en") else "es"
+    """v38 · 'es' solo si se eligió explícitamente; vacío o desconocido → inglés (antes era español)."""
+    return "es" if str(lang or "").strip().lower().startswith("es") else "en"
 
 
 @db_async
@@ -3989,7 +4032,7 @@ def set_channel_plan_broadcast_config(plan_id: int, chat_id: int, interval_hours
                 broadcast_interval_hours = ?,
                 broadcast_enabled = 1,
                 broadcast_failures = 0,
-                broadcast_lang = COALESCE(?, broadcast_lang, 'es'),
+                broadcast_lang = COALESCE(?, broadcast_lang, 'en'),
                 next_broadcast_at = CASE
                     WHEN last_broadcast_at IS NOT NULL AND datetime(last_broadcast_at, ?) > datetime('now')
                         THEN datetime(last_broadcast_at, ?)
@@ -4383,8 +4426,20 @@ def get_chat_heatmap_matrix(group_id: int) -> dict:
                 matrix[day][hour] = count
     return {
         "group_id": group_id, "matrix": matrix,
-        "days": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        # "days" se conserva en español por compatibilidad; v38 añade "days_en" (la Mini App ya lo leía y faltaba).
+        "days": list(WEEKDAY_NAMES["es"]), "days_en": list(WEEKDAY_NAMES["en"]),
     }
+
+
+WEEKDAY_NAMES: Dict[str, tuple] = {
+    "en": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+    "es": ("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"),
+}
+
+
+def weekday_names(lang: str) -> tuple:
+    """v38 · Días de la semana (lunes = índice 0) en el idioma pedido; inglés por defecto."""
+    return WEEKDAY_NAMES.get(resolve_lang(lang), WEEKDAY_NAMES["en"])
 
 
 # ==========================================
@@ -5116,24 +5171,51 @@ def export_group_configuration(group_id: int) -> str:
     return json.dumps({"payload": payload, "signature": signature}, indent=2, ensure_ascii=False)
 
 
+# v38 · El informe de importación sale en inglés (la Mini App lo muestra tal cual); el bot lo traduce con
+#       localize_import_report() al idioma del operador o del grupo.
+IMPORT_REPORT_TEXTS: Dict[str, Dict[str, str]] = {
+    "en": {"invalid_structure": "Invalid package structure.", "invalid_signature": "Invalid digital signature.",
+           "invalid_settings": "Invalid settings block.", "ok": "Configuration imported successfully.",
+           "error_prefix": "Error during restore: "},
+    "es": {"invalid_structure": "Estructura de paquete inválida.", "invalid_signature": "Firma digital no válida.",
+           "invalid_settings": "Bloque de ajustes inválido.", "ok": "Configuración importada con éxito.",
+           "error_prefix": "Error durante la restauración: "},
+}
+
+
+def localize_import_report(report: str, lang: str) -> str:
+    """Traduce el informe de import_group_configuration (inglés o español de versiones previas) al idioma pedido."""
+    text = str(report or "")
+    target = IMPORT_REPORT_TEXTS.get(resolve_lang(lang), IMPORT_REPORT_TEXTS["en"])
+    for bundle in IMPORT_REPORT_TEXTS.values():
+        for key, value in bundle.items():
+            if key == "error_prefix":
+                if text.startswith(value):
+                    return target["error_prefix"] + text[len(value):]
+            elif text == value:
+                return target[key]
+    return text
+
+
 @db_async
 def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[bool, str]:
+    msgs = IMPORT_REPORT_TEXTS["en"]
     try:
         package = json.loads(backup_json)
         if not isinstance(package, dict):
-            return False, "Estructura de paquete inválida."
+            return False, msgs["invalid_structure"]
         payload = package.get("payload")
         received_sig = package.get("signature")
         if not isinstance(payload, dict) or not isinstance(received_sig, str) or not received_sig:
-            return False, "Estructura de paquete inválida."
+            return False, msgs["invalid_structure"]
         raw_data = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         expected_sig = hmac.new(BACKUP_SECRET_SALT.encode("utf-8"), raw_data.encode("utf-8"), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected_sig, received_sig):
-            return False, "Firma digital no válida."
+            return False, msgs["invalid_signature"]
 
         settings = payload.get("settings") or {}
         if not isinstance(settings, dict):
-            return False, "Bloque de ajustes inválido."
+            return False, msgs["invalid_settings"]
         vc_schedule = payload.get("vc_schedule") or {}
         tip_targets = payload.get("tip_targets") or []
 
@@ -5177,10 +5259,10 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
                     [(target_group_id, str(t).strip()) for t in tip_targets if isinstance(t, (str, int)) and str(t).strip()],
                 )
             conn.commit()
-        return True, "Configuración importada con éxito."
+        return True, msgs["ok"]
     except Exception as ex:
         logger.exception("❌ [DB] Falló import_group_configuration")
-        return False, f"Error durante la restauración: {ex}"
+        return False, f"{msgs['error_prefix']}{ex}"
 
 
 # ==========================================================
@@ -5356,7 +5438,7 @@ def _gami_validate(field: str, value):
             raise ValueError("invalid_url")
         return normalized
     if field == "card_lang":
-        lang = str(value or "es").strip().lower()
+        lang = str(value or "en").strip().lower()
         if lang not in GAMI_CARD_LANGS:
             raise ValueError("invalid_lang")
         return lang
@@ -5395,8 +5477,10 @@ def set_gamification_announcement_field(chat_id: int, field: str, value) -> bool
     column = _ident(field)
     with _write_transaction() as conn:
         conn.execute(
-            f"INSERT INTO gamification_announcements (chat_id, {column}, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
-            f"ON CONFLICT(chat_id) DO UPDATE SET {column} = excluded.{column}, updated_at = CURRENT_TIMESTAMP",
+            (f"INSERT INTO gamification_announcements (chat_id, {column}, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+             if column == "card_lang" else
+             f"INSERT INTO gamification_announcements (chat_id, {column}, card_lang, updated_at) VALUES (?, ?, 'en', CURRENT_TIMESTAMP) ")
+            + f"ON CONFLICT(chat_id) DO UPDATE SET {column} = excluded.{column}, updated_at = CURRENT_TIMESTAMP",
             (chat_id, clean_value)
         )
         if field == "status" and clean_value == 1:
@@ -5424,8 +5508,8 @@ def set_gamification_announcement_media(chat_id: int, media_id: str | None, medi
     clean_type = media_type.lower() if (clean_id and media_type) else None
     with _write_transaction() as conn:
         conn.execute(
-            "INSERT INTO gamification_announcements (chat_id, media_id, media_type, updated_at) "
-            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "INSERT INTO gamification_announcements (chat_id, media_id, media_type, card_lang, updated_at) "
+            "VALUES (?, ?, ?, 'en', CURRENT_TIMESTAMP) "
             "ON CONFLICT(chat_id) DO UPDATE SET media_id = excluded.media_id, media_type = excluded.media_type, "
             "updated_at = CURRENT_TIMESTAMP",
             (chat_id, clean_id, clean_type)
@@ -5554,7 +5638,7 @@ def compose_gamification_card(cfg: dict) -> dict:
     Si falta el texto del idioma pedido se usa el otro; si no hay ninguno, la plantilla oficial.
     La firma institucional se añade siempre que el texto no la incluya.
     """
-    card_lang = (cfg.get("card_lang") or "es").lower()
+    card_lang = (cfg.get("card_lang") or "en").lower()
     text_es = (cfg.get("text_es") or "").strip()
     text_en = (cfg.get("text_en") or "").strip()
 
@@ -5808,7 +5892,7 @@ LOG_REPORT_RETRY_MINUTES = (5, 15, 30, 60)
 def _log_report_row_to_dict(group_id: int, row) -> dict:
     if not row:
         return {"group_id": int(group_id), "enabled": False, "interval_hours": 24,
-                "metrics": list(LOG_REPORT_DEFAULT_METRICS), "lang": "es",
+                "metrics": list(LOG_REPORT_DEFAULT_METRICS), "lang": "en",
                 "last_sent_at": None, "next_at": None, "failures": 0}
     enabled, interval, metrics_raw, lang, anchor, last_sent, retry_at, failures = row
     try:

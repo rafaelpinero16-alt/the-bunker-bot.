@@ -3,6 +3,8 @@ admin_group.py — Gestor de comandos y administración de grupos en The Bunker 
 Fase 5: Sistema Criptográfico de Respaldo y Migración (Backup & Restore con HMAC-SHA256).
 v37: inglés por defecto + idioma/TTL de servicio por grupo, Anti-Rogue silencioso en comandos del Dueño y
      /reload sin choque con el /reload del Centinela (Pyrogram).
+v38.1: tipado estricto (Pylance/Pyright): todo valor Optional de aiogram (callback.data, callback.message,
+       message.from_user, reply_to_message.text/caption, File.file_path) se protege antes de usarse.
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 import os
@@ -13,6 +15,7 @@ import asyncio
 import time
 import html
 import logging
+from typing import Callable, Optional
 from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, ChatPermissions, InlineKeyboardMarkup, 
@@ -69,11 +72,23 @@ def is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMIN_IDS
 
 
-_LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+# v38 · regla canónica de idioma (database.resolve_lang) y autodetección centralizada.
+# v38.1 · Tipos declarados ANTES del try: asignar None a un símbolo importado es un error de tipado en Pylance.
+_LANG_AUTODETECT: bool
+_resolve_lang: Optional[Callable[..., str]]
+try:
+    from database.database import LANG_AUTODETECT as _DB_LANG_AUTODETECT, resolve_lang as _db_resolve_lang
+    _LANG_AUTODETECT = bool(_DB_LANG_AUTODETECT)
+    _resolve_lang = _db_resolve_lang
+except ImportError:  # pragma: no cover - base de datos anterior a v38
+    _LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+    _resolve_lang = None
 
 
-def get_lang(lang_code: str) -> str:
-    """v37 · Inglés por defecto; el español por language_code solo con BUNKER_LANG_AUTODETECT=1."""
+def get_lang(lang_code: Optional[str]) -> str:
+    """Inglés por defecto; el español por language_code solo con BUNKER_LANG_AUTODETECT=1 (regla canónica v38)."""
+    if _resolve_lang is not None:
+        return _resolve_lang(None, lang_code)
     if _LANG_AUTODETECT and lang_code and str(lang_code).lower().startswith("es"):
         return "es"
     return "en"
@@ -97,6 +112,15 @@ async def _svc_ttl(chat_id: int, fallback: int, minimum: int = 0) -> int:
     except Exception:
         ttl = fallback
     return max(minimum, ttl)
+
+
+def _localize_report(report, lang: str) -> str:
+    """v38 · Informe de import_group_configuration (inglés) traducido al idioma de servicio del grupo."""
+    try:
+        from database.database import localize_import_report
+        return localize_import_report(report, lang)
+    except Exception:
+        return str(report or "")
 
 
 async def _ignore(message: Message) -> None:
@@ -400,7 +424,7 @@ async def resolve_target(message: Message, command: CommandObject, bot: Bot):
         if getattr(user_obj, "username", None):
             tag = f"@{user_obj.username}"
         else:
-            name = getattr(user_obj, "full_name", getattr(user_obj, "first_name", "Usuario"))
+            name = getattr(user_obj, "full_name", getattr(user_obj, "first_name", "User"))
             tag = f'<a href="tg://user?id={user_obj.id}">{html.escape(name)}</a>'
         return target_id, tag
     elif target_id:
@@ -491,7 +515,7 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
     elif message.document:
         doc = message.document
     elif message.reply_to_message and (message.reply_to_message.text or message.reply_to_message.caption):
-        candidate = message.reply_to_message.text or message.reply_to_message.caption
+        candidate = message.reply_to_message.text or message.reply_to_message.caption or ""
         if "payload" in candidate and "signature" in candidate:
             json_content = candidate
     elif command and command.args:
@@ -502,9 +526,11 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
     if doc:
         try:
             file_obj = await bot.get_file(doc.file_id)
+            if not file_obj.file_path:
+                raise ValueError("file path unavailable")
             downloaded = await bot.download_file(file_obj.file_path)
             if downloaded is None:
-                raise ValueError("La descarga del archivo no devolvió datos")
+                raise ValueError("empty download")
             json_content = downloaded.read().decode("utf-8")
         except Exception as dl_err:
             logger.error(f"Error descargando archivo de backup: {dl_err}")
@@ -542,7 +568,7 @@ async def cmd_import_settings(message: Message, command: CommandObject, bot: Bot
             _spawn(auto_delete_pair(message, succ_msg, await _svc_ttl(message.chat.id, 30, 20)))
         else:
             fail_msg = await message.reply(
-                t["backup_import_failed"].format(error=html.escape(report)),
+                t["backup_import_failed"].format(error=html.escape(_localize_report(report, lang))),
                 parse_mode="HTML"
             )
             _spawn(auto_delete_pair(message, fail_msg, await _svc_ttl(message.chat.id, 15)))
@@ -696,6 +722,8 @@ async def _reload_master_monitor(chat_id: int, lang: str, t: dict) -> str:
         if outcome in labels:
             return labels[outcome][0 if lang == "es" else 1]
         return t["sentinel_master_standby"].format(error=outcome)
+    if assistant_app is None:
+        return t["sentinel_master_standby"].format(error="no MTProto session")
     try:
         peer = await assistant_app.resolve_peer(chat_id)
         if chat_id in active_sentinels:
@@ -721,7 +749,8 @@ async def cmd_settings_group(message: Message, bot: Bot):
     if message.chat.type == "private": 
         return
     
-    if not await is_user_admin(bot, message.chat.id, message.from_user.id if message.from_user else 0):
+    user_id = message.from_user.id if message.from_user else 0
+    if not await is_user_admin(bot, message.chat.id, user_id):
         try: 
             await message.delete()
         except Exception: 
@@ -729,9 +758,9 @@ async def cmd_settings_group(message: Message, bot: Bot):
         return
 
     await register_user_group(
-        user_id=message.from_user.id, 
+        user_id=user_id, 
         group_id=message.chat.id, 
-        group_name=message.chat.title or "Comunidad",
+        group_name=message.chat.title or "Community",
         chat_type=message.chat.type
     )
     bot_info = await bot.get_me()
@@ -781,7 +810,7 @@ async def cmd_autolower_config(message: Message, command: CommandObject, bot: Bo
 
 @router.callback_query(F.data.startswith("gautolower_"))
 async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
-    data_parts = callback.data.split("_")
+    data_parts = (callback.data or "").split("_")
     if len(data_parts) < 3:
         await callback.answer()
         return
@@ -805,10 +834,12 @@ async def process_autolower_callback(callback: CallbackQuery, bot: Bot):
     await set_autolower_status(group_id, new_status)
     
     status_text = t["status_active"] if new_status == 1 else t["status_inactive"]
-    try:
-        await callback.message.edit_text(t["autolower_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
-    except Exception:
-        pass
+    panel_msg = callback.message
+    if isinstance(panel_msg, Message):   # un mensaje inaccesible (muy antiguo) no se puede editar
+        try:
+            await panel_msg.edit_text(t["autolower_panel"].format(status=status_text), reply_markup=panel_msg.reply_markup, parse_mode="HTML")
+        except Exception:
+            pass
 
 
 @router.message(Command("podcast"))
@@ -842,7 +873,7 @@ async def cmd_podcast_config(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("gpodcast_"))
 async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
-    data_parts = callback.data.split("_")
+    data_parts = (callback.data or "").split("_")
     if len(data_parts) < 3:
         await callback.answer()
         return
@@ -871,10 +902,12 @@ async def process_podcast_callback(callback: CallbackQuery, bot: Bot):
         await disengage_podcast_ducking(group_id)
 
     status_text = t["status_active_pod"] if new_status == 1 else t["status_inactive_pod"]
-    try:
-        await callback.message.edit_text(t["podcast_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
-    except Exception:
-        pass
+    panel_msg = callback.message
+    if isinstance(panel_msg, Message):   # un mensaje inaccesible (muy antiguo) no se puede editar
+        try:
+            await panel_msg.edit_text(t["podcast_panel"].format(status=status_text), reply_markup=panel_msg.reply_markup, parse_mode="HTML")
+        except Exception:
+            pass
 
 
 @router.message(Command("shield"))
@@ -908,7 +941,7 @@ async def cmd_shield_config(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("gshield_"))
 async def process_shield_callback(callback: CallbackQuery, bot: Bot):
-    data_parts = callback.data.split("_")
+    data_parts = (callback.data or "").split("_")
     if len(data_parts) < 3:
         await callback.answer()
         return
@@ -937,10 +970,12 @@ async def process_shield_callback(callback: CallbackQuery, bot: Bot):
         await disengage_screen_shield(group_id)
     
     status_text = t["status_active_shield"] if new_status == 1 else t["status_inactive_shield"]
-    try:
-        await callback.message.edit_text(t["shield_panel"].format(status=status_text), reply_markup=callback.message.reply_markup, parse_mode="HTML")
-    except Exception:
-        pass
+    panel_msg = callback.message
+    if isinstance(panel_msg, Message):   # un mensaje inaccesible (muy antiguo) no se puede editar
+        try:
+            await panel_msg.edit_text(t["shield_panel"].format(status=status_text), reply_markup=panel_msg.reply_markup, parse_mode="HTML")
+        except Exception:
+            pass
 
 
 # ==========================================================
@@ -987,7 +1022,7 @@ async def cmd_warn_user(message: Message, command: CommandObject, bot: Bot):
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
-    if not target_id:
+    if not target_id or target_tag is None:
         msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 10)))
         return
@@ -1084,7 +1119,7 @@ async def cmd_reset_warns(message: Message, command: CommandObject, bot: Bot):
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
-    if not target_id:
+    if not target_id or target_tag is None:
         msg = await message.reply(t["target_needed_warn"], parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 10)))
         return
@@ -1144,7 +1179,7 @@ async def cmd_remove_vip(message: Message, command: CommandObject, bot: Bot):
         return
 
     target_id, target_tag = await resolve_target(message, command, bot)
-    if not target_id:
+    if not target_id or target_tag is None:
         msg = await message.reply(t["target_needed_vip"], parse_mode="HTML")
         _spawn(auto_delete_pair(message, msg, await _svc_ttl(message.chat.id, 10)))
         return

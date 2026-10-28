@@ -492,6 +492,12 @@ GROUP_SVC_TEXTS: dict[str, dict[str, str]] = {
         "heatmap": "📊 <b>Traffic &amp; peak hours audit (Heatmap)</b>\n📍 <b>Community:</b> <code>{title}</code>\n\n• 📈 <b>Indexed messages:</b> <code>{total}</code>\n• ⚡ <b>Busiest day:</b> <b>{day}</b>\n• ⏰ <b>Busiest time slot:</b> <code>{h1:02d}:00 - {h2:02d}:00</code>\n• 🔥 <b>Peak traffic record:</b> <code>{peak} messages</code>\n\n💡 <i>Tip: schedule video chats and announcements during peak days and hours to maximise the audience.</i>",
         "heatmap_default_day": "Monday",
         "btn_heatmap": "📊 View 24x7 heatmap",
+        "ghost_progress": "🧹 <b>Ghost Purge (Bot API registry) in progress...</b>\n\n• Checked: <b>{done}/{total}</b>\n• Ghosts found: <b>{found}</b>",
+        "engine_mtproto": "MTProto Sentinel 💎",
+        "engine_botapi": "Bot API registry (local roster) 🤖",
+        "heatmap_unknown_day": "Day",
+        "official_channel": "Official Channel",
+        "community_title": "Community",
     },
     "es": {
         "community": "la comunidad",
@@ -592,6 +598,12 @@ GROUP_SVC_TEXTS: dict[str, dict[str, str]] = {
         "heatmap": "📊 <b>Auditoría de tráfico y horas pico (Heatmap)</b>\n📍 <b>Comunidad:</b> <code>{title}</code>\n\n• 📈 <b>Mensajes indexados:</b> <code>{total}</code>\n• ⚡ <b>Día de mayor actividad:</b> <b>{day}</b>\n• ⏰ <b>Franja horaria más concurrida:</b> <code>{h1:02d}:00 - {h2:02d}:00</code>\n• 🔥 <b>Récord de tráfico en pico:</b> <code>{peak} mensajes</code>\n\n💡 <i>Recomendación: programa videollamadas y anuncios en los días y horas pico para maximizar la audiencia.</i>",
         "heatmap_default_day": "Lunes",
         "btn_heatmap": "📊 Ver mapa de calor 24x7",
+        "ghost_progress": "🧹 <b>Ghost Purge (padrón Bot API) en curso...</b>\n\n• Verificados: <b>{done}/{total}</b>\n• Fantasmas encontrados: <b>{found}</b>",
+        "engine_mtproto": "Centinela MTProto 💎",
+        "engine_botapi": "Padrón Bot API (registro local) 🤖",
+        "heatmap_unknown_day": "Día",
+        "official_channel": "Canal Oficial",
+        "community_title": "Comunidad",
     },
 }
 
@@ -710,7 +722,7 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
     is_channel = (chat.type == "channel")
     chat_type_str = "channel" if is_channel else "supergroup"
     group_id = chat.id
-    group_name = chat.title or ("Canal Oficial" if is_channel else "Comunidad")
+    group_name = chat.title or ("Official Channel" if is_channel else "Community")   # v38 · inglés por defecto
     user = event.from_user
 
     # 👑 Regla de Oro: el registro de dueños SOLO guarda al CREADOR real del chat. Antes se registraba a quien
@@ -1338,7 +1350,7 @@ async def handle_new_members(message: Message, bot: Bot):
             RECENTLY_VERIFIED.pop(k, None)
 
     adder = message.from_user
-    for new_user in message.new_chat_members:
+    for new_user in message.new_chat_members or []:
         if new_user.id == bot_me.id:
             continue
 
@@ -1434,7 +1446,7 @@ async def track_member_updates(event: ChatMemberUpdated, bot: Bot):
 
 @router.callback_query(F.data.startswith("cap_ver_") | F.data.startswith("cap_simple_"))
 async def process_captcha(callback: CallbackQuery, bot: Bot):
-    data = callback.data.split("_")
+    data = (callback.data or "").split("_")
     if len(data) < 4:
         await callback.answer()
         return
@@ -1481,7 +1493,7 @@ async def process_captcha(callback: CallbackQuery, bot: Bot):
     cfg = await get_captcha_config(group_id)
 
     try:
-        if callback.message is not None:
+        if isinstance(callback.message, Message):   # InaccessibleMessage no tiene delete()
             await callback.message.delete()
     except Exception:
         pass
@@ -1572,6 +1584,8 @@ async def raid_gate_start(message: Message, command: CommandObject, bot: Bot):
     try:
         group_id = int(str(command.args or "").split("_", 1)[1])
     except (IndexError, ValueError):
+        return
+    if message.from_user is None:
         return
     user_id = message.from_user.id
     lang = await group_lang(group_id)
@@ -1801,10 +1815,8 @@ async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", 
             last_edit = time.time()
             await _edit_status(
                 status_msg,
-                f"🧹 <b>Ghost Purge (Padrón Bot API) en curso...</b>\n\n"
-                f"• Verificados: <b>{processed}/{len(candidates)}</b>\n"
-                f"• Fantasmas encontrados: <b>{stats['ghost'] + stats['invalid']}</b>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
+                gtx(await group_lang(group_id), "ghost_progress", done=processed, total=len(candidates),
+                    found=stats["ghost"] + stats["invalid"])
             )
         await asyncio.sleep(0.2)
 
@@ -1821,11 +1833,12 @@ async def run_bot_api_ghost_purge(bot: Bot, group_id: int, action: str = "ban", 
 
 
 async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ban", dry_run: bool = False, status_msg: Optional[Message] = None) -> dict:
+    lang = await group_lang(group_id)
     try:
-        mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action)
+        mtproto_res = await execute_ghost_purge(chat_id=group_id, action=action, lang=lang)
         if mtproto_res.get("status") == "success" and not dry_run:
             return {
-                "engine": "MTProto Sentinel 💎",
+                "engine": gtx(lang, "engine_mtproto", signed=False),
                 "found": mtproto_res.get("found", 0),
                 "purged": mtproto_res.get("purged", 0),
                 "action": action
@@ -1834,7 +1847,7 @@ async def execute_unified_ghost_purge(bot: Bot, group_id: int, action: str = "ba
         logger.warning(f"Aviso MTProto Purge en {group_id}, pasando a Bot API: {ex}")
 
     bot_api_res = await run_bot_api_ghost_purge(bot, group_id, action=action, dry_run=dry_run, status_msg=status_msg)
-    bot_api_res["engine"] = "Bot API Registry (Padrón Local) 🤖"
+    bot_api_res["engine"] = gtx(lang, "engine_botapi", signed=False)
     return bot_api_res
 
 
@@ -1980,7 +1993,7 @@ async def panic_command(message: Message, bot: Bot):
 @router.callback_query(F.data.startswith("panic_off_"))
 async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
     try:
-        group_id = int(callback.data.split("_")[-1])
+        group_id = int((callback.data or "").split("_")[-1])
     except ValueError:
         await callback.answer()
         return
@@ -2004,10 +2017,11 @@ async def panic_deactivate_callback(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.warning(f"Aviso restaurando permisos de {group_id} tras desactivar /panic: {e}")
 
-    try:
-        await callback.message.edit_text(gtx(lang, "panic_off_done"), parse_mode="HTML")
-    except Exception:
-        pass
+    if isinstance(callback.message, Message):   # un mensaje inaccesible no se puede editar
+        try:
+            await callback.message.edit_text(gtx(lang, "panic_off_done"), parse_mode="HTML")
+        except Exception:
+            pass
     await callback.answer(gtx(lang, "panic_off_toast", signed=False))
 
 
@@ -2058,7 +2072,7 @@ async def screenshield_toggle(message: Message, bot: Bot):
     group_id = message.chat.id
     if not await _require_owner_message(bot, message):
         return
-    args = message.text.split()[1:]
+    args = (message.text or "").split()[1:]
     status = _parse_on_off(args)
     await set_screen_shield_status(group_id, status)
     _sync_miniapp(group_id, ["shield_enabled"])
@@ -2074,7 +2088,7 @@ async def duck_volume_command(message: Message, bot: Bot):
     group_id = message.chat.id
     if not await _require_owner_message(bot, message):
         return
-    args = message.text.split()[1:]
+    args = (message.text or "").split()[1:]
     lang = await group_lang(group_id)
     if not args or not args[0].strip().isdigit():
         reply = await message.answer(html.escape(gtx(lang, "duck_usage", signed=False)), parse_mode="HTML")
@@ -2092,7 +2106,7 @@ async def noiseshield_toggle(message: Message, bot: Bot):
     group_id = message.chat.id
     if not await _require_owner_message(bot, message):
         return
-    args = message.text.split()[1:]
+    args = (message.text or "").split()[1:]
     status = _parse_on_off(args)
     await set_noise_shield_status(group_id, status)
     _sync_miniapp(group_id, ["noise_shield"])
@@ -2179,9 +2193,13 @@ async def speakers_command(message: Message, bot: Bot):
 
 @router.callback_query(F.data.startswith("speak_buy_"))
 async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
-    parts = callback.data.split("_")
-    group_id = int(parts[2])
-    price = int(parts[3])
+    parts = (callback.data or "").split("_")
+    try:
+        group_id = int(parts[2])
+        price = int(parts[3])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
     await callback.answer()
     lang = await group_lang(group_id)
 
@@ -2203,8 +2221,9 @@ async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
             open_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=gtx(lang, "btn_open_dm", signed=False), url=f"https://t.me/{bot_info.username}?start=speakers")]
             ])
-            notice = await callback.message.answer(gtx(lang, "spk_open_dm"), reply_markup=open_kb, parse_mode="HTML")
-            _spawn(auto_delete_msg(notice, await service_ttl(group_id, 30)))
+            if callback.message is not None:
+                notice = await callback.message.answer(gtx(lang, "spk_open_dm"), reply_markup=open_kb, parse_mode="HTML")
+                _spawn(auto_delete_msg(notice, await service_ttl(group_id, 30)))
         except Exception:
             pass
 
@@ -2216,15 +2235,18 @@ async def speakers_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
 
 @router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith("speak_"))
 async def speakers_successful_payment(message: Message, bot: Bot):
-    payload = message.successful_payment.invoice_payload
+    payment = message.successful_payment
+    if payment is None or message.from_user is None:
+        return
+    payload = payment.invoice_payload
     try:
         _, group_id_str, user_id_str = payload.split("_")
         group_id, buyer_id = int(group_id_str), int(user_id_str)
     except Exception:
         return
 
-    stars_paid = message.successful_payment.total_amount
-    full_name = message.from_user.full_name or "Usuario"
+    stars_paid = payment.total_amount
+    full_name = message.from_user.full_name or gtx(await group_lang(group_id), "user", signed=False)
     username = message.from_user.username or ""
 
     await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
@@ -2482,17 +2504,17 @@ _REASON_TEXT = {
 
 _SANCTION_TEXT = {
     "mute": (
-        "🔇", "Sanción Automática / Auto-Sanction",
+        "🔇", "Auto-Sanction",
         "ha sido silenciado en el chat y videochat por acumulación de faltas.",
         "User has been muted due to reaching the strike threshold."
     ),
     "kick": (
-        "👢", "Sanción Automática / Auto-Sanction",
+        "👢", "Auto-Sanction",
         "ha sido expulsado temporalmente por infringir las reglas.",
         "User has been kicked due to reaching the strike threshold."
     ),
     "ban": (
-        "🚫", "Bloqueo Definitivo / Permanent Ban",
+        "🚫", "Permanent Ban",
         "ha sido bloqueado permanentemente de la comunidad por faltas reiteradas.",
         "User has been permanently banned from the community."
     ),
@@ -2724,7 +2746,7 @@ async def _process_message_reputation(bot: Bot, message: Message):
 
     group_id = message.chat.id
     user_id = message.from_user.id
-    full_name = message.from_user.full_name or "Usuario"
+    full_name = message.from_user.full_name or gtx(await group_lang(group_id), "user", signed=False)
     username = message.from_user.username or ""
 
     rep_result = await add_user_reputation_xp(
@@ -2867,6 +2889,10 @@ async def cmd_chat_heatmap(message: Message, bot: Bot):
     days = data.get("days", [])
 
     lang = await group_lang(group_id)
+    try:
+        local_days = list(_db_module.weekday_names(lang))
+    except Exception:
+        local_days = list(days)
     # Identificar la hora pico global y el día de mayor actividad
     peak_day = gtx(lang, "heatmap_default_day", signed=False)
     peak_hour = 12
@@ -2878,7 +2904,8 @@ async def cmd_chat_heatmap(message: Message, bot: Bot):
             total_msgs += count
             if count > max_count:
                 max_count = count
-                peak_day = days[day_num - 1] if 1 <= day_num <= 7 else "Día"
+                peak_day = (local_days[day_num - 1] if 1 <= day_num <= len(local_days)
+                            else gtx(lang, "heatmap_unknown_day", signed=False))
                 peak_hour = hour
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -3107,8 +3134,9 @@ async def group_lang_callback(callback: CallbackQuery, bot: Bot):
         invalidate_service_prefs(group_id)
         _sync_miniapp(group_id, ["service_lang"], source="group_command")
         await callback.answer(gtx(code, "lang_set_group", signed=False), show_alert=True)
-        with contextlib.suppress(Exception):
-            await callback.message.delete()
+        if isinstance(callback.message, Message):
+            with contextlib.suppress(Exception):
+                await callback.message.delete()
         return
     await set_user_lang(user.id, code, user.username, user.full_name)
     with contextlib.suppress(Exception):
@@ -3204,7 +3232,12 @@ async def group_security_matrix(message: Message, bot: Bot):
             if "t.me/" not in lower_text and "telegram.me/" not in lower_text:
                 is_threat_detected = True
         elif await get_antispam_filter(group_id, "quotes") == 1 and (message.quote or message.reply_to_message):
-            quoted_text = (message.quote.text if message.quote else (message.reply_to_message.text or "")) if (message.quote or message.reply_to_message) else ""
+            if message.quote is not None:
+                quoted_text = message.quote.text or ""
+            elif message.reply_to_message is not None:
+                quoted_text = message.reply_to_message.text or ""
+            else:
+                quoted_text = ""
             if "http://" in quoted_text.lower() or "https://" in quoted_text.lower() or "t.me/" in quoted_text.lower():
                 is_threat_detected = True
         elif await get_antispam_filter(group_id, "forwards") == 1 and message.forward_origin:

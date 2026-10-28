@@ -4234,6 +4234,13 @@ async def main():
     # 🔄 v16 · Toda acción de la consola privada que cambie ajustes reales se refleja al instante en la Mini App.
     dp.callback_query.outer_middleware.register(SettingsSyncMiddleware())
     dp.message.outer_middleware.register(SettingsSyncMiddleware())
+    # 🌐 v38 · Idioma guardado del usuario (users.lang) visible para TODOS los routers —pagos, grupos, VC, admin_group—,
+    #    no solo para la consola privada: se precarga en privados, botones y pre-checkouts (en grupos manda el idioma
+    #    de servicio del grupo). Sin preferencia guardada, el ecosistema responde en inglés.
+    try:
+        user_private.install_global_lang_middleware(dp)
+    except Exception as e:
+        logger.warning(f"⚠️ [i18n] Middleware global de idioma no instalado: {e}")
 
     # 🎯 ORDEN ESTRICTO DE ROUTERS:
     # (v25) Las apelaciones de baneo entran por payments.router (familia appeal_ en sus regex): ban_appeals ya no

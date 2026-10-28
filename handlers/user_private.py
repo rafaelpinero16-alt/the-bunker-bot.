@@ -1279,6 +1279,7 @@ TEXTS = {
         ),
         "eco_main": (
             "📡 <b>Radar y Control del Ecosistema</b>\n\n"
+            "Telemetría en tiempo real y supervisión del Centinela de Voz para <b>{group_name}</b>:\n\n"
             "• 📡 <b>Radar Ecosistema y /cams</b>\n"
             "• ⚙️ <b>/autolower y Programador VC</b>\n"
             "• 🎙️ <b>/mic_vip y Propinas Stars</b>\n\n"
@@ -1693,16 +1694,64 @@ for _bundle in TEXTS.values():
 # 🛡️ NÚCLEO DE RESILIENCIA (SEGURO ANTE REINICIOS DE RAM / RAILWAY)
 # ==========================================
 def tr(lang: str, es: str, en: str) -> str:
-    """Selector bilingüe inline (Español / Inglés)."""
+    """Selector bilingüe inline: español SOLO si lang == 'es'; cualquier otro valor (None, 'en', desconocido) → inglés."""
     return es if lang == "es" else en
+
+
+def _localize_import_report(report, lang: str) -> str:
+    """v38 · Informe de import_group_configuration en el idioma del operador (inglés por defecto)."""
+    try:
+        from database.database import localize_import_report
+        return localize_import_report(report, lang)
+    except Exception:
+        return str(report or "")
+
+
+# ==========================================
+# 🔐 v38 · ERRORES DE VINCULACIÓN DEL CENTINELA (assistant devuelve códigos estables; aquí se traducen)
+# ==========================================
+_AUTH_ERRORS: dict = {
+    "invalid_phone": ("Número no válido. Incluye el código internacional (ej. +57...).",
+                      "Invalid phone number. Include the country code (e.g. +1...)."),
+    "invalid_code": ("Código incorrecto. Escríbelo con espacios (ej. 1 2 3 4 5).",
+                     "Wrong code. Type it with spaces (e.g. 1 2 3 4 5)."),
+    "session_expired": ("La verificación caducó. Vuelve a enviar el número.",
+                        "The verification expired. Send the number again."),
+    "connection_lost": ("Se perdió la conexión con Telegram. Inténtalo de nuevo.",
+                        "The connection to Telegram was lost. Try again."),
+    "connect_failed": ("No se pudo conectar a los servidores de Telegram.", "Could not connect to Telegram's servers."),
+    "timeout": ("Tiempo de espera agotado. Revisa tu conexión y el formato del número (+código).",
+                "Timed out. Check your connection and the number format (+code)."),
+    "phone_banned": ("Este número está suspendido en Telegram.", "This phone number is banned on Telegram."),
+    "phone_flood": ("Demasiados intentos con este número. Espera unas horas.",
+                    "Too many attempts with this number. Wait a few hours."),
+    "phone_not_registered": ("Este número no tiene cuenta de Telegram.", "This number has no Telegram account."),
+    "invalid_password": ("Contraseña de verificación en dos pasos incorrecta.", "Wrong two-step verification password."),
+    "api_credentials_missing": ("Faltan TELEGRAM_API_ID / TELEGRAM_API_HASH en el servidor.",
+                                "TELEGRAM_API_ID / TELEGRAM_API_HASH are missing on the server."),
+}
+
+
+def auth_error_text(lang: str, code) -> str:
+    """Texto (escapado) del error de vinculación por teléfono / código / 2FA."""
+    raw = str(code or "")
+    if raw.startswith("flood_wait_") and raw[11:].isdigit():
+        secs = int(raw[11:])
+        return tr(lang, f"Telegram pide esperar {secs} s antes de reintentar.", f"Telegram asks to wait {secs} s before retrying.")
+    pair = _AUTH_ERRORS.get(raw)
+    if pair:
+        return tr(lang, pair[0], pair[1])
+    return f"Telegram: {html.escape(raw or tr(lang, 'error de conexión', 'connection error'))}"
 
 
 # ==========================================
 # 🌐 v21 · IDIOMA DEL OPERADOR: inglés por defecto, español latino persistente
 # ==========================================
-# Orden de resolución: 1) preferencia guardada (users.lang) → 2) idioma de Telegram SOLO si
-# BUNKER_LANG_AUTODETECT=1 → 3) DEFAULT_LANG ('en', o BUNKER_DEFAULT_LANG). La preferencia se precarga en una
-# caché acotada (TTL + tope) mediante LangPreferenceMiddleware, así user_lang() sigue siendo síncrona.
+# Orden de resolución (v38 · regla ÚNICA, database.resolve_lang): 1) preferencia guardada (users.lang) →
+# 2) idioma de Telegram SOLO si BUNKER_LANG_AUTODETECT=1 → 3) inglés. La preferencia se precarga en una caché acotada
+# (TTL + tope) mediante LangPreferenceMiddleware, así user_lang() sigue siendo síncrona. v38: el middleware también
+# se instala en el Dispatcher (install_global_lang_middleware), de modo que pagos, grupos, VC y admin_group ven la
+# preferencia guardada aunque el evento no pase por este router.
 try:
     from database.database import (
         get_user_lang, set_user_lang, normalize_lang, DEFAULT_LANG as _DB_DEFAULT_LANG,
@@ -1720,8 +1769,14 @@ except ImportError:  # pragma: no cover - base de datos anterior a v21: sin pers
         raw = str(value or "").strip().lower()
         return "en" if raw.startswith("en") else ("es" if raw.startswith("es") else default)
 
-DEFAULT_LANG = _DB_DEFAULT_LANG
-LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+try:
+    from database.database import LANG_AUTODETECT as _DB_LANG_AUTODETECT, resolve_lang as _db_resolve_lang
+except ImportError:  # pragma: no cover - base de datos anterior a v38
+    _DB_LANG_AUTODETECT = os.getenv("BUNKER_LANG_AUTODETECT", "0").strip() == "1"
+    _db_resolve_lang = None
+
+DEFAULT_LANG = "en" if _DB_DEFAULT_LANG not in ("en", "es") else _DB_DEFAULT_LANG
+LANG_AUTODETECT = _DB_LANG_AUTODETECT
 LANG_PREF_TTL_SECONDS = 600
 LANG_PREF_CACHE_MAX = 20000
 _LANG_PREFS: dict = {}   # user_id → (lang | None, monotonic_ts)
@@ -1744,17 +1799,43 @@ def _cached_user_lang(user_id: int):
 
 
 def user_lang(user) -> str:
-    """Idioma con el que se habla a este usuario (síncrono; la preferencia ya está precargada)."""
+    """
+    Idioma con el que se habla a este usuario (síncrono). Con la preferencia ya precargada devuelve la elección
+    guardada; si la caché no la tiene, aplica la regla canónica (autodetección opcional → inglés) y programa la
+    precarga en segundo plano para que la siguiente respuesta ya use la preferencia real.
+    """
     uid = getattr(user, "id", None)
+    pref = None
     if uid:
-        pref, _hit = _cached_user_lang(int(uid))
-        if pref:
-            return pref
+        pref, hit = _cached_user_lang(int(uid))
+        if not hit:
+            _schedule_lang_prime(user)
+    if _db_resolve_lang is not None:
+        return _db_resolve_lang(pref, getattr(user, "language_code", None))
+    if pref:
+        return pref
     if LANG_AUTODETECT:
         detected = normalize_lang(getattr(user, "language_code", None))
         if detected:
             return detected
     return DEFAULT_LANG
+
+
+_LANG_PRIME_INFLIGHT: set = set()
+
+
+def _schedule_lang_prime(user) -> None:
+    """Precarga users.lang sin bloquear (llamadas síncronas fuera del middleware). Una sola tarea por usuario."""
+    uid = int(getattr(user, "id", 0) or 0)
+    if not uid or uid in _LANG_PRIME_INFLIGHT:
+        return
+    try:
+        task = asyncio.get_running_loop().create_task(prime_user_lang(user))
+    except RuntimeError:
+        return
+    _LANG_PRIME_INFLIGHT.add(uid)
+    _SETTINGS_EMIT_TASKS.add(task)
+    task.add_done_callback(lambda t, u=uid: (_LANG_PRIME_INFLIGHT.discard(u), _SETTINGS_EMIT_TASKS.discard(t)))
 
 
 async def prime_user_lang(user) -> str:
@@ -1799,17 +1880,44 @@ def lang_from_callback(callback, data: list) -> str:
 
 
 class LangPreferenceMiddleware(BaseMiddleware):
-    """Precarga users.lang antes de cada handler de esta consola (mensajes y botones)."""
+    """
+    Precarga users.lang antes de cada handler (mensajes y botones). `private_only=True` (instalación global) limita la
+    precarga a chats privados, botones y pagos: en los grupos manda el idioma de SERVICIO del grupo, así que no tiene
+    sentido consultar la base por cada mensaje de cada miembro.
+    """
+
+    def __init__(self, private_only: bool = False):
+        self.private_only = private_only
 
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         if user is not None and not getattr(user, "is_bot", False):
-            await prime_user_lang(user)
+            chat = getattr(event, "chat", None)
+            if not self.private_only or chat is None or getattr(chat, "type", None) == "private":
+                await prime_user_lang(user)
         return await handler(event, data)
 
 
 router.message.middleware(LangPreferenceMiddleware())
 router.callback_query.middleware(LangPreferenceMiddleware())
+
+
+async def resolve_user_lang(user) -> str:
+    """v38 · API pública para otros módulos: preferencia guardada (precargándola si hace falta) → inglés."""
+    return await prime_user_lang(user)
+
+
+def install_global_lang_middleware(dispatcher) -> None:
+    """
+    v38 · Registra LangPreferenceMiddleware como outer middleware del Dispatcher (maestro y clones comparten dp):
+    TODO router —payments, groups, vc_manager, admin_group— ve la preferencia guardada del usuario. Idempotente.
+    """
+    if getattr(dispatcher, "_bunker_lang_mw", False):
+        return
+    dispatcher.message.outer_middleware.register(LangPreferenceMiddleware(private_only=True))
+    dispatcher.callback_query.outer_middleware.register(LangPreferenceMiddleware(private_only=True))
+    dispatcher.pre_checkout_query.outer_middleware.register(LangPreferenceMiddleware(private_only=True))
+    dispatcher._bunker_lang_mw = True
 
 
 def language_selector_keyboard(current: str, back_callback: Optional[str] = None) -> InlineKeyboardMarkup:
@@ -5215,7 +5323,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
                     reply_markup=back_kb, parse_mode="HTML"
                 )
             else:
-                resp = await message.answer(f"❌ <b>{tr(lang, 'Fallo al restaurar', 'Restore failed')}:</b> {report}", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer(f"❌ <b>{tr(lang, 'Fallo al restaurar', 'Restore failed')}:</b> "
+                                            f"{html.escape(_localize_import_report(report, lang))}", reply_markup=back_kb, parse_mode="HTML")
         else:
             resp = await message.answer(tr(lang, "⚠️ Envía un archivo <code>.bunker</code> válido o pega el JSON con firma HMAC.", "⚠️ Send a valid <code>.bunker</code> file or paste the HMAC-signed JSON."), reply_markup=back_kb, parse_mode="HTML")
 
@@ -5292,7 +5401,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             if text_val.isdigit() and int(text_val) >= 0:
                 col_name = f"{prefix}_autodel_seconds"
                 await set_sentinel_service_message(group_id, col_name, int(text_val))
-                resp = await message.answer(f"✅ <b>Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer("✅ <b>" + tr(lang, f"Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.",
+                                                       f"Auto-delete time for {target.upper()} set to {text_val}s.") + "</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
             else:
                 resp = await message.answer(tr(lang, "⚠️ Ingresa un número entero de segundos (0 para no borrar).", "⚠️ Enter a whole number of seconds (0 to keep the message)."), reply_markup=back_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
@@ -5407,7 +5517,8 @@ async def handle_private_inputs(message: Message, bot: Bot):
             if text_val.isdigit() and int(text_val) >= 0:
                 col_name = f"{prefix}_autodel_seconds"
                 await set_sentinel_service_message(group_id, col_name, int(text_val))
-                resp = await message.answer(f"✅ <b>Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
+                resp = await message.answer("✅ <b>" + tr(lang, f"Tiempo de auto-borrado para {target.upper()} actualizado a {text_val}s.",
+                                                       f"Auto-delete time for {target.upper()} set to {text_val}s.") + "</b>\n\n🛡️ <i>Cloud Media Management</i>", reply_markup=back_kb, parse_mode="HTML")
             else:
                 resp = await message.answer(tr(lang, "⚠️ Ingresa un número entero de segundos (0 para no borrar).", "⚠️ Enter a whole number of seconds (0 to keep the message)."), reply_markup=back_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([message, resp], delay=60)
@@ -5635,12 +5746,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 [InlineKeyboardButton(text=t["btn_retry"], callback_data=f"clone_phone_{group_id}_{lang}")],
                 [(await origin_back_button(bot, group_id, lang))]
             ])
-            raw_err = res.get("message", "Error de conexión")
-            error_reason = (
-                tr(lang, "Número no válido. Asegúrate de incluir el código internacional (ej. +57...).", 
-                         "Invalid phone number. Ensure you include the country code (e.g. +1...).") 
-                if raw_err == "invalid_phone" else f"Telegram: {html.escape(str(raw_err))}"
-            )
+            error_reason = auth_error_text(lang, res.get("message") or "connect_failed")
             resp = await message.answer(t["phone_error"].format(reason=error_reason), reply_markup=cancel_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([resp], delay=45)
         return
@@ -5687,7 +5793,7 @@ async def handle_private_inputs(message: Message, bot: Bot):
                 [(await origin_back_button(bot, group_id, lang))]
             ])
             raw_err = res.get("message", "invalid_code")
-            err_msg = t["code_invalid"] if raw_err == "invalid_code" else f"❌ Error: {html.escape(str(raw_err))}"
+            err_msg = t["code_invalid"] if raw_err == "invalid_code" else f"❌ {auth_error_text(lang, raw_err)}"
             resp = await message.answer(err_msg, reply_markup=cancel_kb, parse_mode="HTML")
             fire_and_forget_auto_delete([resp], delay=30)
         return
@@ -5720,16 +5826,16 @@ async def handle_private_inputs(message: Message, bot: Bot):
             tier = await get_effective_group_tier(group_id, user_id)
             
             try:
-                g_name = html.escape((await bot.get_chat(group_id)).title or "Comunidad")
+                g_name = html.escape((await bot.get_chat(group_id)).title or tr(lang, "Comunidad", "Community"))
             except Exception:
-                g_name = "Comunidad"
-                
+                g_name = tr(lang, "Comunidad", "Community")
+
             clone_info = await get_bot_clone(user_id, group_id)
             has_clone = clone_info is not None and clone_info[2] == 'active' and bool(clone_info[0])
-            status_clone = "Operativo 🟢" if has_clone else "No Configurado 🔴"
-            
+            status_clone = tr(lang, "Operativo 🟢", "Operational 🟢") if has_clone else tr(lang, "No Configurado 🔴", "Not configured 🔴")
+
             # Aquí es donde el estado cambia a verde con sesión activa
-            sentinel_status = "Conectado 🟢" if connected else "Error de Conexión 🔴"
+            sentinel_status = tr(lang, "Conectado 🟢", "Connected 🟢") if connected else tr(lang, "Error de Conexión 🔴", "Connection error 🔴")
             
             panel_text = TEXTS[lang]["clone_main_title"].format(
                 group_name=g_name, 
@@ -5749,6 +5855,20 @@ async def handle_private_inputs(message: Message, bot: Bot):
             # Redibuja la consola principal de clon/centinela actualizada
             await message.answer(panel_text, reply_markup=panel_keyboard, parse_mode="HTML")
             return
+        # v38 · Antes un 2FA fallido no respondía nada (el aviso «verificando» se borraba y el usuario quedaba sin
+        # saber qué pasó). Ahora se explica el motivo, se retira la contraseña del chat y el estado se conserva para
+        # reintentar escribiéndola de nuevo.
+        retry_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=t["btn_cancel_ret"], callback_data=f"clone_cancel_{group_id}_{lang}")]
+        ])
+        resp = await message.answer(
+            f"❌ {auth_error_text(lang, res.get('message') or 'invalid_password')}\n\n"
+            + tr(lang, "Escribe la contraseña de nuevo para reintentar.", "Type the password again to retry.")
+            + PERIMETER_SIGNATURE,
+            reply_markup=retry_kb, parse_mode="HTML",
+        )
+        fire_and_forget_auto_delete([message, resp], delay=30)
+        return
 
     # 6. PROGRAMADOR VC
     if (bot.id, user_id) in VC_SCHED_STATES:
@@ -6659,13 +6779,15 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         except Exception:
             g_name = "Comunidad" if lang == "es" else "Community"
 
-        st_panic = "🚨 ACTIVO" if telemetry["panic_active"] else "🟢 Inactivo"
-        st_shield = "🟢 Blindado" if telemetry["shield_status"] else "🔴 Desactivado"
-        st_podcast = "🟢 Activo" if telemetry["podcast_status"] else "🔴 Inactivo"
-        st_autolower = "🟢 Activo (2%)" if telemetry["autolower_status"] else "🔴 Desactivado"
-        st_night = "🟢 Activo" if telemetry["night_mode_status"] else "🔴 Inactivo"
-        st_clone = "🟢 Operativo" if telemetry["has_active_clone"] else "🔴 No configurado"
-        st_sentinel = "🟢 Conectado" if telemetry["has_active_sentinel"] else "🔴 Desconectado"
+        on_txt, off_txt = tr(lang, "🟢 Activo", "🟢 Active"), tr(lang, "🔴 Inactivo", "🔴 Inactive")
+        disabled_txt = tr(lang, "🔴 Desactivado", "🔴 Disabled")
+        st_panic = tr(lang, "🚨 ACTIVO", "🚨 ACTIVE") if telemetry["panic_active"] else tr(lang, "🟢 Inactivo", "🟢 Inactive")
+        st_shield = tr(lang, "🟢 Blindado", "🟢 Shielded") if telemetry["shield_status"] else disabled_txt
+        st_podcast = on_txt if telemetry["podcast_status"] else off_txt
+        st_autolower = tr(lang, "🟢 Activo (2%)", "🟢 Active (2%)") if telemetry["autolower_status"] else disabled_txt
+        st_night = on_txt if telemetry["night_mode_status"] else off_txt
+        st_clone = tr(lang, "🟢 Operativo", "🟢 Operational") if telemetry["has_active_clone"] else tr(lang, "🔴 No configurado", "🔴 Not configured")
+        st_sentinel = tr(lang, "🟢 Conectado", "🟢 Connected") if telemetry["has_active_sentinel"] else tr(lang, "🔴 Desconectado", "🔴 Disconnected")
 
         text = (
             f"📡 <b>Radar & Telemetría en Vivo — {g_name}</b>\n\n"
@@ -7573,7 +7695,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         elif sub == "delmedia":
             await set_warn_custom_field(group_id, "warn_custom_media_id", None)
             await set_warn_custom_field(group_id, "warn_custom_media_type", None)
-            await callback.answer("🗑️ Multimedia retirada de las advertencias.", show_alert=True)
+            await callback.answer(tr(lang, "🗑️ Multimedia retirada de las advertencias.", "🗑️ Media removed from warnings."), show_alert=True)
             cfg = await get_warns_config(group_id)
             await safe_edit_text(callback,
                 t["warns_main_title"].format(limit=cfg["limit"], action=cfg["action"].upper()),
@@ -7843,7 +7965,7 @@ async def _apply_ai_patch(group_id: int, patch: dict, lang: str) -> tuple[Option
 def get_reputation_keyboard(group_id: int, lang: str, rep_cfg: dict, chat_type: str = "g") -> InlineKeyboardMarkup:
     """Botonera de control de Gamificación y Niveles XP con indicadores visuales activos."""
     is_on = (int(rep_cfg.get("enabled", 1) or 0) == 1)
-    st_btn = f"🎮 {'Sistema XP: 🟢 Activado' if is_on else 'Sistema XP: 🔴 Desactivado'}"
+    st_btn = "🎮 " + (tr(lang, "Sistema XP: 🟢 Activado", "XP system: 🟢 On") if is_on else tr(lang, "Sistema XP: 🔴 Desactivado", "XP system: 🔴 Off"))
     mult = float(rep_cfg.get("multiplier", 1.0) or 1.0)
     back_btn = ultra_back_button(chat_type, group_id, lang)
 
@@ -8023,9 +8145,9 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             text, keyboard = build_ultra_lock_view(group_id, lang, feature_title, chat_type=chat_kind)
         elif sub == "menu":
             try:
-                g_title = (await bot.get_chat(group_id)).title or "Comunidad"
+                g_title = (await bot.get_chat(group_id)).title or tr(lang, "Comunidad", "Community")
             except Exception:
-                g_title = "Comunidad"
+                g_title = tr(lang, "Comunidad", "Community")
             text = t["backup_main"].format(title=html.escape(g_title))
             keyboard = get_backup_vault_keyboard(group_id, lang, chat_type=chat_kind)
         elif sub == "export":
@@ -8033,13 +8155,17 @@ async def cb_ultra_tools_dispatch(callback: CallbackQuery, bot: Bot):
             package_str = await export_group_configuration(group_id)
             clean_filename = f"bunker_vault_{abs(group_id)}_{int(time.time())}.bunker"
             doc_file = BufferedInputFile(package_str.encode("utf-8"), filename=clean_filename)
-            caption = (
+            caption = tr(
+                lang,
                 f"🔐 <b>Bóveda Perimetral — The Bunker OS</b>\n\n"
                 f"• <b>Comunidad:</b> <code>{group_id}</code>\n"
                 f"• <b>Firma Digital:</b> <code>HMAC-SHA256 (Válida 🟢)</code>\n\n"
-                f"<i>Guarda este archivo. Puedes restaurarlo en cualquier momento respondiendo con /importsettings o desde esta misma consola.</i>\n\n"
-                f"🛡️ <i>Cloud Media Management</i>"
-            )
+                f"<i>Guarda este archivo. Puedes restaurarlo en cualquier momento respondiendo con /importsettings o desde esta misma consola.</i>",
+                f"🔐 <b>Perimeter Vault — The Bunker OS</b>\n\n"
+                f"• <b>Community:</b> <code>{group_id}</code>\n"
+                f"• <b>Digital signature:</b> <code>HMAC-SHA256 (Valid 🟢)</code>\n\n"
+                f"<i>Keep this file. You can restore it at any time by replying with /importsettings or from this console.</i>",
+            ) + "\n\n🛡️ <i>Cloud Media Management</i>"
             back_kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 " + tr(lang, "Volver", "Back"), callback_data=f"backup_menu_{group_id}_{lang}")]
             ])
@@ -8555,7 +8681,7 @@ async def cb_sentinel_config_dispatch(callback: CallbackQuery, bot: Bot):
             prompt_txt = (
                 f"🏷️ <b>{tr(lang, 'Nombre del Botón y Enlace', 'Button Label and URL')} ({(target_msg or "").upper()}):</b>\n\n"
                 f"{tr(lang, 'Envía el texto del botón, o usa la sintaxis:', 'Send the button text, or use the syntax:')}\n"
-                f"<code>Texto del Botón | https://t.me/tu_enlace</code>\n\n"
+                f"<code>{tr(lang, 'Texto del Botón | https://t.me/tu_enlace', 'Button text | https://t.me/your_link')}</code>\n\n"
                 f"{tr(lang, 'El texto cubrirá el enlace al 100% sin exponer URLs en el mensaje.', 'The button text will seamlessly embed the link without exposing URLs.')}\n\n"
                 f"🛡️ <i>Cloud Media Management</i>"
             )
@@ -8714,8 +8840,8 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
         # Cuerpo del copy formateado (sin links en texto plano)
         caption_body = (
             f"💎 <b>{html.escape(plan['plan_name'])}</b>\n\n"
-            f"⏳ <b>Duración:</b> {plan['duration_days']} " + tr(lang, "días", "days") + "\n"
-            f"⭐ <b>Precio:</b> {plan['stars_price']} XTR (Stars)\n\n"
+            f"⏳ <b>{tr(lang, 'Duración', 'Duration')}:</b> {plan['duration_days']} " + tr(lang, "días", "days") + "\n"
+            f"⭐ <b>{tr(lang, 'Precio', 'Price')}:</b> {plan['stars_price']} XTR (Stars)\n\n"
             f"{plan.get('promo_text') or ''}"
         ) + PERIMETER_SIGNATURE
 
@@ -8790,8 +8916,8 @@ async def cb_channel_plans_dispatch(callback: CallbackQuery, bot: Bot):
 
         post_body = (
             f"💎 <b>{html.escape(plan['plan_name'])}</b>\n\n"
-            f"⏳ <b>Duración:</b> {plan['duration_days']} " + tr(lang, "días", "days") + "\n"
-            f"⭐ <b>Precio:</b> {plan['stars_price']} XTR\n\n"
+            f"⏳ <b>{tr(lang, 'Duración', 'Duration')}:</b> {plan['duration_days']} " + tr(lang, "días", "days") + "\n"
+            f"⭐ <b>{tr(lang, 'Precio', 'Price')}:</b> {plan['stars_price']} XTR\n\n"
             f"{plan.get('promo_text') or ''}"
         ) + PERIMETER_SIGNATURE
 
