@@ -6,6 +6,9 @@
    v8.2: modal nativo del canal de registro, sincronización real de chats, difusión personalizada con
    acciones rápidas (vista previa · difundir · limpiar) y consola de control de grupos operativa.
    v8.3: generador CRUD de planes (channel_plans) y consola de programación 1:1 del bot por módulos.
+   v43: Fase 9 — panel «Mensajes de Servicio» (js/servicemsgs.js: mensajes nativos por tipo, avisos del bot, horario del
+   videochat, doble lista negra ULTRA PRO y enlaces de donación PRO), acceso directo en el panel lateral y recarga en
+   vivo con las señales svcmsg_* / blk_* / don_* del radar.
    v42: la Ghost Purge lanzada desde la Mini App (o desde el bot) se sigue hasta que el servidor confirma que terminó
    (antes se recargaba UNA vez a los 15 s y el botón quedaba bloqueado en purgas largas) y el evento 'backup_restored'
    del radar repinta la consola al restaurar un respaldo .bunker desde el bot o desde otra sesión.
@@ -21,6 +24,7 @@ import { ui } from './ui.js';
 import { moderationConsole } from './moderation.js';
 // 🧾 v41.1 · Canal de registro en tiempo real (vectores) + auditoría de pases MicVIP activos.
 import { auditLogConsole } from './auditlog.js';
+import { serviceMessagesConsole } from './servicemsgs.js';   // 📨 v43 · Fase 9
 
 const STUDIO_ALIAS_RE = /^@[A-Za-z][A-Za-z0-9_]{4,31}$/;
 const CHAT_ID_RE = /^-?\d{5,20}$/;
@@ -970,6 +974,7 @@ export const app = {
             this.rerenderForLanguage();
             moderationConsole.render();   // 🏆 v40 · el dashboard de moderación usa sus propios textos EN/ES
             auditLogConsole.render();     // 🧾 v41.1
+            serviceMessagesConsole.render();   // 📨 v43
         }
         if (announce) ui.showToast({ key: 'lang', force: true, icon: '🌐', tone: 'info', ttl: 1800, title: ui.t('i18n_lang_toast') });
         return next;
@@ -2617,7 +2622,7 @@ export const app = {
             if (!isCurrent()) return;
             if (envelope && typeof client._trackSeq === 'function') client._trackSeq(envelope);
             this.scheduleDashboardReload(chatId);
-            this.onPerimeterSignal(chatId, { changed: ['ai_backup', 'purge_backup', 'shield_backup'] });
+            this.onPerimeterSignal(chatId, { changed: ['ai_backup', 'purge_backup', 'shield_backup', 'backup_restored'] });
         });
         client.on('assets_status', (data, envelope) => {
             if (!isCurrent()) return;
@@ -3419,6 +3424,10 @@ export const app = {
         if (changed.some(f => f.startsWith('vip_'))) this.scheduleV23Reload('vip');
         if (changed.some(f => f.startsWith('alq_'))) this.scheduleV23Reload('alq');
         if (changed.some(f => f.startsWith('appeal_'))) this.scheduleV23Reload('apl');   // v24
+        // 📨 v43 · Mensajes de servicio, doble lista negra y enlaces de donación (bot, otra sesión o respaldo restaurado)
+        if (changed.some(f => f.startsWith('svcmsg_') || f.startsWith('blk_') || f.startsWith('don_') || f === 'backup_restored')) {
+            serviceMessagesConsole.onRemoteChange(changed);
+        }
         this.schedulePerimeterRefresh(chatId);
     },
 
@@ -3767,6 +3776,7 @@ export const app = {
         this.loadBanAppeals({ reset: true });
         moderationConsole.start(id);   // 🏆 v40
         auditLogConsole.start(id);     // 🧾 v41.1
+        serviceMessagesConsole.start(id);   // 📨 v43
     },
 
     stopV23Console() {
@@ -3784,6 +3794,7 @@ export const app = {
         ui.renderAdminQuotas(null, { idle: true });
         moderationConsole.stop();   // 🏆 v40
         auditLogConsole.stop();     // 🧾 v41.1
+        serviceMessagesConsole.stop();   // 📨 v43
     },
 
     /** Respuesta de escritura: aviso de error (403 = solo el dueño) y háptica. Devuelve true si fue bien. */
@@ -4253,6 +4264,15 @@ export const app = {
      * factura se paga dentro de Telegram. Un segundo argumento heredado (HTML en caché) se ignora: la
      * plataforma no cobra por ningún otro medio.
      */
+    /** 📨 v43 · Acceso directo del panel lateral: abre Ajustes del Bot y desplaza la vista al panel de servicio. */
+    openServicePanel() {
+        this.switchTab('bot-settings');
+        setTimeout(() => {
+            const panel = document.getElementById('svc-panel');
+            if (panel && typeof panel.scrollIntoView === 'function') panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 120);
+    },
+
     pagarPlan(plan, chatId) {
         // v29 · La licencia SIEMPRE viaja con su comunidad: `sub_pro_{chat_id}` / `sub_ultra_{chat_id}`.
         // Prioridad del destino: argumento explícito (Renovar / tarjeta de conversión) → comunidad elegida al

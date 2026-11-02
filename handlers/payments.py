@@ -1,6 +1,10 @@
 """
 payments.py — The Bunker OS (Aiogram 3.x)
 
+v43 · El mensaje de regreso tras pagar (propinas, MicVIP, apelaciones…) solo lleva el botón de vuelta al grupo y se
+      autoelimina a los 30 s (PAYMENT_RETURN_TTL). Las propinas muestran también los enlaces externos de donación de
+      la comunidad (PRO+). Las donaciones a la plataforma (pdon_) las gestiona user_private.
+
 Facturación oficial EXCLUSIVA con Telegram Stars (XTR).
 Gestiona la facturación automatizada de licencias PRO/ULTRA PRO, pases VIP de micrófono,
 membresías de canales con enlaces criptográficos de un solo uso, cola de speakers y propinas.
@@ -727,7 +731,7 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
     if custom and "Cloud Media Management" not in text:
         text = f"{text}\n\n{_SIGNATURE}"
 
-    # v37 · Un ÚNICO botón de retorno efímero (un solo uso, solo el donante, autoeliminable a los 15 min).
+    # v37 · Un ÚNICO botón de retorno efímero (un solo uso, solo el donante). v43 · Se autoelimina a los 30 s.
     markup, token = await build_return_markup(user_id, group_id, lang, community)
     if markup is None:
         # Sin ticket (base no disponible): se conserva el botón URL clásico de v36.
@@ -763,8 +767,16 @@ async def send_tip_thanks(bot: Bot, user_id: int, stars: int, group_id: int, lan
 # ==========================================
 # El botón es un callback (no una URL): reenviar el mensaje no da acceso a nadie. Solo el comprador puede pulsarlo
 # y solo una vez; al pulsarlo se borra el agradecimiento y se entrega un enlace de un uso que caduca y se revoca.
-# Si no se pulsa, el agradecimiento se autoelimina a los 15 minutos. Libro mayor, idempotencia y reembolsos intactos.
-RETURN_TICKET_TTL = 900        # el agradecimiento (y su botón) vive 15 minutos
+# Si no se pulsa, el agradecimiento se autoelimina (v43: a los 30 s por defecto, PAYMENT_RETURN_TTL para cambiarlo;
+# mínimo 15 s). Libro mayor, idempotencia y reembolsos intactos.
+def _return_ttl_from_env() -> int:
+    try:
+        return max(15, int(os.getenv("PAYMENT_RETURN_TTL", "30") or 30))
+    except (TypeError, ValueError):
+        return 30
+
+
+RETURN_TICKET_TTL = _return_ttl_from_env()   # el agradecimiento (y su único botón de regreso) vive 30 s
 RETURN_LINK_TTL = 120          # el enlace de un solo uso caduca a los 2 minutos
 RETURN_LINK_NAME = "Bunker · one-time return"
 
@@ -789,11 +801,15 @@ async def build_return_markup(user_id: int, chat_id: int, lang: str,
 
 
 async def arm_return_message(bot: Bot, sent: Message | None, token: str | None) -> None:
-    """Vincula el mensaje al ticket y programa su autoeliminación si el botón no se usa."""
-    if sent is None or not token:
+    """
+    Vincula el mensaje al ticket y programa su autoeliminación si el botón no se usa. v43 · El mensaje de regreso
+    (solo un botón, sin menú general) se borra también cuando no hay ticket (respaldo con botón URL clásico).
+    """
+    if sent is None:
         return
-    with contextlib.suppress(Exception):
-        await _call_db_fn("bind_return_ticket_message", token, sent.message_id)
+    if token:
+        with contextlib.suppress(Exception):
+            await _call_db_fn("bind_return_ticket_message", token, sent.message_id)
     _spawn(_delete_message_later(bot, sent.chat.id, sent.message_id, RETURN_TICKET_TTL))
 
 
@@ -1384,6 +1400,13 @@ async def show_tip_selection(message: Message, group_id: int, lang: str = "es"):
     ]
     if rules["custom_allowed"]:
         rows.append([InlineKeyboardButton(text=btn_custom_text, callback_data=f"paytip_custom_{group_id}")])
+    # 💰 v43 · Enlaces externos de donación de la comunidad (PRO+), debajo de los montos en Stars
+    try:
+        if await _call_db_fn("feature_allowed", group_id, "donation_links"):
+            for link in (await _call_db_fn("get_donation_links", group_id)) or []:
+                rows.append([InlineKeyboardButton(text=f"🔗 {link['label']}"[:64], url=link["url"])])
+    except Exception as ex:
+        logger.debug(f"[Propinas] Enlaces de donación no disponibles para {group_id}: {ex}")
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
     if rules["custom_allowed"]:

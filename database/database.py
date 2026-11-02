@@ -1,6 +1,11 @@
 """
 database.py — The Bunker OS (Sqlite3 Async-Wrapper Pattern)
 Núcleo relacional de persistencia, canales, telemetría y seguridad perimetral.
+v43 · Fase 9 (aditiva): reglas por tipo de los mensajes nativos de Telegram (mantener / borrar / borrar a los X s),
+       autoborrado y personalización de los avisos del bot (warn / mute / kick / ban) con botón de apelación,
+       enlaces externos de donación por comunidad, donaciones a la plataforma (Arquitecto), doble lista negra por
+       comunidad (ULTRA PRO: lista de baneo y lista de advertencia) y ventana horaria de los mensajes del Video Chat.
+       La doble lista negra viaja en los respaldos .bunker; el resto va en la fila de ajustes como siempre.
 v42.1 · Inglés por defecto también en los mensajes que la capa de datos devuelve al operador: todas las validaciones
          "campo: motivo" (errores 422 de la API y avisos del bot), los valores por defecto de chat_language ('EN') y
          user_strikes.last_reason ('Rules violation'), «Deleted plan» en la auditoría de suscriptores y los estados
@@ -29,6 +34,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 import types
 import urllib.parse
 from html.parser import HTMLParser
@@ -1061,6 +1067,8 @@ def init_db():
         ]
 
         _ensure_columns(cursor, "group_settings", settings_columns)
+        _ensure_columns(cursor, "group_settings", V43_SETTINGS_COLUMNS)   # v43 · Fase 9 (aditivo)
+        _v43_create_tables(cursor)
 
         cursor.execute("CREATE TABLE IF NOT EXISTS command_usage (group_id INTEGER, command TEXT, usage_date TEXT, count INTEGER DEFAULT 0, PRIMARY KEY (group_id, command, usage_date))")
         cursor.execute("CREATE TABLE IF NOT EXISTS vip_mic_passes (user_id INTEGER, group_id INTEGER, expires_at TIMESTAMP, PRIMARY KEY (user_id, group_id))")
@@ -5402,11 +5410,18 @@ def export_group_configuration(group_id: int) -> str:
         sched_dict = dict(sched_row) if sched_row else {}
         cursor.execute("SELECT target_value FROM group_tip_targets WHERE group_id = ?", (group_id,))
         targets = [r[0] for r in cursor.fetchall()]
+        # v43 · Doble lista negra de la comunidad (tabla aparte: no viaja en la fila de ajustes).
+        group_blacklists = {kind: [] for kind in ("ban", "warn")}
+        with contextlib.suppress(sqlite3.Error):
+            for term, kind in conn.execute("SELECT term, list_type FROM group_blacklist WHERE group_id = ?",
+                                           (group_id,)).fetchall():
+                if kind in group_blacklists:
+                    group_blacklists[kind].append(term)
 
     payload = {
         "version": "6.0", "exported_at": datetime.now().isoformat(),
         "source_group_id": group_id, "settings": settings_dict,
-        "vc_schedule": sched_dict, "tip_targets": targets,
+        "vc_schedule": sched_dict, "tip_targets": targets, "group_blacklists": group_blacklists,
         "reputation_enabled": _read_reputation_settings(group_id)["enabled"],
         "reputation_xp_multiplier": _read_reputation_settings(group_id)["multiplier"],
     }
@@ -5502,6 +5517,21 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
                     "INSERT OR IGNORE INTO group_tip_targets (group_id, target_value, is_active) VALUES (?, ?, 1)",
                     [(target_group_id, str(t).strip()) for t in tip_targets if isinstance(t, (str, int)) and str(t).strip()],
                 )
+
+            # v43 · Doble lista negra (respaldos antiguos no la traen: no se toca la existente).
+            group_blacklists = payload.get("group_blacklists")
+            if isinstance(group_blacklists, dict):
+                lo, hi = GROUP_BLACKLIST_TERM_RANGE
+                rows = []
+                for kind in GROUP_BLACKLIST_TYPES:
+                    for raw in (group_blacklists.get(kind) or [])[:GROUP_BLACKLIST_MAX_PER_LIST]:
+                        term = normalize_blacklist_term(raw) if isinstance(raw, str) else ""
+                        if lo <= len(term) <= hi:
+                            rows.append((target_group_id, term, kind, None, _now_epoch()))
+                cursor.execute("DELETE FROM group_blacklist WHERE group_id = ?", (target_group_id,))
+                cursor.executemany(
+                    "INSERT OR REPLACE INTO group_blacklist (group_id, term, list_type, added_by, added_at) "
+                    "VALUES (?, ?, ?, ?, ?)", rows)
             conn.commit()
         return True, msgs["ok"]
     except Exception as ex:
@@ -8011,6 +8041,842 @@ def get_chat_entitlements(chat_id: int) -> dict:
             for name, req in FEATURE_MIN_TIER.items()
         },
     }
+
+
+# ==========================================================================================
+# 🧩 v43 · FASE 9 — MENSAJES DE SERVICIO, AVISOS DEL BOT, DONACIONES, DOBLE LISTA NEGRA Y VENTANA DEL VC
+# ------------------------------------------------------------------------------------------
+# Todo es ADITIVO: columnas nuevas en group_settings (viajan solas en los respaldos .bunker, que copian la fila
+# completa) y tablas nuevas. Ningún ajuste antiguo cambia de significado:
+#   • Mensajes nativos de Telegram: sin reglas propias se deriva el comportamiento heredado (service_msgs_mode /
+#     captcha service_del → borrar; los del videochat se borraban SIEMPRE y siguen así por defecto).
+#   • Avisos del bot (warn / mute / kick / ban): sin reglas propias usan el TTL de servicio del grupo y, para la
+#     advertencia, el texto/multimedia heredado (warn_custom_*).
+#   • Mensajes del Video Chat: sin ventana configurada se emiten siempre, como hasta ahora.
+# Los errores de validación siguen el formato "campo: motivo" (la API los devuelve como 422).
+# ==========================================================================================
+NATIVE_SERVICE_KINDS = ("join", "leave", "videochat", "pinned", "chat_info")
+NATIVE_SERVICE_ACTIONS = ("keep", "delete", "delay")
+SERVICE_DELAY_RANGE = (5, 86400)
+SERVICE_DELAY_CHOICES = (10, 30, 60, 300, 900, 3600)
+BOT_NOTICE_KINDS = ("warn", "mute", "kick", "ban")
+BOT_NOTICE_TTL_RANGE = (0, 86400)            # 0 = permanente · None = TTL de servicio del grupo
+BOT_NOTICE_TEXT_MAX = 900
+MEDIA_TYPES_ALLOWED = ("photo", "video", "animation")
+DONATION_LINKS_MAX = 5
+DONATION_LABEL_MAX = 32
+DONATION_URL_MAX = 512
+DONATION_AMOUNTS_MAX = 5
+DONATION_TEXT_MAX = 900
+PLATFORM_DONATION_RANGE = (1, 100000)
+GROUP_BLACKLIST_TYPES = ("ban", "warn")
+GROUP_BLACKLIST_MAX_PER_LIST = 200
+GROUP_BLACKLIST_TERM_RANGE = (2, 64)
+VC_MSG_INTERVAL_RANGE = (0, 3600)            # separación mínima entre avisos del VC (segundos); 0 = sin límite
+_HM_STRICT_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+_URL_RE = re.compile(r"^https?://[^\s<>\"']{3,}$", re.IGNORECASE)
+_TG_URL_RE = re.compile(r"^(?:https?://)?(?:t\.me|telegram\.me)/[A-Za-z0-9_+/?=&%.-]+$", re.IGNORECASE)
+
+# Funciones con muro de pago (se suman al mapa FEATURE_MIN_TIER: la Mini App las bloquea con entitlements).
+V43_FEATURE_MIN_TIER = {
+    "bot_notice_custom": "pro",       # texto / multimedia propios en los avisos del bot + botón de apelación
+    "vc_message_window": "pro",       # horario de emisión de los mensajes del Video Chat
+    "donation_links": "pro",          # enlaces externos de donación
+    "double_blacklist": "ultra_pro",  # doble lista negra por comunidad
+}
+V43_FEATURE_LABELS = {
+    "bot_notice_custom": "Custom Bot Notices",
+    "vc_message_window": "Video Chat Message Schedule",
+    "donation_links": "External Donation Links",
+    "double_blacklist": "Double Blacklist",
+}
+
+
+def _v43_create_tables(cursor) -> None:
+    """Tablas nuevas de la Fase 9 (idempotente; la llama init_db)."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS group_blacklist (
+            group_id INTEGER NOT NULL,
+            term TEXT NOT NULL,
+            list_type TEXT NOT NULL CHECK (list_type IN ('ban', 'warn')),
+            added_by INTEGER,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (group_id, term)
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_blacklist_type ON group_blacklist (group_id, list_type)")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS platform_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at INTEGER,
+            updated_by INTEGER
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS platform_donations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            charge_id TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL,
+            amount_stars INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+    """)
+
+
+V43_SETTINGS_COLUMNS = [
+    ("svc_rules", "TEXT DEFAULT '{}'"),
+    ("botmsg_rules", "TEXT DEFAULT '{}'"),
+    ("tips_links", "TEXT DEFAULT '[]'"),
+    ("vc_messages_enabled", "INTEGER DEFAULT 1"),
+    ("vc_msg_start_time", "TEXT"),
+    ("vc_msg_end_time", "TEXT"),
+    ("vc_msg_interval", "INTEGER DEFAULT 0"),
+]
+
+
+def _now_epoch() -> int:
+    return int(time.time())
+
+
+def _json_load(raw, fallback):
+    """JSON de una columna; ante cualquier dato corrupto devuelve `fallback` (nunca lanza)."""
+    if raw is None or raw == "":
+        return fallback
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return fallback
+    return value if isinstance(value, type(fallback)) else fallback
+
+
+def _touch_config(conn, group_id: int, actor_id: Optional[int]) -> None:
+    with contextlib.suppress(sqlite3.Error):
+        conn.execute("UPDATE group_settings SET config_updated_at = ?, config_updated_by = ? WHERE group_id = ?",
+                     (_now_epoch(), int(actor_id) if actor_id else None, int(group_id)))
+
+
+def _require_patch(name: str, patch) -> dict:
+    if not isinstance(patch, dict) or not patch:
+        raise BunkerValidationError({name: "expected an object with at least one field."})
+    return patch
+
+
+def _coerce_bool_field(errors: dict, key: str, value) -> Optional[int]:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int) and value in (0, 1):
+        return value
+    errors[key] = "expected true/false."
+    return None
+
+
+def _coerce_range_field(errors: dict, key: str, value, lo: int, hi: int, unit: str = "") -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        errors[key] = f"must be a whole number between {lo} and {hi}{unit}."
+        return None
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        errors[key] = f"must be a whole number between {lo} and {hi}{unit}."
+        return None
+    if not lo <= number <= hi:
+        errors[key] = f"must be between {lo} and {hi}{unit}."
+        return None
+    return number
+
+
+def _validate_telegram_html(text: str) -> None:
+    """Mismo verificador de HTML de Telegram que la bienvenida y el agradecimiento de propinas (ValueError si falla)."""
+    checker = _TelegramHTMLCheck()
+    try:
+        checker.feed(text)
+        checker.close()
+    except Exception:
+        raise ValueError("the HTML formatting is not valid.")
+    if checker.error:
+        raise ValueError(checker.error)
+    if checker.stack:
+        raise ValueError(f"the <{checker.stack[-1]}> tag is not closed.")
+
+
+def _clean_text_field(errors: dict, key: str, value, max_len: int) -> Optional[str]:
+    """Texto opcional (None / '' = borrar). Se valida el HTML de Telegram con el mismo verificador de la bienvenida."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        errors[key] = "expected text."
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > max_len:
+        errors[key] = f"maximum {max_len} characters."
+        return None
+    try:
+        _validate_telegram_html(text)
+    except ValueError as ex:
+        errors[key] = str(ex)
+        return None
+    return text
+
+
+def _clean_media_pair(errors: dict, prefix: str, media_id, media_type) -> tuple:
+    if media_id in (None, "") and media_type in (None, ""):
+        return None, None
+    if not media_id or not media_type:
+        errors[f"{prefix}media"] = "media_id and media_type go together."
+        return None, None
+    if media_type not in MEDIA_TYPES_ALLOWED:
+        errors[f"{prefix}media_type"] = "must be photo, video or animation."
+        return None, None
+    if not isinstance(media_id, str) or len(media_id) > 256:
+        errors[f"{prefix}media_id"] = "invalid file id."
+        return None, None
+    return media_id, media_type
+
+
+# ------------------------------------------------------------------------------------------
+# 📨 MENSAJES NATIVOS DE TELEGRAM (join · leave · videochat · pinned · chat_info)
+# ------------------------------------------------------------------------------------------
+def _legacy_native_rules(conn, group_id: int) -> dict:
+    """Comportamiento heredado: service_msgs_mode=1 o captcha service_del=1 borran join/leave/pinned; VC siempre."""
+    mode = 1
+    service_del = 0
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT service_msgs_mode FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        if row and row[0] is not None:
+            mode = int(row[0])
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT captcha_service_del FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        if row and row[0] is not None:
+            service_del = int(row[0])
+    clean = "delete" if (mode == 1 or service_del == 1) else "keep"
+    return {
+        "join": {"action": clean, "delay": 30},
+        "leave": {"action": clean, "delay": 30},
+        "videochat": {"action": "delete", "delay": 30},
+        "pinned": {"action": clean, "delay": 30},
+        "chat_info": {"action": "keep", "delay": 30},
+    }
+
+
+def _native_rules_sync(conn, group_id: int) -> dict:
+    rules = _legacy_native_rules(conn, group_id)
+    custom = {}
+    legacy_mode = None
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT svc_rules, service_msgs_mode FROM group_settings WHERE group_id = ?",
+                           (group_id,)).fetchone()
+        if row:
+            custom = _json_load(row[0], {})
+            legacy_mode = row[1]
+    # Si el interruptor heredado cambió DESPUÉS de guardar reglas propias (bot antiguo, /configuration), manda él.
+    if custom and "_legacy" in custom and legacy_mode is not None and int(custom.get("_legacy")) != int(legacy_mode):
+        custom = {}
+    for kind in NATIVE_SERVICE_KINDS:
+        item = custom.get(kind) if isinstance(custom, dict) else None
+        if not isinstance(item, dict):
+            continue
+        action = item.get("action")
+        if action in NATIVE_SERVICE_ACTIONS:
+            rules[kind]["action"] = action
+        try:
+            delay = int(item.get("delay", rules[kind]["delay"]))
+            if SERVICE_DELAY_RANGE[0] <= delay <= SERVICE_DELAY_RANGE[1]:
+                rules[kind]["delay"] = delay
+        except (TypeError, ValueError):
+            pass
+    return rules
+
+
+@db_async
+def get_native_service_rules(group_id: int) -> dict:
+    """{kind: {action: keep|delete|delay, delay: segundos}} para los 5 tipos de mensaje nativo."""
+    with get_db_connection() as conn:
+        return _native_rules_sync(conn, int(group_id))
+
+
+def validate_native_service_patch(patch) -> dict:
+    """{kind: {action?, delay?}} → reglas limpias. Todo o nada (BunkerValidationError con "campo: motivo")."""
+    patch = _require_patch("service_messages", patch)
+    errors: dict = {}
+    clean: dict = {}
+    for kind, item in patch.items():
+        key = f"service_messages.{kind}"
+        if kind not in NATIVE_SERVICE_KINDS:
+            errors[key] = "unknown field."
+            continue
+        if not isinstance(item, dict) or not item:
+            errors[key] = "expected an object with action and/or delay."
+            continue
+        entry: dict = {}
+        for field, value in item.items():
+            if field == "action":
+                if value not in NATIVE_SERVICE_ACTIONS:
+                    errors[f"{key}.action"] = f"use {', '.join(NATIVE_SERVICE_ACTIONS)}."
+                else:
+                    entry["action"] = value
+            elif field == "delay":
+                number = _coerce_range_field(errors, f"{key}.delay", value, *SERVICE_DELAY_RANGE, " s")
+                if number is not None:
+                    entry["delay"] = number
+            else:
+                errors[f"{key}.{field}"] = "unknown field."
+        clean[kind] = entry
+    if errors:
+        raise BunkerValidationError(errors)
+    return clean
+
+
+@db_async
+def update_native_service_rules(group_id: int, patch: dict, actor_id: Optional[int] = None) -> dict:
+    """Aplica un cambio parcial validado y devuelve las reglas efectivas. Sincroniza service_msgs_mode."""
+    clean = validate_native_service_patch(patch)
+    gid = int(group_id)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (gid,))
+        current = _native_rules_sync(conn, gid)
+        for kind, entry in clean.items():
+            current[kind].update(entry)
+        # El interruptor heredado refleja si se limpia ALGO (lo leen el perímetro, la Mini App antigua y el bot).
+        legacy = 1 if any(current[k]["action"] != "keep" for k in ("join", "leave", "pinned")) else 0
+        stored = {k: dict(v) for k, v in current.items()}
+        stored["_legacy"] = legacy
+        conn.execute("UPDATE group_settings SET svc_rules = ?, service_msgs_mode = ? WHERE group_id = ?",
+                     (json.dumps(stored, separators=(",", ":")), legacy, gid))
+        _touch_config(conn, gid, actor_id)
+    return {k: dict(v) for k, v in current.items()}
+
+
+# ------------------------------------------------------------------------------------------
+# 🤖 AVISOS DEL BOT (warn · mute · kick · ban)
+# ------------------------------------------------------------------------------------------
+def _bot_notice_rules_sync(conn, group_id: int) -> dict:
+    rules = {kind: {"ttl": None, "text": None, "media_id": None, "media_type": None} for kind in BOT_NOTICE_KINDS}
+    rules_meta = {"appeal_button": False}
+    raw = {}
+    legacy = (None, None, None)
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT botmsg_rules, warn_custom_text, warn_custom_media_id, warn_custom_media_type "
+                           "FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        if row:
+            raw = _json_load(row[0], {})
+            legacy = (row[1], row[2], row[3])
+    for kind in BOT_NOTICE_KINDS:
+        item = raw.get(kind) if isinstance(raw, dict) else None
+        if not isinstance(item, dict):
+            continue
+        ttl = item.get("ttl")
+        if ttl is None or (isinstance(ttl, int) and not isinstance(ttl, bool)
+                           and BOT_NOTICE_TTL_RANGE[0] <= ttl <= BOT_NOTICE_TTL_RANGE[1]):
+            rules[kind]["ttl"] = ttl
+        for field in ("text", "media_id", "media_type"):
+            if isinstance(item.get(field), str) and item.get(field):
+                rules[kind][field] = item[field]
+        if rules[kind]["media_type"] not in MEDIA_TYPES_ALLOWED:
+            rules[kind]["media_id"] = rules[kind]["media_type"] = None
+    # La advertencia hereda el texto / multimedia que ya se editaba desde el bot (warn_custom_*).
+    if not rules["warn"]["text"] and legacy[0]:
+        rules["warn"]["text"] = legacy[0]
+    if not rules["warn"]["media_id"] and legacy[1] and legacy[2] in MEDIA_TYPES_ALLOWED:
+        rules["warn"]["media_id"], rules["warn"]["media_type"] = legacy[1], legacy[2]
+    if isinstance(raw, dict):
+        rules_meta["appeal_button"] = bool(raw.get("appeal_button"))
+    return {"notices": rules, **rules_meta}
+
+
+@db_async
+def get_bot_notice_rules(group_id: int) -> dict:
+    """{notices: {warn|mute|kick|ban: {ttl, text, media_id, media_type}}, appeal_button}."""
+    with get_db_connection() as conn:
+        return _bot_notice_rules_sync(conn, int(group_id))
+
+
+def validate_bot_notice_patch(patch) -> dict:
+    """{notices?: {kind: {ttl?, text?, media_id?, media_type?}}, appeal_button?} — todo o nada."""
+    patch = _require_patch("bot_notices", patch)
+    errors: dict = {}
+    clean: dict = {"notices": {}}
+    for field, value in patch.items():
+        if field == "appeal_button":
+            flag = _coerce_bool_field(errors, "bot_notices.appeal_button", value)
+            if flag is not None:
+                clean["appeal_button"] = bool(flag)
+        elif field == "notices":
+            if not isinstance(value, dict) or not value:
+                errors["bot_notices.notices"] = "expected an object with at least one field."
+                continue
+            for kind, item in value.items():
+                key = f"bot_notices.{kind}"
+                if kind not in BOT_NOTICE_KINDS:
+                    errors[key] = "unknown field."
+                    continue
+                if not isinstance(item, dict) or not item:
+                    errors[key] = "expected an object with at least one field."
+                    continue
+                entry: dict = {}
+                unknown = set(item) - {"ttl", "text", "media_id", "media_type"}
+                for name in unknown:
+                    errors[f"{key}.{name}"] = "unknown field."
+                if "ttl" in item:
+                    if item["ttl"] is None:
+                        entry["ttl"] = None
+                    else:
+                        number = _coerce_range_field(errors, f"{key}.ttl", item["ttl"], *BOT_NOTICE_TTL_RANGE, " s")
+                        if number is not None:
+                            entry["ttl"] = number
+                if "text" in item:
+                    entry["text"] = _clean_text_field(errors, f"{key}.text", item["text"], BOT_NOTICE_TEXT_MAX)
+                if "media_id" in item or "media_type" in item:
+                    entry["media_id"], entry["media_type"] = _clean_media_pair(
+                        errors, f"{key}.", item.get("media_id"), item.get("media_type"))
+                clean["notices"][kind] = entry
+        else:
+            errors[f"bot_notices.{field}"] = "unknown field."
+    if errors:
+        raise BunkerValidationError(errors)
+    return clean
+
+
+@db_async
+def update_bot_notice_rules(group_id: int, patch: dict, actor_id: Optional[int] = None) -> dict:
+    """
+    Guarda el cambio validado. Los campos de texto / multimedia / apelación exigen PRO (la API comprueba la licencia
+    antes de llamar aquí); el TTL está disponible en todos los rangos. El texto de la advertencia se escribe también
+    en warn_custom_* para que el panel del bot y la Mini App vean siempre el mismo valor.
+    """
+    clean = validate_bot_notice_patch(patch)
+    gid = int(group_id)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (gid,))
+        row = conn.execute("SELECT botmsg_rules FROM group_settings WHERE group_id = ?", (gid,)).fetchone()
+        stored = _json_load(row[0] if row else None, {})
+        for kind, entry in clean["notices"].items():
+            target = stored.get(kind) if isinstance(stored.get(kind), dict) else {}
+            target.update(entry)
+            stored[kind] = target
+            if kind == "warn":
+                if "text" in entry:
+                    conn.execute("UPDATE group_settings SET warn_custom_text = ? WHERE group_id = ?", (entry["text"], gid))
+                if "media_id" in entry:
+                    conn.execute("UPDATE group_settings SET warn_custom_media_id = ?, warn_custom_media_type = ? "
+                                 "WHERE group_id = ?", (entry["media_id"], entry["media_type"], gid))
+        if "appeal_button" in clean:
+            stored["appeal_button"] = clean["appeal_button"]
+        conn.execute("UPDATE group_settings SET botmsg_rules = ? WHERE group_id = ?",
+                     (json.dumps(stored, separators=(",", ":"), ensure_ascii=False), gid))
+        _touch_config(conn, gid, actor_id)
+        return _bot_notice_rules_sync(conn, gid)
+
+
+# ------------------------------------------------------------------------------------------
+# 💰 DONACIONES POR COMUNIDAD (enlaces externos; los montos siguen en tips_presets)
+# ------------------------------------------------------------------------------------------
+def normalize_donation_url(raw) -> Optional[str]:
+    """https://… o t.me/… → URL absoluta; None si no es un enlace válido."""
+    text = str(raw or "").strip()
+    if not text or len(text) > DONATION_URL_MAX:
+        return None
+    if _TG_URL_RE.match(text):
+        return text if text.lower().startswith("http") else f"https://{text}"
+    if _URL_RE.match(text):
+        return text
+    return None
+
+
+def _clean_links(errors: dict, key: str, value) -> Optional[list]:
+    if not isinstance(value, list):
+        errors[key] = "expected a list of {label, url}."
+        return None
+    if len(value) > DONATION_LINKS_MAX:
+        errors[key] = f"maximum {DONATION_LINKS_MAX} links."
+        return None
+    out = []
+    for i, item in enumerate(value):
+        if not isinstance(item, dict):
+            errors[f"{key}.{i}"] = "expected {label, url}."
+            continue
+        label = str(item.get("label") or "").strip()
+        url = normalize_donation_url(item.get("url"))
+        if not label or len(label) > DONATION_LABEL_MAX:
+            errors[f"{key}.{i}.label"] = f"between 1 and {DONATION_LABEL_MAX} characters."
+            continue
+        if not url:
+            errors[f"{key}.{i}.url"] = "use an https:// or t.me/ link."
+            continue
+        out.append({"label": label, "url": url})
+    return out
+
+
+def _links_sync(conn, group_id: int) -> list:
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT tips_links FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        links = _json_load(row[0] if row else None, [])
+        clean = []
+        for item in links[:DONATION_LINKS_MAX]:
+            if isinstance(item, dict):
+                url = normalize_donation_url(item.get("url"))
+                label = str(item.get("label") or "").strip()[:DONATION_LABEL_MAX]
+                if url and label:
+                    clean.append({"label": label, "url": url})
+        return clean
+    return []
+
+
+@db_async
+def get_donation_links(group_id: int) -> list:
+    with get_db_connection() as conn:
+        return _links_sync(conn, int(group_id))
+
+
+@db_async
+def set_donation_links(group_id: int, links: list, actor_id: Optional[int] = None) -> list:
+    errors: dict = {}
+    clean = _clean_links(errors, "links", links)
+    if errors:
+        raise BunkerValidationError(errors)
+    gid = int(group_id)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (gid,))
+        conn.execute("UPDATE group_settings SET tips_links = ? WHERE group_id = ?",
+                     (json.dumps(clean or [], separators=(",", ":"), ensure_ascii=False), gid))
+        _touch_config(conn, gid, actor_id)
+        return _links_sync(conn, gid)
+
+
+# ------------------------------------------------------------------------------------------
+# 💎 DONACIONES A LA PLATAFORMA (botón 💰 del /start · configuradas por el Arquitecto)
+# ------------------------------------------------------------------------------------------
+PLATFORM_DONATION_DEFAULTS = {
+    "enabled": True,
+    "amounts": [50, 100, 250, 500, 1000],
+    "links": [],
+    "text": None,
+    "media_id": None,
+    "media_type": None,
+}
+
+
+def _platform_get_sync(conn, key: str, fallback):
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT value FROM platform_settings WHERE key = ?", (key,)).fetchone()
+        if row and row[0] is not None:
+            return _json_load(row[0], fallback)
+    return fallback
+
+
+@db_async
+def get_platform_donation_config() -> dict:
+    cfg = {k: (list(v) if isinstance(v, list) else v) for k, v in PLATFORM_DONATION_DEFAULTS.items()}
+    with get_db_connection() as conn:
+        stored = _platform_get_sync(conn, "donations", {})
+    if isinstance(stored, dict):
+        if isinstance(stored.get("enabled"), bool):
+            cfg["enabled"] = stored["enabled"]
+        amounts = stored.get("amounts")
+        if isinstance(amounts, list):
+            clean = sorted({int(a) for a in amounts if isinstance(a, int) and not isinstance(a, bool)
+                            and PLATFORM_DONATION_RANGE[0] <= a <= PLATFORM_DONATION_RANGE[1]})
+            if clean:
+                cfg["amounts"] = clean[:DONATION_AMOUNTS_MAX]
+        links = stored.get("links")
+        if isinstance(links, list):
+            errors: dict = {}
+            cleaned = _clean_links(errors, "links", links)
+            cfg["links"] = cleaned or []
+        for field in ("text", "media_id", "media_type"):
+            if isinstance(stored.get(field), str) and stored.get(field):
+                cfg[field] = stored[field]
+        if cfg["media_type"] not in MEDIA_TYPES_ALLOWED:
+            cfg["media_id"] = cfg["media_type"] = None
+    return cfg
+
+
+def validate_platform_donation_patch(patch) -> dict:
+    patch = _require_patch("donations", patch)
+    errors: dict = {}
+    clean: dict = {}
+    for field, value in patch.items():
+        key = f"donations.{field}"
+        if field == "enabled":
+            flag = _coerce_bool_field(errors, key, value)
+            if flag is not None:
+                clean["enabled"] = bool(flag)
+        elif field == "amounts":
+            if not isinstance(value, list) or not 1 <= len(value) <= DONATION_AMOUNTS_MAX:
+                errors[key] = f"enter between 1 and {DONATION_AMOUNTS_MAX} amounts."
+                continue
+            amounts = []
+            for i, raw in enumerate(value):
+                number = _coerce_range_field(errors, f"{key}.{i}", raw, *PLATFORM_DONATION_RANGE, " Stars")
+                if number is not None:
+                    amounts.append(number)
+            clean["amounts"] = sorted(set(amounts))
+        elif field == "links":
+            links = _clean_links(errors, key, value)
+            if links is not None:
+                clean["links"] = links
+        elif field == "text":
+            clean["text"] = _clean_text_field(errors, key, value, DONATION_TEXT_MAX)
+        elif field in ("media_id", "media_type"):
+            continue
+        else:
+            errors[key] = "unknown field."
+    if "media_id" in patch or "media_type" in patch:
+        clean["media_id"], clean["media_type"] = _clean_media_pair(
+            errors, "donations.", patch.get("media_id"), patch.get("media_type"))
+    if errors:
+        raise BunkerValidationError(errors)
+    return clean
+
+
+@db_async
+def update_platform_donation_config(patch: dict, actor_id: Optional[int] = None) -> dict:
+    """Solo el Arquitecto (lo comprueba quien llama). Cambio parcial validado."""
+    clean = validate_platform_donation_patch(patch)
+    with _write_transaction() as conn:
+        stored = _platform_get_sync(conn, "donations", {})
+        if not isinstance(stored, dict):
+            stored = {}
+        stored.update(clean)
+        conn.execute(
+            "INSERT INTO platform_settings (key, value, updated_at, updated_by) VALUES ('donations', ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, "
+            "updated_by = excluded.updated_by",
+            (json.dumps(stored, separators=(",", ":"), ensure_ascii=False), _now_epoch(),
+             int(actor_id) if actor_id else None))
+    return get_platform_donation_config.sync()
+
+
+@db_async
+def record_platform_donation(charge_id: str, user_id: int, amount_stars: int) -> bool:
+    """Registra un cobro (idempotente por charge_id). True si es nuevo."""
+    if not charge_id:
+        return False
+    with _write_transaction() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO platform_donations (charge_id, user_id, amount_stars, created_at) VALUES (?, ?, ?, ?)",
+            (str(charge_id), int(user_id), int(amount_stars), _now_epoch()))
+        return cur.rowcount > 0
+
+
+@db_async
+def get_platform_donation_stats() -> dict:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT COUNT(*), COALESCE(SUM(amount_stars), 0), COUNT(DISTINCT user_id) "
+                           "FROM platform_donations").fetchone()
+    return {"count": int(row[0] or 0), "stars": int(row[1] or 0), "donors": int(row[2] or 0)}
+
+
+# ------------------------------------------------------------------------------------------
+# 🚫 DOBLE LISTA NEGRA POR COMUNIDAD (ULTRA PRO) — 'ban' expulsa en el acto · 'warn' borra y advierte
+# ------------------------------------------------------------------------------------------
+def normalize_blacklist_term(raw) -> str:
+    text = re.sub(r"\s+", " ", str(raw or "").strip().lower())
+    return text
+
+
+def _blacklists_sync(conn, group_id: int) -> dict:
+    out = {kind: [] for kind in GROUP_BLACKLIST_TYPES}
+    with contextlib.suppress(sqlite3.Error):
+        for term, kind in conn.execute("SELECT term, list_type FROM group_blacklist WHERE group_id = ? ORDER BY term",
+                                       (group_id,)).fetchall():
+            if kind in out:
+                out[kind].append(term)
+    return out
+
+
+@db_async
+def get_group_blacklists(group_id: int) -> dict:
+    """{'ban': [términos], 'warn': [términos]} de la comunidad."""
+    with get_db_connection() as conn:
+        return _blacklists_sync(conn, int(group_id))
+
+
+@db_async
+def add_group_blacklist_terms(group_id: int, list_type: str, terms: list, actor_id: Optional[int] = None) -> dict:
+    """
+    Añade términos a una lista (un término solo puede estar en UNA lista: si estaba en la otra, se mueve).
+    Devuelve {'lists', 'added', 'moved', 'skipped'}. 422 por tipo, longitud o tope de la lista.
+    """
+    errors: dict = {}
+    if list_type not in GROUP_BLACKLIST_TYPES:
+        errors["list_type"] = f"use {', '.join(GROUP_BLACKLIST_TYPES)}."
+    if not isinstance(terms, list) or not terms:
+        errors["terms"] = "expected a list with at least one term."
+    if errors:
+        raise BunkerValidationError(errors)
+    clean_terms: list = []
+    for i, raw in enumerate(terms[:GROUP_BLACKLIST_MAX_PER_LIST]):
+        term = normalize_blacklist_term(raw)
+        lo, hi = GROUP_BLACKLIST_TERM_RANGE
+        if not lo <= len(term) <= hi:
+            errors[f"terms.{i}"] = f"between {lo} and {hi} characters."
+        elif term not in clean_terms:
+            clean_terms.append(term)
+    if errors:
+        raise BunkerValidationError(errors)
+    gid = int(group_id)
+    added = moved = skipped = 0
+    with _write_transaction() as conn:
+        current = _blacklists_sync(conn, gid)
+        room = GROUP_BLACKLIST_MAX_PER_LIST - len(current[list_type])
+        for term in clean_terms:
+            if term in current[list_type]:
+                skipped += 1
+                continue
+            if room <= 0:
+                raise BunkerValidationError({"terms": f"maximum {GROUP_BLACKLIST_MAX_PER_LIST} terms per list."})
+            other = [k for k in GROUP_BLACKLIST_TYPES if k != list_type and term in current[k]]
+            conn.execute(
+                "INSERT INTO group_blacklist (group_id, term, list_type, added_by, added_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(group_id, term) DO UPDATE SET list_type = excluded.list_type, "
+                "added_by = excluded.added_by, added_at = excluded.added_at",
+                (gid, term, list_type, int(actor_id) if actor_id else None, _now_epoch()))
+            room -= 1
+            if other:
+                moved += 1
+            else:
+                added += 1
+        lists = _blacklists_sync(conn, gid)
+    return {"lists": lists, "added": added, "moved": moved, "skipped": skipped}
+
+
+@db_async
+def remove_group_blacklist_terms(group_id: int, terms: list) -> dict:
+    if not isinstance(terms, list) or not terms:
+        raise BunkerValidationError({"terms": "expected a list with at least one term."})
+    gid = int(group_id)
+    clean = [normalize_blacklist_term(t) for t in terms[:GROUP_BLACKLIST_MAX_PER_LIST]]
+    with _write_transaction() as conn:
+        removed = 0
+        for term in clean:
+            cur = conn.execute("DELETE FROM group_blacklist WHERE group_id = ? AND term = ?", (gid, term))
+            removed += cur.rowcount
+        lists = _blacklists_sync(conn, gid)
+    return {"lists": lists, "removed": removed}
+
+
+# ------------------------------------------------------------------------------------------
+# 🎙️ VENTANA HORARIA DE LOS MENSAJES DEL VIDEO CHAT
+# ------------------------------------------------------------------------------------------
+def _vc_window_sync(conn, group_id: int) -> dict:
+    cfg = {"enabled": True, "start": None, "end": None, "interval": 0}
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT vc_messages_enabled, vc_msg_start_time, vc_msg_end_time, vc_msg_interval "
+                           "FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        if row:
+            cfg["enabled"] = bool(_as_flag(row[0], 1))
+            if isinstance(row[1], str) and _HM_STRICT_RE.match(row[1]) and isinstance(row[2], str) \
+                    and _HM_STRICT_RE.match(row[2]) and row[1] != row[2]:
+                cfg["start"], cfg["end"] = row[1], row[2]
+            try:
+                interval = int(row[3] or 0)
+                if VC_MSG_INTERVAL_RANGE[0] <= interval <= VC_MSG_INTERVAL_RANGE[1]:
+                    cfg["interval"] = interval
+            except (TypeError, ValueError):
+                pass
+    return cfg
+
+
+@db_async
+def get_vc_message_window(group_id: int) -> dict:
+    """{enabled, start: 'HH:MM'|None, end: 'HH:MM'|None, interval: s}. Sin horario = emisión las 24 h."""
+    with get_db_connection() as conn:
+        return _vc_window_sync(conn, int(group_id))
+
+
+def validate_vc_window_patch(patch) -> dict:
+    patch = _require_patch("vc_messages", patch)
+    errors: dict = {}
+    clean: dict = {}
+    for field, value in patch.items():
+        key = f"vc_messages.{field}"
+        if field == "enabled":
+            flag = _coerce_bool_field(errors, key, value)
+            if flag is not None:
+                clean["vc_messages_enabled"] = flag
+        elif field in ("start", "end"):
+            if value in (None, ""):
+                clean["vc_msg_start_time" if field == "start" else "vc_msg_end_time"] = None
+            elif not isinstance(value, str) or not _HM_STRICT_RE.match(value.strip()):
+                errors[key] = "use the 24-hour HH:MM format."
+            else:
+                clean["vc_msg_start_time" if field == "start" else "vc_msg_end_time"] = value.strip()
+        elif field == "interval":
+            number = _coerce_range_field(errors, key, value, *VC_MSG_INTERVAL_RANGE, " s")
+            if number is not None:
+                clean["vc_msg_interval"] = number
+        else:
+            errors[key] = "unknown field."
+    if errors:
+        raise BunkerValidationError(errors)
+    return clean
+
+
+@db_async
+def update_vc_message_window(group_id: int, patch: dict, actor_id: Optional[int] = None) -> dict:
+    clean = validate_vc_window_patch(patch)
+    gid = int(group_id)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (gid,))
+        current = _vc_window_sync(conn, gid)
+        start = clean.get("vc_msg_start_time", current["start"]) if "vc_msg_start_time" in clean else current["start"]
+        end = clean.get("vc_msg_end_time", current["end"]) if "vc_msg_end_time" in clean else current["end"]
+        if (start is None) != (end is None):
+            raise BunkerValidationError({"vc_messages.start": "set both start and end, or clear both."})
+        if start is not None and start == end:
+            raise BunkerValidationError({"vc_messages.end": "must be different from the start time."})
+        sets = ", ".join(f"{_ident(col)} = ?" for col in clean)
+        conn.execute(f"UPDATE group_settings SET {sets} WHERE group_id = ?", (*clean.values(), gid))
+        _touch_config(conn, gid, actor_id)
+        return _vc_window_sync(conn, gid)
+
+
+def vc_window_open(cfg: dict, current_hm: str) -> bool:
+    """¿Se pueden emitir mensajes del VC a la hora `current_hm` ('HH:MM')? Admite ventanas que cruzan medianoche."""
+    if not cfg or not cfg.get("enabled", True):
+        return False
+    start, end = cfg.get("start"), cfg.get("end")
+    if not start or not end:
+        return True
+    if start <= end:
+        return start <= current_hm < end
+    return current_hm >= start or current_hm < end
+
+
+# ------------------------------------------------------------------------------------------
+# 🧾 Vista conjunta para la Mini App / bot
+# ------------------------------------------------------------------------------------------
+@db_async
+def get_service_messages_bundle(group_id: int) -> dict:
+    """Todo lo de la Fase 9 de una comunidad en una sola lectura (más las opciones para los selectores)."""
+    gid = int(group_id)
+    with get_db_connection() as conn:
+        return {
+            "native": _native_rules_sync(conn, gid),
+            "bot_notices": _bot_notice_rules_sync(conn, gid),
+            "vc_messages": _vc_window_sync(conn, gid),
+            "donation_links": _links_sync(conn, gid),
+            "options": {
+                "native_kinds": list(NATIVE_SERVICE_KINDS),
+                "native_actions": list(NATIVE_SERVICE_ACTIONS),
+                "delay_choices": list(SERVICE_DELAY_CHOICES),
+                "delay_range": list(SERVICE_DELAY_RANGE),
+                "notice_kinds": list(BOT_NOTICE_KINDS),
+                "notice_ttl_range": list(BOT_NOTICE_TTL_RANGE),
+                "vc_interval_range": list(VC_MSG_INTERVAL_RANGE),
+                "donation_links_max": DONATION_LINKS_MAX,
+                "blacklist_max": GROUP_BLACKLIST_MAX_PER_LIST,
+            },
+        }
+
+
+FEATURE_MIN_TIER.update(V43_FEATURE_MIN_TIER)
+FEATURE_LABELS.update(V43_FEATURE_LABELS)
 
 
 # Inicialización del esquema al importar (al final, para que todas las funciones —incluida la Matriz— existan).

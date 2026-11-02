@@ -14,6 +14,12 @@ Expone a la Mini App las mismas acciones que el panel "💎 Planes de Membresía
     POST   /api/channel/{channel_id}/plan/create                 (v8.3)
     POST   /api/channel/{channel_id}/plan/{plan_id}/schedule     (v9)
 
+v43 · Mensajes de servicio nativos en canales
+---------------------------------------------
+• `build_channel_service_router()` devuelve un router de aiogram (lo incluye main.py) que aplica a las publicaciones
+  de servicio del canal (videochat, fijado, cambio de título / foto) la misma regla que los grupos: mantener,
+  borrar ya o borrar a los X s. La configuración vive en la fila de group_settings del canal.
+
 v37 · Coherencia de caché con el pre-checkout
 ---------------------------------------------
 • Toda mutación (crear, activar/pausar, eliminar y ahora también reprogramar) invalida al instante la caché de
@@ -1326,5 +1332,91 @@ def build_channel_plans_router(
             cid = await authorize(channel_id, x_telegram_init_data, authorization)
             return await generate_invite_link(cid, plan_id, deps(), get_bot())
         return await guarded(run)
+
+    return router
+
+# ==========================================
+# 📨 v43 · MENSAJES DE SERVICIO NATIVOS EN CANALES
+# ==========================================
+# Mismas reglas que los grupos (database.get_native_service_rules, fila de group_settings del canal): los canales
+# solo generan mensajes de servicio de videochat, fijado y cambios del chat (título / foto). La entrada y la salida
+# de suscriptores no producen mensajes en un canal. aiogram se importa al construir el router, no al cargar el
+# módulo: la capa de servicio de arriba sigue siendo importable y probable sin aiogram.
+CHANNEL_RULES_TTL = 30.0
+_CHANNEL_RULES_CACHE: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+
+
+def invalidate_channel_service_rules(channel_id: int) -> None:
+    _CHANNEL_RULES_CACHE.pop(int(channel_id), None)
+
+
+async def _channel_rules(channel_id: int) -> Dict[str, Any]:
+    now = time.monotonic()
+    hit = _CHANNEL_RULES_CACHE.get(channel_id)
+    if hit and now - hit[0] < CHANNEL_RULES_TTL:
+        return hit[1]
+    try:
+        from database.database import get_native_service_rules
+        rules = await get_native_service_rules(channel_id)
+    except Exception as ex:
+        logger.debug(f"[Canal] Reglas de mensajes de servicio no leídas para {channel_id}: {ex}")
+        return hit[1] if hit else {}
+    if len(_CHANNEL_RULES_CACHE) > 5000:
+        _CHANNEL_RULES_CACHE.clear()
+    _CHANNEL_RULES_CACHE[channel_id] = (now, rules)
+    return rules
+
+
+def channel_service_kind(message: Any) -> Optional[str]:
+    """Tipo de mensaje nativo de una publicación de canal ('videochat' | 'pinned' | 'chat_info') o None."""
+    if (getattr(message, "video_chat_started", None) or getattr(message, "video_chat_ended", None)
+            or getattr(message, "video_chat_scheduled", None) or getattr(message, "video_chat_participants_invited", None)):
+        return "videochat"
+    if getattr(message, "pinned_message", None):
+        return "pinned"
+    if (getattr(message, "new_chat_title", None) or getattr(message, "new_chat_photo", None)
+            or getattr(message, "delete_chat_photo", None)):
+        return "chat_info"
+    return None
+
+
+async def _delete_later(message: Any, delay: int) -> None:
+    await asyncio.sleep(max(1, int(delay)))
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+async def apply_channel_service_rule(message: Any) -> Optional[str]:
+    """Aplica la regla del canal al mensaje nativo. Devuelve la acción aplicada o None si no es un mensaje nativo."""
+    kind = channel_service_kind(message)
+    if kind is None:
+        return None
+    rule = (await _channel_rules(int(message.chat.id))).get(kind) or {}
+    action = rule.get("action", "keep")
+    if action == "delete":
+        try:
+            await message.delete()
+        except Exception as ex:
+            # Sin el permiso «Eliminar mensajes» en el canal no se puede limpiar: se registra una sola línea.
+            logger.debug(f"[Canal] No se pudo borrar el mensaje de servicio en {message.chat.id}: {ex}")
+    elif action == "delay":
+        _spawn(_delete_later(message, int(rule.get("delay") or 30)))
+    return action
+
+
+def build_channel_service_router():
+    """Router de aiogram para las publicaciones de servicio de los canales (lo incluye main.py en el Dispatcher)."""
+    from aiogram import F, Router
+
+    router = Router(name="channel_service_messages")
+
+    @router.channel_post(
+        F.video_chat_started | F.video_chat_ended | F.video_chat_scheduled | F.video_chat_participants_invited
+        | F.pinned_message | F.new_chat_title | F.new_chat_photo | F.delete_chat_photo
+    )
+    async def channel_service_message(message):
+        await apply_channel_service_rule(message)
 
     return router

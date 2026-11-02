@@ -24,6 +24,10 @@ v42: Sincronía con assistant.py v42 — init_db() y la verificación WAL salen 
      mientras se prepara SQLite en el arranque), /health informa de los Centinelas en vivo, nuevo diagnóstico
      GET /api/system/ai-status (solo Arquitectos: Mistral, disyuntores y captura de voz, sin secretos) y apagado
      ordenado: el oyente de activos se retira antes de cerrar los Centinelas y close_all_sentinels() tiene tope.
+v43: Fase 9 — API de mensajes de servicio (nativos por tipo, avisos del bot, horario de los mensajes del Video Chat),
+     doble lista negra por comunidad (ULTRA PRO), enlaces externos de donación (PRO) y donaciones a la plataforma
+     (Arquitecto). Las escrituras invalidan las cachés del bot, del Centinela y del router de canales y emiten
+     'settings_updated' (svcmsg_* / blk_* / don_*). Se registra el router de mensajes de servicio de canales.
 v42.1: Inglés por defecto en TODAS las respuestas de la API: los `detail` de los errores HTTP (401/402/403/404/409/
      422/429/503/504), los mensajes de éxito y los valores de respaldo. Los nombres de campo y el formato
      "campo: motivo" no cambian (la Mini App solo lee el prefijo del campo). Los avisos que ya eligen idioma
@@ -2207,6 +2211,249 @@ async def api_set_user_language(
     except Exception as ex:
         logger.debug(f"[i18n] Caché de idioma del bot no invalidada para {user_id}: {ex}")
     return {"status": "success", "lang": saved}
+
+
+# ==========================================
+# 🧩 v43 · FASE 9 — MENSAJES DE SERVICIO, DOBLE LISTA NEGRA Y DONACIONES
+# ==========================================
+def _v43_invalidate(chat_id: int) -> None:
+    """El bot, el Centinela y el router de canales releen la configuración en su siguiente evento."""
+    cid = int(chat_id)
+    with contextlib.suppress(Exception):
+        fn = getattr(groups, "invalidate_v43_caches", None)
+        if callable(fn):
+            fn(cid)
+    with contextlib.suppress(Exception):
+        fn = getattr(_assistant_runtime, "invalidate_vc_window_cache", None)
+        if callable(fn):
+            fn(cid)
+    with contextlib.suppress(Exception):
+        cpa = _import_channel_plans_api()
+        fn = getattr(cpa, "invalidate_channel_service_rules", None) if cpa else None
+        if callable(fn):
+            fn(cid)
+
+
+async def _v43_feature_flags(user_id: int, chat_id: int) -> dict:
+    """{feature: bool} de la Fase 9 para la licencia VIGENTE (la Mini App bloquea con esto; el servidor revalida)."""
+    from database.database import V43_FEATURE_MIN_TIER
+    if is_super_admin(user_id):
+        tier = "ultra_pro"
+    else:
+        try:
+            tier = _v29_norm_tier(await get_group_tier(int(chat_id)))
+        except Exception:
+            tier = "free"
+    return {"tier": tier, **{name: _V29_TIER_RANK[tier] >= _V29_TIER_RANK[req]
+                              for name, req in V43_FEATURE_MIN_TIER.items()}}
+
+
+@api_router.get("/chat/{chat_id}/service-messages")
+async def api_get_service_messages(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """📨 Reglas de los mensajes nativos, avisos del bot, horario de mensajes del VC y enlaces de donación."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import get_service_messages_bundle
+    bundle = await get_service_messages_bundle(numeric_id)
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), "service_messages": bundle,
+                                 "features": await _v43_feature_flags(user_id, numeric_id)}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/service-messages")
+async def api_update_service_messages(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """
+    {native?: {kind: {action?, delay?}}, bot_notices?: {notices?: {kind: {ttl?, text?, media_id?, media_type?}},
+    appeal_button?}, vc_messages?: {enabled?, start?, end?, interval?}} — todo o nada (422 "campo: motivo").
+    Texto / multimedia / apelación de los avisos y el horario del VC exigen PRO (402); el TTL y los mensajes
+    nativos están disponibles en todos los rangos.
+    """
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_config_admin(user_id, numeric_id)
+    from database.database import (BunkerValidationError, get_service_messages_bundle, update_bot_notice_rules,
+                                   update_native_service_rules, update_vc_message_window, validate_bot_notice_patch,
+                                   validate_native_service_patch, validate_vc_window_patch)
+    body = payload.get("service_messages", payload) if isinstance(payload, dict) else {}
+    if not isinstance(body, dict) or not body:
+        raise HTTPException(status_code=422, detail="service_messages: expected an object with at least one field.")
+    unknown = [k for k in body if k not in ("native", "bot_notices", "vc_messages")]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"service_messages.{unknown[0]}: unknown field.")
+    # 1. Validación completa ANTES de escribir nada (todo o nada).
+    try:
+        native = validate_native_service_patch(body["native"]) if "native" in body else None
+        notices = validate_bot_notice_patch(body["bot_notices"]) if "bot_notices" in body else None
+        vc = validate_vc_window_patch(body["vc_messages"]) if "vc_messages" in body else None
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    # 2. Muro de pago por parte (el servidor manda; la Mini App solo lo refleja).
+    if notices is not None:
+        paid_fields = "appeal_button" in notices or any(
+            k in entry for entry in notices.get("notices", {}).values() for k in ("text", "media_id", "media_type"))
+        if paid_fields:
+            # Texto / multimedia / apelación: decisión del Dueño (igual que en el bot); el TTL lo cambian los admins.
+            await assert_chat_ownership(user_id, numeric_id)
+            await require_chat_feature(user_id, numeric_id, "bot_notice_custom")
+    if vc is not None:
+        await require_chat_feature(user_id, numeric_id, "vc_message_window")
+    # 3. Escritura.
+    changed: list = []
+    try:
+        if native is not None:
+            await update_native_service_rules(numeric_id, body["native"], actor_id=user_id)
+            changed.append("svcmsg_native")
+        if notices is not None:
+            await update_bot_notice_rules(numeric_id, body["bot_notices"], actor_id=user_id)
+            changed.append("svcmsg_notices")
+        if vc is not None:
+            await update_vc_message_window(numeric_id, body["vc_messages"], actor_id=user_id)
+            changed.append("svcmsg_vc")
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v43_invalidate(numeric_id)
+    _v23_emit(numeric_id, changed)
+    logger.info(f"📨 [Mensajes de Servicio] Comunidad {numeric_id} actualizada por {user_id}: {', '.join(changed)}")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id),
+                                 "service_messages": await get_service_messages_bundle(numeric_id),
+                                 "features": await _v43_feature_flags(user_id, numeric_id)}, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/blacklists")
+async def api_get_group_blacklists(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """🚫 Doble lista negra de la comunidad (solo el Dueño). La lectura no exige licencia (la Mini App muestra la vitrina)."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    from database.database import GROUP_BLACKLIST_MAX_PER_LIST, GROUP_BLACKLIST_TERM_RANGE, get_group_blacklists
+    return JSONResponse(content={
+        "status": "success", "chat_id": str(numeric_id), "blacklists": await get_group_blacklists(numeric_id),
+        "options": {"max_per_list": GROUP_BLACKLIST_MAX_PER_LIST, "term_length": list(GROUP_BLACKLIST_TERM_RANGE)},
+        "features": await _v43_feature_flags(user_id, numeric_id),
+    }, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/blacklists")
+async def api_update_group_blacklists(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{action: 'add' | 'remove', list_type?: 'ban' | 'warn' (solo add), terms: [...]} — Dueño · ULTRA PRO (402)."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "double_blacklist")
+    from database.database import BunkerValidationError, add_group_blacklist_terms, remove_group_blacklist_terms
+    body = payload if isinstance(payload, dict) else {}
+    action = body.get("action")
+    terms = body.get("terms")
+    if isinstance(terms, str):
+        terms = [t for t in re.split(r"[\n,]+", terms) if t.strip()]
+    try:
+        if action == "add":
+            result = await add_group_blacklist_terms(numeric_id, body.get("list_type"), terms, actor_id=user_id)
+        elif action == "remove":
+            result = await remove_group_blacklist_terms(numeric_id, terms)
+        else:
+            raise HTTPException(status_code=422, detail="action: use add or remove.")
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v43_invalidate(numeric_id)
+    _v23_emit(numeric_id, [f"blk_{body.get('list_type') or 'lists'}"])
+    logger.info(f"🚫 [Doble Lista Negra] {action} en {numeric_id} por {user_id}: {result.get('added', 0)} nuevos, "
+                f"{result.get('moved', 0)} movidos, {result.get('removed', 0)} retirados.")
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id), **result}, headers=_NO_STORE)
+
+
+@api_router.get("/chat/{chat_id}/donations")
+async def api_get_donations(
+    chat_id: str,
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """💰 Enlaces externos de donación (los montos y el texto siguen en /configuration → tips)."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    from database.database import DONATION_LINKS_MAX, get_donation_links
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id),
+                                 "donations": {"links": await get_donation_links(numeric_id)},
+                                 "options": {"links_max": DONATION_LINKS_MAX},
+                                 "features": await _v43_feature_flags(user_id, numeric_id)}, headers=_NO_STORE)
+
+
+@api_router.post("/chat/{chat_id}/donations")
+async def api_update_donations(
+    chat_id: str,
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{links: [{label, url}] (máx. 5, https:// o t.me/)} — PRO (402). Lista completa: [] los borra todos."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    numeric_id = _parse_chat_id(chat_id)
+    await assert_chat_ownership(user_id, numeric_id)
+    await require_chat_feature(user_id, numeric_id, "donation_links")
+    from database.database import BunkerValidationError, set_donation_links
+    body = payload.get("donations", payload) if isinstance(payload, dict) else {}
+    if not isinstance(body, dict) or "links" not in body:
+        raise HTTPException(status_code=422, detail="donations.links: expected a list of {label, url}.")
+    try:
+        links = await set_donation_links(numeric_id, body["links"], actor_id=user_id)
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    _v43_invalidate(numeric_id)
+    _v23_emit(numeric_id, ["don_links"])
+    return JSONResponse(content={"status": "success", "chat_id": str(numeric_id),
+                                 "donations": {"links": links}}, headers=_NO_STORE)
+
+
+@api_router.get("/platform/donations")
+async def api_get_platform_donations(
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """💎 Donaciones a The Bunker (botón 💰 del /start). Solo el Arquitecto."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    if not is_super_admin(user_id):
+        raise HTTPException(status_code=403, detail="Only the Architect can manage platform donations.")
+    from database.database import get_platform_donation_config, get_platform_donation_stats
+    return JSONResponse(content={"status": "success", "donations": await get_platform_donation_config(),
+                                 "stats": await get_platform_donation_stats()}, headers=_NO_STORE)
+
+
+@api_router.post("/platform/donations")
+async def api_update_platform_donations(
+    payload: dict = Body(...),
+    x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
+    authorization: str = Header(None)
+):
+    """{enabled?, amounts?: [≤5], links?: [{label, url}], text?, media_id?, media_type?} — solo el Arquitecto."""
+    user_id = require_authenticated_user(x_telegram_init_data, authorization)
+    if not is_super_admin(user_id):
+        raise HTTPException(status_code=403, detail="Only the Architect can manage platform donations.")
+    from database.database import BunkerValidationError, update_platform_donation_config
+    body = payload.get("donations", payload) if isinstance(payload, dict) else {}
+    try:
+        cfg = await update_platform_donation_config(body, actor_id=user_id)
+    except BunkerValidationError as err:
+        raise _v23_validation_error(err)
+    return JSONResponse(content={"status": "success", "donations": cfg}, headers=_NO_STORE)
 
 
 @api_router.get("/system/ai-status")
@@ -4405,6 +4652,14 @@ async def main():
     dp.include_router(automod.router)
     # 5. groups: aduana captcha, anti-flood, gamificación y matriz perimetral
     dp.include_router(groups.router)
+    # 5b. 📨 v43 · Mensajes de servicio nativos en CANALES (channel_plans_api, importación diferida y tolerante)
+    _cpa_module = _import_channel_plans_api()
+    _build_channel_service = getattr(_cpa_module, "build_channel_service_router", None) if _cpa_module else None
+    if callable(_build_channel_service):
+        try:
+            dp.include_router(_build_channel_service())
+        except Exception as ex:
+            logger.warning(f"⚠️ [Canales] Router de mensajes de servicio no registrado: {ex}")
     # 6. fallback_router: salvaguarda de callbacks huérfanos
     dp.include_router(fallback_router)
 

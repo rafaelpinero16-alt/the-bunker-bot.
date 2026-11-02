@@ -10,6 +10,8 @@
    v9: programador recurrente de planes (6/12/24/48 h), plan tarifario vigente del operador, informe
    periódico de administradores en el canal de registro, bloqueos de seguridad en la analítica y
    Escudo Anti-Raid / Anti-Reportes.
+   v43: Fase 9 — CONFIG.SERVICE_MSGS (mensajes de servicio, doble lista negra y enlaces de donación) y textos del acceso
+   directo del panel lateral.
    v14: sincronización bidireccional bot ↔ Mini App. El evento 'settings_updated' del radar llega desde la
    API (/settings, /configuration), la consola privada del bot, los comandos de grupo y el Protocolo de
    Pánico con el árbol de configuración real y los interruptores del Centinela (CONFIG.SYNC).
@@ -118,6 +120,13 @@ export const CONFIG = {
     },
     AI_SENTINEL: { PROMPT_MAX: 1000, TIMEOUT_MS: 12000 },
     GHOST_PURGE: { CRITERIA: ['deleted', 'scam', 'fake', 'flagged', 'unreachable'], TIMEOUT_MS: 12000 },
+    // v43 · Fase 9 · Mensajes de servicio, doble lista negra y enlaces de donación (js/servicemsgs.js)
+    SERVICE_MSGS: {
+        TIMEOUT_MS: 12000,
+        DELAYS: [10, 30, 60, 300, 900, 3600],          // segundos de «Borrar a los…» (el servidor admite 5–86400)
+        NOTICE_TTLS: [null, 10, 30, 60, 300, 0],        // null = TTL de servicio del grupo · 0 = fijo
+        VC_INTERVALS: [0, 30, 60, 120, 300, 600]        // separación mínima entre avisos de miembros del VC
+    },
     SUPPORT_AI: { TIMEOUT_MS: 30000, MAX_INPUT: 1500, LOG_MAX: 40 },
     // 🎟️ v22 · Auditoría MicVIP (GET /api/chat/{id}/micvip-audit)
     MICVIP_AUDIT: { PAGE_SIZE: 20, EXPORT_MAX: 2000, TIMEOUT_MS: 12000, LIVE_RELOAD_MS: 6000 },
@@ -756,6 +765,8 @@ export const translations = {
         cfg_antiflood_rate: "Mensajes permitidos:",
         cfg_antiflood_window: "por ventana de (s):",
         cfg_service_cleaner_enabled: "Purga de mensajes de servicio (uniones/salidas)",
+        cfg_service_cleaner_moved: "📨 Los mensajes de servicio (entradas, salidas, videochat…) se configuran por tipo en «Mensajes de Servicio».",
+        nav_service_msgs: "Mensajes de Servicio 📨",
         cfg_err_bool: "Valor inválido.",
         cfg_err_range: "Entre {min} y {max}.",
         cfg_err_presets: "Entre 1 y {max} montos enteros de 1 a 10000.",
@@ -1523,6 +1534,8 @@ export const translations = {
         cfg_antiflood_rate: "Messages allowed:",
         cfg_antiflood_window: "per window (s):",
         cfg_service_cleaner_enabled: "Purge service messages (joins/leaves)",
+        cfg_service_cleaner_moved: "📨 Service messages (joins, leaves, video chat…) are now configured per type in «Service Messages».",
+        nav_service_msgs: "Service Messages 📨",
         cfg_err_bool: "Invalid value.",
         cfg_err_range: "Between {min} and {max}.",
         cfg_err_presets: "Between 1 and {max} whole amounts from 1 to 10000.",

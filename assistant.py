@@ -4,6 +4,12 @@ assistant.py — The Bunker OS (Aiogram 3.x / Pyrogram)
 Núcleo de supervisión de voz 24/7, Radar Acústico MTProto, Guardián Mistral AI,
 Gestión de Sesiones Propias y Bucles Autónomos de Automatización (Modo Nocturno & VC Scheduler).
 Fase 5: Cambios de la sala de audio (inicio/fin de llamada, altas/bajas, micrófonos) emitidos al radar WebSocket.
+v43: Ventana horaria de los mensajes del Video Chat (Fase 9, PRO+): fuera del horario configurado o con la emisión
+     apagada, el Centinela y el bot maestro NO publican avisos del VC (entradas, AutoLower, escudo de pantalla,
+     ruido, Guardián Acústico, bienvenida, reinicio, apertura / cierre programados y mensajes promocionales); la
+     moderación acústica, los registros y la auditoría siguen funcionando en silencio. vc_msg_interval fija además
+     una separación mínima entre avisos de miembros. Los avisos que no son del VC (Guardián de texto, modo nocturno,
+     Ghost Purge) no se ven afectados.
 v42.1: Mensajes de servicio en INGLÉS por defecto también en los botones automáticos de enlaces de los avisos del
      Centinela (antes «Ver Enlace Oficial» / «Enlace N» / «Acceder» salían siempre en español).
 v42: Sesiones MTProto con lista fatal validada (sin UserBannedInChannel), Mistral con filtro de parámetros por firma,
@@ -60,6 +66,7 @@ from database.database import (
     get_screen_shield_status, set_screen_shield_status,
     get_podcast_config, set_podcast_mode, set_podcast_duck_volume,
     get_night_mode_config, is_night_mode_time, set_night_mode_config,
+    get_vc_message_window, vc_window_open,
     get_lock_status, get_db_connection,
     activate_universal_night_mode,
     deactivate_universal_night_mode,
@@ -1341,7 +1348,68 @@ async def _send_notice_with(bot, chat_id: int, text: str, media_id: Optional[str
     return await _send_text_notice(bot, chat_id, text, reply_markup)
 
 
-async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str] = None, media_type: Optional[str] = None, auto_delete_after: Optional[int] = None, reply_markup: Optional[InlineKeyboardMarkup] = None):
+# ==========================================
+# 🎙️ v43 · VENTANA HORARIA DE LOS MENSAJES DEL VIDEO CHAT
+# ==========================================
+# Categorías de aviso: "vc" (avisos de miembros: ventana + separación mínima), "vc_lifecycle" (bienvenida, reinicio,
+# apertura / cierre programados: solo ventana; nunca se descartan por la separación) y "chat" (no son del VC).
+VC_WINDOW_CACHE_TTL = 30.0
+_vc_window_cache: dict[int, tuple[float, dict]] = {}
+_vc_last_member_notice: dict[int, float] = {}
+_vc_suppressed_count: dict[int, int] = {}
+
+
+def invalidate_vc_window_cache(chat_id: int) -> None:
+    _vc_window_cache.pop(int(chat_id), None)
+
+
+async def _vc_window_cfg(chat_id: int) -> Optional[dict]:
+    """Ventana efectiva (None = sin restricción: Free o sin configurar). La licencia se revalida con la caché."""
+    now = time.monotonic()
+    hit = _vc_window_cache.get(chat_id)
+    if hit and now - hit[0] < VC_WINDOW_CACHE_TTL:
+        return hit[1]
+    try:
+        tier = (await get_group_tier(chat_id) or "free").lower()
+        cfg = await get_vc_message_window(chat_id) if tier in ("pro", "ultra_pro", "ultra") else None
+    except Exception as ex:
+        logger.debug(f"[VC] Ventana de mensajes no leída para {chat_id}: {ex}")
+        return hit[1] if hit else None
+    if len(_vc_window_cache) > 5000:
+        _vc_window_cache.clear()
+    _vc_window_cache[chat_id] = (now, cfg)
+    return cfg
+
+
+async def vc_notice_allowed(chat_id: int, channel: str = "vc") -> bool:
+    """¿Se puede publicar ahora un aviso de la categoría `channel` en el chat del VC? Nunca lanza."""
+    if channel == "chat":
+        return True
+    cfg = await _vc_window_cfg(chat_id)
+    if not cfg:
+        return True
+    current_hm = _get_group_now().strftime("%H:%M")   # mismo reloj que el modo nocturno (BOT_TIMEZONE)
+    if not vc_window_open(cfg, current_hm):
+        return False
+    interval = int(cfg.get("interval") or 0)
+    if channel == "vc" and interval > 0:
+        last = _vc_last_member_notice.get(chat_id, 0.0)
+        if time.monotonic() - last < interval:
+            return False
+    return True
+
+
+def _note_vc_suppressed(chat_id: int, channel: str) -> None:
+    count = _vc_suppressed_count.get(chat_id, 0) + 1
+    if len(_vc_suppressed_count) > 5000:
+        _vc_suppressed_count.clear()
+    _vc_suppressed_count[chat_id] = count
+    if count == 1 or count % 50 == 0:
+        logger.info(f"🔕 [VC] Aviso '{channel}' suprimido en {chat_id} por la ventana horaria (total {count}).")
+
+
+async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str] = None, media_type: Optional[str] = None, auto_delete_after: Optional[int] = None, reply_markup: Optional[InlineKeyboardMarkup] = None,
+                                 channel: str = "vc"):
     """
     Publica un aviso del radar en la comunidad. Cadena de resiliencia (v15):
       1. Bot maestro con multimedia → si el medio falla, el mismo bot lo envía como texto con su botón.
@@ -1356,6 +1424,14 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str
         return None
     if not text:
         return None
+    # v43 · Ventana horaria de los mensajes del VC: fuera de horario solo se omite la PUBLICACIÓN.
+    if not await vc_notice_allowed(chat_id, channel):
+        _note_vc_suppressed(chat_id, channel)
+        return None
+    if channel == "vc":
+        _vc_last_member_notice[chat_id] = time.monotonic()
+        if len(_vc_last_member_notice) > 5000:
+            _vc_last_member_notice.clear()
 
     sent = None
     try:
@@ -1591,7 +1667,8 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
             chat_id=chat_id, text=cleaned_text,
             media_id=svc_cfg.get("vc_welcome_media_id") if tier == "ultra_pro" else None,
             media_type=svc_cfg.get("vc_welcome_media_type") if tier == "ultra_pro" else None,
-            auto_delete_after=autodel if autodel > 0 else None, reply_markup=final_markup
+            auto_delete_after=autodel if autodel > 0 else None, reply_markup=final_markup,
+            channel="vc_lifecycle"
         )
         if sent:
             # Se fija con el bot que publicó el aviso (maestro o clon); sin permisos se omite en silencio.
@@ -2484,7 +2561,8 @@ async def _run_guardian(client: Client, message, chat_id: int, user_id: int, fro
     except Exception:
         notice_ok = True
     if notice_ok:
-        _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=await _group_service_ttl(chat_id)),
+        _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=await _group_service_ttl(chat_id),
+                                      channel="chat"),
                name=f"guardian_notice:{chat_id}")
     logger.info(f"🛡️ [Guardián IA] Mensaje de {user_id} en {chat_id} {'purgado' if deleted else 'detectado'}: {threat.get('reason')}")
     return deleted
@@ -3909,7 +3987,8 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     media_id=media_id,
                                     media_type=media_type,
                                     auto_delete_after=int(autodel) if autodel else None,
-                                    reply_markup=final_reset_markup
+                                    reply_markup=final_reset_markup,
+                                    channel="vc_lifecycle"
                                 )
                         except Exception as reset_notice_err:
                             logger.warning(f"Aviso despachando aviso de reset en {chat_id}: {reset_notice_err}")
@@ -4320,7 +4399,8 @@ async def vc_scheduler_loop():
                                     media_id=sched_media_id,
                                     media_type=sched_media_type,
                                     auto_delete_after=sched_autodel if sched_autodel > 0 else None,
-                                    reply_markup=sched_markup
+                                    reply_markup=sched_markup,
+                                    channel="vc_lifecycle"
                                 )
                             # La bienvenida fijada la emite el monitor del grupo al detectar la llamada;
                             # solo se envía aquí si no hay monitor activo (evita duplicados).
@@ -4346,7 +4426,8 @@ async def vc_scheduler_loop():
                         await update_vc_call_status(group_id, 0)
                         # Vía resiliente (maestro → clon); un fallo de Telegram no se confunde con un fallo de cierre.
                         end_text = VC_SCHED_MESSAGES_I18N.get(await _group_service_lang(group_id), VC_SCHED_MESSAGES_I18N["en"])["end"]
-                        _spawn(_dispatch_radar_notice(chat_id=group_id, text=end_text), name=f"vc_sched_end:{group_id}")
+                        _spawn(_dispatch_radar_notice(chat_id=group_id, text=end_text, channel="vc_lifecycle"),
+                               name=f"vc_sched_end:{group_id}")
                         logger.info(f"📡 [Cierre VC Programado] Sala concluida ordenadamente en comunidad {group_id}.")
                     except Exception as e:
                         err_up = str(e).upper()
@@ -4408,7 +4489,7 @@ async def night_mode_autonomous_loop():
                         await activate_universal_night_mode(group_id)
                         _spawn(_dispatch_radar_notice(
                             chat_id=group_id,
-                            text=NIGHT_MODE_TEXTS[await _group_service_lang(group_id)]["on"]
+                            text=NIGHT_MODE_TEXTS[await _group_service_lang(group_id)]["on"], channel="chat"
                         ), name=f"night_on:{group_id}")
                         logger.info(f"🌙 [Modo Nocturno Activado] Perímetro asegurado automáticamente en comunidad {group_id}.")
 
@@ -4421,7 +4502,7 @@ async def night_mode_autonomous_loop():
                             await set_night_mode_config(group_id, "night_mode_status", 1)
                             _spawn(_dispatch_radar_notice(
                                 chat_id=group_id,
-                                text=NIGHT_MODE_TEXTS[await _group_service_lang(group_id)]["off"]
+                                text=NIGHT_MODE_TEXTS[await _group_service_lang(group_id)]["off"], channel="chat"
                             ), name=f"night_off:{group_id}")
                             logger.info(f"☀️ [Modo Nocturno Desactivado] Permisos diurnos restaurados en comunidad {group_id}.")
                 except Exception as inner_err:
@@ -5522,6 +5603,7 @@ async def _run_ghost_purge(chat_id: int, action, criteria, origin: str, lang: st
         text = ops.build_purge_report_text(report, lang) if ops else GHOST_PURGE_ALERT_TEXTS[_norm_lang(lang)].format(
             found=report["found"], purged=report["purged"],
             action=GHOST_PURGE_ACTION_LABELS[_norm_lang(lang)]["ban" if action == "ban" else "kick"])
-        _spawn(_dispatch_radar_notice(chat_id=chat_id, text=text, auto_delete_after=60), name=f"ghost_notice:{chat_id}")
+        _spawn(_dispatch_radar_notice(chat_id=chat_id, text=text, auto_delete_after=60, channel="chat"),
+               name=f"ghost_notice:{chat_id}")
         _spawn(_ghost_log_channel_post(chat_id, text), name=f"ghost_log:{chat_id}")
     return report

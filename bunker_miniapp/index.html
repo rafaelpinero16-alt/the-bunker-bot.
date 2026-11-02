@@ -11,14 +11,14 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <meta name="bunker-build" content="41.0">
+    <meta name="bunker-build" content="43.0">
     <link rel="icon" type="image/jpeg" href="logo.jpg">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         /* Tipografía display de la Mini App: Urbanist (respaldo Outfit) para todas las utilidades font-sans */
         /* v30 · Build desplegado: debe coincidir con los ?v= del import map y del script principal. */
-        window.BUNKER_BUILD = '41.0';
+        window.BUNKER_BUILD = '43.0';
         tailwind.config = {
             theme: {
                 extend: {
@@ -39,13 +39,14 @@
     <script type="importmap">
     {
         "imports": {
-            "./js/api.js": "./js/api.js?v=41.0",
-            "./js/ui.js": "./js/ui.js?v=41.0",
-            "./js/config.js": "./js/config.js?v=41.0",
-            "./js/state.js": "./js/state.js?v=41.0",
-            "./js/telegram.js": "./js/telegram.js?v=41.0",
-            "./js/moderation.js": "./js/moderation.js?v=41.0",
-            "./js/auditlog.js": "./js/auditlog.js?v=41.0"
+            "./js/api.js": "./js/api.js?v=43.0",
+            "./js/ui.js": "./js/ui.js?v=43.0",
+            "./js/config.js": "./js/config.js?v=43.0",
+            "./js/state.js": "./js/state.js?v=43.0",
+            "./js/telegram.js": "./js/telegram.js?v=43.0",
+            "./js/moderation.js": "./js/moderation.js?v=43.0",
+            "./js/auditlog.js": "./js/auditlog.js?v=43.0",
+            "./js/servicemsgs.js": "./js/servicemsgs.js?v=43.0"
         }
     }
     </script>
@@ -53,7 +54,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@600;700;800;900&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=41.0">
+    <link rel="stylesheet" href="styles.css?v=43.0">
 </head>
 <body class="min-h-screen flex flex-col justify-between p-4 max-w-md mx-auto selection:bg-[#00f3ff] selection:text-black relative pb-16">
     <div class="tron-grid"></div>
@@ -133,6 +134,11 @@
                         <button onclick="app.switchTab('bot-settings'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
                             <i class="fa-solid fa-sliders text-[#00f3ff] w-5"></i>
                             <span data-i18n="groups_title">Ajustes del Bot ⚙️</span>
+                        </button>
+                        <!-- 📨 v43 · Acceso directo a Mensajes de Servicio · Doble Lista Negra · Donaciones (panel de Ajustes) -->
+                        <button onclick="app.openServicePanel(); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
+                            <i class="fa-solid fa-envelope-open-text text-[#00f3ff] w-5"></i>
+                            <span data-i18n="nav_service_msgs">Mensajes de Servicio 📨</span>
                         </button>
                         <button onclick="app.switchTab('watchdog'); app.toggleDrawer(false);" class="w-full text-left px-3 py-2.5 rounded-xl text-xs uppercase flex items-center space-x-3 text-neutral-300 hover:text-[#00f3ff] hover:bg-[#00f3ff]/10 transition-all font-bold">
                             <i class="fa-solid fa-user-clock text-[#ff00ff] w-5"></i>
@@ -1033,15 +1039,10 @@
                                             <p id="cfg-antiflood_window-error" class="hidden text-[10px] text-rose-400 mt-1"></p>
                                         </div>
                                     </div>
-                                    <div class="flex items-center justify-between gap-3 bg-black/40 p-2.5 rounded-xl border border-neutral-800">
-                                        <div class="min-w-0">
-                                            <p class="text-theme-main font-bold text-xs" data-i18n="cfg_service_cleaner_enabled">Purga de mensajes de servicio (uniones/salidas)</p>
-                                        </div>
-                                        <button type="button" id="cfg-service_cleaner_enabled" role="switch" aria-checked="false" data-field="service_cleaner_enabled" onclick="app.toggleConfigSwitch('service_cleaner_enabled')" class="cfg-switch shrink-0 relative w-12 h-6 rounded-full border border-neutral-600 bg-neutral-800 transition disabled:opacity-50">
-                                            <span class="cfg-switch-knob absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-neutral-400 transition-all"></span>
-                                            <span class="sr-only" data-i18n="i18n_sr_service_cleaner">Service message cleanup (joins/leaves)</span>
-                                        </button>
-                                    </div>
+                                    <!-- v43 · La purga de mensajes de servicio ahora se configura por tipo (mantener / borrar / borrar a los X s)
+                                         en «Mensajes de Servicio», más abajo. El interruptor antiguo se retira de aquí: reactivarlo
+                                         anularía las reglas por tipo. -->
+                                    <p class="text-[10px] text-theme-muted bg-black/40 p-2.5 rounded-xl border border-neutral-800" data-i18n="cfg_service_cleaner_moved">📨 Los mensajes de servicio (entradas, salidas, videochat…) se configuran por tipo en «Mensajes de Servicio».</p>
                                     <button type="button" id="cfg-save-perimeter" onclick="app.saveConfigSection('perimeter')" class="w-full py-2 rounded-xl bg-[#34d399]/15 text-[#34d399] border border-[#34d399]/40 text-[11px] font-extrabold uppercase transition active:scale-95 disabled:opacity-50 disabled:cursor-wait">
                                         <i class="fa-solid fa-floppy-disk mr-1"></i> <span id="cfg-save-label-perimeter" data-i18n="cfg_save">Guardar</span>
                                     </button>
@@ -1237,6 +1238,17 @@
                             </div>
                             <button type="button" id="apl-more-btn" onclick="app.loadMoreAppeals()" class="hidden w-full py-2 rounded-xl bg-black/50 border border-neutral-800 text-neutral-300 text-[10px] font-extrabold uppercase active:scale-95 transition disabled:opacity-50" data-i18n="mva_more">Load more</button>
                             <p class="text-[9px] text-neutral-500 leading-snug" data-i18n="apl_hint">Only automatic warn-limit bans are appealable. The bot needs ban and invite rights; if it cannot unban, the payment is refunded automatically.</p>
+                        </div>
+
+                        <!-- 📨 v43 · FASE 9 · MENSAJES DE SERVICIO · DOBLE LISTA NEGRA (ULTRA PRO) · ENLACES DE DONACIÓN. Lo pinta js/servicemsgs.js. -->
+                        <div id="svc-panel" class="space-y-2.5 pt-3 border-t border-neutral-800" aria-live="polite">
+                            <h4 class="text-xs font-bold text-cyan-300 uppercase tracking-wider flex items-center gap-1.5">
+                                <i class="fa-solid fa-envelope-open-text"></i> <span id="svc-title">Service Messages</span>
+                            </h4>
+                            <p id="svc-desc" class="text-[10px] text-theme-muted leading-snug">Telegram notices, bot notices, voice-chat schedule, double blacklist and donation links.</p>
+                            <div id="svc-root" class="space-y-2">
+                                <p class="text-center text-[11px] text-neutral-500 font-mono py-2">Select a community.</p>
+                            </div>
                         </div>
 
                         <!-- 🧾 v41.1 · CANAL DE REGISTRO EN TIEMPO REAL (vectores) + PASES MICVIP ACTIVOS. Lo pinta js/auditlog.js. -->
@@ -1761,6 +1773,6 @@
     <div id="toast-stack" aria-live="polite" class="fixed inset-x-0 z-[300] flex flex-col items-center gap-2 px-4 pointer-events-none" style="top: calc(env(safe-area-inset-top, 0px) + 12px)"></div>
 
     <!-- Módulo Central de Orquestación -->
-    <script type="module" src="js/app.js?v=41.0"></script>
+    <script type="module" src="js/app.js?v=43.0"></script>
 </body>
 </html>
