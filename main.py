@@ -658,19 +658,36 @@ api_router = APIRouter()
 async def health_check():
     """Siempre 200 y sin E/S: Railway lo consulta durante el despliegue (también antes de que el bot esté listo)."""
     try:
-        clients = int(ws_manager.total_connections())
+        clients = int(ws_manager.total_connections()) if 'ws_manager' in globals() and ws_manager else 0
     except Exception:
         clients = 0
+
     try:
-        sentinels = len(getattr(_assistant_runtime, "active_sentinels", {}) or {})   # lectura en memoria, sin E/S
+        sentinels = len(getattr(_assistant_runtime, "active_sentinels", {}) or {})
     except Exception:
         sentinels = 0
+
+    try:
+        clones = len(active_clone_tasks) if 'active_clone_tasks' in globals() else 0
+    except Exception:
+        clones = 0
+
+    try:
+        bot_ready = (master_bot_instance is not None) if 'master_bot_instance' in globals() else False
+    except Exception:
+        bot_ready = False
+
+    try:
+        startup_ready = _STARTUP_READY if '_STARTUP_READY' in globals() else True
+    except Exception:
+        startup_ready = True
+
     return {
         "status": "online",
-        "ready": _STARTUP_READY,
+        "ready": startup_ready,
         "service": "The Bunker Command OS API",
-        "bot_connected": master_bot_instance is not None,
-        "active_clones": len(active_clone_tasks),
+        "bot_connected": bot_ready,
+        "active_clones": clones,
         "active_sentinels": sentinels,
         "websocket_clients": clients
     }
