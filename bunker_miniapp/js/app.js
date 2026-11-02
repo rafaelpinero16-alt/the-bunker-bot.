@@ -6,6 +6,8 @@
    v8.2: modal nativo del canal de registro, sincronización real de chats, difusión personalizada con
    acciones rápidas (vista previa · difundir · limpiar) y consola de control de grupos operativa.
    v8.3: generador CRUD de planes (channel_plans) y consola de programación 1:1 del bot por módulos.
+   v44: Fase 9.1 — servicemsgs.js añade invitaciones al VC, impulsos, aviso «advise», botón por aviso, configuración de
+        la doble lista negra (acción / duración / borrado) y lista blanca. Build 44.0.
    v43: Fase 9 — panel «Mensajes de Servicio» (js/servicemsgs.js: mensajes nativos por tipo, avisos del bot, horario del
    videochat, doble lista negra ULTRA PRO y enlaces de donación PRO), acceso directo en el panel lateral y recarga en
    vivo con las señales svcmsg_* / blk_* / don_* del radar.

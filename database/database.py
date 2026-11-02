@@ -1,6 +1,11 @@
 """
 database.py — The Bunker OS (Sqlite3 Async-Wrapper Pattern)
 Núcleo relacional de persistencia, canales, telemetría y seguridad perimetral.
+v44 · Fase 9.1 (aditiva): mensajes nativos de impulsos (boosts) e invitaciones al videochat con regla propia, botón
+       propio (texto + URL) en cada aviso del bot y nuevo aviso «advise», configuración de la doble lista negra
+       (activar / desactivar, acción por lista: ban · kick · mute · warn · advise, duración y borrado del mensaje),
+       lista blanca de términos por comunidad (ULTRA PRO) y donaciones a la plataforma desde 100 Stars con hasta 8
+       montos y 8 enlaces.
 v43 · Fase 9 (aditiva): reglas por tipo de los mensajes nativos de Telegram (mantener / borrar / borrar a los X s),
        autoborrado y personalización de los avisos del bot (warn / mute / kick / ban) con botón de apelación,
        enlaces externos de donación por comunidad, donaciones a la plataforma (Arquitecto), doble lista negra por
@@ -5417,11 +5422,16 @@ def export_group_configuration(group_id: int) -> str:
                                            (group_id,)).fetchall():
                 if kind in group_blacklists:
                     group_blacklists[kind].append(term)
+        group_allowlist: list = []
+        with contextlib.suppress(sqlite3.Error):
+            group_allowlist = [r[0] for r in conn.execute("SELECT term FROM group_allowlist WHERE group_id = ?",
+                                                          (group_id,)).fetchall()]
 
     payload = {
         "version": "6.0", "exported_at": datetime.now().isoformat(),
         "source_group_id": group_id, "settings": settings_dict,
         "vc_schedule": sched_dict, "tip_targets": targets, "group_blacklists": group_blacklists,
+        "group_allowlist": group_allowlist,
         "reputation_enabled": _read_reputation_settings(group_id)["enabled"],
         "reputation_xp_multiplier": _read_reputation_settings(group_id)["multiplier"],
     }
@@ -5532,6 +5542,17 @@ def import_group_configuration(target_group_id: int, backup_json: str) -> tuple[
                 cursor.executemany(
                     "INSERT OR REPLACE INTO group_blacklist (group_id, term, list_type, added_by, added_at) "
                     "VALUES (?, ?, ?, ?, ?)", rows)
+            group_allowlist = payload.get("group_allowlist")
+            if isinstance(group_allowlist, list):
+                lo, hi = GROUP_BLACKLIST_TERM_RANGE
+                allow_rows = []
+                for raw in group_allowlist[:GROUP_ALLOWLIST_MAX]:
+                    term = normalize_blacklist_term(raw) if isinstance(raw, str) else ""
+                    if lo <= len(term) <= hi:
+                        allow_rows.append((target_group_id, term, None, _now_epoch()))
+                cursor.execute("DELETE FROM group_allowlist WHERE group_id = ?", (target_group_id,))
+                cursor.executemany("INSERT OR REPLACE INTO group_allowlist (group_id, term, added_by, added_at) "
+                                   "VALUES (?, ?, ?, ?)", allow_rows)
             conn.commit()
         return True, msgs["ok"]
     except Exception as ex:
@@ -8055,23 +8076,35 @@ def get_chat_entitlements(chat_id: int) -> dict:
 #   • Mensajes del Video Chat: sin ventana configurada se emiten siempre, como hasta ahora.
 # Los errores de validación siguen el formato "campo: motivo" (la API los devuelve como 422).
 # ==========================================================================================
-NATIVE_SERVICE_KINDS = ("join", "leave", "videochat", "pinned", "chat_info")
+NATIVE_SERVICE_KINDS = ("join", "leave", "videochat", "vc_invite", "boost", "pinned", "chat_info")
 NATIVE_SERVICE_ACTIONS = ("keep", "delete", "delay")
 SERVICE_DELAY_RANGE = (5, 86400)
 SERVICE_DELAY_CHOICES = (10, 30, 60, 300, 900, 3600)
-BOT_NOTICE_KINDS = ("warn", "mute", "kick", "ban")
+BOT_NOTICE_KINDS = ("warn", "mute", "kick", "ban", "advise")
+BOT_NOTICE_BUTTON_LABEL_MAX = 40
 BOT_NOTICE_TTL_RANGE = (0, 86400)            # 0 = permanente · None = TTL de servicio del grupo
 BOT_NOTICE_TEXT_MAX = 900
 MEDIA_TYPES_ALLOWED = ("photo", "video", "animation")
 DONATION_LINKS_MAX = 5
 DONATION_LABEL_MAX = 32
 DONATION_URL_MAX = 512
-DONATION_AMOUNTS_MAX = 5
+DONATION_AMOUNTS_MAX = 8                    # donaciones a la plataforma: hasta 8 montos
+PLATFORM_DONATION_LINKS_MAX = 8
 DONATION_TEXT_MAX = 900
 PLATFORM_DONATION_RANGE = (1, 100000)
 GROUP_BLACKLIST_TYPES = ("ban", "warn")
 GROUP_BLACKLIST_MAX_PER_LIST = 200
 GROUP_BLACKLIST_TERM_RANGE = (2, 64)
+GROUP_BLACKLIST_ACTIONS = ("ban", "kick", "mute", "warn", "advise")
+GROUP_BLACKLIST_DURATION_RANGE = (0, 525600)   # minutos (0 = permanente) para ban / mute; máx. 1 año
+GROUP_ALLOWLIST_MAX = 200
+GROUP_BLACKLIST_DEFAULTS = {
+    "enabled": True,
+    "lists": {
+        "ban": {"action": "ban", "duration": 0, "delete": True},
+        "warn": {"action": "warn", "duration": 0, "delete": True},
+    },
+}
 VC_MSG_INTERVAL_RANGE = (0, 3600)            # separación mínima entre avisos del VC (segundos); 0 = sin límite
 _HM_STRICT_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 _URL_RE = re.compile(r"^https?://[^\s<>\"']{3,}$", re.IGNORECASE)
@@ -8105,6 +8138,16 @@ def _v43_create_tables(cursor) -> None:
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_group_blacklist_type ON group_blacklist (group_id, list_type)")
+    # v44 · Lista blanca de términos (excepciones que nunca cuentan como prohibidos en esta comunidad)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS group_allowlist (
+            group_id INTEGER NOT NULL,
+            term TEXT NOT NULL,
+            added_by INTEGER,
+            added_at INTEGER NOT NULL,
+            PRIMARY KEY (group_id, term)
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS platform_settings (
             key TEXT PRIMARY KEY,
@@ -8132,6 +8175,7 @@ V43_SETTINGS_COLUMNS = [
     ("vc_msg_start_time", "TEXT"),
     ("vc_msg_end_time", "TEXT"),
     ("vc_msg_interval", "INTEGER DEFAULT 0"),
+    ("blacklist_cfg", "TEXT DEFAULT '{}'"),   # v44 · activar / acción / duración / borrado por lista
 ]
 
 
@@ -8258,6 +8302,8 @@ def _legacy_native_rules(conn, group_id: int) -> dict:
         "join": {"action": clean, "delay": 30},
         "leave": {"action": clean, "delay": 30},
         "videochat": {"action": "delete", "delay": 30},
+        "vc_invite": {"action": "delete", "delay": 30},   # se borraban siempre junto a los del videochat
+        "boost": {"action": "keep", "delay": 30},         # los impulsos nunca se tocaban
         "pinned": {"action": clean, "delay": 30},
         "chat_info": {"action": "keep", "delay": 30},
     }
@@ -8276,6 +8322,9 @@ def _native_rules_sync(conn, group_id: int) -> dict:
     # Si el interruptor heredado cambió DESPUÉS de guardar reglas propias (bot antiguo, /configuration), manda él.
     if custom and "_legacy" in custom and legacy_mode is not None and int(custom.get("_legacy")) != int(legacy_mode):
         custom = {}
+    # v44 · Las invitaciones al VC eran parte de «videochat»: quien ya fijó esa regla la conserva para las invitaciones.
+    if isinstance(custom, dict) and isinstance(custom.get("videochat"), dict) and "vc_invite" not in custom:
+        custom = {**custom, "vc_invite": dict(custom["videochat"])}
     for kind in NATIVE_SERVICE_KINDS:
         item = custom.get(kind) if isinstance(custom, dict) else None
         if not isinstance(item, dict):
@@ -8355,7 +8404,8 @@ def update_native_service_rules(group_id: int, patch: dict, actor_id: Optional[i
 # 🤖 AVISOS DEL BOT (warn · mute · kick · ban)
 # ------------------------------------------------------------------------------------------
 def _bot_notice_rules_sync(conn, group_id: int) -> dict:
-    rules = {kind: {"ttl": None, "text": None, "media_id": None, "media_type": None} for kind in BOT_NOTICE_KINDS}
+    rules = {kind: {"ttl": None, "text": None, "media_id": None, "media_type": None, "button_text": None,
+                    "button_url": None} for kind in BOT_NOTICE_KINDS}
     rules_meta = {"appeal_button": False}
     raw = {}
     legacy = (None, None, None)
@@ -8373,11 +8423,13 @@ def _bot_notice_rules_sync(conn, group_id: int) -> dict:
         if ttl is None or (isinstance(ttl, int) and not isinstance(ttl, bool)
                            and BOT_NOTICE_TTL_RANGE[0] <= ttl <= BOT_NOTICE_TTL_RANGE[1]):
             rules[kind]["ttl"] = ttl
-        for field in ("text", "media_id", "media_type"):
+        for field in ("text", "media_id", "media_type", "button_text", "button_url"):
             if isinstance(item.get(field), str) and item.get(field):
                 rules[kind][field] = item[field]
         if rules[kind]["media_type"] not in MEDIA_TYPES_ALLOWED:
             rules[kind]["media_id"] = rules[kind]["media_type"] = None
+        if not (rules[kind]["button_text"] and normalize_donation_url(rules[kind]["button_url"])):
+            rules[kind]["button_text"] = rules[kind]["button_url"] = None
     # La advertencia hereda el texto / multimedia que ya se editaba desde el bot (warn_custom_*).
     if not rules["warn"]["text"] and legacy[0]:
         rules["warn"]["text"] = legacy[0]
@@ -8418,7 +8470,7 @@ def validate_bot_notice_patch(patch) -> dict:
                     errors[key] = "expected an object with at least one field."
                     continue
                 entry: dict = {}
-                unknown = set(item) - {"ttl", "text", "media_id", "media_type"}
+                unknown = set(item) - {"ttl", "text", "media_id", "media_type", "button_text", "button_url"}
                 for name in unknown:
                     errors[f"{key}.{name}"] = "unknown field."
                 if "ttl" in item:
@@ -8433,6 +8485,19 @@ def validate_bot_notice_patch(patch) -> dict:
                 if "media_id" in item or "media_type" in item:
                     entry["media_id"], entry["media_type"] = _clean_media_pair(
                         errors, f"{key}.", item.get("media_id"), item.get("media_type"))
+                if "button_text" in item or "button_url" in item:
+                    label = str(item.get("button_text") or "").strip()
+                    raw_url = item.get("button_url")
+                    if not label and not raw_url:
+                        entry["button_text"] = entry["button_url"] = None
+                    else:
+                        url = normalize_donation_url(raw_url)
+                        if not label or len(label) > BOT_NOTICE_BUTTON_LABEL_MAX:
+                            errors[f"{key}.button_text"] = f"between 1 and {BOT_NOTICE_BUTTON_LABEL_MAX} characters."
+                        elif not url:
+                            errors[f"{key}.button_url"] = "use an https:// or t.me/ link."
+                        else:
+                            entry["button_text"], entry["button_url"] = label, url
                 clean["notices"][kind] = entry
         else:
             errors[f"bot_notices.{field}"] = "unknown field."
@@ -8487,12 +8552,12 @@ def normalize_donation_url(raw) -> Optional[str]:
     return None
 
 
-def _clean_links(errors: dict, key: str, value) -> Optional[list]:
+def _clean_links(errors: dict, key: str, value, max_links: int = DONATION_LINKS_MAX) -> Optional[list]:
     if not isinstance(value, list):
         errors[key] = "expected a list of {label, url}."
         return None
-    if len(value) > DONATION_LINKS_MAX:
-        errors[key] = f"maximum {DONATION_LINKS_MAX} links."
+    if len(value) > max_links:
+        errors[key] = f"maximum {max_links} links."
         return None
     out = []
     for i, item in enumerate(value):
@@ -8552,7 +8617,7 @@ def set_donation_links(group_id: int, links: list, actor_id: Optional[int] = Non
 # ------------------------------------------------------------------------------------------
 PLATFORM_DONATION_DEFAULTS = {
     "enabled": True,
-    "amounts": [50, 100, 250, 500, 1000],
+    "amounts": [100, 250, 500, 1000, 2500],
     "links": [],
     "text": None,
     "media_id": None,
@@ -8585,7 +8650,7 @@ def get_platform_donation_config() -> dict:
         links = stored.get("links")
         if isinstance(links, list):
             errors: dict = {}
-            cleaned = _clean_links(errors, "links", links)
+            cleaned = _clean_links(errors, "links", links, PLATFORM_DONATION_LINKS_MAX)
             cfg["links"] = cleaned or []
         for field in ("text", "media_id", "media_type"):
             if isinstance(stored.get(field), str) and stored.get(field):
@@ -8616,7 +8681,7 @@ def validate_platform_donation_patch(patch) -> dict:
                     amounts.append(number)
             clean["amounts"] = sorted(set(amounts))
         elif field == "links":
-            links = _clean_links(errors, key, value)
+            links = _clean_links(errors, key, value, PLATFORM_DONATION_LINKS_MAX)
             if links is not None:
                 clean["links"] = links
         elif field == "text":
@@ -8761,6 +8826,162 @@ def remove_group_blacklist_terms(group_id: int, terms: list) -> dict:
 
 
 # ------------------------------------------------------------------------------------------
+# ⚙️ v44 · CONFIGURACIÓN DE LA DOBLE LISTA NEGRA Y LISTA BLANCA DE TÉRMINOS
+# ------------------------------------------------------------------------------------------
+def _blacklist_cfg_sync(conn, group_id: int) -> dict:
+    cfg = json.loads(json.dumps(GROUP_BLACKLIST_DEFAULTS))
+    raw = {}
+    with contextlib.suppress(sqlite3.Error):
+        row = conn.execute("SELECT blacklist_cfg FROM group_settings WHERE group_id = ?", (group_id,)).fetchone()
+        raw = _json_load(row[0] if row else None, {})
+    if isinstance(raw.get("enabled"), bool):
+        cfg["enabled"] = raw["enabled"]
+    for kind in GROUP_BLACKLIST_TYPES:
+        item = (raw.get("lists") or {}).get(kind) if isinstance(raw.get("lists"), dict) else None
+        if not isinstance(item, dict):
+            continue
+        if item.get("action") in GROUP_BLACKLIST_ACTIONS:
+            cfg["lists"][kind]["action"] = item["action"]
+        duration = item.get("duration")
+        if isinstance(duration, int) and not isinstance(duration, bool) \
+                and GROUP_BLACKLIST_DURATION_RANGE[0] <= duration <= GROUP_BLACKLIST_DURATION_RANGE[1]:
+            cfg["lists"][kind]["duration"] = duration
+        if isinstance(item.get("delete"), bool):
+            cfg["lists"][kind]["delete"] = item["delete"]
+    return cfg
+
+
+@db_async
+def get_group_blacklist_config(group_id: int) -> dict:
+    """{enabled, lists: {ban|warn: {action, duration (min, 0 = permanente), delete}}}."""
+    with get_db_connection() as conn:
+        return _blacklist_cfg_sync(conn, int(group_id))
+
+
+def validate_blacklist_config_patch(patch) -> dict:
+    patch = _require_patch("blacklist_config", patch)
+    errors: dict = {}
+    clean: dict = {}
+    for field, value in patch.items():
+        key = f"blacklist_config.{field}"
+        if field == "enabled":
+            flag = _coerce_bool_field(errors, key, value)
+            if flag is not None:
+                clean["enabled"] = bool(flag)
+        elif field == "lists":
+            if not isinstance(value, dict) or not value:
+                errors[key] = "expected an object with at least one field."
+                continue
+            clean["lists"] = {}
+            for kind, item in value.items():
+                k = f"{key}.{kind}"
+                if kind not in GROUP_BLACKLIST_TYPES:
+                    errors[k] = "unknown field."
+                    continue
+                if not isinstance(item, dict) or not item:
+                    errors[k] = "expected an object with at least one field."
+                    continue
+                entry: dict = {}
+                for name, raw in item.items():
+                    if name == "action":
+                        if raw not in GROUP_BLACKLIST_ACTIONS:
+                            errors[f"{k}.action"] = f"use {', '.join(GROUP_BLACKLIST_ACTIONS)}."
+                        else:
+                            entry["action"] = raw
+                    elif name == "duration":
+                        number = _coerce_range_field(errors, f"{k}.duration", raw, *GROUP_BLACKLIST_DURATION_RANGE, " min")
+                        if number is not None:
+                            entry["duration"] = number
+                    elif name == "delete":
+                        flag = _coerce_bool_field(errors, f"{k}.delete", raw)
+                        if flag is not None:
+                            entry["delete"] = bool(flag)
+                    else:
+                        errors[f"{k}.{name}"] = "unknown field."
+                clean["lists"][kind] = entry
+        else:
+            errors[key] = "unknown field."
+    if errors:
+        raise BunkerValidationError(errors)
+    return clean
+
+
+@db_async
+def update_group_blacklist_config(group_id: int, patch: dict, actor_id: Optional[int] = None) -> dict:
+    clean = validate_blacklist_config_patch(patch)
+    gid = int(group_id)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (gid,))
+        current = _blacklist_cfg_sync(conn, gid)
+        if "enabled" in clean:
+            current["enabled"] = clean["enabled"]
+        for kind, entry in (clean.get("lists") or {}).items():
+            current["lists"][kind].update(entry)
+        conn.execute("UPDATE group_settings SET blacklist_cfg = ? WHERE group_id = ?",
+                     (json.dumps(current, separators=(",", ":")), gid))
+        _touch_config(conn, gid, actor_id)
+        return _blacklist_cfg_sync(conn, gid)
+
+
+def _allowlist_sync(conn, group_id: int) -> list:
+    with contextlib.suppress(sqlite3.Error):
+        return [r[0] for r in conn.execute("SELECT term FROM group_allowlist WHERE group_id = ? ORDER BY term",
+                                           (group_id,)).fetchall()]
+    return []
+
+
+@db_async
+def get_group_allowlist(group_id: int) -> list:
+    """Términos permitidos: nunca cuentan como prohibidos (ni en la lista global ni en la doble lista de la comunidad)."""
+    with get_db_connection() as conn:
+        return _allowlist_sync(conn, int(group_id))
+
+
+@db_async
+def add_group_allowlist_terms(group_id: int, terms: list, actor_id: Optional[int] = None) -> dict:
+    if not isinstance(terms, list) or not terms:
+        raise BunkerValidationError({"terms": "expected a list with at least one term."})
+    lo, hi = GROUP_BLACKLIST_TERM_RANGE
+    errors: dict = {}
+    clean: list = []
+    for i, raw in enumerate(terms[:GROUP_ALLOWLIST_MAX]):
+        term = normalize_blacklist_term(raw)
+        if not lo <= len(term) <= hi:
+            errors[f"terms.{i}"] = f"between {lo} and {hi} characters."
+        elif term not in clean:
+            clean.append(term)
+    if errors:
+        raise BunkerValidationError(errors)
+    gid = int(group_id)
+    added = 0
+    with _write_transaction() as conn:
+        current = _allowlist_sync(conn, gid)
+        room = GROUP_ALLOWLIST_MAX - len(current)
+        for term in clean:
+            if term in current:
+                continue
+            if room <= 0:
+                raise BunkerValidationError({"terms": f"maximum {GROUP_ALLOWLIST_MAX} allowed terms."})
+            conn.execute("INSERT OR IGNORE INTO group_allowlist (group_id, term, added_by, added_at) VALUES (?, ?, ?, ?)",
+                         (gid, term, int(actor_id) if actor_id else None, _now_epoch()))
+            added += 1
+            room -= 1
+        return {"allowlist": _allowlist_sync(conn, gid), "added": added}
+
+
+@db_async
+def remove_group_allowlist_terms(group_id: int, terms: list) -> dict:
+    if not isinstance(terms, list) or not terms:
+        raise BunkerValidationError({"terms": "expected a list with at least one term."})
+    gid = int(group_id)
+    removed = 0
+    with _write_transaction() as conn:
+        for term in [normalize_blacklist_term(t) for t in terms[:GROUP_ALLOWLIST_MAX]]:
+            removed += conn.execute("DELETE FROM group_allowlist WHERE group_id = ? AND term = ?", (gid, term)).rowcount
+        return {"allowlist": _allowlist_sync(conn, gid), "removed": removed}
+
+
+# ------------------------------------------------------------------------------------------
 # 🎙️ VENTANA HORARIA DE LOS MENSAJES DEL VIDEO CHAT
 # ------------------------------------------------------------------------------------------
 def _vc_window_sync(conn, group_id: int) -> dict:
@@ -8871,6 +9092,7 @@ def get_service_messages_bundle(group_id: int) -> dict:
                 "vc_interval_range": list(VC_MSG_INTERVAL_RANGE),
                 "donation_links_max": DONATION_LINKS_MAX,
                 "blacklist_max": GROUP_BLACKLIST_MAX_PER_LIST,
+                "blacklist_actions": list(GROUP_BLACKLIST_ACTIONS),
             },
         }
 

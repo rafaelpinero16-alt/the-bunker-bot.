@@ -16,6 +16,7 @@ Expone a la Mini App las mismas acciones que el panel "💎 Planes de Membresía
 
 v43 · Mensajes de servicio nativos en canales
 ---------------------------------------------
+• v44 · Impulsos (boosts) e invitaciones al directo con regla propia.
 • `build_channel_service_router()` devuelve un router de aiogram (lo incluye main.py) que aplica a las publicaciones
   de servicio del canal (videochat, fijado, cambio de título / foto) la misma regla que los grupos: mantener,
   borrar ya o borrar a los X s. La configuración vive en la fila de group_settings del canal.
@@ -1368,9 +1369,14 @@ async def _channel_rules(channel_id: int) -> Dict[str, Any]:
 
 
 def channel_service_kind(message: Any) -> Optional[str]:
-    """Tipo de mensaje nativo de una publicación de canal ('videochat' | 'pinned' | 'chat_info') o None."""
+    """Tipo de mensaje nativo de una publicación de canal ('videochat' | 'vc_invite' | 'boost' | 'pinned' |
+    'chat_info') o None. v44 · Las invitaciones al directo y los impulsos tienen regla propia."""
+    if getattr(message, "video_chat_participants_invited", None):
+        return "vc_invite"
+    if getattr(message, "boost_added", None):
+        return "boost"
     if (getattr(message, "video_chat_started", None) or getattr(message, "video_chat_ended", None)
-            or getattr(message, "video_chat_scheduled", None) or getattr(message, "video_chat_participants_invited", None)):
+            or getattr(message, "video_chat_scheduled", None)):
         return "videochat"
     if getattr(message, "pinned_message", None):
         return "pinned"
@@ -1414,7 +1420,7 @@ def build_channel_service_router():
 
     @router.channel_post(
         F.video_chat_started | F.video_chat_ended | F.video_chat_scheduled | F.video_chat_participants_invited
-        | F.pinned_message | F.new_chat_title | F.new_chat_photo | F.delete_chat_photo
+        | F.pinned_message | F.new_chat_title | F.new_chat_photo | F.delete_chat_photo | F.boost_added
     )
     async def channel_service_message(message):
         await apply_channel_service_rule(message)

@@ -1,6 +1,11 @@
 """
 payments.py — The Bunker OS (Aiogram 3.x)
 
+v44 · Los miembros que pagan (MicVIP, propinas, cola de speakers, planes de canal) nunca ven el menú general del bot:
+      las facturas llevan un «🔙 Volver a <comunidad>» (enlace interno t.me/c, solo abre el chat a quien ya es
+      miembro) en lugar de «Volver al menú». Tras pagar solo queda el botón de regreso de un solo uso; el mensaje con
+      el enlace de acceso se autoelimina a los 30 s (PAYMENT_LINK_TTL) y la invitación privada se revoca, así que
+      reenviarlo no sirve de nada. La felicitación de PRO / ULTRA PRO abre directamente los módulos desbloqueados.
 v43 · El mensaje de regreso tras pagar (propinas, MicVIP, apelaciones…) solo lleva el botón de vuelta al grupo y se
       autoelimina a los 30 s (PAYMENT_RETURN_TTL). Las propinas muestran también los enlaces externos de donación de
       la comunidad (PRO+). Las donaciones a la plataforma (pdon_) las gestiona user_private.
@@ -777,7 +782,14 @@ def _return_ttl_from_env() -> int:
 
 
 RETURN_TICKET_TTL = _return_ttl_from_env()   # el agradecimiento (y su único botón de regreso) vive 30 s
-RETURN_LINK_TTL = 120          # el enlace de un solo uso caduca a los 2 minutos
+def _link_ttl_from_env() -> int:
+    try:
+        return max(15, int(os.getenv("PAYMENT_LINK_TTL", "30") or 30))
+    except (TypeError, ValueError):
+        return 30
+
+
+RETURN_LINK_TTL = _link_ttl_from_env()   # v44 · el mensaje con el enlace de un solo uso se borra a los 30 s
 RETURN_LINK_NAME = "Bunker · one-time return"
 
 
@@ -1407,6 +1419,7 @@ async def show_tip_selection(message: Message, group_id: int, lang: str = "es"):
                 rows.append([InlineKeyboardButton(text=f"🔗 {link['label']}"[:64], url=link["url"])])
     except Exception as ex:
         logger.debug(f"[Propinas] Enlaces de donación no disponibles para {group_id}: {ex}")
+    rows.extend(await member_back_rows(message.bot, group_id, lang))   # v44 · regreso a la comunidad, no al menú
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
 
     if rules["custom_allowed"]:
@@ -1434,6 +1447,27 @@ async def show_tip_selection(message: Message, group_id: int, lang: str = "es"):
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
+async def member_back_rows(bot: Bot, chat_id: int, lang: str) -> list:
+    """
+    v44 · «🔙 Volver a <comunidad>» para los miembros que pagan. Nunca lleva al menú general del bot (era la causa de
+    que quien solo quería donar o pagar MicVIP acabara viendo la información para dueños). Usa el @alias público o el
+    enlace interno t.me/c/…, que solo abre el chat a quien YA es miembro: reenviarlo no da acceso a nadie.
+    """
+    chat = None
+    with contextlib.suppress(Exception):
+        chat = await bot.get_chat(chat_id)
+    title = (getattr(chat, "title", None) or "").strip() or ("tu comunidad" if lang == "es" else "your community")
+    username = getattr(chat, "username", None)
+    if username:
+        url = f"https://t.me/{username}"
+    elif str(chat_id).startswith("-100"):
+        url = f"https://t.me/c/{str(chat_id)[4:]}/999999999"
+    else:
+        return []
+    label = (f"🔙 Volver a {title}" if lang == "es" else f"🔙 Back to {title}")[:64]
+    return [[InlineKeyboardButton(text=label, url=url)]]
+
+
 async def send_stars_tip_invoice(bot: Bot, user_id: int, group_id: int, amount: int, lang: str = "es"):
     """Emite la factura oficial de Telegram Stars con la cantidad dinámica solicitada."""
     t = TEXTS.get(lang, TEXTS["es"])
@@ -1444,13 +1478,7 @@ async def send_stars_tip_invoice(bot: Bot, user_id: int, group_id: int, amount: 
     kb_rows = [
         [InlineKeyboardButton(text=f"⭐ Donar {amount} Stars" if lang == "es" else f"⭐ Donate {amount} Stars", pay=True)]
     ]
-    try:
-        chat_info = await bot.get_chat(group_id)
-        if chat_info and getattr(chat_info, "username", None):
-            kb_rows.append([InlineKeyboardButton(text=t["btn_return_group"], url=f"https://t.me/{chat_info.username}")])
-    except Exception:
-        pass
-    kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+    kb_rows.extend(await member_back_rows(bot, group_id, lang))   # v44 · nunca el menú general
 
     await send_stars_invoice(
         bot, user_id, title, description, payload, amount,
@@ -1655,7 +1683,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
                 target_url = target_link if target_link.startswith("http") else f"https://t.me/{target_link.lstrip('@')}"
                 kb_rows.append([InlineKeyboardButton(text=t["btn_view_target"], url=target_url)])
 
-            kb_rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+            kb_rows.extend(await member_back_rows(bot, channel_id, lang))   # v44 · nunca el menú general
             markup = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
             await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(stars_price), reply_markup=markup)
@@ -1683,7 +1711,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
 
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({final_price} XTR)", pay=True)],
-                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+                *await member_back_rows(bot, chat_id, lang),   # v44 · nunca el menú general
             ])
 
             await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(final_price), reply_markup=markup)
@@ -1707,7 +1735,7 @@ async def cmd_start_deep_linking(message: Message, command: CommandObject, bot: 
 
             markup = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"{t['btn_pay_stars']} ({speaker_price} XTR)", pay=True)],
-                [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")]
+                *await member_back_rows(bot, chat_id, lang),   # v44 · nunca el menú general
             ])
 
             await send_stars_invoice(bot, message.chat.id, title, desc, payload, int(speaker_price), reply_markup=markup)
@@ -2131,8 +2159,15 @@ async def process_successful_payment(message: Message, bot: Bot):
 
             chat_kind, back_cb = await resolve_chat_context(bot, chat_id)
 
+            # v44 · Acceso directo a los módulos recién desbloqueados (solo grupos: las vitrinas viven en su panel).
+            modules_row = ([[InlineKeyboardButton(
+                text=("⭐ Abrir mis módulos PRO" if lang == "es" else "⭐ Open my PRO modules") if plan_type == "pro"
+                else ("💎 Abrir mis módulos ULTRA PRO" if lang == "es" else "💎 Open my ULTRA PRO modules"),
+                callback_data=f"tierv_{'pro' if plan_type == 'pro' else 'ultra'}_{chat_id}_{lang}")]]
+                if chat_kind != "c" else [])
             if plan_type == "pro":
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
+                    *modules_row,
                     [InlineKeyboardButton(text=t["btn_add_master"], url=ASSISTANT_INVITE_URL)],
                     [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
                     [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]
@@ -2145,6 +2180,7 @@ async def process_successful_payment(message: Message, bot: Bot):
             else:
                 clone_cb = f"gset_clone_{chat_id}_{lang}"
                 confirm_markup = InlineKeyboardMarkup(inline_keyboard=[
+                    *modules_row,
                     [InlineKeyboardButton(text=t["btn_setup_clone"], callback_data=clone_cb)],
                     [InlineKeyboardButton(text=t["btn_miniapp"], web_app=WebAppInfo(url=f"{WEBAPP_URL}?chat_id={chat_id}"))],
                     [InlineKeyboardButton(text=t["btn_back_group"], callback_data=f"{back_cb}_{lang}")]

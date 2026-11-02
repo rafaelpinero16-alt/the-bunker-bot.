@@ -1,5 +1,10 @@
 /**
- * servicemsgs.js — The Bunker OS · Mini App · v43 · Fase 9
+ * servicemsgs.js — The Bunker OS · Mini App · v44 · Fase 9.1
+ *
+ * v44: invitaciones al videochat e impulsos como mensajes nativos configurables; aviso «📢 Aviso» (advise) del bot;
+ *      botón propio por aviso (texto + enlace, PRO) e indicador / borrado de la multimedia que se fija desde el bot;
+ *      doble lista negra con configuración (activar, acción ban/kick/mute/warn/advise, duración y borrado por lista)
+ *      y lista blanca (ULTRA PRO). Mismos endpoints: /service-messages y /blacklists.
  *
  * Módulo ES autocontenido que pinta #svc-panel en la consola de la comunidad, con tres pestañas:
  *   • 📨 Mensajes: reglas de los mensajes nativos de Telegram (entradas, salidas, videochat, fijados, título / foto:
@@ -21,8 +26,10 @@ import { tgApp } from './telegram.js';
 import { CONFIG } from './config.js';
 
 const TIMEOUT_MS = CONFIG.SERVICE_MSGS?.TIMEOUT_MS || 12000;
-const KINDS = ['join', 'leave', 'videochat', 'pinned', 'chat_info'];
-const NOTICE_KINDS = ['warn', 'mute', 'kick', 'ban'];
+const KINDS = ['join', 'leave', 'videochat', 'vc_invite', 'boost', 'pinned', 'chat_info'];
+const NOTICE_KINDS = ['warn', 'mute', 'kick', 'ban', 'advise'];
+const BL_ACTIONS = ['ban', 'kick', 'mute', 'warn', 'advise'];
+const BL_DURATIONS = [0, 60, 1440, 10080, 43200];   // minutos · 0 = permanente
 const DELAYS = CONFIG.SERVICE_MSGS?.DELAYS || [10, 30, 60, 300, 900, 3600];
 const NOTICE_TTLS = CONFIG.SERVICE_MSGS?.NOTICE_TTLS || [null, 10, 30, 60, 300, 0];
 const VC_INTERVALS = CONFIG.SERVICE_MSGS?.VC_INTERVALS || [0, 30, 60, 120, 300, 600];
@@ -37,20 +44,28 @@ const TEXTS = {
         tab_messages: '📨 Messages', tab_blacklist: '🚫 Blacklist', tab_donations: '💰 Donations',
         saved: 'Saved', save: 'Save',
         native_title: 'Telegram service messages', native_hint: 'What to do with Telegram\'s automatic notices in this community.',
-        k_join: '👋 Joins', k_leave: '🚪 Leaves', k_videochat: '🎙️ Video chat', k_pinned: '📌 Pins', k_chat_info: '🖼️ Title / photo',
+        k_join: '👋 Joins', k_leave: '🚪 Leaves', k_videochat: '🎙️ Video chat started / ended', k_vc_invite: '📨 Video chat invitations',
+        k_boost: '🚀 Boosts', k_pinned: '📌 Pins', k_chat_info: '🖼️ Title / photo',
         a_keep: 'Keep', a_delete: 'Delete now', a_delay: 'Delete after…',
         notices_title: 'Bot notices', notices_hint: '«Default» uses the group\'s service TTL; «Pinned» never deletes.',
-        n_warn: '⚠️ Warning', n_mute: '🔇 Mute', n_kick: '👢 Kick', n_ban: '🚫 Ban',
+        n_warn: '⚠️ Warning', n_mute: '🔇 Mute', n_kick: '👢 Kick', n_ban: '🚫 Ban', n_advise: '📢 Notice',
         ttl_default: 'Default', ttl_pinned: 'Pinned',
+        btn_title: 'Button under the notice', btn_label: 'Button text', btn_url: 'https://… or t.me/…', btn_clear: 'Remove button',
+        btn_hint: 'For example «📜 Rules». The ⚖️ Appeal button is added separately.',
+        media_on: '🖼️ Media set from the bot', media_clear: 'Remove media', media_hint: 'To add a photo, video or GIF: bot → Group Settings → 📨 Service messages → 🤖 Bot notices → ✍️.',
         custom_text: 'Custom text (HTML)', custom_hint: 'Variables: {mention} {strikes} {limit} {reason} {action}. Empty = official text.',
         appeal: '⚖️ «Appeal» button on automatic bans', appeal_hint: 'Requires ban appeals to be enabled for this community.',
         vc_title: 'Voice-chat message schedule', vc_hint: 'Outside these hours (or with posting off) the Sentinel and the bot post nothing in the chat; acoustic moderation keeps working silently.',
         vc_enabled: 'Posting', vc_all_day: 'All day', vc_start: 'From', vc_end: 'To', vc_interval: 'Minimum gap between member notices',
         vc_no_limit: 'No limit', vc_both: 'Set both times or choose «All day».',
-        bl_title: 'Double Blacklist', bl_hint: 'Terms of your own (case-insensitive, whole words). A term lives in only one list.',
-        bl_ban: '⛔ Ban list — bans on sight', bl_warn: '⚠️ Warn list — deletes and warns',
+        bl_title: 'Double Blacklist', bl_hint: 'Terms of your own (case-insensitive, whole words). A term lives in only one list. For each list choose the action, the duration (ban / mute) and whether the message is deleted. The allowlist always wins.',
+        bl_ban: '⛔ Ban list (default: ban on sight)', bl_warn: '⚠️ Warn list (default: delete + warn)',
         bl_placeholder: 'term, another term…', bl_add: 'Add', bl_empty: 'Empty', bl_remove: 'Remove',
         bl_added: '{a} added · {m} moved · {s} already listed',
+        bl_on: 'Blacklists on', bl_rule: 'When a term is detected', bl_action: 'Action', bl_duration: 'Duration', bl_delete: 'Delete the message',
+        act_ban: '⛔ Ban', act_kick: '👢 Kick', act_mute: '🔇 Mute', act_warn: '⚠️ Warn', act_advise: '📢 Notice only',
+        dur_0: 'Permanent', dur_60: '1 h', dur_1440: '1 day', dur_10080: '7 days', dur_43200: '30 days',
+        bl_allow: '✅ Allowlist — never counts (not even in the global list)', bl_allow_added: '{a} added to the allowlist',
         don_title: 'External donation links', don_hint: 'Shown next to the Stars amounts when a member opens your tips. Amounts and texts are in the Tips section above.',
         don_label: 'Name', don_url: 'https://… or t.me/…', don_add: 'Add link', don_empty: 'No links yet.',
         lock_pro: 'Requires a PRO ⭐ license', lock_ultra: 'Requires an ULTRA PRO 💎 license', get_pro: '⭐ Get PRO', get_ultra: '💎 Get ULTRA PRO',
@@ -64,20 +79,28 @@ const TEXTS = {
         tab_messages: '📨 Mensajes', tab_blacklist: '🚫 Lista negra', tab_donations: '💰 Donaciones',
         saved: 'Guardado', save: 'Guardar',
         native_title: 'Mensajes de servicio de Telegram', native_hint: 'Qué hacer con los avisos automáticos de Telegram en esta comunidad.',
-        k_join: '👋 Entradas', k_leave: '🚪 Salidas', k_videochat: '🎙️ Videochat', k_pinned: '📌 Fijados', k_chat_info: '🖼️ Título / foto',
+        k_join: '👋 Entradas', k_leave: '🚪 Salidas', k_videochat: '🎙️ Videochat abierto / cerrado', k_vc_invite: '📨 Invitaciones al videochat',
+        k_boost: '🚀 Impulsos', k_pinned: '📌 Fijados', k_chat_info: '🖼️ Título / foto',
         a_keep: 'Mantener', a_delete: 'Borrar ya', a_delay: 'Borrar a los…',
         notices_title: 'Avisos del bot', notices_hint: '«Por defecto» usa el TTL de servicio del grupo; «Fijo» no se borra nunca.',
-        n_warn: '⚠️ Advertencia', n_mute: '🔇 Silencio', n_kick: '👢 Expulsión', n_ban: '🚫 Baneo',
+        n_warn: '⚠️ Advertencia', n_mute: '🔇 Silencio', n_kick: '👢 Expulsión', n_ban: '🚫 Baneo', n_advise: '📢 Aviso',
         ttl_default: 'Por defecto', ttl_pinned: 'Fijo',
+        btn_title: 'Botón bajo el aviso', btn_label: 'Texto del botón', btn_url: 'https://… o t.me/…', btn_clear: 'Quitar botón',
+        btn_hint: 'Por ejemplo «📜 Normas». El botón ⚖️ Apelar se añade aparte.',
+        media_on: '🖼️ Multimedia fijada desde el bot', media_clear: 'Quitar multimedia', media_hint: 'Para añadir foto, vídeo o GIF: bot → Configuración de grupos → 📨 Mensajes de servicio → 🤖 Avisos del bot → ✍️.',
         custom_text: 'Texto propio (HTML)', custom_hint: 'Variables: {mention} {strikes} {limit} {reason} {action}. Vacío = texto oficial.',
         appeal: '⚖️ Botón «Apelar» en baneos automáticos', appeal_hint: 'Requiere tener activas las apelaciones de baneo en esta comunidad.',
         vc_title: 'Horario de los mensajes del videochat', vc_hint: 'Fuera de este horario (o con la emisión apagada) el Centinela y el bot no publican nada en el chat; la moderación acústica sigue en silencio.',
         vc_enabled: 'Emisión', vc_all_day: 'Todo el día', vc_start: 'Desde', vc_end: 'Hasta', vc_interval: 'Separación mínima entre avisos de miembros',
         vc_no_limit: 'Sin límite', vc_both: 'Indica las dos horas o elige «Todo el día».',
-        bl_title: 'Doble Lista Negra', bl_hint: 'Términos propios (sin distinguir mayúsculas, palabra completa). Un término solo está en una lista.',
-        bl_ban: '⛔ Lista de baneo — expulsa en el acto', bl_warn: '⚠️ Lista de advertencia — borra y advierte',
+        bl_title: 'Doble Lista Negra', bl_hint: 'Términos propios (sin distinguir mayúsculas, palabra completa). Un término solo está en una lista. En cada lista eliges la acción, la duración (ban / mute) y si se borra el mensaje. La lista blanca gana siempre.',
+        bl_ban: '⛔ Lista de baneo (por defecto: banea en el acto)', bl_warn: '⚠️ Lista de advertencia (por defecto: borra + advierte)',
         bl_placeholder: 'término, otro término…', bl_add: 'Añadir', bl_empty: 'Vacía', bl_remove: 'Quitar',
         bl_added: '{a} añadidos · {m} movidos · {s} ya estaban',
+        bl_on: 'Listas negras activas', bl_rule: 'Al detectar un término', bl_action: 'Acción', bl_duration: 'Duración', bl_delete: 'Borrar el mensaje',
+        act_ban: '⛔ Banear', act_kick: '👢 Expulsar', act_mute: '🔇 Silenciar', act_warn: '⚠️ Advertir', act_advise: '📢 Solo aviso',
+        dur_0: 'Permanente', dur_60: '1 h', dur_1440: '1 día', dur_10080: '7 días', dur_43200: '30 días',
+        bl_allow: '✅ Lista blanca — nunca cuenta (ni en la lista global)', bl_allow_added: '{a} añadidos a la lista blanca',
         don_title: 'Enlaces externos de donación', don_hint: 'Aparecen junto a los montos en Stars cuando un miembro abre tus propinas. Los montos y textos están en la sección Propinas de arriba.',
         don_label: 'Nombre', don_url: 'https://… o t.me/…', don_add: 'Añadir enlace', don_empty: 'Aún no hay enlaces.',
         lock_pro: 'Requiere licencia PRO ⭐', lock_ultra: 'Requiere licencia ULTRA PRO 💎', get_pro: '⭐ Activar PRO', get_ultra: '💎 Activar ULTRA PRO',
@@ -230,7 +253,7 @@ class ServiceMessagesConsole {
 
     reset() {
         this.msgs = { data: null, features: null, error: '', busy: false, drafts: {} };
-        this.bl = { data: null, features: null, error: '', busy: false, input: { ban: '', warn: '' } };
+        this.bl = { data: null, config: null, allowlist: null, features: null, error: '', busy: false, input: { ban: '', warn: '', allow: '' } };
         this.don = { links: null, features: null, error: '', busy: false, label: '', url: '' };
     }
 
@@ -364,7 +387,39 @@ class ServiceMessagesConsole {
                     h('div', { class: 'space-y-1 pt-1' }, [area, h('p', { class: CLS.muted }, t('custom_hint')),
                         h('button', { type: 'button', class: `${CLS.btn} border-cyan-400/40 bg-cyan-400/10 text-cyan-300`, disabled: busy,
                             onclick: () => this.saveMessages({ bot_notices: { notices: { [kind]: { text: (area.value || '').trim() || null } } } }) },
-                        t('save'))]),
+                        t('save')),
+                        item.media_id
+                            ? h('div', { class: 'flex items-center justify-between gap-2' }, [
+                                h('span', { class: 'text-[9px] font-bold text-emerald-300' }, t('media_on')),
+                                h('button', { type: 'button', class: `${CLS.btn} border-red-400/40 bg-red-400/10 text-red-300 shrink-0`, disabled: busy,
+                                    onclick: () => this.saveMessages({ bot_notices: { notices: { [kind]: { media_id: null, media_type: null } } } }) },
+                                t('media_clear'))])
+                            : h('p', { class: CLS.muted }, t('media_hint'))]),
+                ]));
+                const labelKey = `btnl_${kind}`, urlKey = `btnu_${kind}`;
+                const bLabel = h('input', { type: 'text', class: CLS.input, maxlength: '40', placeholder: t('btn_label'), disabled: busy,
+                    oninput: ev => { this.msgs.drafts[labelKey] = ev.target.value; } });
+                bLabel.value = this.msgs.drafts[labelKey] ?? (item.button_text || '');
+                const bUrl = h('input', { type: 'url', class: CLS.input, maxlength: '512', placeholder: t('btn_url'), disabled: busy,
+                    autocomplete: 'off', spellcheck: 'false', oninput: ev => { this.msgs.drafts[urlKey] = ev.target.value; } });
+                bUrl.value = this.msgs.drafts[urlKey] ?? (item.button_url || '');
+                block.push(h('details', { class: 'group' }, [
+                    h('summary', { class: 'text-[9px] text-neutral-400 cursor-pointer select-none' }, `🔘 ${t('btn_title')}${item.button_url ? ' ●' : ''}`),
+                    h('div', { class: 'space-y-1 pt-1' }, [bLabel, bUrl, h('p', { class: CLS.muted }, t('btn_hint')),
+                        h('div', { class: 'flex gap-1.5' }, [
+                            h('button', { type: 'button', class: `${CLS.btn} border-cyan-400/40 bg-cyan-400/10 text-cyan-300`, disabled: busy,
+                                onclick: () => {
+                                    const label = (bLabel.value || '').trim(), url = (bUrl.value || '').trim();
+                                    if (!label || !url) { toast('warn', '⚠️', `${t('btn_label')} + ${t('btn_url')}`); return; }
+                                    delete this.msgs.drafts[labelKey]; delete this.msgs.drafts[urlKey];
+                                    this.saveMessages({ bot_notices: { notices: { [kind]: { button_text: label, button_url: url } } } });
+                                } }, t('save')),
+                            item.button_url ? h('button', { type: 'button', class: `${CLS.btn} border-red-400/40 bg-red-400/10 text-red-300`, disabled: busy,
+                                onclick: () => {
+                                    delete this.msgs.drafts[labelKey]; delete this.msgs.drafts[urlKey];
+                                    this.saveMessages({ bot_notices: { notices: { [kind]: { button_text: null, button_url: null } } } });
+                                } }, t('btn_clear')) : null]),
+                    ]),
                 ]));
             }
             return h('div', { class: 'space-y-1' }, block);
@@ -439,7 +494,7 @@ class ServiceMessagesConsole {
         const res = await serviceMessagesService.fetchBlacklists(this.chatId);
         if (!ok(res)) return;
         if (res.__error) this.bl.error = errorText(res);
-        else Object.assign(this.bl, { data: res.blacklists, features: res.features || {} });
+        else Object.assign(this.bl, { data: res.blacklists, config: res.config || null, allowlist: res.allowlist || [], features: res.features || {} });
         this.render();
     }
 
@@ -457,6 +512,8 @@ class ServiceMessagesConsole {
         } else {
             haptic('ok');
             this.bl.data = res.lists || this.bl.data;
+            if (res.config) this.bl.config = res.config;
+            if (Array.isArray(res.allowlist)) this.bl.allowlist = res.allowlist;
             if (body.action === 'add') this.bl.input[body.list_type] = '';
             toast('success', '🚫', okText(res));
         }
@@ -474,17 +531,21 @@ class ServiceMessagesConsole {
             const list = parseTerms(input.value);
             if (!list.length) return;
             this.blAction({ action: 'add', list_type: kind, terms: list },
-                res => t('bl_added', { a: res.added ?? 0, m: res.moved ?? 0, s: res.skipped ?? 0 }));
+                res => (kind === 'allow' ? t('bl_allow_added', { a: res.added ?? 0 })
+                    : t('bl_added', { a: res.added ?? 0, m: res.moved ?? 0, s: res.skipped ?? 0 })));
         };
         const chips = terms.length ? terms.map(term => h('span', {
             class: 'inline-flex items-center gap-1 rounded-full border border-neutral-700 bg-black/50 px-2 py-0.5 text-[10px] font-mono text-theme-main',
         }, [term, h('button', {
             type: 'button', class: 'text-neutral-500 hover:text-red-300 disabled:opacity-40', disabled: busy, 'aria-label': `${t('bl_remove')} ${term}`,
-            onclick: () => this.blAction({ action: 'remove', terms: [term] }, () => t('saved')),
+            onclick: () => this.blAction(kind === 'allow' ? { action: 'remove', list_type: 'allow', terms: [term] }
+                : { action: 'remove', terms: [term] }, () => t('saved')),
         }, '×')])) : [h('span', { class: CLS.muted }, t('bl_empty'))];
+        const color = kind === 'ban' ? 'text-red-300' : (kind === 'allow' ? 'text-emerald-300' : 'text-amber-300');
+        const title = t(kind === 'ban' ? 'bl_ban' : (kind === 'allow' ? 'bl_allow' : 'bl_warn'));
         return h('div', { class: CLS.card }, [
-            h('p', { class: `text-[11px] font-extrabold ${kind === 'ban' ? 'text-red-300' : 'text-amber-300'}` },
-                `${t(kind === 'ban' ? 'bl_ban' : 'bl_warn')} (${terms.length})`),
+            h('p', { class: `text-[11px] font-extrabold ${color}` }, `${title} (${terms.length})`),
+            kind === 'allow' ? null : this.renderRule(kind, busy),
             h('div', { class: 'flex gap-1.5' }, [input, h('button', {
                 type: 'button', class: `${CLS.btn} border-cyan-400/40 bg-cyan-400/10 text-cyan-300 shrink-0`, disabled: busy, onclick: add,
             }, busy ? '…' : t('bl_add'))]),
@@ -502,8 +563,37 @@ class ServiceMessagesConsole {
             out.push(this.lockBox('ultra_pro'));
             return h('div', { class: 'space-y-2' }, out);
         }
-        out.push(this.renderList('ban', b.data.ban || [], b.busy), this.renderList('warn', b.data.warn || [], b.busy));
+        const on = b.config ? b.config.enabled !== false : true;
+        out.push(h('button', {
+            type: 'button', class: `${CLS.chip} w-full ${on ? ON_CLS : OFF_CLS}`, disabled: b.busy, role: 'switch',
+            'aria-checked': on ? 'true' : 'false',
+            onclick: () => this.blAction({ action: 'config', config: { enabled: !on } }, () => t('saved')),
+        }, `${on ? '🟢' : '🔴'} ${t('bl_on')}`));
+        out.push(this.renderList('ban', b.data.ban || [], b.busy), this.renderList('warn', b.data.warn || [], b.busy),
+            this.renderList('allow', b.allowlist || [], b.busy));
         return h('div', { class: 'space-y-2' }, out);
+    }
+
+    /** v44 · Acción, duración (ban / mute) y borrado del mensaje de una lista. */
+    renderRule(kind, busy) {
+        const rule = (this.bl.config && this.bl.config.lists && this.bl.config.lists[kind])
+            || { action: kind === 'ban' ? 'ban' : 'warn', duration: 0, delete: true };
+        const save = patch => this.blAction({ action: 'config', config: { lists: { [kind]: patch } } }, () => t('saved'));
+        const action = select(BL_ACTIONS.map(a => [a, t(`act_${a}`)]), rule.action, value => save({ action: value }), busy);
+        const durations = [...new Set([...BL_DURATIONS, Number(rule.duration) || 0])].sort((a, b) => a - b);
+        const duration = (rule.action === 'ban' || rule.action === 'mute')
+            ? select(durations.map(d => [d, t(`dur_${d}`) === `dur_${d}` ? `${d} min` : t(`dur_${d}`)]), Number(rule.duration) || 0,
+                value => save({ duration: Number(value) }), busy)
+            : null;
+        const del = rule.delete !== false;
+        const delBtn = h('button', {
+            type: 'button', class: `${CLS.chip} px-2 ${del ? ON_CLS : OFF_CLS}`, disabled: busy, role: 'switch',
+            'aria-checked': del ? 'true' : 'false', onclick: () => save({ delete: !del }),
+        }, `${del ? '🗑 ✅' : '🗑 ❌'} ${t('bl_delete')}`);
+        return h('div', { class: 'space-y-1' }, [
+            h('p', { class: CLS.label }, t('bl_rule')),
+            h('div', { class: 'flex flex-wrap items-center gap-1.5' }, [action, duration, delBtn]),
+        ]);
     }
 
     // ---------------------------------------------------------------- Donaciones

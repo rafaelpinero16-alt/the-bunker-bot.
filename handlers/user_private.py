@@ -8,6 +8,12 @@ Revisión de resiliencia y blindaje:
   4. Identidad visual: botones inline, soporte bilingüe ES/EN y firma perimetral "Cloud Media Management".
   5. Fase 3 · Exclusividad financiera: PRO, ULTRA PRO, MicVIP y membresías se adquieren solo con
      Telegram Stars (XTR) in-app; sin pasarelas externas ni precios fiat (Telegram, Apple 3.1.1, Google Play).
+  6. v44 · Fase 9.1 — /start por intención (📖 Qué es · ➕ Añadir · ⚡ Command Center · ⚙️/📡 · 🆘 Soporte · ℹ️ Info Bot ·
+     💰 Donar a The Bunker · 🛠️ Mi ID · 🌐 Idioma); ℹ️ Info Bot por audiencia (dueños, comandos, miembros, curiosos,
+     permisos, guías FREE / PRO / ULTRA, clon, Centinela); panel del grupo = una guía por herramienta (gd_) con
+     «⚙️ Abrir ajustes»; 📋 Comandos disponibles (cmdl_); vitrinas PRO / ULTRA PRO con factura Stars directa;
+     doble lista negra configurable + lista blanca; botón y multimedia por aviso del bot; donaciones de la
+     plataforma configurables por el Arquitecto (pdcfg_) y «Volver» contextual en cada panel informativo.
 """
 from typing import Optional, cast
 import os
@@ -1951,9 +1957,12 @@ async def safe_edit_text(callback: CallbackQuery, text: str, reply_markup=None, 
     msg = callback.message
     if msg is not None:
         try:
-            if getattr(msg, "photo", None):
+            if getattr(msg, "photo", None) and len(text or "") <= 1024:
                 # Si el mensaje actual es una foto, editamos su caption en lugar de edit_text
-                return await msg.edit_caption(caption=text[:1024], reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+                return await msg.edit_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
+            elif getattr(msg, "photo", None):
+                # v44 · Texto largo sobre una foto: recortarlo a 1024 rompería el HTML → se reemplaza por un mensaje
+                pass
             elif hasattr(msg, "edit_text"):
                 return await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode, **kwargs)
         except TelegramBadRequest as e:
@@ -2429,7 +2438,8 @@ def _state_target_chat(value) -> int | None:
 # Un delegado (designado SOLO por el Arquitecto en la Matriz) opera exclusivamente los botones del módulo que
 # tiene activado. Todo botón que no figure aquí sigue siendo exclusivo del Dueño legítimo y del Arquitecto
 # (moderación ejecutiva, pasarela de planes, clon y centinela por teléfono, respaldos, pánico, etc.).
-DELEGATE_NAV_PREFIXES = ("gpanel_", "cpanel_", "langpanel_", "langcpanel_", "menu_eco_", "menu_ultra_")
+DELEGATE_NAV_PREFIXES = ("gpanel_", "cpanel_", "langpanel_", "langcpanel_", "menu_eco_", "menu_ultra_",
+                         "gd_", "cmdl_m_")   # 🧰 v44 · guías por herramienta y lista de comandos (solo lectura)
 DELEGATE_CALLBACK_RULES = (
     # 🤖 Aduana y Captcha
     ("gset_captcha_", "can_manage_captcha"), ("togcap_", "can_manage_captcha"), ("togmode_", "can_manage_captcha"),
@@ -2442,6 +2452,8 @@ DELEGATE_CALLBACK_RULES = (
     ("afval_", "can_manage_antispam"), ("afact_", "can_manage_antispam"),
     # 🚨🌐 v37 · Anti-Raid configurable e idioma/TTL de servicio
     ("raidcfg_", "can_manage_antispam"), ("svcset_", "can_manage_antispam"),
+    # 📋 v44 · Bloqueo de comandos desde «Comandos disponibles»
+    ("cmdl_t_", "can_manage_locks"),
     # 📢 Difusión de planes y anuncios (sin crear, pausar ni borrar planes: eso es del Dueño)
     ("chplans_menu_", "can_manage_broadcast"), ("chplans_view_", "can_manage_broadcast"),
     ("chplans_share_", "can_manage_broadcast"), ("chplans_postto_", "can_manage_broadcast"),
@@ -2492,7 +2504,9 @@ async def is_authorized_operator(bot: Bot, user_id: int, chat_id: int, perm: Opt
 # v37 · Paneles que también gestionan los administradores con «Añadir administradores» (todos los rangos).
 CONFIG_ADMIN_PREFIXES: tuple[str, ...] = ("raidcfg_", "svcset_",
                                           # 🧩 v43 · mismos permisos que la API (/service-messages)
-                                          "svm_", "bnt_", "vcw_", "tierv_")
+                                          "svm_", "bnt_", "vcw_", "tierv_",
+                                          # 🧰 v44 · guías por herramienta y «Comandos disponibles»
+                                          "gd_", "cmdl_")
 
 
 async def is_authorized_for_callback(bot: Bot, user_id: int, chat_id: int, callback_data: str) -> bool:
@@ -2830,9 +2844,12 @@ def build_channel_request_keyboard(lang: str) -> ReplyKeyboardMarkup:
 
 def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False, user_id: int = 0):
     """
-    v43 · Menú principal por flujos: 📖 Qué es y cómo funciona → ➕ Añadir a grupo / canal → ⚡ Command Center →
-    ⚙️ Mis grupos / 📡 Mis canales → ℹ️ Manuales · 🆘 Soporte → 💰 Donaciones → 🛠️ Mi ID · 🌐 Idioma.
-    Los clones no muestran el Command Center ni las donaciones a la plataforma (no son The Bunker).
+    v44 · Menú principal ordenado por intención:
+      📖 Qué es y cómo funciona → ➕ Añadir a grupo / canal → ⚡ Command Center → ⚙️ Mis grupos / 📡 Mis canales →
+      🆘 Soporte · ℹ️ Info Bot → 💰 Donar a The Bunker → 🛠️ Mi ID · 🌐 Idioma (siempre al final).
+    Las licencias PRO / ULTRA PRO ya NO aparecen aquí: solo dentro del panel de cada comunidad, para que los miembros
+    que donan o compran MicVIP no las confundan con una donación mayor. Los clones no muestran el Command Center ni
+    las donaciones a la plataforma (no son The Bunker).
     """
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     add_group_url = f"https://t.me/{bot_username}?startgroup=true&admin=restrict_members+ban_users+delete_messages+pin_messages+manage_video_chats+promote_members"
@@ -2853,11 +2870,12 @@ def get_main_keyboard(bot_username: str, lang: str, is_clone: bool = False, user
         InlineKeyboardButton(text=t["btn_chsettings"], callback_data=f"menu_chsettings_{lang}")
     ])
     rows.append([
-        InlineKeyboardButton(text=tr(lang, "ℹ️ Manuales", "ℹ️ Manuals"), callback_data=f"menu_manuals_{lang}"),
-        InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}")
+        InlineKeyboardButton(text=t["btn_support"], callback_data=f"menu_support_{lang}"),
+        InlineKeyboardButton(text="ℹ️ Info Bot", callback_data=f"menu_infobot_{lang}")
     ])
     if not is_clone:
-        rows.append([InlineKeyboardButton(text=tr(lang, "💰 Donaciones", "💰 Donations"), callback_data=f"menu_donate_{lang}")])
+        rows.append([InlineKeyboardButton(text=tr(lang, "💰 Donar a The Bunker", "💰 Donate to The Bunker"),
+                                          callback_data=f"menu_donate_{lang}")])
     rows.append([
         InlineKeyboardButton(text=t["btn_id"], callback_data=f"menu_id_{lang}"),
         # 🌐 v21 · Muestra el idioma al que se cambia (🇺🇸 EN por defecto, 🇪🇸 ES persistente)
@@ -3033,40 +3051,26 @@ def _plan_recurrence_keyboard(t: dict, channel_id: int, lang: str, plan_id: Opti
 
 def get_group_panel_keyboard(group_id: int, lang: str):
     """
-    v43 · Panel por rangos: arriba las funciones FREE (disponibles siempre); abajo, las vitrinas ⭐ PRO y 💎 ULTRA PRO.
-    Cada vitrina muestra los botones de configuración si la comunidad tiene el rango, o el texto persuasivo con la
-    instalación y el pago en Stars si no (la licencia se comprueba al abrirla: este teclado es síncrono).
+    v44 · Panel del grupo = módulo FREE: un botón por herramienta (cada uno abre su guía: qué hace, cómo se instala y
+    «⚙️ Abrir ajustes»), 📋 Comandos disponibles y, al final, las vitrinas ⭐ PRO y 💎 ULTRA PRO (texto persuasivo +
+    pago en Stars si el rango no está activo; sus herramientas si lo está). La licencia se comprueba al abrir cada
+    vitrina / guía (este teclado es síncrono).
     """
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     toggle_lang = "en" if lang == "es" else "es"
     g = group_id
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=t["btn_mod"], callback_data=f"menu_mod_{g}_{lang}"), InlineKeyboardButton(text=t["btn_eco"], callback_data=f"menu_eco_{g}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_antispam"], callback_data=f"gset_antispam_{g}_{lang}"), InlineKeyboardButton(text=t["btn_antiflood"], callback_data=f"gset_antiflood_{g}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_captcha"], callback_data=f"gset_captcha_{g}_{lang}"), InlineKeyboardButton(text=t["btn_locks"], callback_data=f"gset_locks_{g}_{lang}")],
-        [InlineKeyboardButton(text=t["btn_warns"], callback_data=f"gset_warns_{g}_{lang}"), InlineKeyboardButton(text=t["btn_delmsgs"], callback_data=f"gset_delmsgs_{g}_{lang}")],
-        # 📨 v43 · Mensajes de servicio de Telegram (todos los rangos) y avisos del bot
-        [InlineKeyboardButton(text="📨 " + tr(lang, "Mensajes de servicio", "Service messages"), callback_data=f"svm_m_{g}_{lang}")],
-        # 🛰️ v20 · Estado real del perímetro y canal de registro con validación en vivo (paridad con la Mini App)
-        [
-            InlineKeyboardButton(text="🛰️ " + tr(lang, "Perímetro", "Perimeter"), callback_data=f"perim_view_{g}_{lang}"),
-            InlineKeyboardButton(text="🧾 " + tr(lang, "Canal de Registro", "Log Channel"), callback_data=f"logch_menu_{g}_{lang}"),
-        ],
-        # 🚨🌐 v37 · Anti-Raid configurable (todos los rangos) e idioma / auto-borrado de los avisos del grupo
-        [
-            InlineKeyboardButton(text="🚨 Anti-Raid", callback_data=f"raidcfg_m_{g}_{lang}"),
-            InlineKeyboardButton(text="🌐 " + tr(lang, "Idioma y TTL", "Language & TTL"), callback_data=f"svcset_m_{g}_{lang}"),
-        ],
-        # ⭐💎 v43 · Vitrinas por rango
-        [
-            InlineKeyboardButton(text="⭐ " + tr(lang, "Módulos PRO", "PRO modules"), callback_data=f"tierv_pro_{g}_{lang}"),
-            InlineKeyboardButton(text="💎 " + tr(lang, "Módulos ULTRA PRO", "ULTRA PRO modules"), callback_data=f"tierv_ultra_{g}_{lang}"),
-        ],
-        [
-            InlineKeyboardButton(text="🇺🇸 English" if lang == "es" else "🇪🇸 Español", callback_data=f"langpanel_{g}_{toggle_lang}"),
-            InlineKeyboardButton(text=t["btn_back_settings"], callback_data=f"menu_settings_{lang}")
-        ]
+    rows = _tool_buttons(g, "free", lang)
+    rows.append([InlineKeyboardButton(text="📋 " + tr(lang, "Comandos disponibles", "Available commands"),
+                                      callback_data=f"cmdl_m_{g}_{lang}")])
+    rows.append([
+        InlineKeyboardButton(text="⭐ " + tr(lang, "Módulos PRO", "PRO modules"), callback_data=f"tierv_pro_{g}_{lang}"),
+        InlineKeyboardButton(text="💎 " + tr(lang, "Módulos ULTRA PRO", "ULTRA PRO modules"), callback_data=f"tierv_ultra_{g}_{lang}"),
     ])
+    rows.append([
+        InlineKeyboardButton(text="🇺🇸 English" if lang == "es" else "🇪🇸 Español", callback_data=f"langpanel_{g}_{toggle_lang}"),
+        InlineKeyboardButton(text=t["btn_back_settings"], callback_data=f"menu_settings_{lang}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_ultra_tools_keyboard(group_id: int, lang: str, chat_type: str = "g"):
@@ -4219,7 +4223,11 @@ async def cmd_start(message: Message, bot: Bot, command: CommandObject):
                         reply_markup=get_channel_panel_keyboard(group_id, lang), parse_mode="HTML"
                     )
                 else:
-                    await message.answer(t["group_panel_title"].format(group_name=g_name), reply_markup=get_group_panel_keyboard(group_id, lang), parse_mode="HTML")
+                    # 🖼️ v44 · Tarjeta del panel + explicación FREE; si la imagen no está, el mismo texto sin imagen
+                    panel_kb = get_group_panel_keyboard(group_id, lang)
+                    panel_txt = group_panel_text(lang, g_name)
+                    if not await send_card_message(bot, message.chat.id, "security_matrix", lang, panel_kb, caption=panel_txt):
+                        await message.answer(panel_txt, reply_markup=panel_kb, parse_mode="HTML")
                 return
             except Exception as g_ex:
                 logging.error(f"❌ [cmd_start Deeplink Error]: {g_ex}")
@@ -6695,7 +6703,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         except Exception:
             g_name = "Comunidad" if lang == "es" else "Community"
         CHAT_KIND_CACHE[group_id] = "g"
-        text = t["group_panel_title"].format(group_name=g_name)
+        text = group_panel_text(lang, g_name)
         keyboard = get_group_panel_keyboard(group_id, lang)
         card_key, card_caption = "security_matrix", text
 
@@ -6736,7 +6744,7 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
         except Exception:
             g_name = "Comunidad" if lang == "es" else "Community"
         CHAT_KIND_CACHE[group_id] = "g"
-        text = t["group_panel_title"].format(group_name=g_name)
+        text = group_panel_text(lang, g_name)
         keyboard = get_group_panel_keyboard(group_id, lang)
         card_key, card_caption = "security_matrix", text
 
@@ -6809,41 +6817,49 @@ async def process_menu_navigation(callback: CallbackQuery, bot: Bot):
 
         elif target == "plans":
             # 💎 v37 · Qué incluye cada rango (Free / PRO / ULTRA PRO) · v43: vive en ℹ️ Manuales
-            text, keyboard = PLANS_GUIDE.get(lang, PLANS_GUIDE["en"]), plans_keyboard(lang)
+            origin = data[2] if len(data) > 3 else "i"   # v44 · 'a' = 📖 Qué es · 'i' = ℹ️ Info Bot
+            text, keyboard = PLANS_GUIDE.get(lang, PLANS_GUIDE["en"]), plans_keyboard(lang, origin)
 
         elif target == "vcguide":
             # 🎙️ v37 · Clon → Centinela → permisos de admin → /reload desde la cuenta Centinela · v43: en ℹ️ Manuales
+            origin = data[2] if len(data) > 3 else "i"
             text = SENTINEL_SETUP_GUIDE.get(lang, SENTINEL_SETUP_GUIDE["en"])
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💎 " + tr(lang, "Licencias", "Licenses"), callback_data=f"menu_plans_{lang}")],
+                [InlineKeyboardButton(text="💎 " + tr(lang, "Licencias", "Licenses"), callback_data=f"menu_plans_{origin}_{lang}")],
                 [InlineKeyboardButton(text=t["btn_settings"], callback_data=f"menu_settings_{lang}")],
-                _back_to_manuals(lang),
+                _origin_back_row(origin, lang),
             ])
 
-        # 🧩 v43 · Qué es y cómo funciona · Manuales · Permisos · Donaciones a la plataforma
+        # 🧩 v44 · Qué es y cómo funciona · ℹ️ Info Bot (módulos por audiencia) · Donaciones a la plataforma
         elif target == "about":
-            text = ABOUT_TEXTS.get(lang, ABOUT_TEXTS["en"])["main"] + PERIMETER_SIGNATURE
+            text = _with_prices(ABOUT_TEXTS[_v44_lng(lang)]["main"]) + PERIMETER_SIGNATURE
             keyboard = _about_keyboard(lang)
-            card_key, card_caption = "info_how", text   # la tarjeta lleva ESTE texto como pie
+            card_key, card_caption = "info_how", text   # la tarjeta lleva ESTE texto como pie (si cabe)
 
         elif target == "aboutmod":
-            text, keyboard = _about_module_view(data[2] if len(data) > 2 else "main", lang)
+            text, keyboard = _about_module_view(data[2] if len(data) > 3 else "main", lang)
 
-        elif target == "manuals":
-            text = MANUALS_TEXTS.get(lang, MANUALS_TEXTS["en"])["main"] + PERIMETER_SIGNATURE
-            keyboard = _manuals_keyboard(lang)
+        elif target in ("infobot", "manuals"):
+            # «manuals» = botones v43 que sigan en chats antiguos
+            text = _with_prices(INFOBOT_TEXTS[_v44_lng(lang)]["main"]) + PERIMETER_SIGNATURE
+            keyboard = _infobot_keyboard(lang)
             card_key, card_caption = "info_core", text
 
+        elif target == "ib":
+            text, keyboard = _infobot_module_view(data[2] if len(data) > 3 else "main", lang)
+
         elif target == "perms":
-            text = MANUALS_TEXTS.get(lang, MANUALS_TEXTS["en"])["perms"] + PERIMETER_SIGNATURE
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[_back_to_manuals(lang)])
+            text, keyboard = _infobot_module_view("perms", lang)
 
         elif target == "donate":
             if is_clone_bot(bot):
                 text = t["welcome"].format(name=callback.from_user.full_name)
                 keyboard = get_main_keyboard((await bot.get_me()).username, lang, is_clone=True, user_id=callback.from_user.id)
             else:
-                text, keyboard = await _platform_donate_view(lang)
+                await _send_platform_donate(callback, bot, lang)
+                with contextlib.suppress(Exception):
+                    await callback.answer()
+                return
 
         elif target in ["mod", "eco"]:
             group_id = int(data[2])
@@ -7587,7 +7603,7 @@ async def cb_group_modules_interceptor(callback: CallbackQuery, bot: Bot):
         except Exception:
             g_name = "Comunidad" if lang == "es" else "Community"
         await safe_edit_text(callback,
-            t["group_panel_title"].format(group_name=g_name),
+            group_panel_text(lang, g_name),
             reply_markup=get_group_panel_keyboard(group_id, lang),
             parse_mode="HTML"
         )
@@ -10490,14 +10506,15 @@ PLANS_GUIDE: dict[str, str] = {
 }
 
 
-def plans_keyboard(lang: str) -> InlineKeyboardMarkup:
+def plans_keyboard(lang: str, origin: str = "i") -> InlineKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    o = "a" if origin == "a" else "i"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎙️ " + tr(lang, "Guía de moderación de Video Chat", "Video Chat moderation guide"),
-                              callback_data=f"menu_vcguide_{lang}")],
+                              callback_data=f"menu_vcguide_{o}_{lang}")],
         [InlineKeyboardButton(text=t["btn_settings"], callback_data=f"menu_settings_{lang}"),
          InlineKeyboardButton(text=t["btn_chsettings"], callback_data=f"menu_chsettings_{lang}")],
-        _back_to_manuals(lang),
+        _origin_back_row(o, lang),
     ])
 
 
@@ -10772,190 +10789,598 @@ async def cb_service_prefs(callback: CallbackQuery, bot: Bot):
 #   donl_   enlaces externos de donación (PRO, Dueño)          pdon_ donación a The Bunker (/start → 💰)
 # ==========================================================================================
 
+# ==========================================================================================
+# 📚 v44 · TEXTOS DEL CHAT PRIVADO: «Qué es y cómo funciona», «Info Bot», panel Free, vitrinas y guías
+# ------------------------------------------------------------------------------------------
+# Todos los textos explicativos viven aquí, separados por módulo y por audiencia (dueños, miembros que donan,
+# curiosos…), para que cada persona lea solo lo que necesita. Inglés por defecto, español si el usuario lo eligió.
+# Los precios se leen de PRICE_PRO_STARS / PRICE_ULTRAPRO_STARS (los mismos que cobra handlers/payments).
+# ==========================================================================================
+def _sig() -> str:
+    return PERIMETER_SIGNATURE
+
+
 ABOUT_TEXTS: dict[str, dict[str, str]] = {
     "en": {
         "main": ("📖 <b>What The Bunker is and how it works</b>\n\n"
-                 "The Bunker is a security and monetization system for Telegram groups and channels. You add the bot "
-                 "as an administrator, configure it from this chat or from the Command Center, and it guards your "
-                 "community 24/7: captcha, anti-spam, anti-raid, voice-chat moderation and Telegram Stars payments.\n\n"
-                 "Pick a module to learn more:"),
-        "owners": ("👑 <b>For community owners</b>\n\n"
-                   "1. Add the bot to your group or channel with the suggested admin rights.\n"
-                   "2. Send <code>/reload</code> in the group so it registers you as the owner.\n"
-                   "3. Open <b>⚙️ Group Settings</b> here or the <b>⚡ Command Center</b> to configure everything.\n\n"
-                   "Only you (and the delegates you choose) can change the configuration. Every license is bound to "
-                   "one community and activates instantly with Telegram Stars."),
-        "commands": ("⌨️ <b>Main commands</b>\n\n"
-                     "<b>Owner / admins</b>\n"
-                     "• <code>/reload</code> sync the group · <code>/settings</code> open the panel\n"
-                     "• <code>/warn</code> <code>/unwarn</code> <code>/ban</code> <code>/unban</code> <code>/kick</code> "
-                     "<code>/mute</code> <code>/unmute</code>\n"
-                     "• <code>/night</code> night mode · <code>/panic</code> raid lockdown · <code>/antiraid</code>\n"
-                     "• <code>/purgeghosts</code> (add <code>scan</code> to simulate) · <code>/exportsettings</code>\n"
-                     "• <code>/autolower</code> <code>/podcast</code> <code>/shield</code> voice-chat controls\n\n"
-                     "<b>Members</b>\n"
-                     "• <code>/micvip</code> unlock your mic · <code>/rank</code> <code>/top</code> levels · "
-                     "<code>/lang</code> language"),
+                 "The Bunker O.S. is a <b>security, moderation and monetization system</b> for Telegram groups and "
+                 "channels. You add the bot as an administrator, configure it from this chat or from the "
+                 "<b>⚡ Command Center</b>, and it protects your community 24/7.\n\n"
+                 "It works in three ranks, bought per community by its owner:\n"
+                 "🆓 <b>FREE</b> — forever, full basic protection\n"
+                 "⭐ <b>PRO</b> — {pro} Stars / 30 days\n"
+                 "💎 <b>ULTRA PRO</b> — {ultra} Stars / 30 days\n\n"
+                 "Each rank keeps everything from the ranks below and adds its own tools. Pick a module to learn more:"),
+        "how": ("🧭 <b>How it works inside</b>\n\n"
+                "<b>1 · The bot (administrator)</b>\n"
+                "It reads every message and member event of your group or channel and applies your rules in real "
+                "time: captcha, anti-spam, anti-flood, 30-vector media locks, warnings, anti-raid, service-message "
+                "cleanup and scheduled night mode.\n\n"
+                "<b>2 · The Sentinel (voice chats)</b>\n"
+                "A Telegram account that joins your video chats and moderates the audio: lowers unverified "
+                "microphones, gives MicVIP buyers 100%, blocks unauthorized screen sharing and noise.\n\n"
+                "<b>3 · The Command Center (Mini App)</b>\n"
+                "The same settings as this chat, with live analytics, the activity radar and dashboards.\n\n"
+                "<b>4 · Telegram Stars</b>\n"
+                "Licenses, MicVIP passes, tips, speaker queue and ban appeals are paid inside Telegram. With your "
+                "own Bot Clone (ULTRA PRO) 100% of members' payments go to your bot's balance.\n\n"
+                "<b>Golden rules</b>\n"
+                "• Only the community owner (and the delegates they choose) can change settings.\n"
+                "• Without administrator rights the bot cannot act: see 🔐 Permissions.\n"
+                "• Licenses belong to one community; remaining days carry over when you renew."),
+        "ranks": ("💎 <b>Ranks and prices</b>\n\n"
+                  "🆓 <b>FREE</b> — free forever\n"
+                  "Captcha, anti-spam, anti-flood, 30-vector media locks, warning ladder, configurable anti-raid, "
+                  "Telegram service messages (keep / delete / delete after X s), bot-notice auto-delete, moderation "
+                  "console, log channel, perimeter status. 3 uses per command per day · 1 free Ghost Purge per day.\n\n"
+                  "⭐ <b>PRO</b> — {pro} Stars / 30 days\n"
+                  "Everything in FREE with <b>unlimited commands</b>, plus: custom bot notices (text, media and your "
+                  "own button) with an <b>⚖️ Appeal</b> button on automatic bans, voice-chat message schedule, external "
+                  "donation links, paid ban appeals, MicVIP audit, admin link quotas, custom captcha / warning / tips "
+                  "texts and recurring gamification announcements.\n\n"
+                  "💎 <b>ULTRA PRO</b> — {ultra} Stars / 30 days\n"
+                  "Everything in PRO, plus: <b>Bot Clone</b> with your own brand (100% of the Stars to you), "
+                  "<b>dedicated voice Sentinel</b>, AutoLower 1–10%, MicVIP 100%, <b>Double Blacklist</b> (one list bans "
+                  "on sight, the other warns and deletes) with configurable action and duration, community "
+                  "<b>allowlist</b>, panic button, screen-share and noise shields, podcast mode, paid speaker queue, "
+                  "AI Sentinel (Mistral), XP levels, VIP roles with native tags and signed .bunker backups.\n\n"
+                  "ℹ️ Ranks are bought by the <b>owner</b> of each community from <b>⚙️ Group Settings → your group → "
+                  "⭐ / 💎 modules</b>. Donations and MicVIP passes paid by members <b>never</b> buy a rank."),
+        "perms": ("🔐 <b>Permissions the bot needs</b>\n\n"
+                  "<b>In groups</b> (administrator):\n"
+                  "• <b>Delete messages</b> — anti-spam, locks, blacklists and service-message cleanup\n"
+                  "• <b>Ban users</b> — captcha, warnings, anti-raid, ban list and ghost purge\n"
+                  "• <b>Pin messages</b> — pinned voice-chat welcome\n"
+                  "• <b>Manage video chats</b> — scheduled calls and voice moderation\n"
+                  "• <b>Add new admins</b> — VIP tags and MicVIP passes\n"
+                  "• <b>Invite users</b> — single-use return links after a payment\n\n"
+                  "<b>In channels</b> (administrator):\n"
+                  "• <b>Post / edit / delete messages</b> — membership plans, broadcasts and service-message cleanup\n"
+                  "• <b>Invite users</b> — single-use access links for paid plans\n"
+                  "• <b>Manage live streams</b> — live moderation with the Sentinel\n\n"
+                  "<b>Sentinel account</b>: administrator with <b>Manage video chats</b> (mandatory), Delete "
+                  "messages, Ban users and Invite users.\n\n"
+                  "The <b>➕ Add to a Group / Channel</b> buttons already request exactly these rights. If you remove "
+                  "one later, the function that needs it stops working: the 🛰️ Perimeter panel tells you which."),
         "clones": ("🧬 <b>Bot Clones (ULTRA PRO)</b>\n\n"
-                   "Run The Bunker under <b>your own bot</b>: create a bot with @BotFather and link its token from "
-                   "<b>⚙️ Group Settings → 💎 ULTRA PRO modules → 🧬 Clone & Sentinel</b>.\n\n"
-                   "Your community sees your bot's name and photo, and <b>100% of the Stars</b> paid by members "
-                   "(MicVIP, tips, appeals) go to your bot's balance. The token is linked only in this private chat "
-                   "and is stored encrypted."),
-        "sentinel": ("🎙️ <b>Voice Sentinel</b>\n\n"
-                     "The Sentinel is a Telegram account that joins your video chats and moderates them in real time: "
-                     "AutoLower (unverified mics at 1–10%), MicVIP passes at 100%, screen-share shield, noise shield "
-                     "and paid speaker queue.\n\n"
-                     "PRO groups use the shared Master Sentinel; ULTRA PRO groups can link a <b>dedicated Sentinel</b> "
-                     "account. You choose when its voice-chat messages are posted (schedule) and what they say."),
-        "guides": "📚 Detailed guides",
-        "owners_btn": "👑 For owners", "commands_btn": "⌨️ Commands", "clones_btn": "🧬 Clones",
-        "sentinel_btn": "🎙️ Sentinel", "back_about": "🔙 Back",
+                   "A clone runs The Bunker under <b>your own bot</b>: your community sees your bot's name and photo, "
+                   "and <b>100% of the Stars</b> paid by members (MicVIP, tips, appeals, speakers) go to your bot's "
+                   "balance instead of The Bunker's.\n\n"
+                   "<b>How to install it</b>\n"
+                   "1. Open @BotFather → <code>/newbot</code> → choose a name and a username ending in <code>bot</code>.\n"
+                   "2. Copy the <b>token</b> BotFather gives you (it looks like <code>123456:ABC-…</code>).\n"
+                   "3. Here: <b>⚙️ Group Settings → your group → 💎 ULTRA PRO modules → 🧬 Clone &amp; Sentinel → "
+                   "🔑 Connect token</b> and paste it. Never share it with anyone else.\n"
+                   "4. Add your new bot to the group as <b>administrator</b> with the same rights as The Bunker.\n"
+                   "5. Send <code>/reload</code> in the group.\n\n"
+                   "<b>Good to know</b>\n"
+                   "• The token is linked only in this private chat and stored encrypted; the Mini App never sees it.\n"
+                   "• If you revoke the token in BotFather, the clone stops: link the new token the same way.\n"
+                   "• The clone keeps all your settings: it is the same community, with your brand."),
+        "sentinel": ("🎙️ <b>The voice Sentinel</b>\n\n"
+                     "The Sentinel is a <b>Telegram user account</b> (not a bot) that joins your video chats and "
+                     "moderates them in real time. Bots cannot change other people's microphone volume; a user "
+                     "account with <b>Manage video chats</b> can.\n\n"
+                     "<b>What it does</b>\n"
+                     "• <b>AutoLower</b>: lowers unverified microphones to 1–10% (you choose the %).\n"
+                     "• <b>MicVIP</b>: members who buy the pass speak at 100% for 24 h, automatically.\n"
+                     "• <b>Screen-share shield</b>: cuts unauthorized screen sharing.\n"
+                     "• <b>Noise shield</b> and <b>Podcast mode</b>: lowers the room while the host speaks.\n"
+                     "• <b>Paid speaker queue</b>, <b>scheduled calls</b> and a <b>reset every 3.5 h</b> against lag.\n"
+                     "• Posts notices in the chat (member joined, MicVIP offer, welcome, reset…): you edit every text, "
+                     "button and auto-delete, and choose the <b>hours</b> when it may post.\n\n"
+                     "<b>Master or dedicated</b>\n"
+                     "PRO groups use the shared <b>Master Sentinel</b>. ULTRA PRO groups can link their own "
+                     "<b>dedicated Sentinel</b> account. Full installation: <b>ℹ️ Info Bot → 🎙️ Sentinel</b>."),
+        "members": ("💝 <b>For members: donations and MicVIP</b>\n\n"
+                    "If you are a member of a community that uses The Bunker you don't need to configure anything.\n\n"
+                    "<b>⭐ Tip a community</b>\n"
+                    "Tap the community's <b>Tip</b> button (or the link its owner shared), choose an amount in Stars "
+                    "and pay. The Stars go to that community. Some communities also show external links (PayPal, "
+                    "Ko-fi…).\n\n"
+                    "<b>🎙️ MicVIP</b>\n"
+                    "In voice chats, unverified microphones are lowered. Send <code>/micvip</code> in the group, pay "
+                    "the pass and the Sentinel puts your microphone at <b>100% for 24 hours</b>, automatically.\n\n"
+                    "<b>After paying</b>\n"
+                    "You only get a confirmation and a single <b>🔙 Back to the group</b> button. It works once, only "
+                    "for you, and deletes itself.\n\n"
+                    "⚠️ Tips and MicVIP <b>do not</b> buy PRO or ULTRA PRO: those licenses are for community owners."),
+        "guides": "📚 Detailed guides", "back_about": "🔙 Back",
+        "how_btn": "🧭 How it works", "ranks_btn": "💎 Ranks & prices", "tools_btn": "🧰 Everything each rank includes",
+        "perms_btn": "🔐 Permissions", "clones_btn": "🧬 Clones", "sentinel_btn": "🎙️ Sentinel",
+        "members_btn": "💝 For members: donations & MicVIP",
     },
     "es": {
         "main": ("📖 <b>Qué es The Bunker y cómo funciona</b>\n\n"
-                 "The Bunker es un sistema de seguridad y monetización para grupos y canales de Telegram. Añades el "
-                 "bot como administrador, lo configuras desde este chat o desde el Command Center y protege tu "
-                 "comunidad las 24 h: captcha, anti-spam, anti-raid, moderación del videochat y pagos con Telegram "
-                 "Stars.\n\nElige un módulo para saber más:"),
-        "owners": ("👑 <b>Para dueños de comunidades</b>\n\n"
-                   "1. Añade el bot a tu grupo o canal con los permisos de administrador sugeridos.\n"
-                   "2. Envía <code>/reload</code> en el grupo para que te registre como dueño.\n"
-                   "3. Abre <b>⚙️ Ajustes del grupo</b> aquí o el <b>⚡ Command Center</b> para configurarlo todo.\n\n"
-                   "Solo tú (y los delegados que elijas) podéis cambiar la configuración. Cada licencia va ligada a "
-                   "una comunidad y se activa al instante con Telegram Stars."),
-        "commands": ("⌨️ <b>Comandos principales</b>\n\n"
-                     "<b>Dueño / administradores</b>\n"
-                     "• <code>/reload</code> sincroniza el grupo · <code>/settings</code> abre el panel\n"
-                     "• <code>/warn</code> <code>/unwarn</code> <code>/ban</code> <code>/unban</code> <code>/kick</code> "
-                     "<code>/mute</code> <code>/unmute</code>\n"
-                     "• <code>/night</code> modo nocturno · <code>/panic</code> bloqueo anti-raid · <code>/antiraid</code>\n"
-                     "• <code>/purgeghosts</code> (añade <code>scan</code> para simular) · <code>/exportsettings</code>\n"
-                     "• <code>/autolower</code> <code>/podcast</code> <code>/shield</code> controles del videochat\n\n"
-                     "<b>Miembros</b>\n"
-                     "• <code>/micvip</code> desbloquea tu micrófono · <code>/rank</code> <code>/top</code> niveles · "
-                     "<code>/lang</code> idioma"),
-        "clones": ("🧬 <b>Bots Clon (ULTRA PRO)</b>\n\n"
-                   "Usa The Bunker con <b>tu propio bot</b>: crea un bot con @BotFather y vincula su token desde "
-                   "<b>⚙️ Ajustes del grupo → 💎 Módulos ULTRA PRO → 🧬 Clon y Centinela</b>.\n\n"
-                   "Tu comunidad ve el nombre y la foto de tu bot y el <b>100 % de las Stars</b> que pagan los "
-                   "miembros (MicVIP, propinas, apelaciones) va al saldo de tu bot. El token solo se vincula en este "
-                   "chat privado y se guarda cifrado."),
-        "sentinel": ("🎙️ <b>Centinela de voz</b>\n\n"
-                     "El Centinela es una cuenta de Telegram que entra en tus videochats y los modera en tiempo real: "
-                     "AutoLower (micrófonos no verificados al 1–10 %), pases MicVIP al 100 %, escudo de pantalla, "
-                     "escudo de ruido y cola de speakers pagada.\n\n"
-                     "Los grupos PRO usan el Centinela Maestro compartido; los ULTRA PRO pueden vincular una cuenta "
-                     "<b>Centinela dedicada</b>. Tú decides cuándo publica sus mensajes en el videochat (horario) y "
-                     "qué dicen."),
-        "guides": "📚 Guías detalladas",
-        "owners_btn": "👑 Para dueños", "commands_btn": "⌨️ Comandos", "clones_btn": "🧬 Clones",
-        "sentinel_btn": "🎙️ Centinela", "back_about": "🔙 Volver",
-    },
-}
-
-MANUALS_TEXTS: dict[str, dict[str, str]] = {
-    "en": {
-        "main": ("ℹ️ <b>Manuals</b>\n\nEverything you need before and after installing The Bunker: what each license "
-                 "includes, the admin rights the bot needs and the step-by-step voice-chat guide."),
-        "licenses": "💎 Licenses: Free · PRO · ULTRA PRO", "perms_btn": "🔐 Required permissions",
-        "vc": "🎙️ Video Chat guide",
-        "perms": ("🔐 <b>Permissions the bot needs</b>\n\n"
-                  "<b>In groups</b> (admin):\n"
-                  "• Delete messages — anti-spam, locks and service-message cleanup\n"
-                  "• Ban users — captcha, warnings, anti-raid and the ban list\n"
-                  "• Pin messages — pinned voice-chat welcome\n"
-                  "• Manage video chats — Sentinel moderation and scheduled calls\n"
-                  "• Add new admins — VIP tags and MicVIP passes\n\n"
-                  "<b>In channels</b> (admin):\n"
-                  "• Post, edit and delete messages — plans, broadcasts and service-message cleanup\n"
-                  "• Invite users — single-use access links for paid plans\n\n"
-                  "<b>Sentinel account</b>: administrator with <b>Manage video chats</b> in the group.\n\n"
-                  "The <b>➕ Add to a Group / Channel</b> buttons request exactly these rights."),
-    },
-    "es": {
-        "main": ("ℹ️ <b>Manuales</b>\n\nTodo lo que necesitas antes y después de instalar The Bunker: qué incluye cada "
-                 "licencia, los permisos de administrador que necesita el bot y la guía paso a paso del videochat."),
-        "licenses": "💎 Licencias: Free · PRO · ULTRA PRO", "perms_btn": "🔐 Permisos necesarios",
-        "vc": "🎙️ Guía del Video Chat",
+                 "The Bunker O.S. es un <b>sistema de seguridad, moderación y monetización</b> para grupos y canales "
+                 "de Telegram. Añades el bot como administrador, lo configuras desde este chat o desde el "
+                 "<b>⚡ Command Center</b> y protege tu comunidad las 24 h.\n\n"
+                 "Funciona en tres rangos, que el dueño compra para cada comunidad:\n"
+                 "🆓 <b>FREE</b> — para siempre, protección básica completa\n"
+                 "⭐ <b>PRO</b> — {pro} Stars / 30 días\n"
+                 "💎 <b>ULTRA PRO</b> — {ultra} Stars / 30 días\n\n"
+                 "Cada rango conserva todo lo de los rangos inferiores y añade sus herramientas. Elige un módulo:"),
+        "how": ("🧭 <b>Cómo funciona por dentro</b>\n\n"
+                "<b>1 · El bot (administrador)</b>\n"
+                "Lee cada mensaje y cada evento de miembros de tu grupo o canal y aplica tus reglas en tiempo real: "
+                "captcha, anti-spam, anti-flood, bloqueos multimedia de 30 vectores, advertencias, anti-raid, "
+                "limpieza de mensajes de servicio y modo nocturno programado.\n\n"
+                "<b>2 · El Centinela (videochats)</b>\n"
+                "Una cuenta de Telegram que entra en tus videochats y modera el audio: baja los micrófonos no "
+                "verificados, da el 100 % a quien compra MicVIP y bloquea pantallas compartidas y ruido no autorizados.\n\n"
+                "<b>3 · El Command Center (Mini App)</b>\n"
+                "Los mismos ajustes que este chat, con analítica en vivo, el radar de actividad y paneles.\n\n"
+                "<b>4 · Telegram Stars</b>\n"
+                "Licencias, pases MicVIP, propinas, cola de speakers y apelaciones se pagan dentro de Telegram. Con tu "
+                "propio Bot Clon (ULTRA PRO) el 100 % de los pagos de los miembros va al saldo de tu bot.\n\n"
+                "<b>Reglas de oro</b>\n"
+                "• Solo el dueño de la comunidad (y los delegados que elija) puede cambiar la configuración.\n"
+                "• Sin permisos de administrador el bot no puede actuar: mira 🔐 Permisos.\n"
+                "• La licencia pertenece a una comunidad; al renovar se conservan los días restantes."),
+        "ranks": ("💎 <b>Rangos y precios</b>\n\n"
+                  "🆓 <b>FREE</b> — gratis para siempre\n"
+                  "Captcha, anti-spam, anti-flood, bloqueos multimedia de 30 vectores, escalera de advertencias, "
+                  "anti-raid configurable, mensajes de servicio de Telegram (mantener / borrar / borrar a los X s), "
+                  "autoborrado de los avisos del bot, consola de moderación, canal de registro y estado del perímetro. "
+                  "3 usos por comando al día · 1 Ghost Purge gratis al día.\n\n"
+                  "⭐ <b>PRO</b> — {pro} Stars / 30 días\n"
+                  "Todo lo de FREE con <b>comandos ilimitados</b>, más: avisos del bot personalizados (texto, "
+                  "multimedia y tu propio botón) con botón <b>⚖️ Apelar</b> en los baneos automáticos, horario de los "
+                  "mensajes del videochat, enlaces externos de donación, apelaciones de baneo pagadas, auditoría "
+                  "MicVIP, cuotas de enlaces de administradores, textos propios de captcha / advertencias / propinas y "
+                  "anuncios de gamificación recurrentes.\n\n"
+                  "💎 <b>ULTRA PRO</b> — {ultra} Stars / 30 días\n"
+                  "Todo lo de PRO, más: <b>Bot Clon</b> con tu marca (el 100 % de las Stars para ti), <b>Centinela de "
+                  "voz dedicado</b>, AutoLower 1–10 %, MicVIP 100 %, <b>Doble Lista Negra</b> (una lista expulsa en el "
+                  "acto y la otra advierte y borra) con acción y duración configurables, <b>lista blanca</b> de la "
+                  "comunidad, botón de pánico, escudos de pantalla y de ruido, modo podcast, cola de speakers pagada, "
+                  "Centinela IA (Mistral), niveles XP, roles VIP con etiqueta nativa y respaldos firmados .bunker.\n\n"
+                  "ℹ️ Los rangos los compra el <b>dueño</b> de cada comunidad desde <b>⚙️ Ajustes de grupos → tu grupo "
+                  "→ módulos ⭐ / 💎</b>. Las donaciones y los pases MicVIP que pagan los miembros <b>nunca</b> compran un rango."),
         "perms": ("🔐 <b>Permisos que necesita el bot</b>\n\n"
                   "<b>En grupos</b> (administrador):\n"
-                  "• Eliminar mensajes — anti-spam, bloqueos y limpieza de mensajes de servicio\n"
-                  "• Banear usuarios — captcha, advertencias, anti-raid y lista de baneo\n"
-                  "• Fijar mensajes — bienvenida fijada del videochat\n"
-                  "• Gestionar videochats — moderación del Centinela y llamadas programadas\n"
-                  "• Añadir administradores — etiquetas VIP y pases MicVIP\n\n"
+                  "• <b>Eliminar mensajes</b> — anti-spam, bloqueos, listas negras y limpieza de mensajes de servicio\n"
+                  "• <b>Banear usuarios</b> — captcha, advertencias, anti-raid, lista de baneo y Ghost Purge\n"
+                  "• <b>Fijar mensajes</b> — bienvenida fijada del videochat\n"
+                  "• <b>Gestionar videochats</b> — llamadas programadas y moderación de voz\n"
+                  "• <b>Añadir administradores</b> — etiquetas VIP y pases MicVIP\n"
+                  "• <b>Invitar usuarios</b> — enlaces de regreso de un solo uso tras un pago\n\n"
                   "<b>En canales</b> (administrador):\n"
-                  "• Publicar, editar y eliminar mensajes — planes, difusiones y limpieza de mensajes de servicio\n"
-                  "• Invitar usuarios — enlaces de acceso de un solo uso de los planes de pago\n\n"
-                  "<b>Cuenta Centinela</b>: administradora con <b>Gestionar videochats</b> en el grupo.\n\n"
-                  "Los botones <b>➕ Añadir a un Grupo / Canal</b> piden exactamente estos permisos."),
+                  "• <b>Publicar / editar / eliminar mensajes</b> — planes de membresía, difusiones y limpieza de "
+                  "mensajes de servicio\n"
+                  "• <b>Invitar usuarios</b> — enlaces de acceso de un solo uso de los planes de pago\n"
+                  "• <b>Gestionar directos</b> — moderación de directos con el Centinela\n\n"
+                  "<b>Cuenta Centinela</b>: administradora con <b>Gestionar videochats</b> (obligatorio), Eliminar "
+                  "mensajes, Banear usuarios e Invitar usuarios.\n\n"
+                  "Los botones <b>➕ Añadir a un Grupo / Canal</b> ya piden exactamente estos permisos. Si después quitas "
+                  "alguno, la función que lo necesita deja de funcionar: el panel 🛰️ Perímetro te dice cuál."),
+        "clones": ("🧬 <b>Bots Clon (ULTRA PRO)</b>\n\n"
+                   "Un clon usa The Bunker con <b>tu propio bot</b>: tu comunidad ve el nombre y la foto de tu bot y el "
+                   "<b>100 % de las Stars</b> que pagan los miembros (MicVIP, propinas, apelaciones, speakers) va al saldo "
+                   "de tu bot en lugar del de The Bunker.\n\n"
+                   "<b>Cómo instalarlo</b>\n"
+                   "1. Abre @BotFather → <code>/newbot</code> → elige un nombre y un usuario que termine en <code>bot</code>.\n"
+                   "2. Copia el <b>token</b> que te da BotFather (se parece a <code>123456:ABC-…</code>).\n"
+                   "3. Aquí: <b>⚙️ Ajustes de grupos → tu grupo → 💎 Módulos ULTRA PRO → 🧬 Clon y Centinela → "
+                   "🔑 Conectar token</b> y pégalo. No lo compartas con nadie más.\n"
+                   "4. Añade tu nuevo bot al grupo como <b>administrador</b> con los mismos permisos que The Bunker.\n"
+                   "5. Envía <code>/reload</code> en el grupo.\n\n"
+                   "<b>Conviene saber</b>\n"
+                   "• El token solo se vincula en este chat privado y se guarda cifrado; la Mini App nunca lo ve.\n"
+                   "• Si revocas el token en BotFather, el clon se detiene: vincula el nuevo de la misma forma.\n"
+                   "• El clon conserva toda tu configuración: es la misma comunidad, con tu marca."),
+        "sentinel": ("🎙️ <b>El Centinela de voz</b>\n\n"
+                     "El Centinela es una <b>cuenta de usuario de Telegram</b> (no un bot) que entra en tus videochats y "
+                     "los modera en tiempo real. Los bots no pueden cambiar el volumen del micrófono de otras personas; "
+                     "una cuenta de usuario con <b>Gestionar videochats</b> sí.\n\n"
+                     "<b>Qué hace</b>\n"
+                     "• <b>AutoLower</b>: baja los micrófonos no verificados al 1–10 % (tú eliges el %).\n"
+                     "• <b>MicVIP</b>: quien compra el pase habla al 100 % durante 24 h, automáticamente.\n"
+                     "• <b>Escudo de pantalla</b>: corta las pantallas compartidas no autorizadas.\n"
+                     "• <b>Escudo de ruido</b> y <b>Modo podcast</b>: baja la sala mientras habla el anfitrión.\n"
+                     "• <b>Cola de speakers pagada</b>, <b>llamadas programadas</b> y un <b>reinicio cada 3,5 h</b> contra el lag.\n"
+                     "• Publica avisos en el chat (entró un miembro, oferta MicVIP, bienvenida, reinicio…): tú editas cada "
+                     "texto, botón y autoborrado, y eliges las <b>horas</b> en que puede publicar.\n\n"
+                     "<b>Maestro o dedicado</b>\n"
+                     "Los grupos PRO usan el <b>Centinela Maestro</b> compartido. Los ULTRA PRO pueden vincular su propia "
+                     "cuenta <b>Centinela dedicada</b>. Instalación completa: <b>ℹ️ Info Bot → 🎙️ Centinela</b>."),
+        "members": ("💝 <b>Para miembros: donaciones y MicVIP</b>\n\n"
+                    "Si eres miembro de una comunidad que usa The Bunker no necesitas configurar nada.\n\n"
+                    "<b>⭐ Dar una propina a una comunidad</b>\n"
+                    "Pulsa el botón <b>Propina</b> de la comunidad (o el enlace que compartió su dueño), elige un monto en "
+                    "Stars y paga. Las Stars van a esa comunidad. Algunas comunidades muestran también enlaces externos "
+                    "(PayPal, Ko-fi…).\n\n"
+                    "<b>🎙️ MicVIP</b>\n"
+                    "En los videochats los micrófonos no verificados se bajan. Envía <code>/micvip</code> en el grupo, paga "
+                    "el pase y el Centinela pone tu micrófono al <b>100 % durante 24 horas</b>, automáticamente.\n\n"
+                    "<b>Después de pagar</b>\n"
+                    "Solo recibes la confirmación y un único botón <b>🔙 Volver al grupo</b>. Funciona una vez, solo para "
+                    "ti, y se borra solo.\n\n"
+                    "⚠️ Las propinas y MicVIP <b>no</b> compran PRO ni ULTRA PRO: esas licencias son para dueños de comunidades."),
+        "guides": "📚 Guías detalladas", "back_about": "🔙 Volver",
+        "how_btn": "🧭 Cómo funciona", "ranks_btn": "💎 Rangos y precios", "tools_btn": "🧰 Todo lo que incluye cada rango",
+        "perms_btn": "🔐 Permisos", "clones_btn": "🧬 Clones", "sentinel_btn": "🎙️ Centinela",
+        "members_btn": "💝 Para miembros: donaciones y MicVIP",
     },
 }
 
-# Vitrinas por rango (texto persuasivo + instalación) — se muestran cuando la comunidad aún no tiene el rango.
+
+INFOBOT_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "main": ("ℹ️ <b>Info Bot</b>\n\n"
+                 "Choose what you are looking for. Each module explains only its topic, so you don't have to read "
+                 "everything:\n\n"
+                 "👑 <b>Owners &amp; admins</b> — install the bot step by step\n"
+                 "⌨️ <b>Commands</b> — every command, by rank, and who can use it\n"
+                 "💝 <b>Members</b> — how to tip a community and buy MicVIP\n"
+                 "👀 <b>Just curious</b> — what the bot is, in one minute\n"
+                 "🔐 <b>Permissions</b> — the rights the bot needs and why\n"
+                 "📘 <b>Guides per rank</b> — where each tool is and how to configure it\n"
+                 "🧬 <b>Clone</b> and 🎙️ <b>Sentinel</b> — detailed installation"),
+        "owners": ("👑 <b>Install The Bunker in your community</b>\n\n"
+                   "<b>1 · Add the bot</b>\n"
+                   "Main menu → <b>➕ Add to a Group</b> (or <b>📢 Add to a Channel</b>) → choose your community → accept "
+                   "the requested administrator rights. Don't remove any: each one powers a function (see 🔐).\n\n"
+                   "<b>2 · Register as owner</b>\n"
+                   "Send <code>/reload</code> inside the group. The bot registers you as the owner and indexes the "
+                   "community. Only the real creator of the group can manage it.\n\n"
+                   "<b>3 · Configure</b>\n"
+                   "Here: <b>⚙️ Group Settings → your group</b>. You'll see the FREE tools, each with an explanation and "
+                   "an <b>⚙️ Open settings</b> button. Start with Captcha, Anti-Spam, Anti-Flood and 📨 Service messages.\n\n"
+                   "<b>4 · Optional: log channel</b>\n"
+                   "Create a private channel, add the bot as admin and link it in <b>🧾 Log Channel</b>: every action is "
+                   "recorded there in real time.\n\n"
+                   "<b>5 · Optional: delegates</b>\n"
+                   "Admins with «Add new admins» can manage anti-raid, language and service messages. Other admins only "
+                   "moderate with commands.\n\n"
+                   "<b>6 · Upgrade when you need it</b>\n"
+                   "At the bottom of your group panel: <b>⭐ PRO modules</b> and <b>💎 ULTRA PRO modules</b> explain what "
+                   "each rank unlocks and let you pay with Stars. Activation is instant."),
+        "cmds": ("⌨️ <b>Commands by rank</b>\n\n"
+                 "<b>🆓 FREE</b> (owner and moderators, 3 uses per command per day)\n"
+                 "• <code>/reload</code> sync the group and the Sentinel · <code>/settings</code> open the panel\n"
+                 "• <code>/warn</code> · <code>/unwarn</code> warnings (reply or @user)\n"
+                 "• <code>/ban</code> · <code>/unban</code> · <code>/kick</code> · <code>/mute</code> · <code>/unmute</code>\n"
+                 "• <code>/whitelist</code> · <code>/unwhitelist</code> full immunity for trusted members\n"
+                 "• <code>/antiraid</code> anti-raid console · <code>/purgeghosts</code> remove deleted accounts "
+                 "(<code>/purgeghosts scan</code> only simulates)\n"
+                 "• <code>/lang</code> service language · <code>/getid</code> chat ID\n\n"
+                 "<b>⭐ PRO</b> — everything above <b>without daily limits</b>, plus\n"
+                 "• <code>/gamification</code> recurring announcement · <code>/heatmap</code> activity by hour · "
+                 "<code>/retention</code> member retention\n\n"
+                 "<b>💎 ULTRA PRO</b> — everything above, plus\n"
+                 "• <code>/blacklist</code> add a term to your community list · <code>/panic</code> raid lockdown\n"
+                 "• <code>/night</code> night mode · <code>/autolower</code> · <code>/podcast</code> · "
+                 "<code>/shield</code> · <code>/screenshield</code> · <code>/noiseshield</code> · <code>/duckvolume</code>\n"
+                 "• <code>/enablevc</code> · <code>/disablevc</code> · <code>/statusvc</code> · <code>/cams</code> · "
+                 "<code>/kickoffcam</code> · <code>/vcwl</code> · <code>/vcunwl</code> voice-chat control\n"
+                 "• <code>/speakers</code> paid queue · <code>/radar</code> ecosystem report · "
+                 "<code>/exportsettings</code> · <code>/importsettings</code> signed backups\n\n"
+                 "<b>👥 Members</b> (any rank)\n"
+                 "• <code>/micvip</code> buy the MicVIP pass · <code>/rank</code> · <code>/top</code> levels (ULTRA PRO)\n\n"
+                 "<b>Who can use them</b>\n"
+                 "Members who are not admins can only use the member commands; anything else is ignored silently, so "
+                 "nobody can make the bot reply on their behalf. With <b>🔒 Command lock</b> on, members' commands are "
+                 "also deleted. You toggle it in <b>📋 Available commands</b> inside your group panel."),
+        "members": ABOUT_TEXTS["en"]["members"],
+        "curious": ("👀 <b>The Bunker in one minute</b>\n\n"
+                    "It's a bot that keeps Telegram communities clean and safe and helps them earn with Stars.\n\n"
+                    "• Stops spam, raids, scam links and flooding automatically.\n"
+                    "• Moderates voice chats with a Sentinel account.\n"
+                    "• Lets communities receive tips and sell MicVIP passes and memberships.\n"
+                    "• Everything is configured from this chat or from the Command Center.\n\n"
+                    "Want to try it? Add it to a test group: the <b>FREE</b> rank is free forever.\n"
+                    "Are you a member who wants to donate? Open <b>💝 Members</b>."),
+        "perms": ABOUT_TEXTS["en"]["perms"],
+        "free": ("📘 <b>FREE guide · where everything is</b>\n\n"
+                 "Open <b>⚙️ Group Settings → your group</b>. Every button opens a guide with an <b>⚙️ Open settings</b> "
+                 "button and a <b>🔙 Back</b> button.\n\n"
+                 "• <b>🤖 Captcha</b>: new members must press a button or solve a code before writing. Set the time "
+                 "limit and the punishment (kick or mute).\n"
+                 "• <b>🛡️ Anti-Spam</b>: blocks Telegram links, web links, forwards and quotes with links; choose "
+                 "which ones and whether the message is deleted.\n"
+                 "• <b>🌊 Anti-Flood</b>: X messages in Y seconds → warn, mute, kick or ban.\n"
+                 "• <b>🔒 Locks</b>: 30 media vectors (photos, videos, stickers, voice, polls…) each with its own action.\n"
+                 "• <b>⚠️ Warnings</b>: how many warnings before the automatic sanction and which one.\n"
+                 "• <b>📨 Service messages</b>: keep, delete or delete after X s each Telegram notice (joins, leaves, "
+                 "video chat, invitations, boosts, pins) and how long the bot's own notices stay.\n"
+                 "• <b>🚨 Anti-Raid</b>: thresholds, penalty and shield duration against mass joins.\n"
+                 "• <b>🌐 Language &amp; TTL</b>: language of the bot's notices and default auto-delete.\n"
+                 "• <b>🧾 Log Channel</b> and <b>🛰️ Perimeter</b>: audit trail and live status."),
+        "pro": ("📘 <b>PRO guide · what you unlock and where</b>\n\n"
+                "Open <b>⚙️ Group Settings → your group → ⭐ PRO modules</b>.\n\n"
+                "• <b>🤖 Custom bot notices</b>: for warnings, mutes, kicks, bans and notices you can set your own text "
+                "(HTML with {mention} {strikes} {limit} {reason} {action}), media and <b>your own button</b>; and add "
+                "<b>⚖️ Appeal</b> to automatic bans.\n"
+                "• <b>🕗 Voice-chat schedule</b>: hours when the Sentinel and the bot may post in the chat. Outside "
+                "them they keep moderating silently.\n"
+                "• <b>💰 Donation links</b>: up to 5 external links shown next to your Stars tips.\n"
+                "• <b>⚖️ Ban appeals</b>: automatically banned members can pay in Stars to come back with a single-use link.\n"
+                "• <b>🎟️ MicVIP audit</b>: every pass with buyer, expiry and Sentinel confirmation.\n"
+                "• <b>🔗 Link quotas</b>: daily link limit per admin.\n"
+                "• All commands without daily limits."),
+        "ultra": ("📘 <b>ULTRA PRO guide · what you unlock and where</b>\n\n"
+                  "Open <b>⚙️ Group Settings → your group → 💎 ULTRA PRO modules</b>.\n\n"
+                  "• <b>🧬 Clone &amp; Sentinel</b>: your own bot and your own voice Sentinel (guides in this menu).\n"
+                  "• <b>⚙️ Sentinel Settings</b>: edit every voice-chat notice (text, button, auto-delete, on/off) and "
+                  "its posting schedule.\n"
+                  "• <b>🚫 Double Blacklist</b>: a ban list and a warn list, each with its action (ban, kick, mute, "
+                  "warn or notice), duration and message deletion; plus an <b>allowlist</b> of terms that never count.\n"
+                  "• <b>👑 VIP roles</b>: automatic VIP role with native tag after a donation or MicVIP.\n"
+                  "• <b>💎 ULTRA tools</b>: panic button, screen-share shield, podcast mode, speakers, multimedia "
+                  "payload, AI Sentinel, XP levels, ghost purge and signed backups.\n"
+                  "• Everything from PRO and FREE."),
+        "sentinel": ("🎙️ <b>Install and program the Sentinel</b>\n\n"
+                     "<b>Before you start</b>: ULTRA PRO for a dedicated Sentinel (PRO uses the Master Sentinel) and a "
+                     "<b>secondary</b> Telegram account — never your main one.\n\n"
+                     "<b>1 · Link the account</b>: <i>Group Settings → your group → 💎 ULTRA PRO → 🧬 Clone &amp; Sentinel "
+                     "→ 🎙️ Connect own Sentinel</i>. Send the number with country code, then the login code <b>with "
+                     "spaces</b> (<code>1 2 3 4 5</code>) and the 2-step password if it has one.\n"
+                     "<b>2 · Make it admin</b> in the group with <b>Manage video chats</b> (mandatory), Delete messages, "
+                     "Ban users and Invite users.\n"
+                     "<b>3 · Activate it</b>: from the Sentinel account send <code>/reload</code> in the group. It "
+                     "answers with a status card.\n"
+                     "<b>4 · Program it</b>:\n"
+                     "• AutoLower %: <code>/autolower</code> or the Command Center.\n"
+                     "• Notices: <i>💎 ULTRA tools → ⚙️ Sentinel Settings</i> → ✍️ text, 🏷️ button, ⏱️ auto-delete, "
+                     "🟢/🔴 on/off for each notice (VC join, MicVIP, reset, scheduled opening, pinned welcome).\n"
+                     "• Hours: <i>⚙️ Sentinel Settings → 🕗 VC message schedule</i>.\n"
+                     "• Scheduled calls: <i>📡 Radar &amp; Ecosystem → 🗓️ VC schedule</i>.\n\n"
+                     "<b>If something fails</b>: «session revoked» → link it again; no AutoLower → missing "
+                     "<b>Manage video chats</b>, grant it and send <code>/reload</code>."),
+        "owners_btn": "👑 Owners & admins", "cmds_btn": "⌨️ Commands", "members_btn": "💝 Members",
+        "curious_btn": "👀 Just curious", "perms_btn": "🔐 Permissions", "free_btn": "📘 FREE guide",
+        "pro_btn": "📘 PRO guide", "ultra_btn": "📘 ULTRA PRO guide", "clone_btn": "🧬 Clone", "sentinel_btn": "🎙️ Sentinel",
+        "plans_btn": "💎 Compare licenses", "vc_btn": "🎙️ Video Chat step by step", "back": "🔙 Back to Info Bot",
+    },
+    "es": {
+        "main": ("ℹ️ <b>Info Bot</b>\n\n"
+                 "Elige lo que buscas. Cada módulo explica solo su tema, así no tienes que leerlo todo:\n\n"
+                 "👑 <b>Dueños y administradores</b> — instala el bot paso a paso\n"
+                 "⌨️ <b>Comandos</b> — todos los comandos, por rango, y quién puede usarlos\n"
+                 "💝 <b>Miembros</b> — cómo dar una propina y comprar MicVIP\n"
+                 "👀 <b>Solo curiosidad</b> — qué es el bot, en un minuto\n"
+                 "🔐 <b>Permisos</b> — los permisos que necesita el bot y para qué\n"
+                 "📘 <b>Guías por rango</b> — dónde está cada herramienta y cómo configurarla\n"
+                 "🧬 <b>Clon</b> y 🎙️ <b>Centinela</b> — instalación detallada"),
+        "owners": ("👑 <b>Instala The Bunker en tu comunidad</b>\n\n"
+                   "<b>1 · Añade el bot</b>\n"
+                   "Menú principal → <b>➕ Añadir a un Grupo</b> (o <b>📢 Añadir a un Canal</b>) → elige tu comunidad → "
+                   "acepta los permisos de administrador que pide. No quites ninguno: cada uno activa una función (mira 🔐).\n\n"
+                   "<b>2 · Regístrate como dueño</b>\n"
+                   "Envía <code>/reload</code> dentro del grupo. El bot te registra como dueño e indexa la comunidad. Solo "
+                   "el creador real del grupo puede administrarla.\n\n"
+                   "<b>3 · Configura</b>\n"
+                   "Aquí: <b>⚙️ Ajustes de grupos → tu grupo</b>. Verás las herramientas FREE, cada una con su explicación "
+                   "y un botón <b>⚙️ Abrir ajustes</b>. Empieza por Captcha, Anti-Spam, Anti-Flood y 📨 Mensajes de servicio.\n\n"
+                   "<b>4 · Opcional: canal de registro</b>\n"
+                   "Crea un canal privado, añade el bot como administrador y vincúlalo en <b>🧾 Canal de Registro</b>: cada "
+                   "acción queda registrada allí en tiempo real.\n\n"
+                   "<b>5 · Opcional: delegados</b>\n"
+                   "Los administradores con «Añadir administradores» pueden gestionar el anti-raid, el idioma y los mensajes "
+                   "de servicio. El resto de administradores solo modera con comandos.\n\n"
+                   "<b>6 · Sube de rango cuando lo necesites</b>\n"
+                   "Al final del panel de tu grupo: <b>⭐ Módulos PRO</b> y <b>💎 Módulos ULTRA PRO</b> explican qué "
+                   "desbloquea cada rango y te dejan pagar con Stars. La activación es inmediata."),
+        "cmds": ("⌨️ <b>Comandos por rango</b>\n\n"
+                 "<b>🆓 FREE</b> (dueño y moderadores, 3 usos por comando al día)\n"
+                 "• <code>/reload</code> sincroniza el grupo y el Centinela · <code>/settings</code> abre el panel\n"
+                 "• <code>/warn</code> · <code>/unwarn</code> advertencias (responde o @usuario)\n"
+                 "• <code>/ban</code> · <code>/unban</code> · <code>/kick</code> · <code>/mute</code> · <code>/unmute</code>\n"
+                 "• <code>/whitelist</code> · <code>/unwhitelist</code> inmunidad total para miembros de confianza\n"
+                 "• <code>/antiraid</code> consola anti-raid · <code>/purgeghosts</code> retira cuentas eliminadas "
+                 "(<code>/purgeghosts scan</code> solo simula)\n"
+                 "• <code>/lang</code> idioma de servicio · <code>/getid</code> ID del chat\n\n"
+                 "<b>⭐ PRO</b> — todo lo anterior <b>sin límite diario</b>, más\n"
+                 "• <code>/gamification</code> anuncio recurrente · <code>/heatmap</code> actividad por hora · "
+                 "<code>/retention</code> retención de miembros\n\n"
+                 "<b>💎 ULTRA PRO</b> — todo lo anterior, más\n"
+                 "• <code>/blacklist</code> añade un término a la lista de tu comunidad · <code>/panic</code> bloqueo anti-raid\n"
+                 "• <code>/night</code> modo nocturno · <code>/autolower</code> · <code>/podcast</code> · "
+                 "<code>/shield</code> · <code>/screenshield</code> · <code>/noiseshield</code> · <code>/duckvolume</code>\n"
+                 "• <code>/enablevc</code> · <code>/disablevc</code> · <code>/statusvc</code> · <code>/cams</code> · "
+                 "<code>/kickoffcam</code> · <code>/vcwl</code> · <code>/vcunwl</code> control del videochat\n"
+                 "• <code>/speakers</code> cola pagada · <code>/radar</code> informe del ecosistema · "
+                 "<code>/exportsettings</code> · <code>/importsettings</code> respaldos firmados\n\n"
+                 "<b>👥 Miembros</b> (cualquier rango)\n"
+                 "• <code>/micvip</code> compra el pase MicVIP · <code>/rank</code> · <code>/top</code> niveles (ULTRA PRO)\n\n"
+                 "<b>Quién puede usarlos</b>\n"
+                 "Los miembros que no son administradores solo pueden usar los comandos de miembros; el resto se ignora "
+                 "en silencio, así nadie puede hacer que el bot responda por él. Con el <b>🔒 Bloqueo de comandos</b> "
+                 "activo, sus comandos también se borran. Lo activas en <b>📋 Comandos disponibles</b>, dentro del panel "
+                 "de tu grupo."),
+        "members": ABOUT_TEXTS["es"]["members"],
+        "curious": ("👀 <b>The Bunker en un minuto</b>\n\n"
+                    "Es un bot que mantiene limpias y seguras las comunidades de Telegram y las ayuda a ganar con Stars.\n\n"
+                    "• Detiene spam, raids, enlaces de estafa y flood automáticamente.\n"
+                    "• Modera los videochats con una cuenta Centinela.\n"
+                    "• Permite a las comunidades recibir propinas y vender pases MicVIP y membresías.\n"
+                    "• Todo se configura desde este chat o desde el Command Center.\n\n"
+                    "¿Quieres probarlo? Añádelo a un grupo de pruebas: el rango <b>FREE</b> es gratis para siempre.\n"
+                    "¿Eres miembro y quieres donar? Abre <b>💝 Miembros</b>."),
+        "perms": ABOUT_TEXTS["es"]["perms"],
+        "free": ("📘 <b>Guía FREE · dónde está cada cosa</b>\n\n"
+                 "Abre <b>⚙️ Ajustes de grupos → tu grupo</b>. Cada botón abre una guía con un botón <b>⚙️ Abrir "
+                 "ajustes</b> y otro <b>🔙 Volver</b>.\n\n"
+                 "• <b>🤖 Captcha</b>: los nuevos miembros deben pulsar un botón o resolver un código antes de escribir. "
+                 "Fija el tiempo límite y el castigo (expulsar o silenciar).\n"
+                 "• <b>🛡️ Anti-Spam</b>: bloquea enlaces de Telegram, enlaces web, reenvíos y citas con enlaces; eliges "
+                 "cuáles y si se borra el mensaje.\n"
+                 "• <b>🌊 Anti-Flood</b>: X mensajes en Y segundos → advertir, silenciar, expulsar o banear.\n"
+                 "• <b>🔒 Bloqueos</b>: 30 vectores multimedia (fotos, vídeos, stickers, voz, encuestas…), cada uno con su acción.\n"
+                 "• <b>⚠️ Advertencias</b>: cuántas antes de la sanción automática y cuál.\n"
+                 "• <b>📨 Mensajes de servicio</b>: mantener, borrar o borrar a los X s cada aviso de Telegram (entradas, "
+                 "salidas, videochat, invitaciones, impulsos, fijados) y cuánto duran los avisos del propio bot.\n"
+                 "• <b>🚨 Anti-Raid</b>: umbrales, castigo y duración del escudo contra entradas masivas.\n"
+                 "• <b>🌐 Idioma y TTL</b>: idioma de los avisos del bot y autoborrado por defecto.\n"
+                 "• <b>🧾 Canal de Registro</b> y <b>🛰️ Perímetro</b>: registro de auditoría y estado en vivo."),
+        "pro": ("📘 <b>Guía PRO · qué desbloqueas y dónde</b>\n\n"
+                "Abre <b>⚙️ Ajustes de grupos → tu grupo → ⭐ Módulos PRO</b>.\n\n"
+                "• <b>🤖 Avisos del bot personalizados</b>: en advertencias, silencios, expulsiones, baneos y avisos puedes "
+                "poner tu texto (HTML con {mention} {strikes} {limit} {reason} {action}), multimedia y <b>tu propio "
+                "botón</b>; y añadir <b>⚖️ Apelar</b> a los baneos automáticos.\n"
+                "• <b>🕗 Horario del videochat</b>: horas en que el Centinela y el bot pueden publicar en el chat. Fuera "
+                "de ellas siguen moderando en silencio.\n"
+                "• <b>💰 Enlaces de donación</b>: hasta 5 enlaces externos junto a tus propinas en Stars.\n"
+                "• <b>⚖️ Apelaciones de baneo</b>: quien fue baneado automáticamente puede pagar en Stars y volver con un "
+                "enlace de un solo uso.\n"
+                "• <b>🎟️ Auditoría MicVIP</b>: cada pase con comprador, vencimiento y confirmación del Centinela.\n"
+                "• <b>🔗 Cuotas de enlaces</b>: límite diario de enlaces por administrador.\n"
+                "• Todos los comandos sin límite diario."),
+        "ultra": ("📘 <b>Guía ULTRA PRO · qué desbloqueas y dónde</b>\n\n"
+                  "Abre <b>⚙️ Ajustes de grupos → tu grupo → 💎 Módulos ULTRA PRO</b>.\n\n"
+                  "• <b>🧬 Clon y Centinela</b>: tu propio bot y tu propio Centinela de voz (guías en este menú).\n"
+                  "• <b>⚙️ Configuración del Centinela</b>: edita cada aviso del videochat (texto, botón, autoborrado, "
+                  "activar/desactivar) y su horario de publicación.\n"
+                  "• <b>🚫 Doble Lista Negra</b>: una lista de baneo y otra de advertencia, cada una con su acción (ban, "
+                  "kick, mute, advertencia o aviso), duración y borrado del mensaje; y una <b>lista blanca</b> de términos "
+                  "que nunca cuentan.\n"
+                  "• <b>👑 Roles VIP</b>: rol VIP automático con etiqueta nativa tras una donación o MicVIP.\n"
+                  "• <b>💎 Herramientas ULTRA</b>: botón de pánico, escudo de pantalla, modo podcast, speakers, payload "
+                  "multimedia, Centinela IA, niveles XP, Ghost Purge y respaldos firmados.\n"
+                  "• Todo lo de PRO y FREE."),
+        "sentinel": ("🎙️ <b>Instala y programa el Centinela</b>\n\n"
+                     "<b>Antes de empezar</b>: ULTRA PRO para un Centinela dedicado (PRO usa el Centinela Maestro) y una "
+                     "cuenta de Telegram <b>secundaria</b>, nunca la principal.\n\n"
+                     "<b>1 · Vincula la cuenta</b>: <i>Ajustes de grupos → tu grupo → 💎 ULTRA PRO → 🧬 Clon y Centinela "
+                     "→ 🎙️ Conectar Centinela propio</i>. Envía el número con código de país, luego el código de acceso "
+                     "<b>con espacios</b> (<code>1 2 3 4 5</code>) y la contraseña de dos pasos si la tiene.\n"
+                     "<b>2 · Hazla administradora</b> del grupo con <b>Gestionar videochats</b> (obligatorio), Eliminar "
+                     "mensajes, Banear usuarios e Invitar usuarios.\n"
+                     "<b>3 · Actívala</b>: desde la cuenta Centinela envía <code>/reload</code> en el grupo. Responde con "
+                     "una tarjeta de estado.\n"
+                     "<b>4 · Prográmala</b>:\n"
+                     "• % de AutoLower: <code>/autolower</code> o el Command Center.\n"
+                     "• Avisos: <i>💎 Herramientas ULTRA → ⚙️ Configuración del Centinela</i> → ✍️ texto, 🏷️ botón, "
+                     "⏱️ autoborrado, 🟢/🔴 activar/desactivar cada aviso (entrada al VC, MicVIP, reinicio, apertura "
+                     "programada, bienvenida fijada).\n"
+                     "• Horas: <i>⚙️ Configuración del Centinela → 🕗 Horario de los mensajes del VC</i>.\n"
+                     "• Llamadas programadas: <i>📡 Radar y Ecosistema → 🗓️ Programación VC</i>.\n\n"
+                     "<b>Si algo falla</b>: «sesión revocada» → vuélvela a vincular; sin AutoLower → falta <b>Gestionar "
+                     "videochats</b>, concédelo y envía <code>/reload</code>."),
+        "owners_btn": "👑 Dueños y administradores", "cmds_btn": "⌨️ Comandos", "members_btn": "💝 Miembros",
+        "curious_btn": "👀 Solo curiosidad", "perms_btn": "🔐 Permisos", "free_btn": "📘 Guía FREE",
+        "pro_btn": "📘 Guía PRO", "ultra_btn": "📘 Guía ULTRA PRO", "clone_btn": "🧬 Clon", "sentinel_btn": "🎙️ Centinela",
+        "plans_btn": "💎 Comparar licencias", "vc_btn": "🎙️ Videochat paso a paso", "back": "🔙 Volver a Info Bot",
+    },
+}
+INFOBOT_TEXTS["en"]["clone"] = ABOUT_TEXTS["en"]["clones"]
+INFOBOT_TEXTS["es"]["clone"] = ABOUT_TEXTS["es"]["clones"]
+
+
+FREE_PANEL_TEXT: dict[str, str] = {
+    "en": ("🛡️ <b>{group_name}</b> · 🆓 FREE tools\n\n"
+           "Your community already has full basic protection. Each button explains the tool, how to install it and "
+           "opens its settings (turn on / off, actions, auto-delete):\n"
+           "🤖 Captcha · 🛡️ Anti-Spam · 🌊 Anti-Flood · 🔒 30 locks · ⚠️ Warnings · 📨 Service messages · "
+           "🚨 Anti-Raid · 🌐 Language &amp; TTL · 🧾 Log channel · 🛰️ Perimeter · 🛡️ Moderation · 📡 Radar\n\n"
+           "📋 <b>Available commands</b> lists what you can use and who can use it.\n"
+           "⭐ <b>PRO</b> and 💎 <b>ULTRA PRO</b> at the bottom show what each rank adds."),
+    "es": ("🛡️ <b>{group_name}</b> · 🆓 Herramientas FREE\n\n"
+           "Tu comunidad ya tiene protección básica completa. Cada botón explica la herramienta, cómo instalarla y "
+           "abre sus ajustes (activar / desactivar, acciones, autoborrado):\n"
+           "🤖 Captcha · 🛡️ Anti-Spam · 🌊 Anti-Flood · 🔒 30 bloqueos · ⚠️ Advertencias · 📨 Mensajes de servicio · "
+           "🚨 Anti-Raid · 🌐 Idioma y TTL · 🧾 Canal de registro · 🛰️ Perímetro · 🛡️ Moderación · 📡 Radar\n\n"
+           "📋 <b>Comandos disponibles</b> muestra qué puedes usar y quién puede usarlo.\n"
+           "⭐ <b>PRO</b> y 💎 <b>ULTRA PRO</b>, abajo, muestran lo que añade cada rango."),
+}
+
+
 TIER_SHOWCASE: dict[str, dict[str, str]] = {
     "pro": {
-        "en": ("⭐ <b>PRO modules</b> · {price} Stars / 30 days\n\n"
-               "Turn your group into a clean, monetized community:\n"
-               "• <b>Custom bot notices</b>: your own text and media for warnings, mutes and bans, plus an "
-               "<b>⚖️ Appeal</b> button on automatic bans so members can pay in Stars to return\n"
-               "• <b>Voice-chat message schedule</b>: choose the hours when the Sentinel posts in the chat\n"
-               "• <b>External donation links</b> (PayPal, Ko-fi, your channel…) next to Stars tips\n"
-               "• MicVIP audit, paid ban appeals and admin link quotas\n"
-               "• Unlimited commands and custom captcha / warning / tips texts\n\n"
-               "<b>How to activate</b>\n"
-               "1. Tap <b>⭐ Get PRO</b> and pay with Telegram Stars.\n"
-               "2. The license binds to this community instantly; remaining days carry over.\n"
-               "3. Come back here: the PRO buttons are unlocked."),
-        "es": ("⭐ <b>Módulos PRO</b> · {price} Stars / 30 días\n\n"
-               "Convierte tu grupo en una comunidad limpia y monetizada:\n"
-               "• <b>Avisos del bot personalizados</b>: tu texto y multimedia en advertencias, silencios y baneos, y "
-               "un botón <b>⚖️ Apelar</b> en los baneos automáticos para que el miembro pague en Stars y vuelva\n"
-               "• <b>Horario de los mensajes del videochat</b>: eliges las horas en que el Centinela publica\n"
-               "• <b>Enlaces externos de donación</b> (PayPal, Ko-fi, tu canal…) junto a las propinas en Stars\n"
-               "• Auditoría MicVIP, apelaciones de baneo pagadas y cuotas de enlaces de administradores\n"
-               "• Comandos ilimitados y textos propios de captcha, advertencias y propinas\n\n"
-               "<b>Cómo activarlo</b>\n"
-               "1. Pulsa <b>⭐ Activar PRO</b> y paga con Telegram Stars.\n"
-               "2. La licencia se vincula al instante a esta comunidad; los días restantes se conservan.\n"
-               "3. Vuelve aquí: los botones PRO quedan desbloqueados."),
+        "en": ("⭐ <b>PRO</b> · {price} Stars / 30 days\n\n"
+               "<b>Everything in FREE, plus:</b>\n"
+               "• <b>Unlimited commands</b> (FREE allows 3 uses per command per day).\n"
+               "• <b>🤖 Custom bot notices</b>: your text, media and button on warnings, mutes, kicks and bans, and an "
+               "<b>⚖️ Appeal</b> button on automatic bans. Members pay in Stars to return: extra income for you.\n"
+               "• <b>🕗 Voice-chat schedule</b>: decide the hours when the Sentinel posts; outside them it moderates silently.\n"
+               "• <b>💰 External donation links</b> next to your Stars tips.\n"
+               "• <b>⚖️ Paid ban appeals</b>, <b>🎟️ MicVIP audit</b> and <b>🔗 admin link quotas</b>.\n"
+               "• Recurring gamification announcement, activity heatmap and retention reports.\n\n"
+               "<b>How it works</b>: tap the button below, pay with Telegram Stars and the license binds to this "
+               "community instantly (remaining days carry over). Then this same button opens your PRO tools."),
+        "es": ("⭐ <b>PRO</b> · {price} Stars / 30 días\n\n"
+               "<b>Todo lo de FREE, más:</b>\n"
+               "• <b>Comandos ilimitados</b> (FREE permite 3 usos por comando al día).\n"
+               "• <b>🤖 Avisos del bot personalizados</b>: tu texto, multimedia y botón en advertencias, silencios, "
+               "expulsiones y baneos, y un botón <b>⚖️ Apelar</b> en los baneos automáticos. El miembro paga en Stars "
+               "para volver: ingresos extra para ti.\n"
+               "• <b>🕗 Horario del videochat</b>: decides las horas en que el Centinela publica; fuera de ellas modera en silencio.\n"
+               "• <b>💰 Enlaces externos de donación</b> junto a tus propinas en Stars.\n"
+               "• <b>⚖️ Apelaciones de baneo pagadas</b>, <b>🎟️ auditoría MicVIP</b> y <b>🔗 cuotas de enlaces</b> de administradores.\n"
+               "• Anuncio de gamificación recurrente, mapa de actividad y retención.\n\n"
+               "<b>Cómo funciona</b>: pulsa el botón de abajo, paga con Telegram Stars y la licencia se vincula al "
+               "instante a esta comunidad (los días restantes se conservan). Después, este mismo botón abre tus herramientas PRO."),
     },
     "ultra_pro": {
-        "en": ("💎 <b>ULTRA PRO modules</b> · {price} Stars / 30 days\n\n"
-               "The full arsenal, with your own brand:\n"
-               "• <b>Bot Clone</b>: your own bot, and 100% of members' Stars go to you\n"
-               "• <b>Dedicated Voice Sentinel</b>: AutoLower 1–10%, MicVIP 100%, screen and noise shields\n"
-               "• <b>Double Blacklist</b>: one list bans on sight, the other deletes and warns\n"
-               "• VIP roles with native tags, AI Sentinel (Mistral), panic button, podcast mode\n"
-               "• Everything in PRO\n\n"
-               "<b>How to activate</b>\n"
-               "1. Tap <b>💎 Get ULTRA PRO</b> and pay with Telegram Stars.\n"
-               "2. Link your clone and Sentinel from <b>🧬 Clone & Sentinel</b> (Video Chat guide in ℹ️ Manuals).\n"
-               "3. Send <code>/reload</code> in the group."),
-        "es": ("💎 <b>Módulos ULTRA PRO</b> · {price} Stars / 30 días\n\n"
-               "El arsenal completo, con tu propia marca:\n"
-               "• <b>Bot Clon</b>: tu propio bot, y el 100 % de las Stars de los miembros para ti\n"
-               "• <b>Centinela de voz dedicado</b>: AutoLower 1–10 %, MicVIP 100 %, escudos de pantalla y ruido\n"
-               "• <b>Doble Lista Negra</b>: una lista expulsa en el acto, la otra borra y advierte\n"
-               "• Roles VIP con etiqueta nativa, Centinela IA (Mistral), botón de pánico y modo podcast\n"
-               "• Todo lo de PRO\n\n"
-               "<b>Cómo activarlo</b>\n"
-               "1. Pulsa <b>💎 Activar ULTRA PRO</b> y paga con Telegram Stars.\n"
-               "2. Vincula tu clon y tu Centinela desde <b>🧬 Clon y Centinela</b> (guía del videochat en ℹ️ Manuales).\n"
-               "3. Envía <code>/reload</code> en el grupo."),
+        "en": ("💎 <b>ULTRA PRO</b> · {price} Stars / 30 days\n\n"
+               "<b>Everything in PRO, plus:</b>\n"
+               "• <b>🧬 Bot Clone</b>: The Bunker under your own bot; <b>100% of members' Stars</b> go to you.\n"
+               "• <b>🎙️ Dedicated voice Sentinel</b>: AutoLower 1–10%, MicVIP 100%, screen-share and noise shields, "
+               "podcast mode, paid speaker queue, scheduled calls, every notice editable.\n"
+               "• <b>🚫 Double Blacklist</b>: one list bans on sight, the other warns and deletes; choose the action "
+               "(ban, kick, mute, warn or notice), duration and deletion, plus an <b>allowlist</b>.\n"
+               "• <b>🚨 Panic button</b>, night mode, AI Sentinel (Mistral), XP levels and leaderboards.\n"
+               "• <b>👑 VIP roles</b> with native tags and <b>signed .bunker backups</b>.\n\n"
+               "<b>How it works</b>: tap the button below, pay with Telegram Stars and every ULTRA PRO tool unlocks "
+               "instantly. Then link your clone and Sentinel (step-by-step guides in ℹ️ Info Bot)."),
+        "es": ("💎 <b>ULTRA PRO</b> · {price} Stars / 30 días\n\n"
+               "<b>Todo lo de PRO, más:</b>\n"
+               "• <b>🧬 Bot Clon</b>: The Bunker con tu propio bot; <b>el 100 % de las Stars de los miembros</b> para ti.\n"
+               "• <b>🎙️ Centinela de voz dedicado</b>: AutoLower 1–10 %, MicVIP 100 %, escudos de pantalla y ruido, modo "
+               "podcast, cola de speakers pagada, llamadas programadas y todos los avisos editables.\n"
+               "• <b>🚫 Doble Lista Negra</b>: una lista expulsa en el acto y la otra advierte y borra; eliges la acción "
+               "(ban, kick, mute, advertencia o aviso), la duración y el borrado, y una <b>lista blanca</b>.\n"
+               "• <b>🚨 Botón de pánico</b>, modo nocturno, Centinela IA (Mistral), niveles XP y rankings.\n"
+               "• <b>👑 Roles VIP</b> con etiqueta nativa y <b>respaldos firmados .bunker</b>.\n\n"
+               "<b>Cómo funciona</b>: pulsa el botón de abajo, paga con Telegram Stars y todas las herramientas ULTRA PRO "
+               "se desbloquean al instante. Después vincula tu clon y tu Centinela (guías paso a paso en ℹ️ Info Bot)."),
+    },
+}
+
+UNLOCKED_INTRO: dict[str, dict[str, str]] = {
+    "pro": {
+        "en": "⭐ <b>PRO modules · unlocked</b>\n\nEach button explains the tool and opens its settings. You also keep every FREE tool.",
+        "es": "⭐ <b>Módulos PRO · desbloqueados</b>\n\nCada botón explica la herramienta y abre sus ajustes. Conservas también todas las herramientas FREE.",
+    },
+    "ultra_pro": {
+        "en": "💎 <b>ULTRA PRO modules · unlocked</b>\n\nEach button explains the tool and opens its settings. You also keep every PRO and FREE tool.",
+        "es": "💎 <b>Módulos ULTRA PRO · desbloqueados</b>\n\nCada botón explica la herramienta y abre sus ajustes. Conservas también todas las herramientas PRO y FREE.",
     },
 }
 
 _V43_KIND_LABELS = {
     "join": ("👋 Entradas", "👋 Joins"), "leave": ("🚪 Salidas", "🚪 Leaves"),
-    "videochat": ("🎙️ Videochat", "🎙️ Video chat"), "pinned": ("📌 Fijados", "📌 Pins"),
+    "videochat": ("🎙️ Videochat abierto / cerrado", "🎙️ Video chat started / ended"),
+    "vc_invite": ("📨 Invitaciones al videochat", "📨 Video chat invitations"),
+    "boost": ("🚀 Impulsos", "🚀 Boosts"), "pinned": ("📌 Fijados", "📌 Pins"),
     "chat_info": ("🖼️ Título / foto", "🖼️ Title / photo"),
 }
 _V43_ACTION_LABELS = {"keep": ("Mantener", "Keep"), "delete": ("Borrar ya", "Delete now"),
                       "delay": ("Borrar a los {d}", "Delete after {d}")}
 _V43_NOTICE_LABELS = {"warn": ("⚠️ Advertencia", "⚠️ Warning"), "mute": ("🔇 Silencio", "🔇 Mute"),
-                      "kick": ("👢 Expulsión", "👢 Kick"), "ban": ("🚫 Baneo", "🚫 Ban")}
+                      "kick": ("👢 Expulsión", "👢 Kick"), "ban": ("🚫 Baneo", "🚫 Ban"),
+                      "advise": ("📢 Aviso", "📢 Notice")}
 _V43_TTL_CYCLE = (None, 10, 30, 60, 300, 0)
 _V43_VC_INTERVALS = (0, 30, 60, 120, 300, 600)
 
@@ -11012,43 +11437,112 @@ def _v43_back_row(group_id: int, lang: str, target: str = "panel") -> list:
     return _v23_back(group_id, lang)
 
 
-# ------------------------------------------------------------------ menú principal y guías
+# ------------------------------------------------------------------ v44 · menú principal, 📖 y ℹ️ Info Bot
+def _v44_lng(lang: str) -> str:
+    return "es" if lang == "es" else "en"
+
+
+def _with_prices(text: str) -> str:
+    """Los textos usan {pro} / {ultra}; se reemplazan sin .format() para no tocar {mention} y similares."""
+    return (text or "").replace("{pro}", str(PRICE_PRO_STARS)).replace("{ultra}", str(PRICE_ULTRAPRO_STARS))
+
+
+def group_panel_text(lang: str, group_name: str) -> str:
+    """v44 · Pie de la tarjeta del panel del grupo: explicación FREE (≤ 1024 caracteres para caber en la imagen)."""
+    return FREE_PANEL_TEXT[_v44_lng(lang)].replace("{group_name}", group_name or "")
+
+
+def _origin_back_row(origin: str, lang: str) -> list:
+    """Volver contextual: 'a' = 📖 Qué es y cómo funciona · cualquier otro = ℹ️ Info Bot."""
+    if origin == "a":
+        return [InlineKeyboardButton(text=ABOUT_TEXTS[_v44_lng(lang)]["back_about"], callback_data=f"menu_about_{lang}")]
+    return [InlineKeyboardButton(text=INFOBOT_TEXTS[_v44_lng(lang)]["back"], callback_data=f"menu_infobot_{lang}")]
+
+
+# ------------------------------------------------------------------ 📖 Qué es y cómo funciona
 def _about_keyboard(lang: str) -> InlineKeyboardMarkup:
-    a = ABOUT_TEXTS.get(lang, ABOUT_TEXTS["en"])
+    a = ABOUT_TEXTS[_v44_lng(lang)]
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=a["owners_btn"], callback_data=f"menu_aboutmod_owners_{lang}"),
-         InlineKeyboardButton(text=a["commands_btn"], callback_data=f"menu_aboutmod_commands_{lang}")],
-        [InlineKeyboardButton(text=a["clones_btn"], callback_data=f"menu_aboutmod_clones_{lang}"),
-         InlineKeyboardButton(text=a["sentinel_btn"], callback_data=f"menu_aboutmod_sentinel_{lang}")],
-        [InlineKeyboardButton(text=a["guides"], callback_data=f"menu_infohow_{lang}")],
+        [InlineKeyboardButton(text=a["how_btn"], callback_data=f"menu_aboutmod_how_{lang}"),
+         InlineKeyboardButton(text=a["ranks_btn"], callback_data=f"menu_aboutmod_ranks_{lang}")],
+        [InlineKeyboardButton(text=a["tools_btn"], callback_data=f"menu_plans_a_{lang}")],
+        [InlineKeyboardButton(text=a["perms_btn"], callback_data=f"menu_aboutmod_perms_{lang}"),
+         InlineKeyboardButton(text=a["clones_btn"], callback_data=f"menu_aboutmod_clones_{lang}")],
+        [InlineKeyboardButton(text=a["sentinel_btn"], callback_data=f"menu_aboutmod_sentinel_{lang}")],
+        [InlineKeyboardButton(text=a["members_btn"], callback_data=f"menu_aboutmod_members_{lang}")],
+        [InlineKeyboardButton(text=a["guides"], callback_data=f"menu_infobot_{lang}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")],
     ])
 
 
 def _about_module_view(module: str, lang: str) -> tuple:
-    a = ABOUT_TEXTS.get(lang, ABOUT_TEXTS["en"])
+    a = ABOUT_TEXTS[_v44_lng(lang)]
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
-    text = a.get(module) or a["main"]
-    return text + PERIMETER_SIGNATURE, InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=a["back_about"], callback_data=f"menu_about_{lang}")],
-        [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")],
-    ])
+    if module not in ("how", "ranks", "perms", "clones", "sentinel", "members"):
+        module = "main"
+    text = _with_prices(a[module]) + PERIMETER_SIGNATURE
+    rows: list = []
+    if module == "ranks":
+        rows.append([InlineKeyboardButton(text=a["tools_btn"], callback_data=f"menu_plans_a_{lang}")])
+    elif module == "sentinel":
+        rows.append([InlineKeyboardButton(text=INFOBOT_TEXTS[_v44_lng(lang)]["vc_btn"], callback_data=f"menu_vcguide_a_{lang}")])
+    elif module == "clones":
+        rows.append([InlineKeyboardButton(text=a["sentinel_btn"], callback_data=f"menu_aboutmod_sentinel_{lang}")])
+    rows.append([InlineKeyboardButton(text=a["back_about"], callback_data=f"menu_about_{lang}")])
+    rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _manuals_keyboard(lang: str) -> InlineKeyboardMarkup:
-    m = MANUALS_TEXTS.get(lang, MANUALS_TEXTS["en"])
+# ------------------------------------------------------------------ ℹ️ Info Bot (módulos por audiencia)
+_INFOBOT_MODULES = ("owners", "cmds", "members", "curious", "perms", "free", "pro", "ultra", "clone", "sentinel")
+
+
+def _infobot_keyboard(lang: str) -> InlineKeyboardMarkup:
+    i = INFOBOT_TEXTS[_v44_lng(lang)]
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+
+    def b(key: str, module: str) -> InlineKeyboardButton:
+        return InlineKeyboardButton(text=i[key], callback_data=f"menu_ib_{module}_{lang}")
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=m["licenses"], callback_data=f"menu_plans_{lang}")],
-        [InlineKeyboardButton(text=m["perms_btn"], callback_data=f"menu_perms_{lang}")],
-        [InlineKeyboardButton(text=m["vc"], callback_data=f"menu_vcguide_{lang}")],
+        [b("owners_btn", "owners"), b("cmds_btn", "cmds")],
+        [b("members_btn", "members"), b("curious_btn", "curious")],
+        [b("perms_btn", "perms"), b("free_btn", "free")],
+        [b("pro_btn", "pro"), b("ultra_btn", "ultra")],
+        [b("clone_btn", "clone"), b("sentinel_btn", "sentinel")],
+        [InlineKeyboardButton(text=i["vc_btn"], callback_data=f"menu_vcguide_i_{lang}"),
+         InlineKeyboardButton(text=i["plans_btn"], callback_data=f"menu_plans_i_{lang}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")],
     ])
+
+
+def _infobot_module_view(module: str, lang: str) -> tuple:
+    i = INFOBOT_TEXTS[_v44_lng(lang)]
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    if module not in _INFOBOT_MODULES:
+        return _with_prices(i["main"]) + PERIMETER_SIGNATURE, _infobot_keyboard(lang)
+    text = _with_prices(i[module]) + PERIMETER_SIGNATURE
+    rows: list = []
+    if module in ("owners", "free", "pro", "ultra"):
+        rows.append([InlineKeyboardButton(text=t["btn_settings"], callback_data=f"menu_settings_{lang}")])
+    if module in ("pro", "ultra", "curious"):
+        rows.append([InlineKeyboardButton(text=i["plans_btn"], callback_data=f"menu_plans_i_{lang}")])
+    if module in ("sentinel", "clone"):
+        rows.append([InlineKeyboardButton(text=i["vc_btn"], callback_data=f"menu_vcguide_i_{lang}")])
+    if module == "clone":
+        rows.append([InlineKeyboardButton(text=i["sentinel_btn"], callback_data=f"menu_ib_sentinel_{lang}")])
+    if module == "free":
+        rows.append([InlineKeyboardButton(text=i["pro_btn"], callback_data=f"menu_ib_pro_{lang}"),
+                     InlineKeyboardButton(text=i["ultra_btn"], callback_data=f"menu_ib_ultra_{lang}")])
+    rows.append([InlineKeyboardButton(text=i["back"], callback_data=f"menu_infobot_{lang}")])
+    rows.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"menu_main_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _back_to_manuals(lang: str) -> list:
-    return [InlineKeyboardButton(text=tr(lang, "🔙 Volver a Manuales", "🔙 Back to Manuals"), callback_data=f"menu_manuals_{lang}")]
+    """Compatibilidad v43: los antiguos «Manuales» son ahora ℹ️ Info Bot."""
+    return _origin_back_row("i", lang)
 
 
 async def _platform_donate_view(lang: str) -> tuple:
@@ -11083,7 +11577,11 @@ async def _platform_donate_view(lang: str) -> tuple:
 
 # ------------------------------------------------------------------ vitrinas por rango
 async def _tier_showcase_view(bot: Bot, group_id: int, user_id: int, which: str, lang: str) -> tuple:
-    """Rango desbloqueado → botones de configuración de ese rango. Si no → texto persuasivo, instalación y pago."""
+    """
+    v44 · Bloqueado → texto persuasivo del rango, vista previa de cada herramienta (sus guías muestran el pago) y, al
+    final, el botón de pago con el precio en Stars. Desbloqueado → tarjeta del rango + un botón por herramienta (cada
+    uno abre su guía con «⚙️ Abrir ajustes»). Devuelve (texto, teclado, clave_de_tarjeta).
+    """
     required = "ultra_pro" if which == "ultra" else "pro"
     try:
         tier = str(await get_effective_group_tier(int(group_id), int(user_id)) or "free").lower()
@@ -11091,100 +11589,119 @@ async def _tier_showcase_view(bot: Bot, group_id: int, user_id: int, which: str,
         tier = "free"
     unlocked = _TIER_RANK_BOT.get(tier, 0) >= _TIER_RANK_BOT[required]
     g = group_id
+    lng = _v44_lng(lang)
+    card = "pay_ultra" if required == "ultra_pro" else "pay_pro"
     if not unlocked:
         price = PRICE_ULTRAPRO_STARS if required == "ultra_pro" else PRICE_PRO_STARS
-        text = TIER_SHOWCASE[required][lang if lang in ("en", "es") else "en"].format(price=price) + PERIMETER_SIGNATURE
-        pay = (InlineKeyboardButton(text=tr(lang, "💎 Activar ULTRA PRO", "💎 Get ULTRA PRO"), callback_data=f"pay_ultra_{g}_{lang}")
+        text = TIER_SHOWCASE[required][lng].replace("{price}", str(price)) + PERIMETER_SIGNATURE
+        rows = [[InlineKeyboardButton(text=tr(lang, "🔎 Qué hace cada herramienta:", "🔎 What each tool does:"),
+                                      callback_data="noop")]]
+        rows += _tool_buttons(g, required, lang)
+        if required == "ultra_pro" and _TIER_RANK_BOT.get(tier, 0) < 1:
+            rows.append([InlineKeyboardButton(text=tr(lang, "⭐ Incluye todo PRO — ver módulos PRO", "⭐ Includes all of PRO — see PRO modules"),
+                                              callback_data=f"tierv_pro_{g}_{lang}")])
+        pay = (tr(lang, f"💎 Pagar ULTRA PRO · {price} ⭐ Stars", f"💎 Pay ULTRA PRO · {price} ⭐ Stars")
                if required == "ultra_pro" else
-               InlineKeyboardButton(text=tr(lang, "⭐ Activar PRO", "⭐ Get PRO"), callback_data=f"pay_pro_{g}_{lang}"))
-        return text, InlineKeyboardMarkup(inline_keyboard=[
-            [pay],
-            [InlineKeyboardButton(text=tr(lang, "💎 Comparar licencias", "💎 Compare licenses"), callback_data=f"menu_plans_{lang}")],
-            _v23_back(g, lang),
-        ])
-    if required == "pro":
-        text = tr(lang, "⭐ <b>Módulos PRO</b> · desbloqueados\n\nElige qué configurar:",
-                  "⭐ <b>PRO modules</b> · unlocked\n\nChoose what to configure:") + PERIMETER_SIGNATURE
-        rows = [
-            [InlineKeyboardButton(text=tr(lang, "🤖 Avisos del bot", "🤖 Bot notices"), callback_data=f"bnt_m_{g}_{lang}"),
-             InlineKeyboardButton(text=tr(lang, "🕗 Horario del VC", "🕗 VC schedule"), callback_data=f"vcw_m_{g}_{lang}")],
-            [InlineKeyboardButton(text=tr(lang, "💰 Enlaces de donación", "💰 Donation links"), callback_data=f"donl_m_{g}_{lang}")],
-            [InlineKeyboardButton(text="🎟️ " + tr(lang, "Auditoría MicVIP", "MicVIP Audit"), callback_data=f"mvaudit_{g}_all_1_{lang}"),
-             InlineKeyboardButton(text="🔗 " + tr(lang, "Cuotas de enlaces", "Link quotas"), callback_data=f"alq_m_{g}_{lang}")],
-            [InlineKeyboardButton(text="⚖️ " + tr(lang, "Apelaciones de baneo", "Ban appeals"), callback_data=f"apl_m_{g}_all_{lang}")],
-            _v23_back(g, lang),
-        ]
+               tr(lang, f"⭐ Pagar PRO · {price} ⭐ Stars", f"⭐ Pay PRO · {price} ⭐ Stars"))
+        rows.append([InlineKeyboardButton(text=pay, callback_data=f"inv_{'ultra' if required == 'ultra_pro' else 'pro'}_{g}_{lang}")])   # factura Stars directa
+        rows.append([InlineKeyboardButton(text=INFOBOT_TEXTS[lng]["plans_btn"], callback_data=f"menu_plans_i_{lang}")])
+        rows.append(_tier_back_row(g, "free", lang))
+        return text, InlineKeyboardMarkup(inline_keyboard=rows), card
+    names = " · ".join(html.escape(_tool_label(k, lang)) for k in TIER_TOOL_KEYS[required])
+    text = (UNLOCKED_INTRO[required][lng] + "\n\n" + names
+            + tr(lang, "\n\n🔙 Las herramientas FREE siguen en el panel del grupo.",
+                 "\n\n🔙 FREE tools remain in the group panel.") + PERIMETER_SIGNATURE)
+    rows = _tool_buttons(g, required, lang)
+    if required == "ultra_pro":
+        rows.append([InlineKeyboardButton(text=tr(lang, "⭐ Herramientas PRO incluidas", "⭐ Included PRO tools"),
+                                          callback_data=f"tierv_pro_{g}_{lang}")])
     else:
-        t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
-        text = tr(lang, "💎 <b>Módulos ULTRA PRO</b> · desbloqueados\n\nElige qué configurar:",
-                  "💎 <b>ULTRA PRO modules</b> · unlocked\n\nChoose what to configure:") + PERIMETER_SIGNATURE
-        rows = [
-            [InlineKeyboardButton(text=t["btn_clone"], callback_data=f"gset_clone_{g}_{lang}")],
-            [InlineKeyboardButton(text=tr(lang, "🚫 Doble Lista Negra", "🚫 Double Blacklist"), callback_data=f"dbl_m_{g}_{lang}"),
-             InlineKeyboardButton(text="👑 " + tr(lang, "Roles VIP", "VIP Roles"), callback_data=f"vipr_m_{g}_{lang}")],
-            [InlineKeyboardButton(text=t["btn_ultra_tools"], callback_data=f"menu_ultra_{g}_{lang}")],
-            _v23_back(g, lang),
-        ]
-    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+        rows.append([InlineKeyboardButton(text=tr(lang, "💎 Ver ULTRA PRO", "💎 See ULTRA PRO"), callback_data=f"tierv_ultra_{g}_{lang}")])
+    rows.append(_tier_back_row(g, "free", lang))
+    return text, InlineKeyboardMarkup(inline_keyboard=rows), card
 
 
 # ------------------------------------------------------------------ vistas de los paneles nuevos
 async def _svm_view(group_id: int, lang: str) -> tuple:
-    from database.database import get_native_service_rules
+    from database.database import NATIVE_SERVICE_KINDS, get_native_service_rules
     rules = await get_native_service_rules(group_id)
     lines = [tr(lang, "📨 <b>Mensajes de servicio de Telegram</b>", "📨 <b>Telegram service messages</b>"), "",
-             tr(lang, "Qué hacer con los avisos automáticos de Telegram. Pulsa un tipo para cambiar la acción y "
-                      "⏱ para el tiempo de borrado.",
-                "What to do with Telegram's automatic notices. Tap a type to change the action and ⏱ for the "
-                "deletion delay."), ""]
+             tr(lang, "Los avisos automáticos que Telegram publica en tu chat. Para cada tipo eliges:\n"
+                      "• <b>Mantener</b>: el aviso se queda.\n• <b>Borrar ya</b>: el bot lo borra al instante.\n"
+                      "• <b>Borrar a los…</b>: se queda unos segundos y luego se borra (⏱ cambia el tiempo).\n"
+                      "Pulsa un tipo para pasar a la siguiente opción. El bot necesita «Eliminar mensajes».",
+                "The automatic notices Telegram posts in your chat. For each type choose:\n"
+                "• <b>Keep</b>: the notice stays.\n• <b>Delete now</b>: the bot deletes it instantly.\n"
+                "• <b>Delete after…</b>: it stays a few seconds, then it's deleted (⏱ changes the time).\n"
+                "Tap a type to switch to the next option. The bot needs «Delete messages»."), ""]
     rows = []
-    for kind in ("join", "leave", "videochat", "pinned", "chat_info"):
+    for kind in NATIVE_SERVICE_KINDS:
+        if kind not in _V43_KIND_LABELS:
+            continue
         rule = rules.get(kind) or {"action": "keep", "delay": 30}
-        es, en = _V43_ACTION_LABELS[rule["action"]]
-        label = tr(lang, es, en).format(d=_fmt_secs(rule["delay"], lang))
+        es, en = _V43_ACTION_LABELS.get(rule.get("action"), _V43_ACTION_LABELS["keep"])
+        label = tr(lang, es, en).format(d=_fmt_secs(rule.get("delay", 30), lang))
         name = tr(lang, *_V43_KIND_LABELS[kind])
         lines.append(f"• {name}: <b>{label}</b>")
         row = [InlineKeyboardButton(text=f"{name} · {label}", callback_data=f"svm_a_{group_id}_{kind}_{lang}")]
-        if rule["action"] == "delay":
-            row.append(InlineKeyboardButton(text=f"⏱ {_fmt_secs(rule['delay'], lang)}",
+        if rule.get("action") == "delay":
+            row.append(InlineKeyboardButton(text=f"⏱ {_fmt_secs(rule.get('delay', 30), lang)}",
                                             callback_data=f"svm_d_{group_id}_{kind}_{lang}"))
         rows.append(row)
-    rows.append([InlineKeyboardButton(text=tr(lang, "🤖 Avisos del bot (warn / mute / ban)", "🤖 Bot notices (warn / mute / ban)"),
+    lines += ["", tr(lang, "🎙️ Los avisos que publica el <b>Centinela</b> en el videochat se editan en 💎 → ⚙️ "
+                           "Configuración del Centinela.",
+                     "🎙️ Notices the <b>Sentinel</b> posts about the voice chat are edited in 💎 → ⚙️ Sentinel Settings.")]
+    rows.append([InlineKeyboardButton(text=tr(lang, "🤖 Avisos del bot (warn / mute / kick / ban / aviso)",
+                                              "🤖 Bot notices (warn / mute / kick / ban / notice)"),
                                       callback_data=f"bnt_m_{group_id}_{lang}")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "📘 Guía", "📘 Guide"), callback_data=f"gd_svm_{group_id}_{lang}")])
     rows.append(_v23_back(group_id, lang))
     return "\n".join(lines) + PERIMETER_SIGNATURE, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _bnt_view(group_id: int, user_id: int, lang: str) -> tuple:
-    from database.database import get_bot_notice_rules
+    from database.database import BOT_NOTICE_KINDS, get_bot_notice_rules
     rules = await get_bot_notice_rules(group_id)
     paid = await feature_unlocked(group_id, user_id, "bot_notice_custom")
     lines = [tr(lang, "🤖 <b>Avisos del bot</b>", "🤖 <b>Bot notices</b>"), "",
-             tr(lang, "Cuánto tiempo quedan en el chat los avisos de advertencia y sanción. «Por defecto» usa el TTL "
-                      "de 🌐 Idioma y TTL; «Fijo» no se borra nunca.",
-                "How long warning and sanction notices stay in the chat. «Default» uses the TTL from 🌐 Language & "
-                "TTL; «Pinned» never deletes."), ""]
+             tr(lang, "Los mensajes que publica el bot al advertir, silenciar, expulsar, banear o avisar.\n"
+                      "• ⏱ <b>Duración</b> (todos los rangos): «Por defecto» usa el TTL de 🌐 Idioma y TTL; «Fijo» "
+                      "no se borra nunca.\n• ✍️ <b>Texto y multimedia</b> (PRO): envía texto, o una foto / vídeo / GIF "
+                      "con pie de foto.\n• 🔘 <b>Botón</b> (PRO): un enlace bajo el aviso, p. ej. tus normas.",
+                "The messages the bot posts when it warns, mutes, kicks, bans or gives a notice.\n"
+                "• ⏱ <b>Duration</b> (every rank): «Default» uses the TTL from 🌐 Language & TTL; «Pinned» never "
+                "deletes.\n• ✍️ <b>Text and media</b> (PRO): send text, or a photo / video / GIF with a caption.\n"
+                "• 🔘 <b>Button</b> (PRO): a link under the notice, e.g. your rules."), ""]
     rows = []
-    for kind in ("warn", "mute", "kick", "ban"):
+    for kind in BOT_NOTICE_KINDS:
+        if kind not in _V43_NOTICE_LABELS:
+            continue
         item = (rules.get("notices") or {}).get(kind) or {}
         ttl = item.get("ttl")
         ttl_label = (tr(lang, "Por defecto", "Default") if ttl is None
                      else tr(lang, "Fijo", "Pinned") if ttl == 0 else _fmt_secs(ttl, lang))
-        custom = " ✍️" if item.get("text") else ""
+        extras = ("✍️" if item.get("text") else "") + ("🖼️" if item.get("media_id") else "") + ("🔘" if item.get("button_url") else "")
         name = tr(lang, *_V43_NOTICE_LABELS[kind])
-        lines.append(f"• {name}: <b>{ttl_label}</b>{custom}")
-        row = [InlineKeyboardButton(text=f"{name} · ⏱ {ttl_label}", callback_data=f"bnt_t_{group_id}_{kind}_{lang}")]
-        row.append(InlineKeyboardButton(text="✍️" if paid else "✍️🔒", callback_data=f"bnx_e_{group_id}_{kind}_{lang}"))
-        rows.append(row)
+        lines.append(f"• {name}: <b>{ttl_label}</b> {extras}".rstrip())
+        lock = "" if paid else "🔒"
+        rows.append([
+            InlineKeyboardButton(text=f"{name} · ⏱ {ttl_label}", callback_data=f"bnt_t_{group_id}_{kind}_{lang}"),
+            InlineKeyboardButton(text="✍️" + lock, callback_data=f"bnx_e_{group_id}_{kind}_{lang}"),
+            InlineKeyboardButton(text="🔘" + lock, callback_data=f"bnx_b_{group_id}_{kind}_{lang}"),
+        ])
     appeal = bool(rules.get("appeal_button"))
-    lines += ["", tr(lang, f"⚖️ Botón «Apelar» en baneos automáticos: <b>{'Sí' if appeal else 'No'}</b>",
-                     f"⚖️ «Appeal» button on automatic bans: <b>{'On' if appeal else 'Off'}</b>")]
+    lines += ["", tr(lang, f"⚖️ Botón «Apelar» en baneos automáticos: <b>{'Sí' if appeal else 'No'}</b> — el miembro "
+                           "baneado por un filtro paga en Stars y vuelve (configura precio y plazos en ⭐ → ⚖️ Apelaciones).",
+                     f"⚖️ «Appeal» button on automatic bans: <b>{'On' if appeal else 'Off'}</b> — a member banned by a "
+                     "filter pays in Stars to return (set price and windows in ⭐ → ⚖️ Ban appeals).")]
     if not paid:
-        lines.append(tr(lang, "🔒 Texto propio y botón de apelación: <b>PRO ⭐</b>", "🔒 Custom text and appeal button: <b>PRO ⭐</b>"))
+        lines.append(tr(lang, f"🔒 Texto, multimedia, botón y apelación: <b>PRO ⭐ ({PRICE_PRO_STARS} Stars)</b>",
+                        f"🔒 Text, media, button and appeal: <b>PRO ⭐ ({PRICE_PRO_STARS} Stars)</b>"))
     rows.append([InlineKeyboardButton(text=("⚖️ " + tr(lang, "Apelar", "Appeal") + (": ON" if appeal else ": OFF")) + ("" if paid else " 🔒"),
                                       callback_data=f"bnx_a_{group_id}_x_{lang}")])
     rows.append([InlineKeyboardButton(text=tr(lang, "📨 Mensajes de Telegram", "📨 Telegram messages"),
-                                      callback_data=f"svm_m_{group_id}_{lang}")])
+                                      callback_data=f"svm_m_{group_id}_{lang}"),
+                 InlineKeyboardButton(text=tr(lang, "📘 Guía", "📘 Guide"), callback_data=f"gd_bnt_{group_id}_{lang}")])
     rows.append(_v23_back(group_id, lang))
     return "\n".join(lines) + PERIMETER_SIGNATURE, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -11225,9 +11742,28 @@ async def _vcw_view(group_id: int, lang: str, origin: str = "p") -> tuple:
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+_DBL_ACTION_LABELS = {"ban": ("⛔ Banear", "⛔ Ban"), "kick": ("👢 Expulsar", "👢 Kick"), "mute": ("🔇 Silenciar", "🔇 Mute"),
+                      "warn": ("⚠️ Advertir", "⚠️ Warn"), "advise": ("📢 Solo aviso", "📢 Notice only")}
+_DBL_DURATIONS = (0, 60, 1440, 10080, 43200)   # minutos · 0 = permanente
+
+
+def _dbl_duration_label(minutes: int, lang: str) -> str:
+    m = int(minutes or 0)
+    if m <= 0:
+        return tr(lang, "permanente", "permanent")
+    if m % 1440 == 0:
+        return tr(lang, f"{m // 1440} día(s)", f"{m // 1440} day(s)")
+    if m % 60 == 0:
+        return f"{m // 60} h"
+    return f"{m} min"
+
+
 async def _dbl_view(group_id: int, lang: str) -> tuple:
-    from database.database import GROUP_BLACKLIST_MAX_PER_LIST, get_group_blacklists
+    from database.database import (GROUP_BLACKLIST_MAX_PER_LIST, GROUP_ALLOWLIST_MAX, get_group_allowlist,
+                                   get_group_blacklist_config, get_group_blacklists)
     lists = await get_group_blacklists(group_id)
+    cfg = await get_group_blacklist_config(group_id)
+    allow = await get_group_allowlist(group_id)
 
     def preview(terms: list) -> str:
         if not terms:
@@ -11235,22 +11771,58 @@ async def _dbl_view(group_id: int, lang: str) -> tuple:
         shown = ", ".join(f"<code>{html.escape(x)}</code>" for x in terms[:15])
         return shown + (f" … (+{len(terms) - 15})" if len(terms) > 15 else "")
 
+    def rule_line(kind: str) -> str:
+        rule = (cfg.get("lists") or {}).get(kind) or {}
+        action = rule.get("action", "ban" if kind == "ban" else "warn")
+        parts = [tr(lang, *_DBL_ACTION_LABELS.get(action, _DBL_ACTION_LABELS["warn"]))]
+        if action in ("ban", "mute"):
+            parts.append(_dbl_duration_label(rule.get("duration", 0), lang))
+        parts.append(tr(lang, "borra el mensaje", "deletes the message") if rule.get("delete", True)
+                     else tr(lang, "no borra el mensaje", "keeps the message"))
+        return "   ↳ " + " · ".join(parts)
+
+    on = bool(cfg.get("enabled", True))
     text = "\n".join([
         tr(lang, "🚫 <b>Doble Lista Negra</b> 💎", "🚫 <b>Double Blacklist</b> 💎"), "",
-        tr(lang, "Términos propios de esta comunidad (no distingue mayúsculas; palabra completa).",
-           "Terms of your own for this community (case-insensitive; whole words)."), "",
-        tr(lang, f"⛔ <b>Lista de baneo</b> ({len(lists['ban'])}/{GROUP_BLACKLIST_MAX_PER_LIST}) — expulsa en el acto:",
-           f"⛔ <b>Ban list</b> ({len(lists['ban'])}/{GROUP_BLACKLIST_MAX_PER_LIST}) — bans on sight:"),
-        preview(lists["ban"]), "",
-        tr(lang, f"⚠️ <b>Lista de advertencia</b> ({len(lists['warn'])}/{GROUP_BLACKLIST_MAX_PER_LIST}) — borra y advierte:",
-           f"⚠️ <b>Warn list</b> ({len(lists['warn'])}/{GROUP_BLACKLIST_MAX_PER_LIST}) — deletes and warns:"),
-        preview(lists["warn"]),
+        tr(lang, f"Estado: <b>{'🟢 activa' if on else '🔴 apagada'}</b>. Términos propios de esta comunidad (no distingue "
+                 "mayúsculas; palabra completa). La lista blanca gana siempre, también frente a la lista global.",
+           f"Status: <b>{'🟢 on' if on else '🔴 off'}</b>. Terms of your own for this community (case-insensitive; whole "
+           "words). The allowlist always wins, also against the global list."), "",
+        tr(lang, f"⛔ <b>Lista de baneo</b> ({len(lists['ban'])}/{GROUP_BLACKLIST_MAX_PER_LIST}):",
+           f"⛔ <b>Ban list</b> ({len(lists['ban'])}/{GROUP_BLACKLIST_MAX_PER_LIST}):"),
+        preview(lists["ban"]), rule_line("ban"), "",
+        tr(lang, f"⚠️ <b>Lista de advertencia</b> ({len(lists['warn'])}/{GROUP_BLACKLIST_MAX_PER_LIST}):",
+           f"⚠️ <b>Warn list</b> ({len(lists['warn'])}/{GROUP_BLACKLIST_MAX_PER_LIST}):"),
+        preview(lists["warn"]), rule_line("warn"), "",
+        tr(lang, f"✅ <b>Lista blanca</b> ({len(allow)}/{GROUP_ALLOWLIST_MAX}):", f"✅ <b>Allowlist</b> ({len(allow)}/{GROUP_ALLOWLIST_MAX}):"),
+        preview(allow), "",
+        tr(lang, "Pulsa la acción, la duración o 🗑 para cambiarlas. Desde el grupo: <code>/blacklist palabra</code> "
+                 "(va a la lista de advertencia).",
+           "Tap the action, the duration or 🗑 to change them. From the group: <code>/blacklist word</code> "
+           "(goes to the warn list)."),
     ]) + PERIMETER_SIGNATURE
-    rows = [
-        [InlineKeyboardButton(text=tr(lang, "➕ Lista de baneo", "➕ Ban list"), callback_data=f"dbl_b_{group_id}_{lang}"),
-         InlineKeyboardButton(text=tr(lang, "➕ Lista de advertencia", "➕ Warn list"), callback_data=f"dbl_w_{group_id}_{lang}")],
-        [InlineKeyboardButton(text=tr(lang, "➖ Quitar términos", "➖ Remove terms"), callback_data=f"dbl_r_{group_id}_{lang}")],
-        _v43_back_row(group_id, lang, "ultra"),
+    g = group_id
+    rows = [[InlineKeyboardButton(text=("🟢 " if on else "🔴 ") + tr(lang, "Listas negras activas", "Blacklists on"),
+                                  callback_data=f"dbl_e_{g}_{lang}")]]
+    for kind, icon in (("ban", "⛔"), ("warn", "⚠️")):
+        rule = (cfg.get("lists") or {}).get(kind) or {}
+        action = rule.get("action", "ban" if kind == "ban" else "warn")
+        k = kind[0]
+        row = [InlineKeyboardButton(text=f"{icon} " + tr(lang, *_DBL_ACTION_LABELS.get(action, _DBL_ACTION_LABELS["warn"])),
+                                    callback_data=f"dbl_a{k}_{g}_{lang}")]
+        if action in ("ban", "mute"):
+            row.append(InlineKeyboardButton(text="⏳ " + _dbl_duration_label(rule.get("duration", 0), lang),
+                                            callback_data=f"dbl_d{k}_{g}_{lang}"))
+        row.append(InlineKeyboardButton(text=("🗑 ✅" if rule.get("delete", True) else "🗑 ❌"), callback_data=f"dbl_x{k}_{g}_{lang}"))
+        rows.append(row)
+    rows += [
+        [InlineKeyboardButton(text=tr(lang, "➕ Lista de baneo", "➕ Ban list"), callback_data=f"dbl_b_{g}_{lang}"),
+         InlineKeyboardButton(text=tr(lang, "➕ Lista de advertencia", "➕ Warn list"), callback_data=f"dbl_w_{g}_{lang}")],
+        [InlineKeyboardButton(text=tr(lang, "➖ Quitar términos", "➖ Remove terms"), callback_data=f"dbl_r_{g}_{lang}")],
+        [InlineKeyboardButton(text=tr(lang, "✅ ➕ Lista blanca", "✅ ➕ Allowlist"), callback_data=f"dbl_pa_{g}_{lang}"),
+         InlineKeyboardButton(text=tr(lang, "✅ ➖ Lista blanca", "✅ ➖ Allowlist"), callback_data=f"dbl_pr_{g}_{lang}")],
+        [InlineKeyboardButton(text=tr(lang, "📘 Guía", "📘 Guide"), callback_data=f"gd_dbl_{g}_{lang}")],
+        _v43_back_row(g, lang, "ultra"),
     ]
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -11307,8 +11879,8 @@ async def cb_v43_panels(callback: CallbackQuery, bot: Bot):
     changed: list = []
     try:
         if prefix == "tierv":
-            text, kb = await _tier_showcase_view(bot, group_id, uid, "ultra" if sub == "ultra" else "pro", lang)
-            await _safe_edit(callback, text, kb)
+            text, kb, card = await _tier_showcase_view(bot, group_id, uid, "ultra" if sub == "ultra" else "pro", lang)
+            await _v44_show(callback, bot, text, kb, lang, card_key=card)
             await callback.answer()
             return
 
@@ -11345,16 +11917,35 @@ async def cb_v43_panels(callback: CallbackQuery, bot: Bot):
                 await update_bot_notice_rules(group_id, {"appeal_button": not rules.get("appeal_button")}, actor_id=uid)
                 changed.append("svcmsg_notices")
                 text, kb = await _bnt_view(group_id, uid, lang)
+            elif sub == "b" and len(data) > 4 and data[3] in _V43_NOTICE_LABELS:
+                kind = data[3]
+                V43_INPUT_STATES[(bot.id, uid)] = {"kind": f"noticebtn_{kind}", "group_id": group_id, "lang": lang,
+                                                   "ts": time.time()}
+                msg = await callback.message.answer(
+                    tr(lang,
+                       f"🔘 Botón del aviso «{tr(lang, *_V43_NOTICE_LABELS[kind])}». Envíalo así:\n"
+                       "<code>Texto del botón | https://enlace</code>\nEjemplo: <code>📜 Normas | https://t.me/tucanal/5</code>\n"
+                       "Envía <code>-</code> para quitar el botón. (El botón ⚖️ Apelar se añade aparte.)",
+                       f"🔘 Button for the «{tr(lang, *_V43_NOTICE_LABELS[kind])}» notice. Send it like this:\n"
+                       "<code>Button text | https://link</code>\nExample: <code>📜 Rules | https://t.me/yourchannel/5</code>\n"
+                       "Send <code>-</code> to remove the button. (The ⚖️ Appeal button is added separately.)")
+                    + PERIMETER_SIGNATURE,
+                    reply_markup=_cancel_kb(t, f"bnt_m_{group_id}_{lang}"), parse_mode="HTML")
+                fire_and_forget_auto_delete([msg], delay=180)
+                await callback.answer()
+                return
             elif sub == "e" and len(data) > 4 and data[3] in _V43_NOTICE_LABELS:
                 kind = data[3]
                 V43_INPUT_STATES[(bot.id, uid)] = {"kind": f"notice_{kind}", "group_id": group_id, "lang": lang,
                                                    "ts": time.time()}
                 msg = await callback.message.answer(
                     tr(lang,
-                       f"✍️ Envía el texto del aviso «{tr(lang, *_V43_NOTICE_LABELS[kind])}» (HTML de Telegram). "
-                       "Variables: {mention} {strikes} {limit} {reason} {action}. Envía <code>-</code> para volver al texto oficial.",
-                       f"✍️ Send the text for the «{tr(lang, *_V43_NOTICE_LABELS[kind])}» notice (Telegram HTML). "
-                       "Variables: {mention} {strikes} {limit} {reason} {action}. Send <code>-</code> to restore the official text.")
+                       f"✍️ Envía el texto del aviso «{tr(lang, *_V43_NOTICE_LABELS[kind])}» (HTML de Telegram), o una "
+                       "foto / vídeo / GIF con el texto como pie. Variables: {mention} {strikes} {limit} {reason} {action}. "
+                       "Envía <code>-</code> para volver al texto oficial y quitar la multimedia.",
+                       f"✍️ Send the text for the «{tr(lang, *_V43_NOTICE_LABELS[kind])}» notice (Telegram HTML), or a "
+                       "photo / video / GIF with the text as caption. Variables: {mention} {strikes} {limit} {reason} {action}. "
+                       "Send <code>-</code> to restore the official text and remove the media.")
                     + PERIMETER_SIGNATURE,
                     reply_markup=_cancel_kb(t, f"bnt_m_{group_id}_{lang}"), parse_mode="HTML")
                 fire_and_forget_auto_delete([msg], delay=180)
@@ -11393,8 +11984,25 @@ async def cb_v43_panels(callback: CallbackQuery, bot: Bot):
                 return
             if not await enforce_feature_tier(callback, bot, group_id, "double_blacklist", lang):
                 return
-            if sub in ("b", "w", "r"):
-                kind = {"b": "bl_ban", "w": "bl_warn", "r": "bl_remove"}[sub]
+            if sub in ("e", "ab", "aw", "db", "dw", "xb", "xw"):
+                from database.database import get_group_blacklist_config, update_group_blacklist_config
+                cfg = await get_group_blacklist_config(group_id)
+                if sub == "e":
+                    patch = {"enabled": not cfg.get("enabled", True)}
+                else:
+                    lst = "ban" if sub[1] == "b" else "warn"
+                    rule = (cfg.get("lists") or {}).get(lst) or {}
+                    if sub[0] == "a":
+                        patch = {"lists": {lst: {"action": _v43_next(tuple(_DBL_ACTION_LABELS), rule.get("action"))}}}
+                    elif sub[0] == "d":
+                        patch = {"lists": {lst: {"duration": _v43_next(_DBL_DURATIONS, int(rule.get("duration", 0) or 0))}}}
+                    else:
+                        patch = {"lists": {lst: {"delete": not rule.get("delete", True)}}}
+                await update_group_blacklist_config(group_id, patch, actor_id=uid)
+                changed.append("blk_config")
+                text, kb = await _dbl_view(group_id, lang)
+            elif sub in ("b", "w", "r", "pa", "pr"):
+                kind = {"b": "bl_ban", "w": "bl_warn", "r": "bl_remove", "pa": "al_add", "pr": "al_remove"}[sub]
                 V43_INPUT_STATES[(bot.id, uid)] = {"kind": kind, "group_id": group_id, "lang": lang, "ts": time.time()}
                 prompt = {
                     "bl_ban": ("⛔ Envía los términos para la <b>lista de baneo</b>, separados por comas o en líneas.",
@@ -11403,13 +12011,20 @@ async def cb_v43_panels(callback: CallbackQuery, bot: Bot):
                                 "⚠️ Send the terms for the <b>warn list</b>, separated by commas or on separate lines."),
                     "bl_remove": ("➖ Envía los términos que quieres quitar (de cualquiera de las dos listas).",
                                   "➖ Send the terms you want to remove (from either list)."),
+                    "al_add": ("✅ Envía los términos permitidos (nunca cuentan como prohibidos, ni en la lista global), "
+                               "separados por comas o en líneas.",
+                               "✅ Send the allowed terms (never counted as forbidden, not even in the global list), "
+                               "separated by commas or on separate lines."),
+                    "al_remove": ("✅➖ Envía los términos que quieres quitar de la lista blanca.",
+                                  "✅➖ Send the terms you want to remove from the allowlist."),
                 }[kind]
                 msg = await callback.message.answer(tr(lang, *prompt) + PERIMETER_SIGNATURE,
                                                     reply_markup=_cancel_kb(t, f"dbl_m_{group_id}_{lang}"), parse_mode="HTML")
                 fire_and_forget_auto_delete([msg], delay=180)
                 await callback.answer()
                 return
-            text, kb = await _dbl_view(group_id, lang)
+            else:
+                text, kb = await _dbl_view(group_id, lang)
 
         elif prefix == "donl":
             if not await is_authorized_operator(bot, uid, group_id, None):
@@ -11450,27 +12065,47 @@ async def cb_v43_panels(callback: CallbackQuery, bot: Bot):
     if changed:
         _v43_invalidate(group_id)
         emit_settings_updated_bg(group_id, "bot_console", changed)
-    await _safe_edit(callback, text, kb)
+    await _v44_show(callback, bot, text, kb, lang)
     await callback.answer("✅" if changed else None)
 
 
 async def _handle_v43_input(message: Message, bot: Bot, state: dict, text_input: str) -> None:
     """Respuestas conversacionales de los paneles nuevos (doble lista negra, enlaces de donación, texto de avisos)."""
-    from database.database import (BunkerValidationError, add_group_blacklist_terms, get_donation_links,
-                                   remove_group_blacklist_terms, set_donation_links, update_bot_notice_rules)
+    from database.database import (BunkerValidationError, add_group_allowlist_terms, add_group_blacklist_terms,
+                                   get_donation_links, remove_group_allowlist_terms, remove_group_blacklist_terms,
+                                   set_donation_links, update_bot_notice_rules)
+    if str(state.get("kind", "")).startswith("pd_"):
+        # 💎 v44 · Donaciones a la plataforma (Arquitecto): no pertenecen a ninguna comunidad
+        await _handle_platform_donation_input(message, bot, state, text_input)
+        return
     group_id, lang, kind = int(state["group_id"]), state.get("lang", "en"), state.get("kind", "")
     uid = message.from_user.id
     t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
-    feature = ("double_blacklist" if kind.startswith("bl_") else "donation_links" if kind == "don_link"
+    feature = ("double_blacklist" if kind.startswith(("bl_", "al_")) else "donation_links" if kind == "don_link"
                else "bot_notice_custom")
     if not await enforce_feature_tier_msg(message, group_id, feature, lang):
         return
+    has_media = bool(message.photo or message.video or message.animation)
+    if kind.startswith("notice_") and has_media:
+        text_input = (message.caption or "").strip() or "·"
     if not text_input:
         await message.answer(tr(lang, "⚠️ Envía un texto.", "⚠️ Send a text message.") + PERIMETER_SIGNATURE, parse_mode="HTML")
         return
     changed: list = []
     try:
-        if kind in ("bl_ban", "bl_warn", "bl_remove"):
+        if kind in ("al_add", "al_remove"):
+            terms = [x for x in re.split(r"[\n,]+", text_input) if x.strip()]
+            if kind == "al_add":
+                result = await add_group_allowlist_terms(group_id, terms, actor_id=uid)
+                summary = tr(lang, f"✅ {result['added']} término(s) añadidos a la lista blanca.",
+                             f"✅ {result['added']} term(s) added to the allowlist.")
+            else:
+                result = await remove_group_allowlist_terms(group_id, terms)
+                summary = tr(lang, f"➖ {result['removed']} término(s) retirados de la lista blanca.",
+                             f"➖ {result['removed']} term(s) removed from the allowlist.")
+            changed.append("blk_allowlist")
+            view = await _dbl_view(group_id, lang)
+        elif kind in ("bl_ban", "bl_warn", "bl_remove"):
             terms = [x for x in re.split(r"[\n,]+", text_input) if x.strip()]
             if kind == "bl_remove":
                 result = await remove_group_blacklist_terms(group_id, terms)
@@ -11491,10 +12126,33 @@ async def _handle_v43_input(message: Message, bot: Bot, state: dict, text_input:
             changed.append("don_links")
             summary = tr(lang, "✅ Enlace añadido.", "✅ Link added.")
             view = await _donl_view(group_id, lang)
+        elif kind.startswith("noticebtn_"):
+            notice = kind.split("_", 1)[1]
+            if text_input.strip() == "-":
+                entry = {"button_text": None, "button_url": None}
+            else:
+                label, sep, url = text_input.partition("|")
+                entry = {"button_text": label.strip(), "button_url": url.strip() if sep else ""}
+            await update_bot_notice_rules(group_id, {"notices": {notice: entry}}, actor_id=uid)
+            changed.append("svcmsg_notices")
+            summary = tr(lang, "✅ Botón del aviso actualizado.", "✅ Notice button updated.")
+            view = await _bnt_view(group_id, uid, lang)
         elif kind.startswith("notice_"):
             notice = kind.split("_", 1)[1]
-            new_text = None if text_input.strip() == "-" else message.html_text or text_input
-            await update_bot_notice_rules(group_id, {"notices": {notice: {"text": new_text}}}, actor_id=uid)
+            entry: dict = {}
+            if has_media:
+                if message.photo:
+                    entry["media_id"], entry["media_type"] = message.photo[-1].file_id, "photo"
+                elif message.video:
+                    entry["media_id"], entry["media_type"] = message.video.file_id, "video"
+                else:
+                    entry["media_id"], entry["media_type"] = message.animation.file_id, "animation"
+                entry["text"] = (message.html_text or None) if (message.caption or "").strip() else None
+            elif text_input.strip() == "-":
+                entry = {"text": None, "media_id": None, "media_type": None}
+            else:
+                entry["text"] = message.html_text or text_input
+            await update_bot_notice_rules(group_id, {"notices": {notice: entry}}, actor_id=uid)
             changed.append("svcmsg_notices")
             summary = tr(lang, "✅ Aviso actualizado.", "✅ Notice updated.")
             view = await _bnt_view(group_id, uid, lang)
@@ -11502,13 +12160,546 @@ async def _handle_v43_input(message: Message, bot: Bot, state: dict, text_input:
             return
     except BunkerValidationError as err:
         V43_INPUT_STATES[(bot.id, uid)] = state   # se reabre el editor para corregir
+        back = (f"dbl_m_{group_id}_{lang}" if kind.startswith(("bl_", "al_")) else f"donl_m_{group_id}_{lang}"
+                if kind == "don_link" else f"bnt_m_{group_id}_{lang}")
         await message.answer("⚠️ " + html.escape(str(err)) + PERIMETER_SIGNATURE,
-                             reply_markup=_cancel_kb(t, f"gpanel_{group_id}_{lang}"), parse_mode="HTML")
+                             reply_markup=_cancel_kb(t, back), parse_mode="HTML")
         return
     _v43_invalidate(group_id)
     emit_settings_updated_bg(group_id, "bot_console", changed)
     text, kb = view
     await message.answer(f"{summary}\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+
+
+# ------------------------------------------------------------------------------------------
+# 🧰 v44 · GUÍAS POR HERRAMIENTA (gd_{clave}_{grupo}_{lang})
+# ------------------------------------------------------------------------------------------
+# Cada herramienta del panel abre primero su guía: qué hace, cómo se instala / configura y un botón «⚙️ Abrir ajustes»
+# que lleva al panel real. El «🔙 Volver» regresa a la lista de herramientas de su rango (panel FREE, ⭐ PRO o 💎 ULTRA).
+# Claves sin guion bajo (el callback se divide por «_»). cfg = plantilla del callback del panel de ajustes.
+TOOL_GUIDES: dict[str, dict] = {
+    # ---------------------------------------------------------------- FREE
+    "cap": {"tier": "free", "icon": "🤖", "name": ("Captcha", "Captcha"), "cfg": "gset_captcha_{g}_{lang}",
+            "en": ("Stops bots and raids at the door. When someone joins, they can't write until they press the "
+                   "button or solve the code the bot sends them.\n\n<b>How to set it up</b>\n1. ⚙️ Open settings → turn "
+                   "it 🟢 on.\n2. Choose the mode (button or code) and the time limit.\n3. Choose the punishment if they "
+                   "don't pass: kick or mute.\n4. (PRO) Write your own welcome text.\n\nTip: combine it with 🚨 Anti-Raid "
+                   "for mass joins."),
+            "es": ("Detiene bots y raids en la puerta. Quien entra no puede escribir hasta pulsar el botón o resolver el "
+                   "código que le envía el bot.\n\n<b>Cómo configurarlo</b>\n1. ⚙️ Abrir ajustes → actívalo 🟢.\n2. Elige el "
+                   "modo (botón o código) y el tiempo límite.\n3. Elige el castigo si no lo supera: expulsar o silenciar.\n"
+                   "4. (PRO) Escribe tu propio texto de bienvenida.\n\nConsejo: combínalo con 🚨 Anti-Raid para las "
+                   "entradas masivas.")},
+    "as": {"tier": "free", "icon": "🛡️", "name": ("Anti-Spam", "Anti-Spam"), "cfg": "gset_antispam_{g}_{lang}",
+           "en": ("Removes the most common spam before anyone reads it.\n\n<b>What you can block</b>\n• 📘 Telegram links "
+                  "(t.me/…)\n• 🔗 Internet links\n• 📥 Forwards (from channels, users, groups or bots, separately)\n• 💭 "
+                  "Quotes that contain links\n\n<b>How to set it up</b>: ⚙️ Open settings → turn on each filter 🟢 and "
+                  "choose whether the message is deleted. Every hit adds a warning (⚠️ Warnings decides the sanction). "
+                  "Admins and whitelisted members are never affected."),
+           "es": ("Retira el spam más común antes de que nadie lo lea.\n\n<b>Qué puedes bloquear</b>\n• 📘 Enlaces de "
+                  "Telegram (t.me/…)\n• 🔗 Enlaces de internet\n• 📥 Reenvíos (de canales, usuarios, grupos o bots, por "
+                  "separado)\n• 💭 Citas que contienen enlaces\n\n<b>Cómo configurarlo</b>: ⚙️ Abrir ajustes → activa cada "
+                  "filtro 🟢 y elige si se borra el mensaje. Cada detección suma una advertencia (⚠️ Advertencias decide "
+                  "la sanción). Los administradores y la lista blanca nunca se ven afectados.")},
+    "af": {"tier": "free", "icon": "🌊", "name": ("Anti-Flood", "Anti-Flood"), "cfg": "gset_antiflood_{g}_{lang}",
+           "en": ("Stops anyone who sends too many messages too fast.\n\n<b>How to set it up</b>\n1. ⚙️ Open settings.\n2. "
+                  "Set the threshold: X messages in Y seconds.\n3. Choose the action: warn, mute, kick, ban or off.\n4. "
+                  "Choose whether the flood messages are deleted.\n\nVIP members get extra margin automatically."),
+           "es": ("Frena a quien envía demasiados mensajes demasiado rápido.\n\n<b>Cómo configurarlo</b>\n1. ⚙️ Abrir "
+                  "ajustes.\n2. Fija el umbral: X mensajes en Y segundos.\n3. Elige la acción: advertir, silenciar, "
+                  "expulsar, banear o desactivado.\n4. Elige si se borran los mensajes del flood.\n\nLos miembros VIP "
+                  "tienen margen extra automáticamente.")},
+    "lk": {"tier": "free", "icon": "🔒", "name": ("Bloqueos (30 vectores)", "Locks (30 vectors)"), "cfg": "gset_locks_{g}_{lang}",
+           "en": ("Decide which content is allowed: photos, videos, long videos, GIFs, stickers, voice notes, audio, "
+                  "files, polls, spoilers, inline buttons, hidden links, edited messages and more — 30 vectors.\n\n"
+                  "<b>How to set it up</b>: ⚙️ Open settings → each vector has its own action (allow, delete, delete + "
+                  "warn). The four quick switches (media, stickers, links, commands) change whole families at once.\n\n"
+                  "Edits are checked too: editing a message to add a forbidden link is caught."),
+           "es": ("Decide qué contenido se permite: fotos, vídeos, vídeos largos, GIF, stickers, notas de voz, audio, "
+                  "archivos, encuestas, spoilers, botones inline, enlaces ocultos, mensajes editados y más: 30 vectores.\n\n"
+                  "<b>Cómo configurarlo</b>: ⚙️ Abrir ajustes → cada vector tiene su acción (permitir, borrar, borrar + "
+                  "advertir). Los cuatro interruptores rápidos (multimedia, stickers, enlaces, comandos) cambian familias "
+                  "enteras de una vez.\n\nTambién se revisan las ediciones: editar un mensaje para añadir un enlace "
+                  "prohibido se detecta.")},
+    "wr": {"tier": "free", "icon": "⚠️", "name": ("Advertencias", "Warnings"), "cfg": "gset_warns_{g}_{lang}",
+           "en": ("Every filter (spam, flood, locks, blacklists) adds a warning instead of punishing at once.\n\n<b>How to "
+                  "set it up</b>: ⚙️ Open settings → choose the limit (e.g. 3) and the automatic sanction when it's "
+                  "reached: mute, kick or ban. Each warning lowers the member's microphone a little in voice chats.\n\n"
+                  "Admins can also warn by hand with <code>/warn</code> and clear with <code>/unwarn</code>. The text of "
+                  "these notices is edited in 📨 Service messages → 🤖 Bot notices."),
+           "es": ("Cada filtro (spam, flood, bloqueos, listas negras) suma una advertencia en lugar de castigar de golpe.\n\n"
+                  "<b>Cómo configurarlo</b>: ⚙️ Abrir ajustes → elige el límite (p. ej. 3) y la sanción automática al "
+                  "alcanzarlo: silenciar, expulsar o banear. Cada advertencia baja un poco el micrófono del miembro en "
+                  "los videochats.\n\nLos administradores también advierten a mano con <code>/warn</code> y limpian con "
+                  "<code>/unwarn</code>. El texto de estos avisos se edita en 📨 Mensajes de servicio → 🤖 Avisos del bot.")},
+    "dm": {"tier": "free", "icon": "🗑️", "name": ("Purga de mensajes", "Message purge"), "cfg": "gset_delmsgs_{g}_{lang}",
+           "en": ("Deletes messages in bulk from the chat (for example after a raid). FREE has a daily quota; PRO and "
+                  "ULTRA PRO have more. ⚙️ Open settings shows your quota and the purge options."),
+           "es": ("Borra mensajes en bloque del chat (por ejemplo tras un raid). FREE tiene una cuota diaria; PRO y ULTRA "
+                  "PRO tienen más. ⚙️ Abrir ajustes muestra tu cuota y las opciones de purga.")},
+    "svm": {"tier": "free", "icon": "📨", "name": ("Mensajes de servicio", "Service messages"), "cfg": "svm_m_{g}_{lang}",
+            "en": ("Two kinds of notices you control:\n\n<b>Telegram's notices</b> — «X joined», «X left», video chat "
+                   "started / ended, video chat invitations, boosts, pinned messages and title / photo changes. For each "
+                   "one choose: <b>Keep</b>, <b>Delete now</b> or <b>Delete after</b> 10 s … 1 h.\n\n<b>The bot's own "
+                   "notices</b> — warnings, mutes, kicks, bans and notices: choose how long they stay (<b>Default</b> = "
+                   "the TTL from 🌐 Language &amp; TTL, <b>Pinned</b> = never deleted). With PRO you also edit their text, "
+                   "media and button.\n\n⚙️ Open settings → tap a type to change its action; ⏱ changes the time."),
+            "es": ("Dos tipos de avisos que tú controlas:\n\n<b>Los avisos de Telegram</b> — «X se unió», «X salió», "
+                   "videochat iniciado / terminado, invitaciones al videochat, impulsos, mensajes fijados y cambios de "
+                   "título / foto. Para cada uno eliges: <b>Mantener</b>, <b>Borrar ya</b> o <b>Borrar a los</b> 10 s … 1 h.\n\n"
+                   "<b>Los avisos del propio bot</b> — advertencias, silencios, expulsiones, baneos y avisos: eliges "
+                   "cuánto duran (<b>Por defecto</b> = el TTL de 🌐 Idioma y TTL, <b>Fijo</b> = no se borran). Con PRO "
+                   "también editas su texto, multimedia y botón.\n\n⚙️ Abrir ajustes → pulsa un tipo para cambiar su "
+                   "acción; ⏱ cambia el tiempo.")},
+    "rd": {"tier": "free", "icon": "🚨", "name": ("Anti-Raid", "Anti-Raid"), "cfg": "raidcfg_m_{g}_{lang}",
+           "en": ("Detects mass joins (raids) and isolates the group automatically.\n\n<b>How to set it up</b>: ⚙️ Open "
+                  "settings → set how many joins in how many seconds trigger the shield, the penalty for raiders "
+                  "(strict captcha, mute, kick or ban) and how long the shield lasts. Raiders go to a raid blacklist "
+                  "where you can release them one by one. You can lift a false alarm with one tap."),
+           "es": ("Detecta entradas masivas (raids) y aísla el grupo automáticamente.\n\n<b>Cómo configurarlo</b>: ⚙️ Abrir "
+                  "ajustes → fija cuántas entradas en cuántos segundos activan el escudo, el castigo a los atacantes "
+                  "(captcha estricto, silenciar, expulsar o banear) y cuánto dura el escudo. Los atacantes van a una "
+                  "lista negra de raid donde puedes liberarlos uno a uno. Una falsa alarma se levanta con un toque.")},
+    "lt": {"tier": "free", "icon": "🌐", "name": ("Idioma y TTL", "Language & TTL"), "cfg": "svcset_m_{g}_{lang}",
+           "en": ("Language of every notice the bot posts in your group (English by default, or Spanish) and the "
+                  "default auto-delete time of those notices (10 s to 5 min). Each notice type can override it in 📨 "
+                  "Service messages."),
+           "es": ("Idioma de todos los avisos que el bot publica en tu grupo (inglés por defecto, o español) y el "
+                  "autoborrado por defecto de esos avisos (10 s a 5 min). Cada tipo de aviso puede cambiarlo en 📨 "
+                  "Mensajes de servicio.")},
+    "lg": {"tier": "free", "icon": "🧾", "name": ("Canal de registro", "Log channel"), "cfg": "logch_menu_{g}_{lang}",
+           "en": ("A private channel where the bot records every action in real time: bans, warnings, deleted spam, "
+                  "joins, payments, admin activity.\n\n<b>How to set it up</b>\n1. Create a private channel.\n2. Add the "
+                  "bot as administrator with «Post messages».\n3. ⚙️ Open settings → send the channel @username, its ID "
+                  "(-100…) or forward a message from it.\n4. Choose which event families are posted."),
+           "es": ("Un canal privado donde el bot registra cada acción en tiempo real: baneos, advertencias, spam borrado, "
+                  "entradas, pagos, actividad de los administradores.\n\n<b>Cómo configurarlo</b>\n1. Crea un canal "
+                  "privado.\n2. Añade el bot como administrador con «Publicar mensajes».\n3. ⚙️ Abrir ajustes → envía el "
+                  "@alias del canal, su ID (-100…) o reenvía un mensaje suyo.\n4. Elige qué familias de eventos se publican.")},
+    "pr": {"tier": "free", "icon": "🛰️", "name": ("Perímetro", "Perimeter"), "cfg": "perim_view_{g}_{lang}",
+           "en": ("A live checklist of your protection: which tools are on, which permissions the bot is missing and "
+                  "whether the Sentinel and the log channel work. Open it whenever something doesn't seem to work."),
+           "es": ("Una lista en vivo de tu protección: qué herramientas están activas, qué permisos le faltan al bot y si "
+                  "el Centinela y el canal de registro funcionan. Ábrelo cuando algo no parezca funcionar.")},
+    "mod": {"tier": "free", "icon": "🛡️", "name": ("Moderación", "Moderation"), "cfg": "menu_mod_{g}_{lang}",
+            "en": ("Moderate from this private chat without writing in the group: ban (with duration), kick, mute, "
+                   "unmute, whitelist and blacklist. Send the member's @username, ID or forward one of their messages."),
+            "es": ("Modera desde este chat privado sin escribir en el grupo: banear (con duración), expulsar, silenciar, "
+                   "quitar silencio, lista blanca y lista negra. Envía el @usuario, el ID o reenvía un mensaje suyo.")},
+    "eco": {"tier": "free", "icon": "📡", "name": ("Radar y ecosistema", "Radar & ecosystem"), "cfg": "menu_eco_{g}_{lang}",
+            "en": ("Live report of your community and its voice chat: Sentinel status, camera quality, AutoLower, "
+                   "scheduled calls and MicVIP. Some controls inside require PRO or ULTRA PRO; they are marked."),
+            "es": ("Informe en vivo de tu comunidad y su videochat: estado del Centinela, calidad de cámaras, AutoLower, "
+                   "llamadas programadas y MicVIP. Algunos controles requieren PRO o ULTRA PRO; están marcados.")},
+    # ---------------------------------------------------------------- PRO
+    "bnt": {"tier": "pro", "icon": "🤖", "name": ("Avisos del bot personalizados", "Custom bot notices"), "cfg": "bnt_m_{g}_{lang}",
+            "en": ("Make warnings, mutes, kicks, bans and notices speak with your community's voice.\n\n<b>How to set it "
+                   "up</b>: ⚙️ Open settings → for each notice:\n• ⏱ how long it stays (default, 10 s … 5 min, pinned)\n"
+                   "• ✍️ your text — Telegram HTML with {mention} {strikes} {limit} {reason} {action}; send <code>-</code> "
+                   "to restore the official text\n• 🔘 your own button (for example «📜 Rules | https://…»)\n• ⚖️ Appeal: "
+                   "adds a button to automatic bans so the member can pay in Stars to return (needs ⚖️ Ban appeals on)."),
+            "es": ("Haz que las advertencias, silencios, expulsiones, baneos y avisos hablen con la voz de tu comunidad.\n\n"
+                   "<b>Cómo configurarlo</b>: ⚙️ Abrir ajustes → en cada aviso:\n• ⏱ cuánto dura (por defecto, 10 s … 5 "
+                   "min, fijo)\n• ✍️ tu texto — HTML de Telegram con {mention} {strikes} {limit} {reason} {action}; envía "
+                   "<code>-</code> para volver al texto oficial\n• 🔘 tu propio botón (por ejemplo «📜 Normas | https://…»)\n"
+                   "• ⚖️ Apelar: añade un botón a los baneos automáticos para que el miembro pague en Stars y vuelva "
+                   "(requiere ⚖️ Apelaciones de baneo activas).")},
+    "vcw": {"tier": "pro", "icon": "🕗", "name": ("Horario del videochat", "Voice-chat schedule"), "cfg": "vcw_m_{g}_{lang}",
+            "en": ("Choose when the Sentinel and the bot may post voice-chat notices in your chat (member joined, MicVIP "
+                   "offer, welcome, reset, scheduled opening…). Outside these hours they post nothing, but AutoLower, "
+                   "MicVIP and the shields keep working.\n\n⚙️ Open settings → 🟢 Posting on/off, ▶️ start and ⏹ end hour "
+                   "(windows across midnight work), ⏱ minimum gap between member notices, ♾ all day."),
+            "es": ("Elige cuándo el Centinela y el bot pueden publicar avisos del videochat en tu chat (entró un miembro, "
+                   "oferta MicVIP, bienvenida, reinicio, apertura programada…). Fuera de estas horas no publican nada, "
+                   "pero AutoLower, MicVIP y los escudos siguen funcionando.\n\n⚙️ Abrir ajustes → 🟢 Emisión sí/no, ▶️ hora "
+                   "de inicio y ⏹ de fin (sirven ventanas que cruzan la medianoche), ⏱ separación mínima entre avisos de "
+                   "miembros, ♾ todo el día.")},
+    "donl": {"tier": "pro", "icon": "💰", "name": ("Enlaces de donación", "Donation links"), "cfg": "donl_m_{g}_{lang}",
+             "en": ("Up to 5 external donation links (PayPal, Ko-fi, Patreon, your channel…) shown under the Stars "
+                    "amounts when a member opens your community's tips.\n\n⚙️ Open settings → ➕ Add link → send "
+                    "<code>Name | https://link</code>. The amounts and texts of the Stars tips are in 💰 Tips (Radar &amp; "
+                    "ecosystem) or the Command Center."),
+             "es": ("Hasta 5 enlaces externos de donación (PayPal, Ko-fi, Patreon, tu canal…) que aparecen bajo los montos "
+                    "en Stars cuando un miembro abre las propinas de tu comunidad.\n\n⚙️ Abrir ajustes → ➕ Añadir enlace → "
+                    "envía <code>Nombre | https://enlace</code>. Los montos y textos de las propinas en Stars están en 💰 "
+                    "Propinas (Radar y ecosistema) o en el Command Center.")},
+    "apl": {"tier": "pro", "icon": "⚖️", "name": ("Apelaciones de baneo", "Ban appeals"), "cfg": "apl_m_{g}_all_{lang}",
+            "en": ("When the bot bans someone automatically (spam, blacklist, warnings), it can offer them to pay a Stars "
+                   "appeal. If they pay, they are unbanned and get a single-use link to return.\n\n⚙️ Open settings → "
+                   "turn it on, set the price, how long the link lasts, the appeal window and the maximum appeals per "
+                   "person. Manual bans by an admin are never appealable."),
+            "es": ("Cuando el bot banea a alguien automáticamente (spam, lista negra, advertencias), puede ofrecerle pagar "
+                   "una apelación en Stars. Si paga, se le desbanea y recibe un enlace de un solo uso para volver.\n\n⚙️ "
+                   "Abrir ajustes → actívalo, fija el precio, cuánto dura el enlace, el plazo para apelar y el máximo de "
+                   "apelaciones por persona. Los baneos manuales de un administrador nunca son apelables.")},
+    "mva": {"tier": "pro", "icon": "🎟️", "name": ("Auditoría MicVIP", "MicVIP audit"), "cfg": "mvaudit_{g}_all_1_{lang}",
+            "en": ("Every MicVIP pass sold: buyer, Stars, purchase time, real expiry and whether the Sentinel applied the "
+                   "100% volume. Use it to solve disputes («I paid but my mic is low»)."),
+            "es": ("Cada pase MicVIP vendido: comprador, Stars, hora de compra, vencimiento real y si el Centinela aplicó "
+                   "el 100 % de volumen. Úsalo para resolver reclamaciones («pagué pero mi micrófono sigue bajo»).")},
+    "alq": {"tier": "pro", "icon": "🔗", "name": ("Cuotas de enlaces", "Link quotas"), "cfg": "alq_m_{g}_{lang}",
+            "en": ("Limit how many links each administrator can post per day (rolling 24 h), with individual exceptions. "
+                   "Useful against admins who flood the chat with promotions."),
+            "es": ("Limita cuántos enlaces puede publicar cada administrador al día (24 h móviles), con excepciones "
+                   "individuales. Útil contra administradores que llenan el chat de promociones.")},
+    # ---------------------------------------------------------------- ULTRA PRO
+    "cl": {"tier": "ultra_pro", "icon": "🧬", "name": ("Clon y Centinela", "Clone & Sentinel"), "cfg": "gset_clone_{g}_{lang}",
+           "en": None, "es": None, "about": "clones"},
+    "sn": {"tier": "ultra_pro", "icon": "⚙️", "name": ("Configuración del Centinela", "Sentinel Settings"),
+           "cfg": "sentinelcfg_menu_{g}_{lang}", "en": None, "es": None, "infobot": "sentinel"},
+    "dbl": {"tier": "ultra_pro", "icon": "🚫", "name": ("Doble Lista Negra", "Double Blacklist"), "cfg": "dbl_m_{g}_{lang}",
+            "en": ("Two lists of forbidden terms of your own, plus an allowlist.\n\n<b>⛔ Ban list</b> — by default bans "
+                   "on sight.\n<b>⚠️ Warn list</b> — by default deletes and adds a warning.\n<b>✅ Allowlist</b> — terms "
+                   "that never count, not even in the global list.\n\n<b>How to set it up</b>: ⚙️ Open settings → ➕ add "
+                   "terms (comma or line separated) → for each list choose the <b>action</b> (ban, kick, mute, warn or "
+                   "notice), the <b>duration</b> of ban / mute (permanent, 1 h, 1 day, 7 days…) and whether the message "
+                   "is <b>deleted</b>. 🟢/🔴 turns both lists on or off. You can also add terms from the group with "
+                   "<code>/blacklist word</code> (goes to the warn list)."),
+            "es": ("Dos listas propias de términos prohibidos, y una lista blanca.\n\n<b>⛔ Lista de baneo</b> — por defecto "
+                   "expulsa en el acto.\n<b>⚠️ Lista de advertencia</b> — por defecto borra y suma una advertencia.\n"
+                   "<b>✅ Lista blanca</b> — términos que nunca cuentan, ni siquiera en la lista global.\n\n<b>Cómo "
+                   "configurarla</b>: ⚙️ Abrir ajustes → ➕ añade términos (separados por comas o en líneas) → en cada lista "
+                   "elige la <b>acción</b> (ban, kick, mute, advertencia o aviso), la <b>duración</b> del ban / mute "
+                   "(permanente, 1 h, 1 día, 7 días…) y si se <b>borra</b> el mensaje. 🟢/🔴 activa o desactiva las dos "
+                   "listas. También puedes añadir términos desde el grupo con <code>/blacklist palabra</code> (va a la "
+                   "lista de advertencia).")},
+    "vip": {"tier": "ultra_pro", "icon": "👑", "name": ("Roles VIP", "VIP roles"), "cfg": "vipr_m_{g}_{lang}",
+            "en": ("After a donation or a MicVIP purchase the member gets a VIP role with Telegram's native tag for the "
+                   "days you choose, partial exemptions from the locks and extra anti-flood margin. You can also grant "
+                   "VIP by hand."),
+            "es": ("Tras una donación o una compra de MicVIP, el miembro recibe un rol VIP con la etiqueta nativa de "
+                   "Telegram durante los días que elijas, exenciones parciales de los bloqueos y margen extra de "
+                   "anti-flood. También puedes conceder VIP a mano.")},
+    "ut": {"tier": "ultra_pro", "icon": "💎", "name": ("Herramientas ULTRA", "ULTRA tools"), "cfg": "menu_ultra_{g}_{lang}",
+           "en": ("Panic button (raid lockdown), screen-share shield, podcast mode, speakers queue, Sentinel multimedia "
+                  "payload, AI Sentinel (Mistral guardian and copilot), XP levels, ghost purge and signed .bunker backups. "
+                  "Each one opens with its own explanation and switches."),
+           "es": ("Botón de pánico (bloqueo anti-raid), escudo de pantalla, modo podcast, cola de speakers, payload "
+                  "multimedia del Centinela, Centinela IA (guardián y copiloto Mistral), niveles XP, Ghost Purge y "
+                  "respaldos firmados .bunker. Cada una se abre con su propia explicación e interruptores.")},
+}
+
+TIER_TOOL_KEYS = {
+    "free": ("cap", "as", "af", "lk", "wr", "dm", "svm", "rd", "lt", "lg", "pr", "mod", "eco"),
+    "pro": ("bnt", "vcw", "donl", "apl", "mva", "alq"),
+    "ultra_pro": ("cl", "sn", "dbl", "vip", "ut"),
+}
+
+
+def _tool_label(key: str, lang: str) -> str:
+    g = TOOL_GUIDES[key]
+    return f"{g['icon']} {tr(lang, g['name'][0], g['name'][1])}"
+
+
+def _tool_buttons(group_id: int, tier: str, lang: str, per_row: int = 2) -> list:
+    keys = TIER_TOOL_KEYS[tier]
+    buttons = [InlineKeyboardButton(text=_tool_label(k, lang), callback_data=f"gd_{k}_{group_id}_{lang}") for k in keys]
+    return [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
+
+
+def _tier_back_row(group_id: int, tier: str, lang: str) -> list:
+    if tier == "pro":
+        return [InlineKeyboardButton(text=tr(lang, "🔙 Módulos PRO", "🔙 PRO modules"), callback_data=f"tierv_pro_{group_id}_{lang}")]
+    if tier == "ultra_pro":
+        return [InlineKeyboardButton(text=tr(lang, "🔙 Módulos ULTRA PRO", "🔙 ULTRA PRO modules"),
+                                     callback_data=f"tierv_ultra_{group_id}_{lang}")]
+    return [InlineKeyboardButton(text=tr(lang, "🔙 Herramientas FREE", "🔙 FREE tools"), callback_data=f"gpanel_{group_id}_{lang}")]
+
+
+def _tool_guide_view(key: str, group_id: int, lang: str, unlocked: bool) -> tuple:
+    g = TOOL_GUIDES[key]
+    lng = "es" if lang == "es" else "en"
+    body = g.get(lng)
+    if body is None and g.get("about"):
+        body = ABOUT_TEXTS[lng][g["about"]].split("\n\n", 1)[-1]
+    if body is None and g.get("infobot"):
+        body = INFOBOT_TEXTS[lng][g["infobot"]].split("\n\n", 1)[-1]
+    tier = g["tier"]
+    badge = {"free": "🆓 FREE", "pro": "⭐ PRO", "ultra_pro": "💎 ULTRA PRO"}[tier]
+    text = f"{g['icon']} <b>{html.escape(tr(lang, g['name'][0], g['name'][1]))}</b> · {badge}\n\n{body}" + _sig()
+    rows: list = []
+    if unlocked:
+        rows.append([InlineKeyboardButton(text=tr(lang, "⚙️ Abrir ajustes", "⚙️ Open settings"),
+                                          callback_data=g["cfg"].format(g=group_id, lang=lang))])
+    else:
+        price = PRICE_ULTRAPRO_STARS if tier == "ultra_pro" else PRICE_PRO_STARS
+        plan = "ultra" if tier == "ultra_pro" else "pro"
+        rows.append([InlineKeyboardButton(
+            text=tr(lang, f"{'💎' if plan == 'ultra' else '⭐'} Activar {badge.split(' ', 1)[1]} · {price} Stars",
+                    f"{'💎' if plan == 'ultra' else '⭐'} Get {badge.split(' ', 1)[1]} · {price} Stars"),
+            callback_data=f"inv_{plan}_{group_id}_{lang}")])   # factura Stars directa
+    if key == "sn":
+        rows.append([InlineKeyboardButton(text=tr(lang, "🎙️ Videochat paso a paso", "🎙️ Video Chat step by step"),
+                                          callback_data=f"menu_vcguide_{lang}")])
+    rows.append(_tier_back_row(group_id, tier, lang))
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _v44_show(callback: CallbackQuery, bot: Bot, text: str, keyboard: InlineKeyboardMarkup, lang: str,
+                    card_key: Optional[str] = None) -> None:
+    """
+    Muestra una vista sin romperla: con tarjeta gráfica si cabe en un pie de foto (≤ 1024), si no como texto. Si el
+    mensaje anterior era una foto (menú principal, panel del grupo) se reemplaza en lugar de recortar su pie de foto
+    (Telegram limita los pies a 1024 caracteres: recortar rompería el HTML).
+    """
+    msg = callback.message
+    if card_key and len(text) <= 1024:
+        if await render_card(bot, callback.from_user.id, card_key, lang, keyboard, caption=text, old_message=msg):
+            return
+    has_media = msg is not None and any(getattr(msg, attr, None) for attr in ("photo", "video", "animation", "document"))
+    if msg is not None and not has_media:
+        try:
+            await msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+            return
+        except TelegramBadRequest as e:
+            if "not modified" in str(e).lower():
+                return
+    if msg is not None and has_media:
+        with contextlib.suppress(Exception):
+            await msg.delete()
+    await bot.send_message(chat_id=callback.from_user.id, text=text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("gd_"))
+async def cb_tool_guide(callback: CallbackQuery, bot: Bot):
+    """v44 · Guía de una herramienta (qué hace, cómo se configura) con su «⚙️ Abrir ajustes» y «🔙 Volver»."""
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        key, group_id = data[1], int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if key not in TOOL_GUIDES:
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    tier = TOOL_GUIDES[key]["tier"]
+    unlocked = tier == "free"
+    if not unlocked:
+        try:
+            current = str(await get_effective_group_tier(group_id, callback.from_user.id) or "free").lower()
+        except Exception:
+            current = "free"
+        unlocked = _TIER_RANK_BOT.get(current, 0) >= _TIER_RANK_BOT[tier]
+    text, kb = _tool_guide_view(key, group_id, lang, unlocked)
+    await _v44_show(callback, bot, text, kb, lang)
+    await callback.answer()
+
+
+# ------------------------------------------------------------------------------------------
+# 📋 v44 · COMANDOS DISPONIBLES DE UNA COMUNIDAD (cmdl_{sub}_{grupo}_{lang})
+# ------------------------------------------------------------------------------------------
+@router.callback_query(F.data.startswith("cmdl_"))
+async def cb_commands_panel(callback: CallbackQuery, bot: Bot):
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    try:
+        sub, group_id = data[1], int(data[2])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if not await verify_admin_privileges(callback, bot, group_id):
+        return
+    changed = False
+    try:
+        tier = str(await get_effective_group_tier(group_id, callback.from_user.id) or "free").lower()
+    except Exception:
+        tier = "free"
+    if sub == "t":
+        if tier == "free":
+            # Igual que 🗑️ Purga → «Borrar comandos»: el borrado de comandos de miembros es PRO.
+            await callback.answer(tr(lang, f"⭐ El bloqueo de comandos requiere PRO ({PRICE_PRO_STARS} Stars). En FREE "
+                                           "los comandos de miembros ya se ignoran; con PRO además se borran.",
+                                     f"⭐ Command lock requires PRO ({PRICE_PRO_STARS} Stars). On FREE members' commands "
+                                     "are already ignored; with PRO they are also deleted."), show_alert=True)
+            return
+        current = await get_lock_status(group_id, "lock_commands")
+        await set_lock_status(group_id, "lock_commands", 0 if current == 1 else 1)
+        emit_settings_updated_bg(group_id, "bot_console", ["lock_commands"])
+        changed = True
+    locked = await get_lock_status(group_id, "lock_commands") == 1
+    tier_badge = {"free": "🆓 FREE", "pro": "⭐ PRO", "ultra_pro": "💎 ULTRA PRO"}.get(tier, "🆓 FREE")
+    lng = "es" if lang == "es" else "en"
+    text = (tr(lang, f"📋 <b>Comandos disponibles</b> · tu rango: <b>{tier_badge}</b>\n\n",
+               f"📋 <b>Available commands</b> · your rank: <b>{tier_badge}</b>\n\n")
+            + INFOBOT_TEXTS[lng]["cmds"].split("\n\n", 1)[-1]
+            + tr(lang, f"\n\n🔒 <b>Bloqueo de comandos</b>: <b>{'ACTIVO' if locked else 'APAGADO'}</b> — con él activo, los "
+                       "comandos que envían los miembros se borran además de ignorarse.",
+                 f"\n\n🔒 <b>Command lock</b>: <b>{'ON' if locked else 'OFF'}</b> — when on, commands sent by members are "
+                 "also deleted, not only ignored.")
+            + _sig())
+    rows = [
+        [InlineKeyboardButton(text=("🟢 " if locked else "🔴 ") + tr(lang, "Bloqueo de comandos", "Command lock")
+                              + (" 🔒 PRO" if tier == "free" else ""), callback_data=f"cmdl_t_{group_id}_{lang}")],
+    ]
+    if tier == "free":
+        rows.append([InlineKeyboardButton(text=tr(lang, f"⭐ Comandos ilimitados con PRO · {PRICE_PRO_STARS} Stars",
+                                                  f"⭐ Unlimited commands with PRO · {PRICE_PRO_STARS} Stars"),
+                                          callback_data=f"tierv_pro_{group_id}_{lang}")])
+    rows.append(_tier_back_row(group_id, "free", lang))
+    await _v44_show(callback, bot, text, InlineKeyboardMarkup(inline_keyboard=rows), lang)
+    await callback.answer("✅" if changed else None)
+
+
+# ------------------------------------------------------------------------------------------
+# 💎 v44 · DONACIONES A LA PLATAFORMA: vista con multimedia y panel del Arquitecto (pdcfg_)
+# ------------------------------------------------------------------------------------------
+async def _send_platform_donate(callback: CallbackQuery, bot: Bot, lang: str) -> None:
+    """💰 del /start con su multimedia (si el Arquitecto la configuró) y el botón de configuración para él."""
+    from database.database import get_platform_donation_config
+    text, kb = await _platform_donate_view(lang)
+    if is_super_admin(callback.from_user.id):
+        kb.inline_keyboard.insert(len(kb.inline_keyboard) - 1, [InlineKeyboardButton(
+            text=tr(lang, "⚙️ Configurar donaciones (Arquitecto)", "⚙️ Configure donations (Architect)"),
+            callback_data=f"pdcfg_m_0_{lang}")])
+    try:
+        cfg = await get_platform_donation_config()
+    except Exception:
+        cfg = {}
+    media_id, media_type = cfg.get("media_id"), cfg.get("media_type")
+    if media_id and media_type and len(text) <= 1024:
+        sender = {"photo": bot.send_photo, "video": bot.send_video, "animation": bot.send_animation}.get(media_type)
+        if sender is not None:
+            try:
+                await sender(callback.from_user.id, media_id, caption=text, reply_markup=kb, parse_mode="HTML")
+                if callback.message is not None:
+                    with contextlib.suppress(Exception):
+                        await callback.message.delete()
+                return
+            except Exception as ex:
+                logging.warning(f"⚠️ [Donaciones] Multimedia de la plataforma no enviada ({ex}); se usa texto.")
+    await _v44_show(callback, bot, text, kb, lang)
+
+
+async def _pdcfg_view(lang: str) -> tuple:
+    from database.database import get_platform_donation_config, get_platform_donation_stats
+    cfg = await get_platform_donation_config()
+    try:
+        stats = await get_platform_donation_stats()
+    except Exception:
+        stats = {"count": 0, "stars": 0, "donors": 0}
+    links = "\n".join(f"  {i + 1}. {html.escape(l['label'])} — {html.escape(l['url'])}" for i, l in enumerate(cfg["links"])) or "  —"
+    text = (tr(lang, "⚙️ <b>Donaciones a The Bunker</b> (solo Arquitectos)\n\n", "⚙️ <b>Donations to The Bunker</b> (Architects only)\n\n")
+            + tr(lang, f"• Estado: <b>{'Activas 🟢' if cfg['enabled'] else 'Apagadas 🔴'}</b>\n",
+                 f"• Status: <b>{'On 🟢' if cfg['enabled'] else 'Off 🔴'}</b>\n")
+            + tr(lang, "• Montos (Stars): ", "• Amounts (Stars): ") + f"<code>{', '.join(map(str, cfg['amounts']))}</code>\n"
+            + tr(lang, "• Enlaces externos:\n", "• External links:\n") + links + "\n"
+            + tr(lang, f"• Texto propio: <b>{'sí' if cfg.get('text') else 'no (texto oficial)'}</b>\n",
+                 f"• Custom text: <b>{'yes' if cfg.get('text') else 'no (official text)'}</b>\n")
+            + tr(lang, f"• Multimedia: <b>{cfg.get('media_type') or 'ninguna'}</b>\n\n",
+                 f"• Media: <b>{cfg.get('media_type') or 'none'}</b>\n\n")
+            + tr(lang, f"📊 Recibido: <b>{stats['stars']} Stars</b> en {stats['count']} donaciones de {stats['donors']} personas.",
+                 f"📊 Received: <b>{stats['stars']} Stars</b> in {stats['count']} donations from {stats['donors']} people.")
+            + _sig())
+    rows = [
+        [InlineKeyboardButton(text=("🟢 " if cfg["enabled"] else "🔴 ") + tr(lang, "Donaciones", "Donations"),
+                              callback_data=f"pdcfg_e_0_{lang}")],
+        [InlineKeyboardButton(text=tr(lang, "✏️ Montos", "✏️ Amounts"), callback_data=f"pdcfg_a_0_{lang}"),
+         InlineKeyboardButton(text=tr(lang, "➕ Enlace", "➕ Link"), callback_data=f"pdcfg_l_0_{lang}")],
+        [InlineKeyboardButton(text=tr(lang, "✍️ Texto", "✍️ Text"), callback_data=f"pdcfg_t_0_{lang}"),
+         InlineKeyboardButton(text=tr(lang, "🖼️ Multimedia", "🖼️ Media"), callback_data=f"pdcfg_p_0_{lang}")],
+    ]
+    for i, link in enumerate(cfg["links"]):
+        rows.append([InlineKeyboardButton(text=f"🗑 {link['label']}"[:60], callback_data=f"pdcfg_x_{i}_{lang}")])
+    rows.append([InlineKeyboardButton(text=tr(lang, "👁️ Ver como un usuario", "👁️ Preview as a user"),
+                                      callback_data=f"menu_donate_{lang}")])
+    rows.append([InlineKeyboardButton(text=TEXTS.get(lang, TEXTS[DEFAULT_LANG])["btn_back"], callback_data=f"menu_main_{lang}")])
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data.startswith("pdcfg_"))
+async def cb_platform_donation_config(callback: CallbackQuery, bot: Bot):
+    data = (callback.data or "").split("_")
+    lang = lang_from_callback(callback, data)
+    if not is_super_admin(callback.from_user.id) or is_clone_bot(bot):
+        await callback.answer()
+        return
+    sub = data[1] if len(data) > 1 else "m"
+    uid = callback.from_user.id
+    clear_user_states(bot.id, uid)
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    from database.database import BunkerValidationError, get_platform_donation_config, update_platform_donation_config
+    prompts = {
+        "a": ("pd_amounts", "✏️ Envía los montos en Stars separados por comas (máx. 8). Ejemplo: <code>100, 250, 500, 1000, 2500</code>",
+              "✏️ Send the Stars amounts separated by commas (max 8). Example: <code>100, 250, 500, 1000, 2500</code>"),
+        "l": ("pd_link", "➕ Envía el enlace así: <code>Nombre | https://enlace</code> (máx. 8 enlaces).",
+              "➕ Send the link like this: <code>Name | https://link</code> (max 8 links)."),
+        "t": ("pd_text", "✍️ Envía el texto que verán antes de donar (HTML de Telegram). Envía <code>-</code> para volver al texto oficial.",
+              "✍️ Send the text people see before donating (Telegram HTML). Send <code>-</code> to restore the official text."),
+        "p": ("pd_media", "🖼️ Envía una foto, un vídeo o un GIF. Envía <code>-</code> para quitar la multimedia.",
+              "🖼️ Send a photo, a video or a GIF. Send <code>-</code> to remove the media."),
+    }
+    try:
+        if sub == "e":
+            cfg = await get_platform_donation_config()
+            await update_platform_donation_config({"enabled": not cfg["enabled"]}, actor_id=uid)
+        elif sub == "x":
+            cfg = await get_platform_donation_config()
+            idx = int(data[2]) if len(data) > 3 else -1
+            links = list(cfg["links"])
+            if 0 <= idx < len(links):
+                links.pop(idx)
+                await update_platform_donation_config({"links": links}, actor_id=uid)
+        elif sub in prompts:
+            kind, es, en = prompts[sub]
+            V43_INPUT_STATES[(bot.id, uid)] = {"kind": kind, "lang": lang, "ts": time.time()}
+            msg = await callback.message.answer(tr(lang, es, en) + _sig(), reply_markup=_cancel_kb(t, f"pdcfg_m_0_{lang}"),
+                                                parse_mode="HTML")
+            fire_and_forget_auto_delete([msg], delay=180)
+            await callback.answer()
+            return
+    except BunkerValidationError as err:
+        await callback.answer("⚠️ " + str(err)[:180], show_alert=True)
+        return
+    text, kb = await _pdcfg_view(lang)
+    await _v44_show(callback, bot, text, kb, lang)
+    await callback.answer()
+
+
+async def _handle_platform_donation_input(message: Message, bot: Bot, state: dict, text_input: str) -> None:
+    from database.database import BunkerValidationError, get_platform_donation_config, update_platform_donation_config
+    lang, kind = state.get("lang", "en"), state.get("kind", "")
+    uid = message.from_user.id
+    t = TEXTS.get(lang, TEXTS[DEFAULT_LANG])
+    if not is_super_admin(uid):
+        return
+    try:
+        if kind == "pd_amounts":
+            amounts = [int(x) for x in re.split(r"[\s,;]+", text_input or "") if x.strip()]
+            await update_platform_donation_config({"amounts": amounts}, actor_id=uid)
+        elif kind == "pd_link":
+            label, sep, url = (text_input or "").partition("|")
+            cfg = await get_platform_donation_config()
+            await update_platform_donation_config(
+                {"links": list(cfg["links"]) + [{"label": label.strip(), "url": url.strip() if sep else ""}]}, actor_id=uid)
+        elif kind == "pd_text":
+            new_text = None if (text_input or "").strip() == "-" else (message.html_text or text_input)
+            await update_platform_donation_config({"text": new_text}, actor_id=uid)
+        elif kind == "pd_media":
+            if (text_input or "").strip() == "-":
+                patch = {"media_id": None, "media_type": None}
+            elif message.photo:
+                patch = {"media_id": message.photo[-1].file_id, "media_type": "photo"}
+            elif message.video:
+                patch = {"media_id": message.video.file_id, "media_type": "video"}
+            elif message.animation:
+                patch = {"media_id": message.animation.file_id, "media_type": "animation"}
+            else:
+                raise ValueError(tr(lang, "envía una foto, un vídeo, un GIF o «-».", "send a photo, a video, a GIF or «-»."))
+            await update_platform_donation_config(patch, actor_id=uid)
+        else:
+            return
+    except (ValueError, BunkerValidationError) as err:
+        V43_INPUT_STATES[(bot.id, uid)] = state
+        await message.answer("⚠️ " + html.escape(str(err)) + _sig(), reply_markup=_cancel_kb(t, f"pdcfg_m_0_{lang}"),
+                             parse_mode="HTML")
+        return
+    text, kb = await _pdcfg_view(lang)
+    await message.answer(tr(lang, "✅ Guardado.\n\n", "✅ Saved.\n\n") + text, reply_markup=kb, parse_mode="HTML")
 
 
 # ------------------------------------------------------------------ 💰 donaciones a la plataforma (Stars)

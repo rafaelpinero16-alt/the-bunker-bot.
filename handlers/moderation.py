@@ -1,6 +1,11 @@
 """
 moderation.py — The Bunker OS (Aiogram 3.x)
 
+v44 · SEGURIDAD: /blacklist ya no escribe en la lista negra GLOBAL (compartida por todas las comunidades del bot:
+      cualquier administrador de cualquier grupo podía prohibir palabras en todos los demás). Ahora añade el término a
+      la lista de ADVERTENCIA de la propia comunidad (doble lista negra, ULTRA PRO). Solo un Arquitecto sigue
+      escribiendo en la lista global. En comunidades sin ULTRA PRO el comando explica cómo activarlo.
+
 Módulo de moderación táctica, sanciones remotas y control perimetral.
 Integrado con la matriz de advertencias granular (Free / PRO / ULTRA PRO) y Centinela MTProto.
 
@@ -1113,6 +1118,44 @@ async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
         _spawn(auto_delete_pair(message, msg, delay=10))
 
 
+_BL_UPSELL = {
+    "en": ("⚫ <b>Community blacklist · ULTRA PRO 💎</b>\n\nSince v44 <code>/blacklist</code> adds words to <b>your "
+           "community's own</b> list (it no longer touches the list shared by every community). This list is an "
+           "<b>ULTRA PRO</b> feature: open the bot in private → <b>⚙️ Group Settings → your group → 💎 ULTRA PRO "
+           "modules</b> to activate it.\n\n🛡️ <i>Cloud Media Management</i>"),
+    "es": ("⚫ <b>Lista negra de la comunidad · ULTRA PRO 💎</b>\n\nDesde la v44 <code>/blacklist</code> añade palabras a "
+           "la lista <b>propia de tu comunidad</b> (ya no toca la lista que comparten todas las comunidades). Esta lista "
+           "es una función <b>ULTRA PRO</b>: abre el bot en privado → <b>⚙️ Ajustes de grupos → tu grupo → 💎 Módulos "
+           "ULTRA PRO</b> para activarla.\n\n🛡️ <i>Cloud Media Management</i>"),
+}
+
+
+async def _add_blacklist_word(chat_id: int, operator_id: int, word: str, lang: str) -> Optional[str]:
+    """
+    v44 · Destino del término de /blacklist. Devuelve None si se añadió o el texto a mostrar si no se pudo.
+      • Arquitecto → lista negra global (comportamiento anterior, solo para él).
+      • Comunidad ULTRA PRO → lista de ADVERTENCIA de la comunidad (borra y advierte; acción configurable en el bot).
+      • Resto → no se añade: se explica cómo activar la lista propia.
+    """
+    if is_super_admin(operator_id):
+        await add_to_blacklist(word)
+        return None
+    try:
+        tier = _db_module.normalize_tier(await _db_module.get_group_tier(chat_id))
+    except Exception:
+        tier = "free"
+    if tier != "ultra_pro":
+        return _BL_UPSELL.get(lang, _BL_UPSELL["en"])
+    try:
+        await _db_module.add_group_blacklist_terms(chat_id, "warn", [word], actor_id=operator_id or None)
+    except Exception as ex:
+        return f"⚠️ {html.escape(str(ex))[:200]}"
+    with contextlib.suppress(Exception):
+        from handlers import groups as _groups
+        _groups.invalidate_v43_caches(chat_id)
+    return None
+
+
 # ==========================================
 # ⚫ GESTIÓN DE LISTA NEGRA (BLACKLIST)
 # ==========================================
@@ -1146,8 +1189,8 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
 
     if command and command.args:
         word = command.args.strip().lower()[:64]
-        await add_to_blacklist(word)
-        text = t["bl_added"].format(word=html.escape(word))
+        problem = await _add_blacklist_word(message.chat.id, operator_id, word, lang)   # v44
+        text = problem or t["bl_added"].format(word=html.escape(word))
         await send_remote_menu(message, lang, text, None)
         return
 
@@ -1162,8 +1205,8 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
                 )
                 _spawn(auto_delete_pair(message, msg, delay=10))
                 return
-            await add_to_blacklist(word)
-            text = t["bl_added"].format(word=html.escape(word))
+            problem = await _add_blacklist_word(message.chat.id, operator_id, word, lang)   # v44
+            text = problem or t["bl_added"].format(word=html.escape(word))
             await send_remote_menu(message, lang, text, None)
             return
         else:

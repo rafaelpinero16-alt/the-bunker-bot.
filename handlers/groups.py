@@ -13,6 +13,10 @@ v40:    Fase 3 — etapa Auto-Mod (handlers/automod.py) dentro de la matriz peri
 v39:    Log Channel Hub — entradas/salidas (enlace, solicitud, añadido, directo), captcha, Anti-Spam, Anti-Flood,
         userbots, CAS, Anti-Raid, escalera de advertencias, pánico, interruptores del Dueño y turnos de speaker
         se auditan en el canal de registro vía handlers/logger_hub.py (siempre en segundo plano con _spawn).
+v44 · Fase 9.1 — Impulsos (boosts) e invitaciones al videochat con regla propia; botón propio (texto + URL) en cada
+      aviso del bot, combinado con «Apelar»; doble lista negra con interruptor, acción por lista (ban / kick / mute /
+      warn / advise), duración y borrado opcional; lista blanca de términos (ULTRA PRO) que neutraliza también la lista
+      negra global en esa comunidad.
 v43 · Fase 9 — Mensajes de servicio por tipo (entrada, salida, videochat, fijados y cambios del chat: mantener / borrar
       ya / borrar a los X s), avisos del bot configurables (TTL propio, texto y multimedia PRO+, botón «Apelar» en los
       baneos automáticos) y doble lista negra por comunidad (ULTRA PRO: lista de baneo inmediato y lista de
@@ -628,7 +632,10 @@ GROUP_SVC_TEXTS: dict[str, dict[str, str]] = {
         "sanction_mute": "🔇 <b>Auto-sanction{badge} ({strikes}/{limit})</b>\n\n{mention} was muted in chat and voice after reaching the warning limit.\n• <b>Action:</b> <code>MUTE</code>",
         "sanction_kick": "👢 <b>Auto-sanction{badge} ({strikes}/{limit})</b>\n\n{mention} was kicked after reaching the warning limit.\n• <b>Action:</b> <code>KICK</code>",
         "sanction_ban": "🚫 <b>Permanent ban{badge} ({strikes}/{limit})</b>\n\n{mention} was permanently banned for repeated violations.\n• <b>Action:</b> <code>BAN</code>",
-        "blacklist_ban": "🚫 <b>Banned 💎</b>\n\n{mention} used a term from this community's ban list and was removed.\n• <b>Action:</b> <code>BAN</code>",
+        "blacklist_ban": "🚫 <b>Banned 💎</b>\n\n{mention} used a term that is banned in this community.\n• <b>Action:</b> <code>BAN</code> {length}",
+        "blacklist_kick": "👢 <b>Removed 💎</b>\n\n{mention} used a term that is banned in this community and was kicked (can rejoin).\n• <b>Action:</b> <code>KICK</code>",
+        "blacklist_mute": "🔇 <b>Muted 💎</b>\n\n{mention} used a term that is banned in this community.\n• <b>Action:</b> <code>MUTE</code> {length}",
+        "blacklist_advise": "⚠️ <b>Notice 💎</b>\n\n{mention}, that term is not allowed in this community. Please keep the chat clean.",
         "flood_kick": "👢 <b>Kick notice:</b> {mention} was temporarily removed for message flooding.",
         "flood_mute": "🔇 <b>Mute notice:</b> {mention} was muted for message flooding.",
         "flood_ban": "🚫 <b>Ban notice:</b> {mention} was permanently banned for repeated flooding.",
@@ -735,7 +742,10 @@ GROUP_SVC_TEXTS: dict[str, dict[str, str]] = {
         "sanction_mute": "🔇 <b>Sanción automática{badge} ({strikes}/{limit})</b>\n\n{mention} fue silenciado en el chat y el videochat por acumulación de faltas.\n• <b>Medida:</b> <code>MUTE</code>",
         "sanction_kick": "👢 <b>Sanción automática{badge} ({strikes}/{limit})</b>\n\n{mention} fue expulsado temporalmente por infringir las reglas.\n• <b>Medida:</b> <code>KICK</code>",
         "sanction_ban": "🚫 <b>Bloqueo definitivo{badge} ({strikes}/{limit})</b>\n\n{mention} fue bloqueado permanentemente por faltas reiteradas.\n• <b>Medida:</b> <code>BAN</code>",
-        "blacklist_ban": "🚫 <b>Expulsado 💎</b>\n\n{mention} usó un término de la lista de baneo de esta comunidad y fue expulsado.\n• <b>Medida:</b> <code>BAN</code>",
+        "blacklist_ban": "🚫 <b>Expulsado 💎</b>\n\n{mention} usó un término prohibido en esta comunidad.\n• <b>Medida:</b> <code>BAN</code> {length}",
+        "blacklist_kick": "👢 <b>Retirado 💎</b>\n\n{mention} usó un término prohibido en esta comunidad y fue expulsado (puede volver a entrar).\n• <b>Medida:</b> <code>KICK</code>",
+        "blacklist_mute": "🔇 <b>Silenciado 💎</b>\n\n{mention} usó un término prohibido en esta comunidad.\n• <b>Medida:</b> <code>MUTE</code> {length}",
+        "blacklist_advise": "⚠️ <b>Aviso 💎</b>\n\n{mention}, ese término no está permitido en esta comunidad. Mantén el chat limpio, por favor.",
         "flood_kick": "👢 <b>Aviso de expulsión:</b> {mention} fue expulsado temporalmente por saturación de mensajes.",
         "flood_mute": "🔇 <b>Aviso de silencio:</b> {mention} fue silenciado por saturación de mensajes.",
         "flood_ban": "🚫 <b>Bloqueo definitivo:</b> {mention} fue baneado por flood reiterado.",
@@ -1544,11 +1554,13 @@ V43_CACHE_TTL = 30.0
 _NATIVE_RULES_CACHE: dict[int, tuple[float, dict]] = {}
 _NOTICE_RULES_CACHE: dict[int, tuple[float, dict]] = {}
 _GROUP_BLACKLIST_CACHE: dict[int, tuple[float, dict]] = {}
+_BLACKLIST_CFG_CACHE: dict[int, tuple[float, dict]] = {}   # v44
+_ALLOWLIST_CACHE: dict[int, tuple[float, list]] = {}      # v44
 
 
 def invalidate_v43_caches(chat_id: int) -> None:
     """La API y los paneles del bot llaman a esto tras guardar: el siguiente evento relee la configuración."""
-    for cache in (_NATIVE_RULES_CACHE, _NOTICE_RULES_CACHE, _GROUP_BLACKLIST_CACHE):
+    for cache in (_NATIVE_RULES_CACHE, _NOTICE_RULES_CACHE, _GROUP_BLACKLIST_CACHE, _BLACKLIST_CFG_CACHE, _ALLOWLIST_CACHE):
         cache.pop(int(chat_id), None)
 
 
@@ -1611,7 +1623,20 @@ async def _notice_overrides(chat_id: int, kind: str, group_tier: str) -> dict:
         "text": item.get("text") if paid else None,
         "media_id": item.get("media_id") if paid else None,
         "media_type": item.get("media_type") if paid else None,
+        # v44 · Botón propio del aviso (PRO+): reglas, canal de apelación externo, soporte…
+        "button_text": item.get("button_text") if paid else None,
+        "button_url": item.get("button_url") if paid else None,
     }
+
+
+def _notice_markup(ov: dict, extra: Optional[InlineKeyboardMarkup] = None) -> Optional[InlineKeyboardMarkup]:
+    """Teclado del aviso: botón propio del Dueño (si lo hay) + botones extra (p. ej. «Apelar»)."""
+    rows: list = []
+    if ov.get("button_text") and ov.get("button_url"):
+        rows.append([InlineKeyboardButton(text=str(ov["button_text"])[:40], url=str(ov["button_url"]))])
+    if extra is not None:
+        rows.extend(extra.inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 async def _appeal_markup(bot: Bot, chat_id: int, group_tier: str, lang: str) -> Optional[InlineKeyboardMarkup]:
@@ -1977,12 +2002,16 @@ async def purge_left_member(message: Message):
 @router.message(
     F.chat.type.in_({"group", "supergroup"}),
     F.video_chat_started | F.video_chat_ended | F.video_chat_participants_invited | F.video_chat_scheduled
-    | F.pinned_message | F.new_chat_title | F.new_chat_photo | F.delete_chat_photo
+    | F.pinned_message | F.new_chat_title | F.new_chat_photo | F.delete_chat_photo | F.boost_added
 )
 async def purge_general_service_messages(message: Message):
-    """v43 · Mensajes nativos del videochat, de fijado y de cambios del chat, cada uno con su regla."""
-    if (message.video_chat_started or message.video_chat_ended or
-            message.video_chat_participants_invited or getattr(message, "video_chat_scheduled", None)):
+    """v43 · Mensajes nativos del videochat, de fijado y de cambios del chat, cada uno con su regla (v44: + impulsos
+    e invitaciones al videochat por separado)."""
+    if message.video_chat_participants_invited:
+        kind = "vc_invite"
+    elif getattr(message, "boost_added", None):
+        kind = "boost"
+    elif message.video_chat_started or message.video_chat_ended or getattr(message, "video_chat_scheduled", None):
         kind = "videochat"
     elif message.pinned_message:
         kind = "pinned"
@@ -3071,7 +3100,8 @@ async def enforce_warn_ladder(
                 use_media, use_type = (ov["media_id"], ov["media_type"]) if ov["media_id"] else \
                     ((media_id, media_type) if ultra else (None, None))
                 await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to,
-                                 media_id=use_media, media_type=use_type, fixed_ttl=ov["fixed_ttl"])
+                                 media_id=use_media, media_type=use_type, fixed_ttl=ov["fixed_ttl"],
+                                 reply_markup=_notice_markup(ov))
             else:
                 notice = gtx(lang, "warn", strikes=strikes, limit=limit, mention=target_mention, reason=reason_loc)
                 await _send_temp(bot, chat_id, notice, ttl=20, reply_to=reply_to, fixed_ttl=ov["fixed_ttl"])
@@ -3156,7 +3186,7 @@ async def enforce_warn_ladder(
         if action == "ban" and not is_manual and not prior_global_ban:
             markup = await _appeal_markup(bot, chat_id, group_tier, lang)
         await _send_temp(bot, chat_id, sanction_notice, ttl=25, reply_to=reply_to, media_id=use_media, media_type=use_type,
-                         fixed_ttl=ov["fixed_ttl"], reply_markup=markup)
+                         fixed_ttl=ov["fixed_ttl"], reply_markup=_notice_markup(ov, markup))
 
     # 🧾 v39 · Auditoría: límite alcanzado y sanción aplicada.
     _audit_claim(chat_id, target_id, "removal", "restrict")
@@ -3609,14 +3639,42 @@ def match_group_blacklist(lists: dict, text: str) -> tuple[Optional[str], Option
     return None, None
 
 
+async def _is_ultra(group_id: int) -> bool:
+    try:
+        return _db_module.normalize_tier(await get_group_tier(group_id)) == "ultra_pro"
+    except Exception:
+        return False
+
+
+async def strip_allowlisted(group_id: int, lower_text: str) -> str:
+    """
+    v44 · Lista blanca (ULTRA PRO): elimina del texto analizado los términos permitidos de la comunidad, de modo que
+    ni la doble lista negra ni la lista negra global los cuenten. Sin ULTRA PRO devuelve el texto intacto.
+    """
+    if not lower_text or not await _is_ultra(group_id):
+        return lower_text
+    allow = await _cached_v43(_ALLOWLIST_CACHE, group_id, _db_module.get_group_allowlist, [])
+    out = lower_text
+    for term in allow or []:
+        if term:
+            out = _term_pattern(term).sub(" ", out)
+    return out
+
+
+_BLACKLIST_ACTION_NOTICE = {"ban": "blacklist_ban", "kick": "blacklist_kick", "mute": "blacklist_mute",
+                            "advise": "blacklist_advise"}
+
+
 async def enforce_group_blacklists(bot: Bot, message: Message, lower_text: str, *, vip_perks=None,
                                    is_edit: bool = False) -> bool:
     """
-    Aplica la doble lista negra de la comunidad. True si actuó (mensaje ya borrado).
-      • Lista de BANEO: borra el mensaje y banea al autor de la comunidad (sin marca global).
-      • Lista de ADVERTENCIA: borra el mensaje y suma una advertencia en la escalera (reason='blacklist').
-    Solo ULTRA PRO (la licencia se revalida en cada mensaje con la caché de get_group_tier). Los administradores ya
-    quedaron fuera antes de llegar aquí; un VIP con la exención 'blacklist' también.
+    Aplica la doble lista negra de la comunidad (ULTRA PRO). True si actuó.
+      • Cada lista (baneo / advertencia) tiene su acción configurable: ban (con duración), kick, mute (con duración),
+        warn (escalera de advertencias) o advise (solo aviso, sin falta), y si se borra o no el mensaje.
+      • Por defecto: lista de baneo → ban permanente + borrar; lista de advertencia → warn + borrar.
+      • Con la doble lista desactivada no se aplica nada (la lista global y el resto del perímetro siguen igual).
+    La licencia se revalida con la caché de get_group_tier. Los administradores ya quedaron fuera antes de llegar aquí;
+    un VIP con la exención 'blacklist' también. `lower_text` llega ya sin los términos de la lista blanca.
     """
     group_id = message.chat.id
     user = message.from_user
@@ -3624,55 +3682,71 @@ async def enforce_group_blacklists(bot: Bot, message: Message, lower_text: str, 
         return False
     if vip_perks and "blacklist" in (vip_perks.get("exempt") or ()):
         return False
-    try:
-        if _db_module.normalize_tier(await get_group_tier(group_id)) != "ultra_pro":
-            return False
-    except Exception:
+    if not await _is_ultra(group_id):
+        return False
+    cfg = await _cached_v43(_BLACKLIST_CFG_CACHE, group_id, _db_module.get_group_blacklist_config,
+                            _db_module.GROUP_BLACKLIST_DEFAULTS)
+    if not cfg.get("enabled", True):
         return False
     lists = await _cached_v43(_GROUP_BLACKLIST_CACHE, group_id, _db_module.get_group_blacklists, {"ban": [], "warn": []})
     kind, term = match_group_blacklist(lists, lower_text)
     if kind is None:
         return False
 
-    with contextlib.suppress(Exception):
-        await message.delete()
+    rule = (cfg.get("lists") or {}).get(kind) or {"action": "ban" if kind == "ban" else "warn", "duration": 0, "delete": True}
+    action = rule.get("action", "warn")
+    duration = int(rule.get("duration") or 0)
+    if rule.get("delete", True):
+        with contextlib.suppress(Exception):
+            await message.delete()
     excerpt = message.text or message.caption or None
     username = user.username or ""
     mention = user.mention_html()
+    list_label = "ban list" if kind == "ban" else "warn list"
+    reason = f"Community {list_label}: {term}"
+    _audit(bot, group_id, "spam_deleted", user=user, automatic=True, system="antispam",
+           action="delete" if rule.get("delete", True) else "flag", reason=reason, excerpt=excerpt,
+           detail="edited message" if is_edit else None)
 
-    if kind == "warn":
+    if action == "warn":
         track_security(group_id, user.id, "antispam", "delete", False)
-        _audit(bot, group_id, "spam_deleted", user=user, automatic=True, system="antispam", action="delete",
-               reason=f"Community warn list: {term}", excerpt=excerpt, detail="edited message" if is_edit else None)
         await enforce_warn_ladder(bot, group_id, user.id, username, mention, reply_to=None, reason="blacklist")
         return True
 
-    # Lista de baneo: expulsión inmediata de ESTA comunidad.
+    until = int(time.time()) + duration * 60 if duration > 0 else None
     try:
-        await bot.ban_chat_member(chat_id=group_id, user_id=user.id)
+        if action == "ban":
+            await bot.ban_chat_member(chat_id=group_id, user_id=user.id, until_date=until)
+        elif action == "kick":
+            await bot.ban_chat_member(chat_id=group_id, user_id=user.id, until_date=int(time.time() + 35))
+            await bot.unban_chat_member(chat_id=group_id, user_id=user.id, only_if_banned=True)
+        elif action == "mute":
+            await bot.restrict_chat_member(chat_id=group_id, user_id=user.id,
+                                           permissions=ChatPermissions(can_send_messages=False), until_date=until)
     except Exception as ex:
-        logger.warning(f"[Doble Lista Negra] No se pudo banear a {user.id} en {group_id}: {ex}")
+        logger.warning(f"[Doble Lista Negra] Acción '{action}' fallida sobre {user.id} en {group_id}: {ex}")
         return True
-    with contextlib.suppress(Exception):
-        await set_participant_mic(chat_id=group_id, user_id=user.id, muted=True, volume=0)
-    track_security(group_id, user.id, "antispam", "ban", False)
-    await registry_forget(group_id, user.id)
-    _audit_claim(group_id, user.id, "removal", "restrict")
-    _audit(bot, group_id, "spam_deleted", user=user, automatic=True, system="antispam", action="delete",
-           reason=f"Community ban list: {term}", excerpt=excerpt, detail="edited message" if is_edit else None)
-    # Misma forma que la tarjeta de sanción de la escalera de advertencias (sin campos nuevos para el Hub).
-    _audit(bot, group_id, "sanction", action="ban", user_id=user.id, user_name=user.full_name, username=username or None,
-           automatic=True, system="antispam", reason=f"Community ban list: {term}")
+    if action in ("ban", "kick", "mute"):
+        with contextlib.suppress(Exception):
+            await set_participant_mic(chat_id=group_id, user_id=user.id, muted=True, volume=0)
+        track_security(group_id, user.id, "antispam", action, False)
+        if action in ("ban", "kick"):
+            await registry_forget(group_id, user.id)
+        _audit_claim(group_id, user.id, "removal", "restrict")
+        _audit(bot, group_id, "sanction", action=action, user_id=user.id, user_name=user.full_name,
+               username=username or None, automatic=True, system="antispam", reason=reason)
 
     lang = await group_lang(group_id)
     group_tier = _db_module.normalize_tier(await get_group_tier(group_id))
-    ov = await _notice_overrides(group_id, "ban", group_tier)
+    ov = await _notice_overrides(group_id, action, group_tier)
+    length = (f"{duration} min" if duration else ("permanent" if lang != "es" else "permanente")) \
+        if action in ("ban", "mute") else ""
     if ov["text"]:
-        notice = _fill_notice(ov["text"], mention=mention, reason=term, action="BAN") + SVC_SIGNATURE
+        notice = _fill_notice(ov["text"], mention=mention, reason=term, action=action.upper()) + SVC_SIGNATURE
     else:
-        notice = gtx(lang, "blacklist_ban", mention=mention)
+        notice = gtx(lang, _BLACKLIST_ACTION_NOTICE.get(action, "blacklist_advise"), mention=mention, length=length)
     await _send_temp(bot, group_id, notice, ttl=25, media_id=ov["media_id"], media_type=ov["media_type"],
-                     fixed_ttl=ov["fixed_ttl"])
+                     fixed_ttl=ov["fixed_ttl"], reply_markup=_notice_markup(ov))
     return True
 
 
@@ -3762,14 +3836,16 @@ async def group_security_matrix(message: Message, bot: Bot):
 
     # 2b. 🚫 v43 · Doble lista negra de la comunidad (ULTRA PRO). Va ANTES de la lista global: un término de la lista
     #     de baneo expulsa en el acto aunque la palabra también esté en la global (que solo advierte).
-    if await enforce_group_blacklists(bot, message, lower_text, vip_perks=vip_perks, is_edit=is_edit):
+    #     v44 · La lista blanca de la comunidad se descuenta antes de las dos comprobaciones.
+    checked_text = await strip_allowlisted(group_id, lower_text)
+    if await enforce_group_blacklists(bot, message, checked_text, vip_perks=vip_perks, is_edit=is_edit):
         return
 
     # 3. Lista Negra (Blacklist Alfanumérica)
     if not is_threat_detected:
         blacklist = await get_blacklist()
         for b_word in blacklist:
-            if b_word and b_word in lower_text:
+            if b_word and b_word in checked_text:
                 is_threat_detected = True
                 threat_kind = "Blacklisted word"
                 break

@@ -24,6 +24,8 @@ v42: Sincronía con assistant.py v42 — init_db() y la verificación WAL salen 
      mientras se prepara SQLite en el arranque), /health informa de los Centinelas en vivo, nuevo diagnóstico
      GET /api/system/ai-status (solo Arquitectos: Mistral, disyuntores y captura de voz, sin secretos) y apagado
      ordenado: el oyente de activos se retira antes de cerrar los Centinelas y close_all_sentinels() tiene tope.
+v44: Fase 9.1 — /blacklists devuelve y acepta la configuración de la doble lista negra (activar, acción por lista,
+     duración, borrado) y la lista blanca de términos ('allow'); los avisos del bot admiten un botón propio.
 v43: Fase 9 — API de mensajes de servicio (nativos por tipo, avisos del bot, horario de los mensajes del Video Chat),
      doble lista negra por comunidad (ULTRA PRO), enlaces externos de donación (PRO) y donaciones a la plataforma
      (Arquitecto). Las escrituras invalidan las cachés del bot, del Centinela y del router de canales y emiten
@@ -2338,10 +2340,15 @@ async def api_get_group_blacklists(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
-    from database.database import GROUP_BLACKLIST_MAX_PER_LIST, GROUP_BLACKLIST_TERM_RANGE, get_group_blacklists
+    from database.database import (GROUP_ALLOWLIST_MAX, GROUP_BLACKLIST_ACTIONS, GROUP_BLACKLIST_DURATION_RANGE,
+                                   GROUP_BLACKLIST_MAX_PER_LIST, GROUP_BLACKLIST_TERM_RANGE, get_group_allowlist,
+                                   get_group_blacklist_config, get_group_blacklists)
     return JSONResponse(content={
         "status": "success", "chat_id": str(numeric_id), "blacklists": await get_group_blacklists(numeric_id),
-        "options": {"max_per_list": GROUP_BLACKLIST_MAX_PER_LIST, "term_length": list(GROUP_BLACKLIST_TERM_RANGE)},
+        "config": await get_group_blacklist_config(numeric_id), "allowlist": await get_group_allowlist(numeric_id),
+        "options": {"max_per_list": GROUP_BLACKLIST_MAX_PER_LIST, "term_length": list(GROUP_BLACKLIST_TERM_RANGE),
+                    "actions": list(GROUP_BLACKLIST_ACTIONS), "duration_range": list(GROUP_BLACKLIST_DURATION_RANGE),
+                    "allowlist_max": GROUP_ALLOWLIST_MAX},
         "features": await _v43_feature_flags(user_id, numeric_id),
     }, headers=_NO_STORE)
 
@@ -2353,7 +2360,10 @@ async def api_update_group_blacklists(
     x_telegram_init_data: str = Header(None, alias="x-telegram-init-data"),
     authorization: str = Header(None)
 ):
-    """{action: 'add' | 'remove', list_type?: 'ban' | 'warn' (solo add), terms: [...]} — Dueño · ULTRA PRO (402)."""
+    """
+    {action: 'add' | 'remove', list_type: 'ban' | 'warn' | 'allow', terms: [...]} o {action: 'config', config: {...}}
+    — Dueño · ULTRA PRO (402). 'remove' sin list_type (o 'ban' / 'warn') quita de la doble lista; con 'allow', de la blanca.
+    """
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
@@ -2364,15 +2374,28 @@ async def api_update_group_blacklists(
     terms = body.get("terms")
     if isinstance(terms, str):
         terms = [t for t in re.split(r"[\n,]+", terms) if t.strip()]
+    from database.database import (add_group_allowlist_terms, get_group_allowlist, get_group_blacklist_config,
+                                   remove_group_allowlist_terms, update_group_blacklist_config)
+    list_type = body.get("list_type")
     try:
-        if action == "add":
-            result = await add_group_blacklist_terms(numeric_id, body.get("list_type"), terms, actor_id=user_id)
+        if action == "config":
+            result = {"config": await update_group_blacklist_config(numeric_id, body.get("config"), actor_id=user_id)}
+        elif action == "add" and list_type == "allow":
+            result = await add_group_allowlist_terms(numeric_id, terms, actor_id=user_id)
+        elif action == "remove" and list_type == "allow":
+            result = await remove_group_allowlist_terms(numeric_id, terms)
+        elif action == "add":
+            result = await add_group_blacklist_terms(numeric_id, list_type, terms, actor_id=user_id)
         elif action == "remove":
             result = await remove_group_blacklist_terms(numeric_id, terms)
         else:
-            raise HTTPException(status_code=422, detail="action: use add or remove.")
+            raise HTTPException(status_code=422, detail="action: use add, remove or config.")
     except BunkerValidationError as err:
         raise _v23_validation_error(err)
+    from database.database import get_group_blacklists
+    result.setdefault("lists", await get_group_blacklists(numeric_id))
+    result.setdefault("config", await get_group_blacklist_config(numeric_id))
+    result.setdefault("allowlist", await get_group_allowlist(numeric_id))
     _v43_invalidate(numeric_id)
     _v23_emit(numeric_id, [f"blk_{body.get('list_type') or 'lists'}"])
     logger.info(f"🚫 [Doble Lista Negra] {action} en {numeric_id} por {user_id}: {result.get('added', 0)} nuevos, "
