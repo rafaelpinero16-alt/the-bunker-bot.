@@ -8082,7 +8082,7 @@ SERVICE_DELAY_RANGE = (5, 86400)
 SERVICE_DELAY_CHOICES = (10, 30, 60, 300, 900, 3600)
 BOT_NOTICE_KINDS = ("warn", "mute", "kick", "ban", "advise")
 BOT_NOTICE_BUTTON_LABEL_MAX = 40
-BOT_NOTICE_TTL_RANGE = (0, 86400)            # 0 = permanente · None = TTL de servicio del grupo
+BOT_NOTICE_TTL_RANGE = (-1, 86400)           # v45 · -1 = no publicar (apagado) · 0 = conservar · None = TTL de servicio
 BOT_NOTICE_TEXT_MAX = 900
 MEDIA_TYPES_ALLOWED = ("photo", "video", "animation")
 DONATION_LINKS_MAX = 5
@@ -8098,6 +8098,7 @@ GROUP_BLACKLIST_TERM_RANGE = (2, 64)
 GROUP_BLACKLIST_ACTIONS = ("ban", "kick", "mute", "warn", "advise")
 GROUP_BLACKLIST_DURATION_RANGE = (0, 525600)   # minutos (0 = permanente) para ban / mute; máx. 1 año
 GROUP_ALLOWLIST_MAX = 200
+GROUP_BLACKLIST_BASIC_MAX = 20                 # v45 · lista negra BÁSICA (FREE / PRO): solo la lista de advertencia
 GROUP_BLACKLIST_DEFAULTS = {
     "enabled": True,
     "lists": {
@@ -8112,13 +8113,15 @@ _TG_URL_RE = re.compile(r"^(?:https?://)?(?:t\.me|telegram\.me)/[A-Za-z0-9_+/?=&
 
 # Funciones con muro de pago (se suman al mapa FEATURE_MIN_TIER: la Mini App las bloquea con entitlements).
 V43_FEATURE_MIN_TIER = {
-    "bot_notice_custom": "pro",       # texto / multimedia propios en los avisos del bot + botón de apelación
+    "bot_notice_custom": "pro",       # texto propio en los avisos del bot + botón ⚖️ Apelar (sistema de apelaciones PRO)
+    "bot_notice_media": "ultra_pro",  # v45 · multimedia (foto / GIF / vídeo) + botón propio bajo los avisos del bot
     "vc_message_window": "pro",       # horario de emisión de los mensajes del Video Chat
     "donation_links": "pro",          # enlaces externos de donación
     "double_blacklist": "ultra_pro",  # doble lista negra por comunidad
 }
 V43_FEATURE_LABELS = {
     "bot_notice_custom": "Custom Bot Notices",
+    "bot_notice_media": "Bot Notices with Media & Buttons",
     "vc_message_window": "Video Chat Message Schedule",
     "donation_links": "External Donation Links",
     "double_blacklist": "Double Blacklist",
@@ -8176,6 +8179,7 @@ V43_SETTINGS_COLUMNS = [
     ("vc_msg_end_time", "TEXT"),
     ("vc_msg_interval", "INTEGER DEFAULT 0"),
     ("blacklist_cfg", "TEXT DEFAULT '{}'"),   # v44 · activar / acción / duración / borrado por lista
+    ("cmd_access", "TEXT DEFAULT 'admins'"),  # v45 · quién usa los comandos de moderación: 'admins' | 'owner'
 ]
 
 
@@ -8762,11 +8766,14 @@ def get_group_blacklists(group_id: int) -> dict:
 
 
 @db_async
-def add_group_blacklist_terms(group_id: int, list_type: str, terms: list, actor_id: Optional[int] = None) -> dict:
+def add_group_blacklist_terms(group_id: int, list_type: str, terms: list, actor_id: Optional[int] = None,
+                              max_terms: Optional[int] = None) -> dict:
     """
     Añade términos a una lista (un término solo puede estar en UNA lista: si estaba en la otra, se mueve).
     Devuelve {'lists', 'added', 'moved', 'skipped'}. 422 por tipo, longitud o tope de la lista.
+    v45 · max_terms: tope propio (lista negra BÁSICA de FREE / PRO = GROUP_BLACKLIST_BASIC_MAX).
     """
+    cap = GROUP_BLACKLIST_MAX_PER_LIST if max_terms is None else max(1, min(int(max_terms), GROUP_BLACKLIST_MAX_PER_LIST))
     errors: dict = {}
     if list_type not in GROUP_BLACKLIST_TYPES:
         errors["list_type"] = f"use {', '.join(GROUP_BLACKLIST_TYPES)}."
@@ -8788,13 +8795,13 @@ def add_group_blacklist_terms(group_id: int, list_type: str, terms: list, actor_
     added = moved = skipped = 0
     with _write_transaction() as conn:
         current = _blacklists_sync(conn, gid)
-        room = GROUP_BLACKLIST_MAX_PER_LIST - len(current[list_type])
+        room = cap - len(current[list_type])
         for term in clean_terms:
             if term in current[list_type]:
                 skipped += 1
                 continue
             if room <= 0:
-                raise BunkerValidationError({"terms": f"maximum {GROUP_BLACKLIST_MAX_PER_LIST} terms per list."})
+                raise BunkerValidationError({"terms": f"maximum {cap} terms per list."})
             other = [k for k in GROUP_BLACKLIST_TYPES if k != list_type and term in current[k]]
             conn.execute(
                 "INSERT INTO group_blacklist (group_id, term, list_type, added_by, added_at) VALUES (?, ?, ?, ?, ?) "
@@ -9057,6 +9064,34 @@ def update_vc_message_window(group_id: int, patch: dict, actor_id: Optional[int]
         return _vc_window_sync(conn, gid)
 
 
+# ------------------------------------------------------------------------------------------
+# 👥 v45 · ACCESO A LOS COMANDOS DE MODERACIÓN (/ban /kick /mute /warn /unban /unmute /unwarn /whitelist /blacklist)
+# ------------------------------------------------------------------------------------------
+CMD_ACCESS_MODES = ("admins", "owner")   # admins = admins con «Restringir miembros» (por defecto) · owner = solo el Dueño
+
+
+@db_async
+def get_cmd_access(group_id: int) -> str:
+    with get_db_connection() as conn:
+        with contextlib.suppress(sqlite3.Error):
+            row = conn.execute("SELECT cmd_access FROM group_settings WHERE group_id = ?", (int(group_id),)).fetchone()
+            if row and row[0] in CMD_ACCESS_MODES:
+                return row[0]
+    return "admins"
+
+
+@db_async
+def set_cmd_access(group_id: int, mode: str, actor_id: Optional[int] = None) -> str:
+    if mode not in CMD_ACCESS_MODES:
+        raise BunkerValidationError({"cmd_access": f"use one of: {', '.join(CMD_ACCESS_MODES)}."})
+    gid = int(group_id)
+    with _write_transaction() as conn:
+        conn.execute("INSERT INTO group_settings (group_id) VALUES (?) ON CONFLICT(group_id) DO NOTHING", (gid,))
+        conn.execute("UPDATE group_settings SET cmd_access = ? WHERE group_id = ?", (mode, gid))
+        _touch_config(conn, gid, actor_id)
+    return mode
+
+
 def vc_window_open(cfg: dict, current_hm: str) -> bool:
     """¿Se pueden emitir mensajes del VC a la hora `current_hm` ('HH:MM')? Admite ventanas que cruzan medianoche."""
     if not cfg or not cfg.get("enabled", True):
@@ -9082,6 +9117,7 @@ def get_service_messages_bundle(group_id: int) -> dict:
             "bot_notices": _bot_notice_rules_sync(conn, gid),
             "vc_messages": _vc_window_sync(conn, gid),
             "donation_links": _links_sync(conn, gid),
+            "cmd_access": get_cmd_access.sync(gid),   # v45 · quién usa los comandos de moderación
             "options": {
                 "native_kinds": list(NATIVE_SERVICE_KINDS),
                 "native_actions": list(NATIVE_SERVICE_ACTIONS),
@@ -9093,6 +9129,7 @@ def get_service_messages_bundle(group_id: int) -> dict:
                 "donation_links_max": DONATION_LINKS_MAX,
                 "blacklist_max": GROUP_BLACKLIST_MAX_PER_LIST,
                 "blacklist_actions": list(GROUP_BLACKLIST_ACTIONS),
+                "cmd_access_modes": list(CMD_ACCESS_MODES),
             },
         }
 

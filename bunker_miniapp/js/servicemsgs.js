@@ -31,7 +31,7 @@ const NOTICE_KINDS = ['warn', 'mute', 'kick', 'ban', 'advise'];
 const BL_ACTIONS = ['ban', 'kick', 'mute', 'warn', 'advise'];
 const BL_DURATIONS = [0, 60, 1440, 10080, 43200];   // minutos · 0 = permanente
 const DELAYS = CONFIG.SERVICE_MSGS?.DELAYS || [10, 30, 60, 300, 900, 3600];
-const NOTICE_TTLS = CONFIG.SERVICE_MSGS?.NOTICE_TTLS || [null, 10, 30, 60, 300, 0];
+const NOTICE_TTLS = CONFIG.SERVICE_MSGS?.NOTICE_TTLS || [null, 10, 30, 60, 300, 0, -1];   // v45 · -1 = no publicar
 const VC_INTERVALS = CONFIG.SERVICE_MSGS?.VC_INTERVALS || [0, 30, 60, 120, 300, 600];
 const LINKS_MAX = 5;
 
@@ -47,9 +47,14 @@ const TEXTS = {
         k_join: '👋 Joins', k_leave: '🚪 Leaves', k_videochat: '🎙️ Video chat started / ended', k_vc_invite: '📨 Video chat invitations',
         k_boost: '🚀 Boosts', k_pinned: '📌 Pins', k_chat_info: '🖼️ Title / photo',
         a_keep: 'Keep', a_delete: 'Delete now', a_delay: 'Delete after…',
-        notices_title: 'Bot notices', notices_hint: '«Default» uses the group\'s service TTL; «Pinned» never deletes.',
+        notices_title: 'Bot sanction notices', notices_hint: 'For each notice: 🟢 Keep (stays in the chat), 🔴 Don\'t post (silent sanction) or ⏳ auto-delete after a time («Default» = the group\'s service TTL). FREE: official text · PRO: your own text + ⚖️ Appeal · ULTRA PRO: plus media and your own button.',
         n_warn: '⚠️ Warning', n_mute: '🔇 Mute', n_kick: '👢 Kick', n_ban: '🚫 Ban', n_advise: '📢 Notice',
-        ttl_default: 'Default', ttl_pinned: 'Pinned',
+        ttl_default: '⏳ Default', ttl_pinned: '🟢 Keep', ttl_off: '🔴 Don\'t post', ttl_after: '⏳ {d}',
+        media_ultra: '💎 Media and your own button under each notice are ULTRA PRO.',
+        acc_title: '👥 Who can use moderation commands', acc_hint: '/ban /kick /mute /warn /unban /unmute /unwarn /whitelist /blacklist. Only the Owner can change this. In «Owner only» mode anonymous admins are blocked too.',
+        acc_admins: '🛡️ Admins with «Restrict members»', acc_owner: '👑 Owner only',
+        bl_basic_title: '📛 Basic blacklist 🆓', bl_basic_hint: 'Up to {max} words. Whoever writes one loses the message and gets a warning (the ⚠️ Warnings ladder decides the final sanction). From the group: /blacklist word.',
+        bl_basic_list: '⚠️ Banned words (delete + warn)', bl_basic_upsell: '💎 ULTRA PRO turns it into the Double Blacklist: a ban list and a warn list of 200 words each, an action per list with duration and deletion, and an allowlist.',
         btn_title: 'Button under the notice', btn_label: 'Button text', btn_url: 'https://… or t.me/…', btn_clear: 'Remove button',
         btn_hint: 'For example «📜 Rules». The ⚖️ Appeal button is added separately.',
         media_on: '🖼️ Media set from the bot', media_clear: 'Remove media', media_hint: 'To add a photo, video or GIF: bot → Group Settings → 📨 Service messages → 🤖 Bot notices → ✍️.',
@@ -82,9 +87,14 @@ const TEXTS = {
         k_join: '👋 Entradas', k_leave: '🚪 Salidas', k_videochat: '🎙️ Videochat abierto / cerrado', k_vc_invite: '📨 Invitaciones al videochat',
         k_boost: '🚀 Impulsos', k_pinned: '📌 Fijados', k_chat_info: '🖼️ Título / foto',
         a_keep: 'Mantener', a_delete: 'Borrar ya', a_delay: 'Borrar a los…',
-        notices_title: 'Avisos del bot', notices_hint: '«Por defecto» usa el TTL de servicio del grupo; «Fijo» no se borra nunca.',
+        notices_title: 'Avisos de sanción del bot', notices_hint: 'Para cada aviso: 🟢 Conservar (se queda en el chat), 🔴 No publicar (sanción en silencio) o ⏳ auto-eliminar tras un tiempo («Por defecto» = TTL de servicio del grupo). FREE: texto oficial · PRO: texto propio + ⚖️ Apelar · ULTRA PRO: además multimedia y botón propio.',
         n_warn: '⚠️ Advertencia', n_mute: '🔇 Silencio', n_kick: '👢 Expulsión', n_ban: '🚫 Baneo', n_advise: '📢 Aviso',
-        ttl_default: 'Por defecto', ttl_pinned: 'Fijo',
+        ttl_default: '⏳ Por defecto', ttl_pinned: '🟢 Conservar', ttl_off: '🔴 No publicar', ttl_after: '⏳ {d}',
+        media_ultra: '💎 La multimedia y el botón propio bajo cada aviso son ULTRA PRO.',
+        acc_title: '👥 Quién puede usar los comandos de moderación', acc_hint: '/ban /kick /mute /warn /unban /unmute /unwarn /whitelist /blacklist. Solo el Dueño puede cambiarlo. En modo «Solo el Dueño» también se bloquean los admins anónimos.',
+        acc_admins: '🛡️ Admins con «Restringir miembros»', acc_owner: '👑 Solo el Dueño',
+        bl_basic_title: '📛 Lista negra básica 🆓', bl_basic_hint: 'Hasta {max} palabras. Quien escribe una pierde el mensaje y recibe una advertencia (la escalera de ⚠️ Advertencias decide la sanción final). Desde el grupo: /blacklist palabra.',
+        bl_basic_list: '⚠️ Palabras prohibidas (borrar + advertir)', bl_basic_upsell: '💎 ULTRA PRO la convierte en la Doble Lista Negra: una lista de baneo y otra de advertencia de 200 palabras cada una, una acción por lista con duración y borrado, y lista blanca.',
         btn_title: 'Botón bajo el aviso', btn_label: 'Texto del botón', btn_url: 'https://… o t.me/…', btn_clear: 'Quitar botón',
         btn_hint: 'Por ejemplo «📜 Normas». El botón ⚖️ Apelar se añade aparte.',
         media_on: '🖼️ Multimedia fijada desde el bot', media_clear: 'Quitar multimedia', media_hint: 'Para añadir foto, vídeo o GIF: bot → Configuración de grupos → 📨 Mensajes de servicio → 🤖 Avisos del bot → ✍️.',
@@ -367,11 +377,12 @@ class ServiceMessagesConsole {
         ]);
     }
 
-    renderNotices(notices, busy, paid) {
+    renderNotices(notices, busy, paid, ultra = false) {
         const items = notices.notices || {};
+        const ttlLabel = v => (v === null ? t('ttl_default') : v === 0 ? t('ttl_pinned') : v < 0 ? t('ttl_off') : t('ttl_after', { d: fmtSecs(v) }));
         const rows = NOTICE_KINDS.map(kind => {
             const item = items[kind] || {};
-            const ttlSel = select(NOTICE_TTLS.map(v => [v, v === null ? t('ttl_default') : (v === 0 ? t('ttl_pinned') : fmtSecs(v))]),
+            const ttlSel = select(NOTICE_TTLS.map(v => [v, ttlLabel(v)]),
                 item.ttl, value => this.saveMessages({ bot_notices: { notices: { [kind]: { ttl: value === '' ? null : Number(value) } } } }), busy);
             const block = [h('div', { class: 'flex items-center justify-between gap-2' }, [
                 h('span', { class: 'text-[11px] font-bold text-theme-main' }, t(`n_${kind}`)), ttlSel])];
@@ -388,7 +399,7 @@ class ServiceMessagesConsole {
                         h('button', { type: 'button', class: `${CLS.btn} border-cyan-400/40 bg-cyan-400/10 text-cyan-300`, disabled: busy,
                             onclick: () => this.saveMessages({ bot_notices: { notices: { [kind]: { text: (area.value || '').trim() || null } } } }) },
                         t('save')),
-                        item.media_id
+                        !ultra ? h('p', { class: CLS.muted }, t('media_ultra')) : item.media_id
                             ? h('div', { class: 'flex items-center justify-between gap-2' }, [
                                 h('span', { class: 'text-[9px] font-bold text-emerald-300' }, t('media_on')),
                                 h('button', { type: 'button', class: `${CLS.btn} border-red-400/40 bg-red-400/10 text-red-300 shrink-0`, disabled: busy,
@@ -403,7 +414,7 @@ class ServiceMessagesConsole {
                 const bUrl = h('input', { type: 'url', class: CLS.input, maxlength: '512', placeholder: t('btn_url'), disabled: busy,
                     autocomplete: 'off', spellcheck: 'false', oninput: ev => { this.msgs.drafts[urlKey] = ev.target.value; } });
                 bUrl.value = this.msgs.drafts[urlKey] ?? (item.button_url || '');
-                block.push(h('details', { class: 'group' }, [
+                if (ultra) block.push(h('details', { class: 'group' }, [
                     h('summary', { class: 'text-[9px] text-neutral-400 cursor-pointer select-none' }, `🔘 ${t('btn_title')}${item.button_url ? ' ●' : ''}`),
                     h('div', { class: 'space-y-1 pt-1' }, [bLabel, bUrl, h('p', { class: CLS.muted }, t('btn_hint')),
                         h('div', { class: 'flex gap-1.5' }, [
@@ -435,6 +446,17 @@ class ServiceMessagesConsole {
             h('p', { class: CLS.muted }, t('notices_hint')),
             ...rows,
             appeal, paid ? h('p', { class: CLS.muted }, t('appeal_hint')) : this.lockBox('pro'),
+            paid && !ultra ? this.lockBox('ultra_pro') : null,
+        ]);
+    }
+
+    renderCmdAccess(mode, busy) {
+        const sel = select([['admins', t('acc_admins')], ['owner', t('acc_owner')]], mode || 'admins',
+            value => this.saveMessages({ cmd_access: value }), busy);
+        return h('div', { class: CLS.card }, [
+            h('p', { class: 'text-[11px] font-extrabold text-cyan-300' }, t('acc_title')),
+            h('p', { class: CLS.muted }, t('acc_hint')),
+            h('div', { class: 'flex justify-end' }, [sel]),
         ]);
     }
 
@@ -481,8 +503,9 @@ class ServiceMessagesConsole {
         const f = m.features || {};
         return h('div', { class: 'space-y-2' }, [
             this.renderNative(m.data.native || {}, m.busy),
-            this.renderNotices(m.data.bot_notices || {}, m.busy, Boolean(f.bot_notice_custom)),
+            this.renderNotices(m.data.bot_notices || {}, m.busy, Boolean(f.bot_notice_custom), Boolean(f.bot_notice_media)),
             this.renderVc(m.data.vc_messages || {}, m.busy, Boolean(f.vc_message_window)),
+            this.renderCmdAccess(m.data.cmd_access, m.busy),
         ]);
     }
 
@@ -494,7 +517,8 @@ class ServiceMessagesConsole {
         const res = await serviceMessagesService.fetchBlacklists(this.chatId);
         if (!ok(res)) return;
         if (res.__error) this.bl.error = errorText(res);
-        else Object.assign(this.bl, { data: res.blacklists, config: res.config || null, allowlist: res.allowlist || [], features: res.features || {} });
+        else Object.assign(this.bl, { data: res.blacklists, config: res.config || null, allowlist: res.allowlist || [], features: res.features || {},
+            basicMax: Number(res.options?.basic_max) || 20 });
         this.render();
     }
 
@@ -520,7 +544,7 @@ class ServiceMessagesConsole {
         this.render();
     }
 
-    renderList(kind, terms, busy) {
+    renderList(kind, terms, busy, basic = false) {
         const input = h('input', {
             type: 'text', class: `${CLS.input} flex-1 min-w-0`, maxlength: '600', autocomplete: 'off', spellcheck: 'false',
             placeholder: t('bl_placeholder'), value: this.bl.input[kind], disabled: busy,
@@ -542,10 +566,10 @@ class ServiceMessagesConsole {
                 : { action: 'remove', terms: [term] }, () => t('saved')),
         }, '×')])) : [h('span', { class: CLS.muted }, t('bl_empty'))];
         const color = kind === 'ban' ? 'text-red-300' : (kind === 'allow' ? 'text-emerald-300' : 'text-amber-300');
-        const title = t(kind === 'ban' ? 'bl_ban' : (kind === 'allow' ? 'bl_allow' : 'bl_warn'));
+        const title = basic ? t('bl_basic_list') : t(kind === 'ban' ? 'bl_ban' : (kind === 'allow' ? 'bl_allow' : 'bl_warn'));
         return h('div', { class: CLS.card }, [
-            h('p', { class: `text-[11px] font-extrabold ${color}` }, `${title} (${terms.length})`),
-            kind === 'allow' ? null : this.renderRule(kind, busy),
+            h('p', { class: `text-[11px] font-extrabold ${color}` }, `${title} (${terms.length}${basic ? `/${this.bl.basicMax || 20}` : ''})`),
+            kind === 'allow' || basic ? null : this.renderRule(kind, busy),
             h('div', { class: 'flex gap-1.5' }, [input, h('button', {
                 type: 'button', class: `${CLS.btn} border-cyan-400/40 bg-cyan-400/10 text-cyan-300 shrink-0`, disabled: busy, onclick: add,
             }, busy ? '…' : t('bl_add'))]),
@@ -559,11 +583,23 @@ class ServiceMessagesConsole {
         if (!b.data) return this.loadingBox();
         const out = [h('p', { class: 'text-[11px] font-extrabold text-cyan-300' }, `${t('bl_title')} 💎`),
             h('p', { class: CLS.muted }, t('bl_hint'))];
-        if (!b.features?.double_blacklist) {
-            out.push(this.lockBox('ultra_pro'));
-            return h('div', { class: 'space-y-2' }, out);
-        }
         const on = b.config ? b.config.enabled !== false : true;
+        if (!b.features?.double_blacklist) {
+            // v45 · 📛 Lista negra básica (FREE / PRO): una lista de advertencia con tope y acción fija.
+            const max = b.basicMax || 20;
+            return h('div', { class: 'space-y-2' }, [
+                h('p', { class: 'text-[11px] font-extrabold text-cyan-300' }, t('bl_basic_title')),
+                h('p', { class: CLS.muted }, t('bl_basic_hint', { max })),
+                h('button', {
+                    type: 'button', class: `${CLS.chip} w-full ${on ? ON_CLS : OFF_CLS}`, disabled: b.busy, role: 'switch',
+                    'aria-checked': on ? 'true' : 'false',
+                    onclick: () => this.blAction({ action: 'config', config: { enabled: !on } }, () => t('saved')),
+                }, `${on ? '🟢' : '🔴'} ${t('bl_on')}`),
+                this.renderList('warn', (b.data.warn || []).slice(0, max), b.busy, true),
+                h('p', { class: CLS.muted }, t('bl_basic_upsell')),
+                this.lockBox('ultra_pro'),
+            ]);
+        }
         out.push(h('button', {
             type: 'button', class: `${CLS.chip} w-full ${on ? ON_CLS : OFF_CLS}`, disabled: b.busy, role: 'switch',
             'aria-checked': on ? 'true' : 'false',

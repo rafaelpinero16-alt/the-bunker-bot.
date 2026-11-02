@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import html
 import logging
 import time
@@ -38,6 +39,23 @@ FORWARD_VECTOR = "forward_any"
 _cfg_cache: Dict[int, Tuple[float, dict]] = {}     # group_id -> (monotonic_ts, cfg_dict)
 _notice_last: Dict[Tuple[int, int, str], float] = {} # (group_id, admin_id, kind) -> monotonic_ts
 _bg: Set[asyncio.Task] = set()
+
+
+async def _db_call(fn_name: str, *args, **kwargs):
+    """
+    v44.1 · Llama a una función de database.database sea cual sea su forma.
+    Las funciones decoradas con @db_async YA son corrutinas (internamente usan asyncio.to_thread):
+    envolverlas otra vez en asyncio.to_thread devolvía un objeto corrutina SIN esperar, de modo que
+    `cfg.get(...)` lanzaba AttributeError, la cuota de enlaces nunca se aplicaba y get_overview fallaba.
+    Aquí se espera la corrutina directamente; si la función fuese síncrona, se ejecuta en un hilo.
+    """
+    fn = getattr(_db(), fn_name)
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    result = await asyncio.to_thread(fn, *args, **kwargs)
+    if inspect.isawaitable(result):
+        result = await result
+    return result
 
 
 def _db():
@@ -79,12 +97,8 @@ async def get_config(group_id: int) -> dict:
     if hit and now - hit[0] < CFG_TTL_S:
         return hit[1]
     
-    db = _db()
-    # Ejecución asíncrona adaptada para no bloquear el Event Loop con SQLite
-    if hasattr(db, "get_admin_link_quota_config_async"):
-        cfg = await db.get_admin_link_quota_config_async(gid)
-    else:
-        cfg = await asyncio.to_thread(db.get_admin_link_quota_config, gid)
+    # v44.1 · @db_async ya ejecuta SQLite en un hilo: se espera la corrutina directamente.
+    cfg = await _db_call("get_admin_link_quota_config", gid)
 
     if len(_cfg_cache) >= CFG_MAX:
         purge_state()
@@ -167,12 +181,8 @@ def _throttled(group_id: int, admin_id: int, kind: str) -> bool:
 async def _user_lang(user_id: int) -> str:
     """Obtiene el idioma preferido del usuario desde la base de datos."""
     with contextlib.suppress(Exception):
-        db = _db()
-        if hasattr(db, "get_user_lang_async"):
-            stored = await db.get_user_lang_async(int(user_id))
-        else:
-            stored = await asyncio.to_thread(db.get_user_lang, int(user_id))
-        return stored or getattr(db, "DEFAULT_LANG", "es")
+        stored = await _db_call("get_user_lang", int(user_id))
+        return stored or getattr(_db(), "DEFAULT_LANG", "es")
     return "es"
 
 
@@ -279,13 +289,9 @@ async def enforce_admin_link_quota(bot, message, tier: str, *, is_edit: bool = F
         return False
 
     kind = "forward" if promo == {FORWARD_VECTOR} else "link"
-    db = _db()
 
     try:
-        if hasattr(db, "admin_link_quota_consume_async"):
-            result = await db.admin_link_quota_consume_async(group_id, admin_id, message_id=message.message_id, kind=kind)
-        else:
-            result = await asyncio.to_thread(db.admin_link_quota_consume, group_id, admin_id, message_id=message.message_id, kind=kind)
+        result = await _db_call("admin_link_quota_consume", group_id, admin_id, message_id=message.message_id, kind=kind)
     except Exception as ex:
         logger.error(f"❌ [LinkQuota] Consumo de cuota fallido en {group_id}: {ex}")
         return False
@@ -322,15 +328,10 @@ async def enforce_admin_link_quota(bot, message, tier: str, *, is_edit: bool = F
 # --------------------------------------------------------------------------
 async def get_overview(bot, group_id: int) -> dict:
     """Configuración y resumen de uso de cada administrador en las últimas 24 horas."""
-    db = _db()
     gid = int(group_id)
 
-    if hasattr(db, "get_admin_link_quota_config_async"):
-        cfg = await db.get_admin_link_quota_config_async(gid)
-        usage = await db.admin_link_usage_summary_async(gid)
-    else:
-        cfg = await asyncio.to_thread(db.get_admin_link_quota_config, gid)
-        usage = await asyncio.to_thread(db.admin_link_usage_summary, gid)
+    cfg = await _db_call("get_admin_link_quota_config", gid)
+    usage = await _db_call("admin_link_usage_summary", gid)
 
     admins = []
     try:

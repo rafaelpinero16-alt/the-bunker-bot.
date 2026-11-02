@@ -249,13 +249,52 @@ async def _chat_default_permissions(bot: Bot, chat_id: int) -> ChatPermissions:
     return ChatPermissions(**_FULL_CHAT_PERMISSIONS)
 
 
+async def _may_moderate(message: Message, bot: Bot) -> bool:
+    """
+    v45 · ¿El autor del comando puede moderar? Admin anónimo: sí, salvo que el Dueño haya elegido «👑 Solo el Dueño»
+    (Telegram no revela quién escribe como anónimo). Resto: is_operator_admin (creador / Arquitecto / admin con
+    «Restringir miembros», o solo el creador en modo Dueño).
+    """
+    if _is_anonymous_admin(message):
+        return await _cmd_access_mode(message.chat.id) != "owner"
+    return bool(message.from_user) and await is_operator_admin(bot, message.chat.id, message.from_user.id)
+
+
+# 👥 v45 · Quién puede usar los comandos de moderación (📋 Comandos disponibles → 👥 Acceso). Caché corta: el panel del
+# bot y la Mini App llaman a invalidate_cmd_access() al guardar.
+_CMD_ACCESS_CACHE: Dict[int, Tuple[float, str]] = {}
+_CMD_ACCESS_TTL = 30.0
+
+
+def invalidate_cmd_access(chat_id: int) -> None:
+    _CMD_ACCESS_CACHE.pop(int(chat_id), None)
+
+
+async def _cmd_access_mode(chat_id: int) -> str:
+    now = time.monotonic()
+    hit = _CMD_ACCESS_CACHE.get(int(chat_id))
+    if hit and now - hit[0] < _CMD_ACCESS_TTL:
+        return hit[1]
+    try:
+        mode = await _db_module.get_cmd_access(int(chat_id))
+    except Exception:
+        mode = "admins"
+    if len(_CMD_ACCESS_CACHE) > 5000:
+        _CMD_ACCESS_CACHE.clear()
+    _CMD_ACCESS_CACHE[int(chat_id)] = (now, mode)
+    return mode
+
+
 async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     """
     Creador, Arquitecto, administrador anónimo o administrador con el derecho REAL de restringir miembros.
     v25: un "administrador" sin can_restrict_members (p. ej. el título temporal de un pase MicVIP) no modera.
+    v45: si el Dueño eligió «👑 Solo el Dueño», los demás administradores ya no pueden usar los comandos.
     """
-    if is_super_admin(user_id) or user_id == 1087968824:  # Group Anonymous Bot
+    if is_super_admin(user_id):
         return True
+    if user_id == 1087968824:  # Group Anonymous Bot (admin anónimo: Telegram no revela quién es)
+        return await _cmd_access_mode(chat_id) != "owner"
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
     except Exception:
@@ -263,6 +302,8 @@ async def is_operator_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     status = str(getattr(getattr(member, "status", ""), "value", getattr(member, "status", "")) or "")
     if status == "creator":
         return True
+    if await _cmd_access_mode(chat_id) == "owner":
+        return False
     return status == "administrator" and bool(getattr(member, "can_restrict_members", False))
 
 
@@ -534,7 +575,7 @@ async def validate_moderation_target(message: Message, command: CommandObject, b
 
     # Reconocimiento de administradores anónimos en supergrupos
     is_anon = _is_anonymous_admin(message)
-    if not is_anon and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+    if not await _may_moderate(message, bot):
         try:
             await message.delete()
         except Exception:
@@ -803,7 +844,7 @@ async def cmd_unwarn(message: Message, command: CommandObject, bot: Bot):
     lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+    if not await _may_moderate(message, bot):
         try:
             await message.delete()
         except Exception:
@@ -973,8 +1014,22 @@ async def cb_mod_execution(callback: CallbackQuery, bot: Bot):
                 dur = format_duration(minutes, lang)
                 await _edit_cb(callback, t["mute_success"].format(name=target_name, duration=dur))
 
+        # 📣 v45 · Aviso público en el grupo con la configuración de 📨 Mensajes de servicio → 🤖 Avisos del bot
+        #    (duración / conservar / no publicar · texto PRO · multimedia y botón ULTRA PRO).
+        _spawn(_publish_manual_notice(bot, group_id, action, target_id, raw_name, minutes, reason))
+
     except Exception as e:
         await _edit_cb(callback, t["error"].format(error=html.escape(str(e))))
+
+
+async def _publish_manual_notice(bot: Bot, group_id: int, action: str, target_id: int, name: str, minutes: int,
+                                 reason: Optional[str]) -> None:
+    """Delegado perezoso (evita el import circular moderation ↔ groups)."""
+    try:
+        from handlers.groups import publish_manual_sanction_notice
+        await publish_manual_sanction_notice(bot, group_id, action, target_id, name, minutes=minutes, reason=reason)
+    except Exception as ex:
+        logger.debug(f"Aviso público de {action} no publicado en {group_id}: {ex}")
 
 
 # ==========================================
@@ -988,7 +1043,7 @@ async def cmd_unmute(message: Message, command: CommandObject, bot: Bot):
     lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+    if not await _may_moderate(message, bot):
         try:
             await message.delete()
         except Exception:
@@ -1047,7 +1102,7 @@ async def cmd_whitelist(message: Message, command: CommandObject, bot: Bot):
     lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+    if not await _may_moderate(message, bot):
         try:
             await message.delete()
         except Exception:
@@ -1094,7 +1149,7 @@ async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
     lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+    if not await _may_moderate(message, bot):
         try:
             await message.delete()
         except Exception:
@@ -1119,14 +1174,14 @@ async def cmd_unwhitelist(message: Message, command: CommandObject, bot: Bot):
 
 
 _BL_UPSELL = {
-    "en": ("⚫ <b>Community blacklist · ULTRA PRO 💎</b>\n\nSince v44 <code>/blacklist</code> adds words to <b>your "
-           "community's own</b> list (it no longer touches the list shared by every community). This list is an "
-           "<b>ULTRA PRO</b> feature: open the bot in private → <b>⚙️ Group Settings → your group → 💎 ULTRA PRO "
-           "modules</b> to activate it.\n\n🛡️ <i>Cloud Media Management</i>"),
-    "es": ("⚫ <b>Lista negra de la comunidad · ULTRA PRO 💎</b>\n\nDesde la v44 <code>/blacklist</code> añade palabras a "
-           "la lista <b>propia de tu comunidad</b> (ya no toca la lista que comparten todas las comunidades). Esta lista "
-           "es una función <b>ULTRA PRO</b>: abre el bot en privado → <b>⚙️ Ajustes de grupos → tu grupo → 💎 Módulos "
-           "ULTRA PRO</b> para activarla.\n\n🛡️ <i>Cloud Media Management</i>"),
+    "en": ("⚫ <b>Basic blacklist full</b>\n\nOn FREE and PRO your community has a <b>basic blacklist</b> of up to "
+           "{max} words (delete + warn). For 200 words per list, a separate <b>ban list</b>, configurable actions "
+           "(ban / kick / mute / warn / notice) and an allowlist, upgrade to <b>ULTRA PRO 💎 · Double Blacklist</b>: "
+           "bot in private → <b>⚙️ My groups → your group → 💎 ULTRA PRO modules</b>.\n\n🛡️ <i>Cloud Media Management</i>"),
+    "es": ("⚫ <b>Lista negra básica llena</b>\n\nEn FREE y PRO tu comunidad tiene una <b>lista negra básica</b> de hasta "
+           "{max} palabras (borra + advierte). Para 200 palabras por lista, una <b>lista de baneo</b> aparte, acciones "
+           "configurables (ban / kick / mute / advertencia / aviso) y lista blanca, pasa a <b>ULTRA PRO 💎 · Doble Lista "
+           "Negra</b>: bot en privado → <b>⚙️ Mis grupos → tu grupo → 💎 Módulos ULTRA PRO</b>.\n\n🛡️ <i>Cloud Media Management</i>"),
 }
 
 
@@ -1135,7 +1190,8 @@ async def _add_blacklist_word(chat_id: int, operator_id: int, word: str, lang: s
     v44 · Destino del término de /blacklist. Devuelve None si se añadió o el texto a mostrar si no se pudo.
       • Arquitecto → lista negra global (comportamiento anterior, solo para él).
       • Comunidad ULTRA PRO → lista de ADVERTENCIA de la comunidad (borra y advierte; acción configurable en el bot).
-      • Resto → no se añade: se explica cómo activar la lista propia.
+      • v45 · FREE / PRO → la lista negra BÁSICA (la misma lista de advertencia, hasta GROUP_BLACKLIST_BASIC_MAX
+        términos). Si está llena se explica la Doble Lista Negra.
     """
     if is_super_admin(operator_id):
         await add_to_blacklist(word)
@@ -1144,11 +1200,13 @@ async def _add_blacklist_word(chat_id: int, operator_id: int, word: str, lang: s
         tier = _db_module.normalize_tier(await _db_module.get_group_tier(chat_id))
     except Exception:
         tier = "free"
-    if tier != "ultra_pro":
-        return _BL_UPSELL.get(lang, _BL_UPSELL["en"])
+    basic_max = int(getattr(_db_module, "GROUP_BLACKLIST_BASIC_MAX", 20))
     try:
-        await _db_module.add_group_blacklist_terms(chat_id, "warn", [word], actor_id=operator_id or None)
+        await _db_module.add_group_blacklist_terms(chat_id, "warn", [word], actor_id=operator_id or None,
+                                                   max_terms=None if tier == "ultra_pro" else basic_max)
     except Exception as ex:
+        if tier != "ultra_pro" and "maximum" in str(ex):
+            return _BL_UPSELL.get(lang, _BL_UPSELL["en"]).replace("{max}", str(basic_max))
         return f"⚠️ {html.escape(str(ex))[:200]}"
     with contextlib.suppress(Exception):
         from handlers import groups as _groups
@@ -1167,7 +1225,7 @@ async def cmd_blacklist(message: Message, command: CommandObject, bot: Bot):
     lang = _msg_lang(message)
     t = TEXTS[lang]
 
-    if not _is_anonymous_admin(message) and (not message.from_user or not await is_operator_admin(bot, message.chat.id, message.from_user.id)):
+    if not await _may_moderate(message, bot):
         try:
             await message.delete()
         except Exception:

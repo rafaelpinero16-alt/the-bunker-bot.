@@ -124,7 +124,7 @@ export const CONFIG = {
     SERVICE_MSGS: {
         TIMEOUT_MS: 12000,
         DELAYS: [10, 30, 60, 300, 900, 3600],          // segundos de «Borrar a los…» (el servidor admite 5–86400)
-        NOTICE_TTLS: [null, 10, 30, 60, 300, 0],        // null = TTL de servicio del grupo · 0 = fijo
+        NOTICE_TTLS: [null, 10, 30, 60, 300, 0, -1],    // null = TTL de servicio · 0 = conservar · -1 = no publicar (v45)
         VC_INTERVALS: [0, 30, 60, 120, 300, 600]        // separación mínima entre avisos de miembros del VC
     },
     SUPPORT_AI: { TIMEOUT_MS: 30000, MAX_INPUT: 1500, LOG_MAX: 40 },

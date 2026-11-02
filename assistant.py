@@ -4512,6 +4512,21 @@ async def night_mode_autonomous_loop():
         await asyncio.sleep(60)
 
 
+# v44.1 · Grupos con Centinela dedicado (owner_sessions activa) cuyo último arranque falló. Solo en esos casos el
+# Centinela Maestro cubre el grupo como respaldo; el resto de grupos dedicados se dejan a su propia cuenta.
+_dedicated_launch_failed: dict[int, float] = {}
+
+
+async def _dedicated_group_ids() -> set:
+    """IDs de grupo con sesión dedicada activa en la base de datos (vacío si la lectura falla)."""
+    try:
+        rows = await get_all_active_sessions() or []
+        return {int(row[1]) for row in rows}
+    except Exception as e:
+        logger.debug(f"Aviso leyendo sesiones dedicadas para el radar maestro: {e}")
+        return set()
+
+
 async def radar_master_loop():
     """Bucle del maestro con corte automático definitivo ante clave duplicada para evitar colisiones."""
     global assistant_app
@@ -4562,7 +4577,21 @@ async def radar_master_loop():
                     return found
 
                 group_ids = await asyncio.wait_for(_collect_groups(), timeout=MTPROTO_RPC_TIMEOUT * 2)
+                # v44.1 · Un grupo con Centinela dedicado (ULTRA) NO se ocupa con el maestro salvo que su
+                # arranque haya fallado: antes el maestro tomaba el grupo primero y _load_one lo saltaba.
+                dedicated = await _dedicated_group_ids()
+                # Un dedicado registrado pero sin tarea viva (caída de red, monitor terminado) se reintenta aquí;
+                # si vuelve a fallar queda en _dedicated_launch_failed y el maestro lo cubre en este mismo ciclo.
+                orphan = [
+                    g for g in dedicated
+                    if not (active_sentinels.get(g) and active_sentinels[g].get("task") is not None
+                            and not active_sentinels[g]["task"].done())
+                ]
+                if orphan:
+                    await load_all_sentinels()
                 for chat_id in group_ids:
+                    if chat_id in dedicated and chat_id not in _dedicated_launch_failed:
+                        continue
                     lock = _get_launch_lock(chat_id)
                     async with lock:
                         existing = active_sentinels.get(chat_id)
@@ -4678,7 +4707,13 @@ async def register_or_update_sentinel(user_id: int, group_id: int, session_strin
     async with lock:
         await _disconnect_sentinel_unlocked(group_id)
         async with _sentinel_launch_semaphore:
-            return await launch_sentinel_instance(user_id, group_id, session_string, api_id, api_hash)
+            ok = await launch_sentinel_instance(user_id, group_id, session_string, api_id, api_hash)
+        # v44.1 · Mantiene coherente el respaldo del maestro: éxito → el grupo es del dedicado; fallo → el maestro puede cubrirlo.
+        if ok:
+            _dedicated_launch_failed.pop(int(group_id), None)
+        else:
+            _dedicated_launch_failed[int(group_id)] = time.time()
+        return ok
 
 
 async def disconnect_sentinel(group_id: int):
@@ -4898,10 +4933,16 @@ async def load_all_sentinels():
             if existing and existing.get("task") is not None and not existing["task"].done():
                 return
             async with _sentinel_launch_semaphore:
+                ok = False
                 try:
-                    await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash)
+                    ok = bool(await launch_sentinel_instance(u_id, g_id, s_str, a_id, a_hash))
                 except Exception as e:
                     logger.debug(f"Aviso cargando Centinela del grupo {g_id}: {e}")
+                # v44.1 · Si la cuenta dedicada no arrancó, el maestro puede cubrir el grupo como respaldo.
+                if ok:
+                    _dedicated_launch_failed.pop(int(g_id), None)
+                else:
+                    _dedicated_launch_failed[int(g_id)] = time.time()
 
     results = await asyncio.gather(*[
         _load_one(row[0], row[1], row[2], row[3], row[4]) for row in sessions
@@ -5184,13 +5225,16 @@ async def init_assistant_master():
 
     # Los bucles autónomos arrancan ANTES de cargar los Centinelas: si la carga
     # tarda (muchas sesiones / red lenta) el programador y el modo noche no se retrasan.
-    if assistant_app:
-        _spawn(radar_master_loop(), name="radar_master_loop")
     _spawn(vc_scheduler_loop(), name="vc_scheduler_loop")
     _spawn(pending_auth_cleanup_loop(), name="pending_auth_cleanup_loop")
     _spawn(night_mode_autonomous_loop(), name="night_mode_autonomous_loop")
     _spawn(_state_janitor_loop(), name="state_janitor_loop")
+    # v44.1 · ORDEN CORREGIDO: primero los Centinelas dedicados y DESPUÉS el radar del maestro. Antes el radar
+    # arrancaba primero, ocupaba con la cuenta maestra todos sus grupos y _load_one saltaba esos grupos porque
+    # ya había una tarea viva: los Centinelas ULTRA nunca se conectaban donde la cuenta maestra también era miembro.
     await load_all_sentinels()
+    if assistant_app:
+        _spawn(radar_master_loop(), name="radar_master_loop")
 
 
 async def mistral_startup_probe(delay: float = 5.0) -> bool:

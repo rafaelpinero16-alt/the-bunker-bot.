@@ -147,7 +147,14 @@ if USERBOT_ACTION not in ("ban", "mute", "delete"):
 
 WARN_PROGRESSIVE_ATTENUATION = _env_flag("WARN_PROGRESSIVE_ATTENUATION", True)
 RESET_WARNS_AFTER_SANCTION = _env_flag("RESET_WARNS_AFTER_SANCTION", True)
-MEMBER_REGISTRY_DB = os.getenv("MEMBER_REGISTRY_DB", "database/bot_data.db")
+# v44.1 · El padrón de miembros comparte archivo con la base principal. Antes el respaldo fijo
+# "database/bot_data.db" ignoraba DB_PATH: con un volumen de Railway el padrón quedaba en el disco efímero.
+# Prioridad: MEMBER_REGISTRY_DB explícita → DB_PATH efectivo de database.database → valor local.
+MEMBER_REGISTRY_DB = (
+    os.getenv("MEMBER_REGISTRY_DB")
+    or getattr(_db_module, "DB_PATH", None)
+    or "database/bot_data.db"
+)
 
 _BG_TASKS: set = set()
 
@@ -990,6 +997,24 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
         except Exception as ex:
             logger.warning(f"Aviso al enviar bienvenida al grupo {group_id}: {ex}")
 
+        # 🧭 v45 · Recepción FREE en privado: si quien añadió el bot es el creador, recibe AL INSTANTE la tarjeta del
+        #    panel con la explicación de las herramientas FREE y un botón por herramienta (sin tener que pulsar nada en
+        #    el grupo). Si aún no abrió el bot, se queda con el botón «Configurar» publicado en el grupo.
+        if user and promoter_is_creator:
+            _spawn(_dm_free_panel(bot, user, group_id, group_name))
+
+
+async def _dm_free_panel(bot: Bot, user, group_id: int, group_name: str) -> None:
+    try:
+        from handlers import user_private as _up
+        lang = _up.user_lang(user)
+        panel_kb = _up.get_group_panel_keyboard(group_id, lang)
+        panel_txt = _up.group_panel_text(lang, html.escape(group_name or ""))
+        if not await _up.send_card_message(bot, user.id, "security_matrix", lang, panel_kb, caption=panel_txt):
+            await bot.send_message(chat_id=user.id, text=panel_txt, reply_markup=panel_kb, parse_mode="HTML")
+    except Exception as ex:
+        logger.debug(f"[Recepción FREE] No se pudo enviar el panel privado de {group_id} a {getattr(user, 'id', '?')}: {ex}")
+
 # ==========================================
 # 🤖 ADUANA DE SEGURIDAD (CAPTCHA PRO BILINGÜE)
 # ==========================================
@@ -1617,15 +1642,17 @@ async def _notice_overrides(chat_id: int, kind: str, group_tier: str) -> dict:
     """
     rules = await notice_rules(chat_id)
     item = (rules.get("notices") or {}).get(kind) or {}
+    # v45 · Matriz de rangos: FREE = texto oficial · PRO = texto propio · ULTRA PRO = texto + multimedia + botón propio.
+    # Se comprueba también al ENVIAR: si la licencia baja de rango, lo que ya no cubre deja de mostrarse.
     paid = group_tier in ("pro", "ultra_pro", "ultra")
+    ultra = group_tier in ("ultra_pro", "ultra")
     return {
         "fixed_ttl": item.get("ttl"),
         "text": item.get("text") if paid else None,
-        "media_id": item.get("media_id") if paid else None,
-        "media_type": item.get("media_type") if paid else None,
-        # v44 · Botón propio del aviso (PRO+): reglas, canal de apelación externo, soporte…
-        "button_text": item.get("button_text") if paid else None,
-        "button_url": item.get("button_url") if paid else None,
+        "media_id": item.get("media_id") if ultra else None,
+        "media_type": item.get("media_type") if ultra else None,
+        "button_text": item.get("button_text") if ultra else None,
+        "button_url": item.get("button_url") if ultra else None,
     }
 
 
@@ -2586,26 +2613,49 @@ async def speakers_command(message: Message, bot: Bot):
     _spawn(auto_delete_msg(card, await service_ttl(group_id, 60)))
 
 
+def _payments_module():
+    """Import perezoso de handlers.payments (evita ciclos de importación al cargar routers)."""
+    from handlers import payments as _payments
+    return _payments
+
+
+async def _current_speaker_price(group_id: int) -> int:
+    """Tarifa vigente del turno prioritario leída SIEMPRE de la base de datos (nunca del callback_data)."""
+    try:
+        price = int(await get_speaker_price(group_id) or 0)
+    except Exception as e:
+        logger.warning(f"No se pudo leer la tarifa de /speakers de {group_id}: {e}")
+        price = 0
+    return price if price > 0 else 25
+
+
 @router.callback_query(F.data.startswith("speak_buy_"))
 async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
+    # v44.1 · SEGURIDAD: el importe ya NO se toma del callback_data. Un cliente MTProto puede enviar
+    # callback_data arbitrario sobre un mensaje existente («speak_buy_<grupo>_1») y obtener una factura de
+    # 1 Star. Del botón solo se usa el grupo (formato antiguo «speak_buy_<g>_<precio>» sigue aceptándose).
     parts = (callback.data or "").split("_")
     try:
         group_id = int(parts[2])
-        price = int(parts[3])
     except (IndexError, ValueError):
+        await callback.answer()
+        return
+    if group_id >= 0:
         await callback.answer()
         return
     await callback.answer()
     lang = await group_lang(group_id)
+    price = await _current_speaker_price(group_id)
 
     try:
-        await bot.send_invoice(
-            chat_id=callback.from_user.id,
-            title=gtx(lang, "spk_inv_title", signed=False)[:32],
-            description=gtx(lang, "spk_inv_desc", signed=False),
-            payload=f"speak_{group_id}_{callback.from_user.id}",
-            currency="XTR",
-            prices=[LabeledPrice(label=gtx(lang, "spk_inv_label", signed=False), amount=price)],
+        # send_stars_invoice registra la oferta (payload → importe) para que el pre-checkout pueda validarla.
+        await _payments_module().send_stars_invoice(
+            bot,
+            callback.from_user.id,
+            gtx(lang, "spk_inv_title", signed=False)[:32],
+            gtx(lang, "spk_inv_desc", signed=False),
+            f"speak_{group_id}_{callback.from_user.id}",
+            price,
         )
     except Exception as e:
         # Si la factura no se entregó, el usuario no ha iniciado el bot: un segundo DM fallaría
@@ -2623,9 +2673,49 @@ async def speak_buy_callback(callback: CallbackQuery, bot: Bot):
             pass
 
 
+def _parse_speak_payload(payload: str) -> Optional[tuple]:
+    """«speak_<grupo>_<usuario>» → (grupo, usuario). None si el formato no es válido."""
+    try:
+        prefix, group_id_str, user_id_str = (payload or "").split("_")
+        if prefix != "speak":
+            return None
+        group_id, user_id = int(group_id_str), int(user_id_str)
+    except (ValueError, TypeError):
+        return None
+    if group_id >= 0 or user_id <= 0:
+        return None
+    return group_id, user_id
+
+
 @router.pre_checkout_query(F.invoice_payload.startswith("speak_"))
 async def speakers_pre_checkout(pre_checkout_query: PreCheckoutQuery, bot: Bot):
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+    # v44.1 · Antes se aprobaba SIEMPRE (ok=True). Ahora se valida moneda, titular e importe.
+    # Telegram exige responder en < 10 s: la lectura de la tarifa va con timeout.
+    decline_msg = "⚠️ Invoice expired or invalid. Please request a new one from the group."
+    ok = False
+    try:
+        parsed = _parse_speak_payload(pre_checkout_query.invoice_payload)
+        amount = int(pre_checkout_query.total_amount or 0)
+        if parsed and pre_checkout_query.currency == "XTR" and amount >= 1:
+            group_id, payer_id = parsed
+            if pre_checkout_query.from_user.id == payer_id:
+                known = _payments_module()._offer_matches(pre_checkout_query.invoice_payload, amount)
+                if known is None:
+                    # Tras un reinicio la oferta no está en memoria: se exige al menos la tarifa vigente.
+                    current = await asyncio.wait_for(_current_speaker_price(group_id), timeout=5)
+                    ok = amount >= current
+                else:
+                    ok = bool(known)
+    except Exception as e:
+        logger.warning(f"Pre-checkout de /speakers rechazado por error: {e}")
+        ok = False
+    try:
+        if ok:
+            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+        else:
+            await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=False, error_message=decline_msg)
+    except Exception as e:
+        logger.error(f"No se pudo responder el pre-checkout de /speakers: {e}")
 
 
 @router.message(F.successful_payment, F.successful_payment.invoice_payload.startswith("speak_"))
@@ -2634,23 +2724,51 @@ async def speakers_successful_payment(message: Message, bot: Bot):
     if payment is None or message.from_user is None:
         return
     payload = payment.invoice_payload
-    try:
-        _, group_id_str, user_id_str = payload.split("_")
-        group_id, buyer_id = int(group_id_str), int(user_id_str)
-    except Exception:
+    parsed = _parse_speak_payload(payload)
+    if parsed is None:
         return
+    group_id, buyer_id = parsed
+    charge_id = payment.telegram_payment_charge_id
+    payments = _payments_module()
 
-    stars_paid = payment.total_amount
+    # v44.1 · Idempotencia: Telegram puede reenviar el successful_payment (reinicio, reintento de red).
+    # Antes cada reenvío añadía OTRA entrada a la cola sin cobrar de nuevo.
+    if not await payments.mark_payment_processed(charge_id, message.from_user.id, payload):
+        logger.warning(f"⚠️ [Speakers] Pago duplicado ignorado charge_id={charge_id}")
+        return
+    # v44.1 · Trazabilidad: el cargo entra en el libro mayor de Stars (antes no quedaba registrado).
+    with contextlib.suppress(Exception):
+        await payments.record_star_payment(message)
+
+    stars_paid = int(payment.total_amount or 0)
     full_name = message.from_user.full_name or gtx(await group_lang(group_id), "user", signed=False)
     username = message.from_user.username or ""
 
-    await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
+    try:
+        await add_to_speaker_queue(group_id, buyer_id, full_name, username, stars_paid)
+    except Exception as e:
+        # Sin turno registrado no se puede quedar con las Stars: reembolso automático.
+        logger.error(f"Error encolando speaker {payload!r} (reembolso automático): {e}")
+        with contextlib.suppress(Exception):
+            await payments.process_star_refund(bot, message.from_user.id, charge_id, reason=f"Speaker queue failed: {e}")
+        return
+
     # 🧾 v39 · Auditoría: turno prioritario comprado con Stars.
     _audit(bot, group_id, "speaker_purchase", user=message.from_user, amount=stars_paid,
-           detail=f"charge {payment.telegram_payment_charge_id}")
+           detail=f"charge {charge_id}")
 
     lang = await group_lang(group_id)
-    await message.answer(gtx(lang, "spk_paid_dm", stars=stars_paid), parse_mode="HTML")
+    # v45 · Igual que propinas y MicVIP: SOLO la confirmación y un único botón «🔙 Volver a <grupo>» (un solo uso,
+    #       solo el comprador, se autodestruye). El comprador no ve el menú general del bot.
+    try:
+        title = ""
+        with contextlib.suppress(Exception):
+            title = (await bot.get_chat(group_id)).title or ""
+        markup, token = await payments.build_return_markup(message.from_user.id, group_id, lang, title)
+        sent = await message.answer(gtx(lang, "spk_paid_dm", stars=stars_paid), parse_mode="HTML", reply_markup=markup)
+        await payments.arm_return_message(bot, sent, token)
+    except Exception as ex:
+        logger.debug(f"[Speakers] Confirmación privada no enviada a {message.from_user.id}: {ex}")
     try:
         clean_name = html.escape(full_name)
         notice = await bot.send_message(
@@ -2965,6 +3083,9 @@ async def _send_temp(
     fixed_ttl: Optional[int] = None,
     reply_markup: Optional[InlineKeyboardMarkup] = None
 ) -> None:
+    # v45 · Modo «🔴 Apagado» del aviso (fixed_ttl = -1): la sanción se aplica igual, pero no se publica nada.
+    if fixed_ttl is not None and int(fixed_ttl) < 0:
+        return
     # Anti-reportes: los avisos temporales no son esenciales (presupuesto por minuto; silencio bajo escudo).
     if not raid_shield.notice_allowed(chat_id):
         return
@@ -3192,6 +3313,72 @@ async def enforce_warn_ladder(
     _audit_claim(chat_id, target_id, "removal", "restrict")
     _audit(bot, chat_id, "sanction", action=action, **audit_fields)
     return {"status": "sanctioned", "tier": tier, "strikes": strikes, "limit": limit, "action": action}
+
+
+# ==========================================
+# 📣 v45 · AVISO PÚBLICO DE LAS SANCIONES MANUALES (/ban /kick /mute desde la consola remota)
+# ==========================================
+_MANUAL_NOTICE_TEXTS = {
+    "es": {
+        "ban": "🚫 {mention} fue <b>baneado</b> por un administrador{length}.{reason}",
+        "kick": "👢 {mention} fue <b>expulsado</b> por un administrador.{reason}",
+        "mute": "🔇 {mention} fue <b>silenciado</b> por un administrador{length}.{reason}",
+        "perm": " (permanente)",
+        "for": " durante {d}",
+        "reason": "\nMotivo: <i>{r}</i>",
+    },
+    "en": {
+        "ban": "🚫 {mention} was <b>banned</b> by an administrator{length}.{reason}",
+        "kick": "👢 {mention} was <b>kicked</b> by an administrator.{reason}",
+        "mute": "🔇 {mention} was <b>muted</b> by an administrator{length}.{reason}",
+        "perm": " (permanent)",
+        "for": " for {d}",
+        "reason": "\nReason: <i>{r}</i>",
+    },
+}
+
+
+def _fmt_minutes_short(minutes: int, lang: str) -> str:
+    m = int(minutes or 0)
+    if m >= 1440 and m % 1440 == 0:
+        return f"{m // 1440} " + ("día(s)" if lang == "es" else "day(s)")
+    if m >= 60 and m % 60 == 0:
+        return f"{m // 60} h"
+    return f"{m} min"
+
+
+async def publish_manual_sanction_notice(bot: Bot, chat_id: int, action: str, target_id: int, target_name: str,
+                                         minutes: int = 0, reason: Optional[str] = None) -> None:
+    """
+    v45 · Antes, /ban /kick /mute ejecutados desde la consola remota no dejaban ningún aviso en el grupo (o lo borraban
+    a los pocos segundos). Ahora publican el aviso de la sanción con la MISMA configuración que los automáticos
+    (📨 Mensajes de servicio → 🤖 Avisos del bot): ⏱ duración / conservar / 🔴 no publicar, texto propio (PRO),
+    multimedia y botón propio (ULTRA PRO). Nunca lanza: un fallo del aviso no deshace la sanción.
+    """
+    if action not in ("ban", "kick", "mute"):
+        return
+    try:
+        lang = await group_lang(chat_id)
+        group_tier = _db_module.normalize_tier(await get_group_tier(chat_id))
+        ov = await _notice_overrides(chat_id, action, group_tier)
+        if ov["fixed_ttl"] is not None and int(ov["fixed_ttl"]) < 0:
+            return
+        mention = f'<a href="tg://user?id={int(target_id)}">{html.escape(target_name or str(target_id))}</a>'
+        reason_txt = html.escape((reason or "").strip()[:200])
+        lng = "es" if lang == "es" else "en"
+        texts = _MANUAL_NOTICE_TEXTS[lng]
+        if ov["text"]:
+            notice = _fill_notice(ov["text"], mention=mention, reason=reason_txt, action=action.upper()) + SVC_SIGNATURE
+        else:
+            length = ""
+            if action in ("ban", "mute"):
+                length = texts["perm"] if not minutes else texts["for"].format(d=_fmt_minutes_short(minutes, lang))
+            notice = texts[action].format(mention=mention, length=length,
+                                          reason=texts["reason"].format(r=reason_txt) if reason_txt else "") + SVC_SIGNATURE
+        await _send_temp(bot, chat_id, notice, ttl=25, media_id=ov["media_id"], media_type=ov["media_type"],
+                         fixed_ttl=ov["fixed_ttl"], reply_markup=_notice_markup(ov))
+    except Exception as ex:
+        logger.debug(f"[Aviso manual] No se pudo publicar el aviso de {action} en {chat_id}: {ex}")
 
 
 # ==========================================
@@ -3682,18 +3869,26 @@ async def enforce_group_blacklists(bot: Bot, message: Message, lower_text: str, 
         return False
     if vip_perks and "blacklist" in (vip_perks.get("exempt") or ()):
         return False
-    if not await _is_ultra(group_id):
-        return False
+    ultra = await _is_ultra(group_id)
     cfg = await _cached_v43(_BLACKLIST_CFG_CACHE, group_id, _db_module.get_group_blacklist_config,
                             _db_module.GROUP_BLACKLIST_DEFAULTS)
     if not cfg.get("enabled", True):
         return False
     lists = await _cached_v43(_GROUP_BLACKLIST_CACHE, group_id, _db_module.get_group_blacklists, {"ban": [], "warn": []})
+    if not ultra:
+        # v45 · Lista negra BÁSICA (FREE / PRO): solo la lista de advertencia (hasta GROUP_BLACKLIST_BASIC_MAX
+        # términos) con acción fija «borrar + advertir». La lista de baneo, las acciones configurables y la lista
+        # blanca son de la Doble Lista Negra (ULTRA PRO).
+        basic_max = int(getattr(_db_module, "GROUP_BLACKLIST_BASIC_MAX", 20))
+        lists = {"ban": [], "warn": list(lists.get("warn") or [])[:basic_max]}
     kind, term = match_group_blacklist(lists, lower_text)
     if kind is None:
         return False
 
-    rule = (cfg.get("lists") or {}).get(kind) or {"action": "ban" if kind == "ban" else "warn", "duration": 0, "delete": True}
+    if ultra:
+        rule = (cfg.get("lists") or {}).get(kind) or {"action": "ban" if kind == "ban" else "warn", "duration": 0, "delete": True}
+    else:
+        rule = {"action": "warn", "duration": 0, "delete": True}
     action = rule.get("action", "warn")
     duration = int(rule.get("duration") or 0)
     if rule.get("delete", True):

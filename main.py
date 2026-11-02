@@ -2305,7 +2305,7 @@ async def api_update_service_messages(
     body = payload.get("service_messages", payload) if isinstance(payload, dict) else {}
     if not isinstance(body, dict) or not body:
         raise HTTPException(status_code=422, detail="service_messages: expected an object with at least one field.")
-    unknown = [k for k in body if k not in ("native", "bot_notices", "vc_messages")]
+    unknown = [k for k in body if k not in ("native", "bot_notices", "vc_messages", "cmd_access")]
     if unknown:
         raise HTTPException(status_code=422, detail=f"service_messages.{unknown[0]}: unknown field.")
     # 1. Validación completa ANTES de escribir nada (todo o nada).
@@ -2315,14 +2315,29 @@ async def api_update_service_messages(
         vc = validate_vc_window_patch(body["vc_messages"]) if "vc_messages" in body else None
     except BunkerValidationError as err:
         raise _v23_validation_error(err)
+    # v45 · 👥 Quién usa los comandos de moderación: decisión exclusiva del Dueño (todos los rangos).
+    cmd_access = body.get("cmd_access") if "cmd_access" in body else None
+    if "cmd_access" in body:
+        from database.database import CMD_ACCESS_MODES
+        if cmd_access not in CMD_ACCESS_MODES:
+            raise HTTPException(status_code=422, detail=f"service_messages.cmd_access: use one of {list(CMD_ACCESS_MODES)}.")
+        await assert_chat_ownership(user_id, numeric_id)
     # 2. Muro de pago por parte (el servidor manda; la Mini App solo lo refleja).
     if notices is not None:
-        paid_fields = "appeal_button" in notices or any(
-            k in entry for entry in notices.get("notices", {}).values() for k in ("text", "media_id", "media_type"))
-        if paid_fields:
-            # Texto / multimedia / apelación: decisión del Dueño (igual que en el bot); el TTL lo cambian los admins.
+        entries = list(notices.get("notices", {}).values())
+        # v45 · Matriz de rangos: texto + ⚖️ apelación = PRO · multimedia + botón propio = ULTRA PRO. Quitar (null) un
+        # campo de pago se permite siempre al Dueño para que pueda limpiar lo configurado tras bajar de rango.
+        def _sets(fields: tuple) -> bool:
+            return any(entry.get(k) not in (None, "") for entry in entries for k in fields if k in entry)
+        touches_paid = "appeal_button" in notices or any(
+            k in entry for entry in entries for k in ("text", "media_id", "media_type", "button_text", "button_url"))
+        if touches_paid:
+            # Texto / multimedia / botón / apelación: decisión del Dueño (igual que en el bot); el TTL lo cambian los admins.
             await assert_chat_ownership(user_id, numeric_id)
-            await require_chat_feature(user_id, numeric_id, "bot_notice_custom")
+            if _sets(("text",)) or notices.get("appeal_button") is True:
+                await require_chat_feature(user_id, numeric_id, "bot_notice_custom")
+            if _sets(("media_id", "media_type", "button_text", "button_url")):
+                await require_chat_feature(user_id, numeric_id, "bot_notice_media")
     if vc is not None:
         await require_chat_feature(user_id, numeric_id, "vc_message_window")
     # 3. Escritura.
@@ -2337,6 +2352,13 @@ async def api_update_service_messages(
         if vc is not None:
             await update_vc_message_window(numeric_id, body["vc_messages"], actor_id=user_id)
             changed.append("svcmsg_vc")
+        if cmd_access is not None:
+            from database.database import set_cmd_access
+            await set_cmd_access(numeric_id, cmd_access, actor_id=user_id)
+            changed.append("cmd_access")
+            with contextlib.suppress(Exception):
+                from handlers import moderation as _moderation
+                _moderation.invalidate_cmd_access(numeric_id)
     except BunkerValidationError as err:
         raise _v23_validation_error(err)
     _v43_invalidate(numeric_id)
@@ -2363,11 +2385,17 @@ async def api_get_group_blacklists(
     return JSONResponse(content={
         "status": "success", "chat_id": str(numeric_id), "blacklists": await get_group_blacklists(numeric_id),
         "config": await get_group_blacklist_config(numeric_id), "allowlist": await get_group_allowlist(numeric_id),
-        "options": {"max_per_list": GROUP_BLACKLIST_MAX_PER_LIST, "term_length": list(GROUP_BLACKLIST_TERM_RANGE),
+        "options": {"max_per_list": GROUP_BLACKLIST_MAX_PER_LIST, "basic_max": _BASIC_BL_MAX(),
+                    "term_length": list(GROUP_BLACKLIST_TERM_RANGE),
                     "actions": list(GROUP_BLACKLIST_ACTIONS), "duration_range": list(GROUP_BLACKLIST_DURATION_RANGE),
                     "allowlist_max": GROUP_ALLOWLIST_MAX},
         "features": await _v43_feature_flags(user_id, numeric_id),
     }, headers=_NO_STORE)
+
+
+def _BASIC_BL_MAX() -> int:
+    from database.database import GROUP_BLACKLIST_BASIC_MAX
+    return int(GROUP_BLACKLIST_BASIC_MAX)
 
 
 @api_router.post("/chat/{chat_id}/blacklists")
@@ -2384,8 +2412,8 @@ async def api_update_group_blacklists(
     user_id = require_authenticated_user(x_telegram_init_data, authorization)
     numeric_id = _parse_chat_id(chat_id)
     await assert_chat_ownership(user_id, numeric_id)
-    await require_chat_feature(user_id, numeric_id, "double_blacklist")
-    from database.database import BunkerValidationError, add_group_blacklist_terms, remove_group_blacklist_terms
+    from database.database import (GROUP_BLACKLIST_BASIC_MAX, BunkerValidationError, add_group_blacklist_terms,
+                                   remove_group_blacklist_terms)
     body = payload if isinstance(payload, dict) else {}
     action = body.get("action")
     terms = body.get("terms")
@@ -2394,6 +2422,15 @@ async def api_update_group_blacklists(
     from database.database import (add_group_allowlist_terms, get_group_allowlist, get_group_blacklist_config,
                                    remove_group_allowlist_terms, update_group_blacklist_config)
     list_type = body.get("list_type")
+    # v45 · 📛 Lista negra BÁSICA (todos los rangos): añadir / quitar en la lista de advertencia (tope
+    # GROUP_BLACKLIST_BASIC_MAX) y encenderla / apagarla. La lista de baneo, las acciones, la lista blanca y los 200
+    # términos por lista siguen siendo la Doble Lista Negra (ULTRA PRO, 402).
+    cfg_body = body.get("config") if isinstance(body.get("config"), dict) else None
+    basic_ok = ((action == "add" and list_type == "warn") or (action == "remove" and list_type in (None, "warn"))
+                or (action == "config" and cfg_body is not None and set(cfg_body) <= {"enabled"}))
+    ultra = bool((await _v43_feature_flags(user_id, numeric_id)).get("double_blacklist", False))
+    if not basic_ok:
+        await require_chat_feature(user_id, numeric_id, "double_blacklist")
     try:
         if action == "config":
             result = {"config": await update_group_blacklist_config(numeric_id, body.get("config"), actor_id=user_id)}
@@ -2402,7 +2439,8 @@ async def api_update_group_blacklists(
         elif action == "remove" and list_type == "allow":
             result = await remove_group_allowlist_terms(numeric_id, terms)
         elif action == "add":
-            result = await add_group_blacklist_terms(numeric_id, list_type, terms, actor_id=user_id)
+            result = await add_group_blacklist_terms(numeric_id, list_type, terms, actor_id=user_id,
+                                                     max_terms=None if ultra else GROUP_BLACKLIST_BASIC_MAX)
         elif action == "remove":
             result = await remove_group_blacklist_terms(numeric_id, terms)
         else:
@@ -4548,6 +4586,51 @@ async def _enforce_single_instance(timeout_s: Optional[float] = None) -> None:
     logger.info(f"🔒 [Instancia] Candado exclusivo adquirido: {path}")
 
 
+def _warn_if_db_not_persistent() -> None:
+    """
+    v44.1 · En Railway el disco del contenedor es EFÍMERO: solo el volumen sobrevive a un redeploy. Si hay un volumen
+    montado pero DB_PATH (o el padrón / la analítica) apunta fuera de él, cada despliegue arranca con la base vacía
+    (sesiones de Centinelas, suscripciones, libro de Stars…). No se cambia la ruta automáticamente —podría ocultar
+    datos existentes—: se deja un aviso CRÍTICO inequívoco en el log.
+    """
+    mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if not mount:
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+            logger.critical(
+                "🚨 [Persistencia] Railway sin volumen montado: la base SQLite se perderá en cada redeploy. "
+                "Crea un Volume (p. ej. /data) y define DB_PATH=/data/bot_data.db."
+            )
+        return
+    mount_abs = os.path.realpath(mount)
+    candidates = {"DB_PATH": ""}
+    try:
+        import database.database as _db  # type: ignore[import-not-found]
+        candidates["DB_PATH"] = str(getattr(_db, "DB_PATH", "") or "")
+    except Exception:
+        pass
+    try:
+        from handlers import groups as _groups_mod  # type: ignore[import-not-found]
+        candidates["MEMBER_REGISTRY_DB"] = str(getattr(_groups_mod, "MEMBER_REGISTRY_DB", "") or "")
+    except Exception:
+        pass
+    try:
+        from database import analytics as _analytics_mod  # type: ignore[import-not-found]
+        candidates["ANALYTICS_DB_PATH"] = str(getattr(_analytics_mod, "ANALYTICS_DB_PATH", "") or "")
+    except Exception:
+        pass
+    for name, path in candidates.items():
+        if not path:
+            continue
+        real = os.path.realpath(path)
+        if os.path.commonpath([real, mount_abs]) != mount_abs:
+            logger.critical(
+                f"🚨 [Persistencia] {name}={path!r} está FUERA del volumen {mount!r}: esos datos se borrarán en el "
+                f"próximo redeploy. Define DB_PATH={os.path.join(mount, 'bot_data.db')!r} en las variables de Railway."
+            )
+        else:
+            logger.info(f"💾 [Persistencia] {name} en el volumen: {real}")
+
+
 def _verify_sqlite_wal() -> None:
     """Comprueba (y si falta, activa) WAL y que las conexiones traigan busy_timeout."""
     with get_db_connection() as conn:
@@ -4578,6 +4661,7 @@ async def main():
     # v42 · Fuera del event loop: con el puerto ya abierto, una migración lenta de SQLite no congela /health.
     await asyncio.to_thread(init_db)
     await asyncio.to_thread(_verify_sqlite_wal)
+    _warn_if_db_not_persistent()
     logger.info("🛡️ [Base de Datos]: Inicializada correctamente.")
     # 🏆 v40 · Esquema de la Fase 3 (aditivo) y trabajos masivos que un reinicio dejó a medias.
     try:

@@ -69,7 +69,16 @@ def _env_int(name: str, default: int) -> int:
 
 # Mismo archivo que el padrón de groups.py para que un único snapshot WAL cubra
 # miembros y actividad.
-ANALYTICS_DB_PATH = (os.getenv("ANALYTICS_DB") or os.getenv("MEMBER_REGISTRY_DB") or "database/bot_data.db").strip()
+# v44.1 · Antes el respaldo era "database/bot_data.db" aunque DB_PATH apuntase al volumen de Railway: la analítica se
+# escribía en el disco efímero del contenedor y se perdía en cada redeploy. Ahora sigue la MISMA cadena que
+# database.database.DB_PATH (DB_PATH → DATABASE_PATH → valor local por defecto).
+ANALYTICS_DB_PATH = (
+    os.getenv("ANALYTICS_DB")
+    or os.getenv("MEMBER_REGISTRY_DB")
+    or os.getenv("DB_PATH")
+    or os.getenv("DATABASE_PATH")
+    or "database/bot_data.db"
+).strip()
 ANALYTICS_TZ_NAME = os.getenv("ANALYTICS_TZ", "America/Bogota").strip() or "UTC"
 ANALYTICS_FLUSH_SECONDS = max(1.0, _env_float("ANALYTICS_FLUSH_SECONDS", 3.0))
 ANALYTICS_CACHE_TTL = max(0.0, _env_float("ANALYTICS_CACHE_TTL", 4.0))
