@@ -76,9 +76,13 @@ router = Router()
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
 # ==========================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
 
 # Cuentas de servicio de Telegram: 777000 (canal vinculado), 1087968824 (admin anónimo),
 # 136817688 (publicación como canal). Jamás pueden ser objetivo de una sanción.
@@ -95,10 +99,8 @@ def _spawn(coro) -> asyncio.Task:
 
 
 def is_super_admin(user_id: int) -> bool:
-    try:
-        return int(user_id) in SUPER_ADMIN_IDS
-    except (TypeError, ValueError):
-        return False
+    # v47 · Delegado: Arquitecto (ADMIN_IDS) o Creador Absoluto (OWNER_ID); int o str numérico.
+    return _identity.is_super_admin(user_id)
 
 
 def _msg_lang(message: Message) -> str:

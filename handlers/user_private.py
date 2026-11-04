@@ -535,12 +535,17 @@ async def toggle_group_tip_target(group_id: int, target_id: int) -> None:
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
 # ==========================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    # v47 · Delegado: Arquitecto (ADMIN_IDS) o Creador Absoluto (OWNER_ID); int o str numérico.
+    return _identity.is_super_admin(user_id)
 
 # Cuentas de servicio (Sentinel / userbots / asistentes): inmunes igual que los Arquitectos en toda directiva de moderación.
 RAW_SERVICE_ACCOUNTS = os.getenv("SERVICE_ACCOUNT_IDS", "")

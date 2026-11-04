@@ -136,9 +136,13 @@ def _awaiting_custom_tip(message: Message, bot: Bot) -> bool:
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
 # ==========================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
 
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://the-bunker-bot-bunkerminiapp.vercel.app/").strip()
 
@@ -220,10 +224,8 @@ def is_clone_bot(bot: Bot) -> bool:
 
 
 def is_super_admin(user_id: int) -> bool:
-    try:
-        return int(user_id) in SUPER_ADMIN_IDS
-    except (TypeError, ValueError):
-        return False
+    # v47 · Delegado: Arquitecto (ADMIN_IDS) o Creador Absoluto (OWNER_ID); int o str numérico.
+    return _identity.is_super_admin(user_id)
 
 
 def get_master_bot_username() -> str | None:

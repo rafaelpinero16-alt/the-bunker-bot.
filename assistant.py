@@ -17,6 +17,18 @@ v42: Sesiones MTProto con lista fatal validada (sin UserBannedInChannel), Mistra
      (5 → 60 s) y mapa SSRC continuo para la captura de voz.
 Fase 6: Blindaje técnico y legal — Token-Bucket MTProto (anti-FloodWait), Capa 0 de minimización PII
         antes de Mistral AI y Centinela restringido a escritura exclusiva en grupos (sin DMs).
+v46 (refactor de seguridad y auditoría del Centinela de Videochat):
+  • IDs: ningún ID de administrador queda escrito en el código. Arquitectos = ADMIN_IDS (+ SUPER_ADMIN_IDS) y Creador
+    Absoluto = OWNER_ID (alias CREATOR_ID / BOT_OWNER_ID), siempre con jerarquía máxima (is_owner ⊂ is_super_admin):
+    nunca se le atenúa, silencia, expulsa ni purga desde el Centinela.
+  • Interruptores del Centinela normalizados con _flag_on(): un valor guardado como texto ("0"/"1"), bool o NULL ya no
+    invierte el estado. Corregidos: aviso de cierre programado que ignoraba su interruptor, payload contado como aviso
+    de miembro (consumía la separación mínima), config None → AttributeError en los avisos de reinicio y apertura,
+    Escudo Antinota / AutoLower / Podcast con estado textual y captura de voz arrancada en grupos sin Guardián de voz.
+  • _extract_urls_to_markup: solo http(s) públicos y tg:// (custom), sin credenciales en la URL, sin tocar los
+    atributos href del HTML, sin duplicados, tope de botones y puntuación final recortada.
+  • Excepciones específicas (RPCError / FloodWait / TelegramAPIError / sqlite3.Error / TimeoutError) con traza completa
+    en la cadena de avisos del VC y en el bucle del monitor (con limitador de logs por grupo: sin inundar Railway).
 The Bunker Command OS © 2026 — Cloud Media Management
 """
 from typing import Any, Optional
@@ -31,8 +43,11 @@ import json
 import html
 import inspect
 import re
+import sqlite3
 import weakref
 from datetime import datetime
+from urllib.parse import urlsplit
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram import Client, filters
 from pyrogram.handlers import MessageHandler
@@ -126,7 +141,7 @@ def _resolve_mistral_sdk():
     try:
         from importlib.metadata import version as _pkg_version
         version = _pkg_version("mistralai")
-    except Exception:
+    except (ImportError, LookupError, ValueError):   # PackageNotFoundError hereda de ImportError
         version = ""
     reasons = []
     for module_name in ("mistralai", "mistralai.client", "mistralai.sdk"):
@@ -515,11 +530,54 @@ GUARDIAN_STATES: dict[str, tuple[str, str]] = {
 }
 
 # ==========================================
-# 👑 LISTA BLANCA DE ARQUITECTOS Y SERVICIO
+# 👑 v46 · JERARQUÍA DE IDENTIDADES (100 % desde variables de entorno)
 # ==========================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# · OWNER_ID (alias CREATOR_ID / BOT_OWNER_ID): Creador Absoluto. Un único ID con jerarquía máxima e indiscutible.
+# · ADMIN_IDS (y SUPER_ADMIN_IDS, opcional): Arquitectos, separados por comas, espacios o punto y coma.
+# El Creador Absoluto se incluye SIEMPRE entre los Arquitectos: toda comprobación is_super_admin() le da paso y
+# ninguna acción automática del Centinela puede dirigirse contra él (is_owner()).
+_ID_SPLIT_RE = re.compile(r"[\s,;]+")
+
+
+def _parse_id_list(*env_names: str) -> set[int]:
+    """IDs de usuario positivos de una o varias variables de entorno. Los valores no numéricos se avisan y se ignoran."""
+    ids: set[int] = set()
+    for env_name in env_names:
+        raw = os.getenv(env_name, "") or ""
+        for token in _ID_SPLIT_RE.split(raw.strip()):
+            token = token.strip().strip('"').strip("'")
+            if not token:
+                continue
+            try:
+                value = int(token)
+            except ValueError:
+                logging.getLogger("assistant_radar").warning(
+                    f"⚠️ [Identidades] Valor ignorado en {env_name}: {token!r} (no es un ID numérico).")
+                continue
+            if value > 0:
+                ids.add(value)
+            else:
+                logging.getLogger("assistant_radar").warning(
+                    f"⚠️ [Identidades] ID ignorado en {env_name}: {value} (los usuarios tienen IDs positivos).")
+    return ids
+
+
+def _resolve_owner_id() -> Optional[int]:
+    for env_name in ("OWNER_ID", "CREATOR_ID", "BOT_OWNER_ID"):
+        found = _parse_id_list(env_name)
+        if found:
+            if len(found) > 1:
+                logging.getLogger("assistant_radar").warning(
+                    f"⚠️ [Identidades] {env_name} contiene varios IDs; el Creador Absoluto es uno solo: se usa {min(found)}.")
+            return min(found)
+    return None
+
+
+# v47 · Fuente única compartida con el resto del bot (bunker_identity: mismas reglas de lectura que las funciones de
+#       arriba, que se conservan por compatibilidad). El aviso CRITICAL sin identidades lo emite bunker_identity.
+import bunker_identity as _identity  # noqa: E402
+OWNER_ID: Optional[int] = _identity.OWNER_ID
+SUPER_ADMIN_IDS: set[int] = _identity.SUPER_ADMIN_IDS
 
 SERVICE_ACCOUNT_IDS = {777000, 1087968824, 136817688}
 
@@ -542,11 +600,38 @@ def _spawn(coro, name: Optional[str] = None) -> asyncio.Task:
     return task
 
 
-def is_super_admin(user_id: int) -> bool:
+def is_owner(user_id) -> bool:
+    """Creador Absoluto (OWNER_ID). Jerarquía máxima: está por encima de cualquier Arquitecto o administrador."""
+    if OWNER_ID is None:
+        return False
     try:
-        return int(user_id) in SUPER_ADMIN_IDS
+        return int(user_id) == OWNER_ID
     except (TypeError, ValueError):
         return False
+
+
+def is_super_admin(user_id) -> bool:
+    """Arquitecto (ADMIN_IDS) o Creador Absoluto. Firma y semántica idénticas a versiones anteriores."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    return uid == OWNER_ID or uid in SUPER_ADMIN_IDS
+
+
+def _flag_on(value, default: bool = True) -> bool:
+    """
+    v46 · Interruptor guardado en SQLite → bool, igual que database._as_flag: None/'' → default; 1/'1'/True/'on' → True;
+    0/'0'/False/'off' → False. Antes se comparaba con `== 1` / `== 0` y un valor textual o booleano invertía el estado.
+    """
+    if value is None or value == "":
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    try:
+        return int(value) != 0
+    except (TypeError, ValueError):
+        return str(value).strip().lower() in ("true", "on", "yes", "si", "sí")
 
 
 # ==========================================
@@ -621,10 +706,7 @@ class MTProtoTokenBucket:
                 await asyncio.sleep((1.0 - self._tokens) / self.rate)
 
 
-try:
-    _rpc_buckets = weakref.WeakKeyDictionary()
-except Exception:  # pragma: no cover
-    _rpc_buckets = {}
+_rpc_buckets: Any = weakref.WeakKeyDictionary()   # un bucket por cliente MTProto; se libera con el cliente
 _fallback_bucket: Optional[MTProtoTokenBucket] = None   # bucket compartido de respaldo (se crea al primer uso)
 
 
@@ -818,8 +900,8 @@ def _normalize_hm(value: str, default: str) -> str:
         h, m = int(hours), int(minutes[:2])
         if 0 <= h <= 23 and 0 <= m <= 59:
             return f"{h:02d}:{m:02d}"
-    except Exception:
-        pass
+    except (ValueError, TypeError, AttributeError):
+        pass   # formato no HH:MM → se usa el valor por defecto
     return default
 
 
@@ -1123,12 +1205,18 @@ def _get_launch_lock(group_id: int) -> asyncio.Lock:
     return lock
 
 
+_BAD_TZ_WARNED: set[str] = set()
+
+
 def _get_group_now(tz_name: Optional[str] = None) -> datetime:
     tz_str = tz_name or os.getenv("BOT_TIMEZONE", "America/Bogota")
     try:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo(tz_str))
-    except Exception:
+    except (ImportError, KeyError, ValueError) as tz_err:   # ZoneInfoNotFoundError hereda de KeyError
+        if tz_str not in _BAD_TZ_WARNED:
+            _BAD_TZ_WARNED.add(tz_str)
+            logger.warning(f"⚠️ [Reloj] Zona horaria {tz_str!r} no disponible ({tz_err}); se usa la hora del contenedor.")
         return datetime.now()
 
 
@@ -1191,13 +1279,14 @@ def _night_window_now(start_str: str, end_str: str) -> bool:
 async def _is_night_active(chat_id: int) -> tuple[bool, str]:
     try:
         cfg = await get_night_mode_config(chat_id)
-        if not cfg or cfg.get("status") != 1:
+        if not cfg or not _flag_on(cfg.get("status"), False):
             return False, "disabled"
         start_str = cfg.get("start", "22:00")
         end_str = cfg.get("end", "06:00")
         in_night = _night_window_now(start_str, end_str)
         return in_night, "night" if in_night else "day"
-    except Exception:
+    except _CFG_READ_ERRORS as ex:
+        logger.warning(f"⚠️ [Modo Nocturno] Configuración ilegible en {chat_id}: {ex}")
         return False, "error"
 
 
@@ -1215,26 +1304,120 @@ URL_BUTTON_LABELS: dict[str, dict[str, str]] = {
 }
 
 
+# v46 · Enlaces → botones, con validación estricta.
+URL_BUTTONS_MAX = 8                       # botones generados a partir del texto (Telegram limita el teclado a 100)
+URL_MAX_LENGTH = 2048
+_URL_TRAILING_PUNCT = ".,;:!?…»”’\"'"
+_TAG_OR_URL_RE = re.compile(r"(<[^>]*>)|(https?://[^\s<>\"']+)", re.IGNORECASE)
+_HOST_LABEL_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$", re.IGNORECASE)
+_TG_SCHEME_RE = re.compile(r"^tg://[a-z_]+(\?[^\s<>\"']*)?$", re.IGNORECASE)
+_BARE_TME_RE = re.compile(r"^(?:t\.me|telegram\.me)/[^\s<>\"']+$", re.IGNORECASE)
+
+
+def _trim_url_tail(url: str) -> str:
+    """Quita la puntuación final que no forma parte de la URL ("visita https://x.com." → "https://x.com")."""
+    while url and url[-1] in _URL_TRAILING_PUNCT:
+        url = url[:-1]
+    # Paréntesis / corchetes de cierre sin su apertura dentro de la URL: pertenecen a la frase.
+    for opener, closer in (("(", ")"), ("[", "]"), ("{", "}")):
+        while url.endswith(closer) and url.count(closer) > url.count(opener):
+            url = url[:-1]
+    return url
+
+
+def _safe_button_url(raw, allow_tg: bool = False) -> Optional[str]:
+    """
+    URL apta para un botón inline o None. Solo http(s) con un host de verdad (sin espacios, sin «usuario@host» —el
+    truco https://t.me@sitio-falso—, sin puertos absurdos) y, si allow_tg, deep links tg:// y t.me/… sin esquema.
+    Rechaza javascript:, data:, file:, intent:, etc. (Telegram rechazaría además el envío completo del aviso).
+    """
+    if not isinstance(raw, str):
+        return None
+    url = raw.strip()
+    if not url or len(url) > URL_MAX_LENGTH or any(ch.isspace() for ch in url):
+        return None
+    if allow_tg and _BARE_TME_RE.match(url):
+        url = "https://" + url
+    if allow_tg and _TG_SCHEME_RE.match(url):
+        return url
+    try:
+        parts = urlsplit(url)
+        port = parts.port   # ValueError si el puerto no es numérico o está fuera de rango
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        return None
+    if "@" in parts.netloc or parts.username or parts.password:
+        return None
+    host = (parts.hostname or "").rstrip(".")
+    if not host or "." not in host:
+        return None
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        return None
+    ascii_host = host.encode("idna").decode("ascii")
+    if not all(_HOST_LABEL_RE.match(label) for label in ascii_host.split(".")):
+        return None
+    if port is not None and not (0 < port < 65536):
+        return None
+    return url
+
+
 def _extract_urls_to_markup(text: str, custom_btn_text: Optional[str] = None, custom_btn_url: Optional[str] = None,
                             lang: str = "en"):
+    """
+    Convierte los enlaces sueltos del aviso en botones y devuelve (texto_limpio, markup | None). Firma sin cambios.
+    v46 · Robustez: (1) los enlaces dentro de etiquetas HTML (<a href="…">) no se tocan ni se arrancan del atributo;
+    (2) solo URLs válidas por _safe_button_url (las inválidas se quedan en el texto, sin botón); (3) sin duplicados y
+    con tope URL_BUTTONS_MAX; (4) la URL personalizada del operador se valida (admite tg:// y t.me/…) y, si no es
+    válida, se registra y se omite en lugar de hacer fallar el envío del aviso.
+    """
+    text = text or ""
     labels = URL_BUTTON_LABELS.get(_norm_lang(lang), URL_BUTTON_LABELS["en"])
-    buttons = []
-    if custom_btn_url:
-        label = custom_btn_text if custom_btn_text else labels["official"]
-        buttons.append([InlineKeyboardButton(text=label, url=custom_btn_url.strip())])
+    buttons: list = []
+    seen: set = set()
 
-    url_pattern = re.compile(r'(?<!href=["\'])(https?://[^\s<>"\']+)')
-    found_urls = url_pattern.findall(text)
+    safe_custom = _safe_button_url(custom_btn_url, allow_tg=True) if custom_btn_url else None
+    if custom_btn_url and not safe_custom:
+        logger.warning(f"⚠️ [Radar] URL del botón personalizado descartada por insegura o malformada: {str(custom_btn_url)[:120]!r}")
+    if safe_custom:
+        label = (custom_btn_text or "").strip()[:64] or labels["official"]
+        buttons.append([InlineKeyboardButton(text=label, url=safe_custom)])
+        seen.add(safe_custom)
 
-    cleaned_text = text
-    for i, u in enumerate(found_urls):
-        cleaned_text = cleaned_text.replace(u, "").strip()
-        if not custom_btn_url or u != custom_btn_url:
-            btn_title = (labels["numbered"].format(n=i + 1) if len(found_urls) > 1
-                         else (custom_btn_text if custom_btn_text else labels["open"]))
-            buttons.append([InlineKeyboardButton(text=btn_title, url=u)])
+    found: list = []
+    pieces: list = []
+    last = 0
+    for match in _TAG_OR_URL_RE.finditer(text):
+        if match.group(1):          # etiqueta HTML completa: se conserva tal cual (incluido su href)
+            continue
+        raw_url = match.group(2)
+        url = _trim_url_tail(raw_url)
+        safe = _safe_button_url(url)
+        if not safe:
+            continue                # URL dudosa: se queda como texto, sin botón
+        pieces.append(text[last:match.start(2)])
+        pieces.append(raw_url[len(url):])   # la puntuación recortada vuelve a la frase
+        last = match.end(2)
+        if safe not in seen:
+            seen.add(safe)
+            found.append(safe)
+    pieces.append(text[last:])
+    cleaned_text = "".join(pieces)
 
-    cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text).strip()
+    extra = found[:URL_BUTTONS_MAX]
+    if len(found) > URL_BUTTONS_MAX:
+        logger.info(f"ℹ️ [Radar] Aviso con {len(found)} enlaces: solo los {URL_BUTTONS_MAX} primeros se convierten en botón.")
+    for i, url in enumerate(extra):
+        if len(extra) > 1:
+            btn_title = labels["numbered"].format(n=i + 1)
+        else:
+            btn_title = (custom_btn_text or "").strip()[:64] if (custom_btn_text and not safe_custom) else labels["open"]
+        buttons.append([InlineKeyboardButton(text=btn_title, url=url)])
+
+    cleaned_text = re.sub(r"[ \t]+\n", "\n", cleaned_text)
+    cleaned_text = re.sub(r"\n{3,}", "\n\n", cleaned_text).strip()
     markup = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
     return cleaned_text, markup
 
@@ -1245,8 +1428,11 @@ def build_vc_moderation_keyboard(chat_id: int, bot_username: str, lang: str = "e
     construye SIEMPRE el botón por defecto (deep-link de MicVIP hacia el bot maestro), para que el aviso nunca
     quede sin su botón interactivo. Solo devuelve None si no hay usuario del bot con el que formar el enlace.
     """
-    btn_label = (custom_btn_text or "").strip() or ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW")
-    custom_url = (custom_btn_url or "").strip()
+    btn_label = ((custom_btn_text or "").strip() or ("⭐ ACTIVAR MICVIP AHORA" if lang == "es" else "⭐ ACTIVATE MICVIP NOW"))[:64]
+    custom_url = _safe_button_url(custom_btn_url, allow_tg=True) if custom_btn_url else None
+    if custom_btn_url and not custom_url:
+        # v46 · Una URL inválida hacía fallar el envío completo del aviso (BUTTON_URL_INVALID): se usa el botón MicVIP.
+        logger.warning(f"⚠️ [Radar] URL personalizada inválida en el aviso de {chat_id}; se usa el botón MicVIP por defecto.")
     if custom_url:
         pay_url = custom_url
     elif bot_username:
@@ -1292,6 +1478,15 @@ async def _resolve_reset_text(chat_id: int):
 # ==========================================
 # 📣 v15 · DESPACHO RESILIENTE DE AVISOS DEL CENTINELA
 # ==========================================
+# v46 · Errores esperables al publicar con un bot de Aiogram: API de Telegram, red y time-out. Cualquier otra cosa es
+# un fallo de programación y se registra con traza completa (logger.exception).
+try:
+    from aiohttp import ClientError as _AiohttpClientError   # aiogram usa aiohttp como sesión por defecto
+except ImportError:   # pragma: no cover - aiohttp siempre llega con aiogram
+    class _AiohttpClientError(Exception):
+        pass
+_BOT_SEND_ERRORS = (TelegramAPIError, _AiohttpClientError, asyncio.TimeoutError, OSError)
+_CFG_READ_ERRORS = (sqlite3.Error, asyncio.TimeoutError, OSError, TypeError, ValueError, KeyError)
 # main.py registra aquí cómo localizar el bot clon activo de una comunidad (assistant no puede importar main).
 _clone_bot_resolver = None
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
@@ -1308,8 +1503,12 @@ async def _resolve_clone_bot(chat_id: int):
         return None
     try:
         return await _clone_bot_resolver(chat_id)
-    except Exception as e:
-        logger.debug(f"[Radar] No se pudo resolver el bot clon de {chat_id}: {e}")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # El resolvedor vive en main.py (código ajeno a este módulo): cualquier fallo se registra con traza y se trata
+        # como «sin clon» para que el aviso siga su cadena de respaldo.
+        logger.exception(f"[Radar] No se pudo resolver el bot clon de {chat_id}")
         return None
 
 
@@ -1321,7 +1520,7 @@ async def _send_text_notice(bot, chat_id: int, text: str, reply_markup):
     """Texto con HTML; si Telegram rechaza el marcado (HTML mal formado en un texto personalizado), en plano."""
     try:
         return await bot.send_message(chat_id=chat_id, text=text[:4000], reply_markup=reply_markup, parse_mode="HTML")
-    except Exception as e:
+    except TelegramBadRequest as e:
         if "parse" not in str(e).lower() and "entit" not in str(e).lower():
             raise
         logger.warning(f"⚠️ [Radar] HTML no válido en el aviso de {chat_id}; se reenvía como texto plano: {e}")
@@ -1342,7 +1541,9 @@ async def _send_notice_with(bot, chat_id: int, text: str, media_id: Optional[str
             if media_type == "video":
                 return await bot.send_video(chat_id=chat_id, video=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
             return await bot.send_animation(chat_id=chat_id, animation=media_id, caption=safe_caption, reply_markup=reply_markup, parse_mode="HTML")
-        except Exception as media_err:
+        except TelegramRetryAfter:
+            raise   # flood de la Bot API: reintentar como texto también fallaría; decide el llamador
+        except _BOT_SEND_ERRORS as media_err:
             logger.warning(f"⚠️ [Radar] Envío multimedia ({media_type}) fallido en {chat_id}: {media_err}. "
                            f"Respaldo inmediato: aviso en texto con su botón.")
     return await _send_text_notice(bot, chat_id, text, reply_markup)
@@ -1372,8 +1573,9 @@ async def _vc_window_cfg(chat_id: int) -> Optional[dict]:
     try:
         tier = (await get_group_tier(chat_id) or "free").lower()
         cfg = await get_vc_message_window(chat_id) if tier in ("pro", "ultra_pro", "ultra") else None
-    except Exception as ex:
-        logger.debug(f"[VC] Ventana de mensajes no leída para {chat_id}: {ex}")
+    except _CFG_READ_ERRORS as ex:
+        # Se reutiliza el último valor conocido: un fallo puntual de SQLite no reabre la emisión que el operador apagó.
+        logger.warning(f"⚠️ [VC] Ventana de mensajes no leída para {chat_id} ({ex}); se usa el último valor conocido.")
         return hit[1] if hit else None
     if len(_vc_window_cache) > 5000:
         _vc_window_cache.clear()
@@ -1388,10 +1590,16 @@ async def vc_notice_allowed(chat_id: int, channel: str = "vc") -> bool:
     cfg = await _vc_window_cfg(chat_id)
     if not cfg:
         return True
+    # v46 · Interruptor 🔴 «Emisión» normalizado (un "0" textual antes se leía como encendido en vc_window_open).
+    if not _flag_on(cfg.get("enabled"), True):
+        return False
     current_hm = _get_group_now().strftime("%H:%M")   # mismo reloj que el modo nocturno (BOT_TIMEZONE)
     if not vc_window_open(cfg, current_hm):
         return False
-    interval = int(cfg.get("interval") or 0)
+    try:
+        interval = int(cfg.get("interval") or 0)
+    except (TypeError, ValueError):
+        interval = 0
     if channel == "vc" and interval > 0:
         last = _vc_last_member_notice.get(chat_id, 0.0)
         if time.monotonic() - last < interval:
@@ -1440,7 +1648,7 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str
                 sent = await _send_notice_with(_global_bot, chat_id, text, media_id, media_type, reply_markup)
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
+            except _BOT_SEND_ERRORS as e:
                 _log_notice_failure("maestro", chat_id, e)
 
         if sent is None:
@@ -1451,15 +1659,16 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str
                     logger.info(f"🧬 [Radar] Aviso publicado en {chat_id} con el bot clon de la comunidad.")
                 except asyncio.CancelledError:
                     raise
-                except Exception as e:
+                except _BOT_SEND_ERRORS as e:
                     _log_notice_failure("clon", chat_id, e)
             elif not _global_bot:
                 logger.debug(f"[Radar] Sin bot maestro ni clon disponible para publicar en {chat_id}.")
     except asyncio.CancelledError:
         raise
-    except Exception as e:
-        # Red de seguridad: un aviso jamás debe romper el bucle de monitoreo que lo invoca.
-        logger.warning(f"⚠️ [Radar] Fallo inesperado despachando aviso en {chat_id}: {e}")
+    except Exception:
+        # Red de seguridad: un aviso jamás debe romper el bucle de monitoreo que lo invoca. Lo que llega aquí NO es
+        # un error esperable de Telegram (esos se tratan arriba): se registra con traza completa.
+        logger.exception(f"❌ [Radar] Fallo inesperado despachando aviso en {chat_id}")
         sent = None
 
     if sent and auto_delete_after and auto_delete_after > 0:
@@ -1467,8 +1676,9 @@ async def _dispatch_radar_notice(chat_id: int, text: str, media_id: Optional[str
             await asyncio.sleep(delay)
             try:
                 await asyncio.wait_for(msg.delete(), timeout=MTPROTO_RPC_TIMEOUT)
-            except Exception:
-                pass
+            except _BOT_SEND_ERRORS as del_err:
+                # Ya borrado a mano, sin permiso de borrar o mensaje de hace > 48 h: no es un fallo del Centinela.
+                logger.debug(f"[Radar] Autoborrado omitido en {chat_id}: {del_err}")
         try:
             _spawn(_auto_delete_notice(sent, int(auto_delete_after)), name=f"notice_autodel:{chat_id}")
         except (TypeError, ValueError):
@@ -1505,18 +1715,13 @@ _vc_notice_pending: dict = {}          # chat_id -> [menciones en espera]
 _vc_notice_flush_tasks: dict = {}      # chat_id -> tarea que enviará el lote
 
 
-def _vc_join_notice_enabled(svc_cfg: dict) -> bool:
-    """Paridad de flags: si "vc_enabled" o "vc_join_enabled" vale 0 explícito, el aviso está apagado."""
-    for key in ("vc_enabled", "vc_join_enabled"):
-        value = svc_cfg.get(key, 1)
-        if value is None:
-            continue
-        try:
-            if int(value) == 0:
-                return False
-        except (TypeError, ValueError):
-            continue
-    return True
+def _vc_join_notice_enabled(svc_cfg: Optional[dict]) -> bool:
+    """
+    Paridad de flags: si "vc_enabled" o "vc_join_enabled" está apagado (0, "0", False, "off"), el aviso está apagado.
+    v46 · Usa _flag_on: antes un "off" o "false" textual se ignoraba (int() fallaba) y el aviso seguía saliendo.
+    """
+    cfg = svc_cfg or {}
+    return all(_flag_on(cfg.get(key), True) for key in ("vc_enabled", "vc_join_enabled"))
 
 
 async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "en"):
@@ -1529,8 +1734,10 @@ async def _dispatch_member_vc_notice(chat_id: int, user_name: str, lang: str = "
         return
     try:
         svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
-    except Exception as cfg_err:
-        logger.debug(f"[Radar] No se pudo leer la configuración de avisos de {chat_id}: {cfg_err}")
+    except _CFG_READ_ERRORS as cfg_err:
+        # Sin configuración legible no se publica (fallo cerrado: nunca se envía un aviso que el operador apagó).
+        logger.error(f"❌ [Radar] Configuración de avisos ilegible en {chat_id}; aviso de entrada omitido: {cfg_err}",
+                     exc_info=True)
         return
     # 🚫 Si el módulo de entrada a VC está desactivado, no se envía absolutamente nada.
     if not _vc_join_notice_enabled(svc_cfg):
@@ -1555,15 +1762,24 @@ async def _flush_member_vc_notice(chat_id: int, lang: str = "en"):
         if not mentions:
             return
         # Se relee la configuración: el operador pudo apagar el aviso durante la ventana de agrupación.
-        svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
+        try:
+            svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
+        except _CFG_READ_ERRORS as cfg_err:
+            logger.error(f"❌ [Radar] Configuración de avisos ilegible en {chat_id}; lote de {len(mentions)} "
+                         f"mención(es) descartado: {cfg_err}", exc_info=True)
+            return
         if not _vc_join_notice_enabled(svc_cfg):
+            logger.debug(f"[Radar] Aviso de entrada al VC apagado en {chat_id}: {len(mentions)} mención(es) descartadas.")
             return
         _vc_notice_locks[chat_id] = time.time()
         await _send_member_vc_notice(chat_id, mentions, svc_cfg, lang)
     except asyncio.CancelledError:
         raise
-    except Exception as e:
-        logger.warning(f"Aviso notificación de entrada a VC en {chat_id}: {e}")
+    except _BOT_SEND_ERRORS as e:
+        logger.warning(f"⚠️ [Radar] Notificación de entrada a VC no publicada en {chat_id}: {e}")
+    except Exception:
+        # Bucle 24/7: un error de programación se registra con traza y el siguiente lote se programa igualmente.
+        logger.exception(f"❌ [Radar] Fallo inesperado en el lote de avisos de entrada a VC de {chat_id}")
     finally:
         if _vc_notice_flush_tasks.get(chat_id) is asyncio.current_task():
             _vc_notice_flush_tasks.pop(chat_id, None)
@@ -1582,17 +1798,19 @@ async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, la
             try:
                 await asyncio.wait_for(deleter.delete_message(chat_id=chat_id, message_id=last_id), timeout=MTPROTO_RPC_TIMEOUT)
                 break
-            except Exception:
-                continue
+            except _BOT_SEND_ERRORS:
+                continue   # lo publicó el otro bot, ya no existe o no hay permiso de borrar
 
     bot_username = await _get_bot_username()
     try:
-        price = await get_mic_vip_price(chat_id) or 50
-    except Exception:
+        price = int(await get_mic_vip_price(chat_id) or 50)
+    except _CFG_READ_ERRORS as ex:
+        logger.warning(f"⚠️ [Radar] Precio MicVIP ilegible en {chat_id} ({ex}); se usa 50.")
         price = 50
     try:
         pct = max(1, min(10, int(await get_autolower_pct(chat_id) or 2)))
-    except Exception:
+    except _CFG_READ_ERRORS as ex:
+        logger.warning(f"⚠️ [Radar] Porcentaje AutoLower ilegible en {chat_id} ({ex}); se usa 2 %.")
         pct = 2
 
     shown = mentions[:VC_NOTICE_MAX_MENTIONS]
@@ -1605,7 +1823,10 @@ async def _send_member_vc_notice(chat_id: int, mentions: list, svc_cfg: dict, la
     custom_text = svc_cfg.get("vc_text")
     custom_btn = svc_cfg.get("vc_btn") or svc_cfg.get("micvip_btn")
     custom_url = svc_cfg.get("vc_btn_url") or svc_cfg.get("micvip_btn_url")
-    autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
+    try:
+        autodel_time = int(svc_cfg.get("vc_autodel", 30) or 30)
+    except (TypeError, ValueError):
+        autodel_time = 30
 
     if custom_text:
         text = (custom_text.replace("{user_name}", user_name).replace("{mention}", user_name)
@@ -1646,8 +1867,8 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
         return
     try:
         svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
-        if svc_cfg.get("vc_welcome_enabled", 1) == 0:
-            return
+        if not _flag_on(svc_cfg.get("vc_welcome_enabled"), True):
+            return   # v46 · interruptor 🔴: no se publica ni se fija nada
 
         bot_username = await _get_bot_username()
         tier = (await get_group_tier(chat_id) or "free").lower()
@@ -1655,7 +1876,10 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
         custom_text = svc_cfg.get("vc_welcome_text")
         custom_btn = svc_cfg.get("vc_welcome_btn")
         custom_url = svc_cfg.get("vc_welcome_btn_url")
-        autodel = int(svc_cfg.get("vc_welcome_autodel", 0) or 0)
+        try:
+            autodel = int(svc_cfg.get("vc_welcome_autodel", 0) or 0)
+        except (TypeError, ValueError):
+            autodel = 0
 
         markup = build_vc_moderation_keyboard(chat_id, bot_username, lang, custom_btn_text=custom_btn, custom_btn_url=custom_url)
         text = custom_text if (tier in ("pro", "ultra_pro") and custom_text) else VC_START_TEXTS.get(lang, VC_START_TEXTS["en"])
@@ -1679,7 +1903,8 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
                     pin_call: Any = pin_method(disable_notification=True)
                     await asyncio.wait_for(pin_call, timeout=MTPROTO_RPC_TIMEOUT)
                     pinned = True
-                except Exception:
+                except _BOT_SEND_ERRORS as pin_err:
+                    logger.debug(f"[Radar] Fijado con el bot emisor no disponible en {chat_id}: {pin_err}")
                     pinned = False
             if not pinned and _global_bot:
                 try:
@@ -1687,13 +1912,17 @@ async def _dispatch_pinned_vc_welcome(chat_id: int, lang: str = "en"):
                         _global_bot.pin_chat_message(chat_id=chat_id, message_id=sent.message_id, disable_notification=True),
                         timeout=MTPROTO_RPC_TIMEOUT
                     )
-                except Exception:
-                    pass
+                except _BOT_SEND_ERRORS as pin_err:
+                    logger.info(f"📌 [Radar] Bienvenida del VC publicada sin fijar en {chat_id} (sin permiso de fijar): {pin_err}")
             _pinned_vc_messages[chat_id] = sent.message_id
     except asyncio.CancelledError:
         raise
-    except Exception as e:
-        logger.warning(f"Aviso bienvenida de VC en {chat_id}: {e}")
+    except _CFG_READ_ERRORS as e:
+        logger.error(f"❌ [Radar] Configuración de la bienvenida del VC ilegible en {chat_id}: {e}", exc_info=True)
+    except _BOT_SEND_ERRORS as e:
+        logger.warning(f"⚠️ [Radar] Bienvenida de VC no publicada en {chat_id}: {e}")
+    except Exception:
+        logger.exception(f"❌ [Radar] Fallo inesperado en la bienvenida de VC de {chat_id}")
 
 
 async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion"):
@@ -1701,10 +1930,11 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
         return None
     try:
         payload_cfg = await get_sentinel_payload_config(chat_id)
-    except Exception:
+    except _CFG_READ_ERRORS as cfg_err:
+        logger.error(f"❌ [Radar] Configuración del Payload ilegible en {chat_id}: {cfg_err}", exc_info=True)
         return None
 
-    if not payload_cfg or payload_cfg.get("enabled") != 1:
+    if not payload_cfg or not _flag_on(payload_cfg.get("enabled"), False):
         return None
     text = payload_cfg.get("text")
     if not text:
@@ -1717,10 +1947,16 @@ async def _dispatch_sentinel_payload(chat_id: int, origin: str = "optimizacion")
 
     cleaned_text, markup = _extract_urls_to_markup(text, payload_cfg.get("button_text"), payload_cfg.get("button_url"),
                                                    lang=await _group_service_lang(chat_id))
+    try:
+        payload_autodel = int(payload_cfg.get("auto_delete_after") or 0) or None
+    except (TypeError, ValueError):
+        payload_autodel = None
+    # v46 · El Payload acompaña al reinicio / apertura: canal "vc_lifecycle". Con "vc" (antes) contaba como aviso de
+    # miembro, consumía la separación mínima y hacía que el siguiente aviso de entrada se descartara.
     sent = await _dispatch_radar_notice(
         chat_id=chat_id, text=cleaned_text, media_id=payload_cfg.get("media_id"),
-        media_type=payload_cfg.get("media_type"), auto_delete_after=payload_cfg.get("auto_delete_after"),
-        reply_markup=markup
+        media_type=payload_cfg.get("media_type"), auto_delete_after=payload_autodel,
+        reply_markup=markup, channel="vc_lifecycle"
     )
     if sent:
         _sentinel_payload_last_sent[chat_id] = now
@@ -2004,7 +2240,8 @@ async def _detect_copilot_trigger(client: Client, message, me_id: int, usernames
         if reply_id:
             try:
                 reply = await asyncio.wait_for(client.get_messages(message.chat.id, reply_id), timeout=5.0)
-            except Exception:
+            except (RPCError, asyncio.TimeoutError, OSError) as reply_err:
+                logger.debug(f"[Centinela IA] Mensaje respondido no recuperable en {message.chat.id}: {reply_err}")
                 reply = None
     if reply is not None and getattr(reply, "from_user", None) is not None:
         replied_to_me = bool(getattr(reply.from_user, "is_self", False) or (me_id and reply.from_user.id == me_id))
@@ -2044,7 +2281,7 @@ def _mistral_retry_after(exc: BaseException) -> Optional[float]:
             continue
         try:
             raw = headers.get("retry-after") or headers.get("Retry-After")
-        except Exception:
+        except (AttributeError, TypeError):
             raw = None
         if raw is None:
             continue
@@ -2491,8 +2728,8 @@ async def _keep_typing(client: Client, chat_id: int, stop_event: asyncio.Event) 
     while not stop_event.is_set():
         try:
             await client.send_chat_action(chat_id, ChatAction.TYPING)
-        except Exception:
-            return
+        except (RPCError, asyncio.TimeoutError, OSError, ConnectionError):
+            return   # indicador «escribiendo…» puramente cosmético
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=4.5)
         except asyncio.TimeoutError:
@@ -2524,8 +2761,11 @@ async def _run_guardian(client: Client, message, chat_id: int, user_id: int, fro
     try:
         if await is_whitelisted(user_id):
             return False
-    except Exception:
-        pass
+    except _CFG_READ_ERRORS as wl_err:
+        # v46 · Fallo cerrado: sin poder confirmar la Whitelist NO se purga (antes se seguía y podía borrar a un miembro
+        # inmune durante un fallo de SQLite).
+        logger.warning(f"⚠️ [Guardián IA] Whitelist ilegible para {user_id} en {chat_id} ({wl_err}); mensaje no evaluado.")
+        return False
 
     g_lang = await _group_service_lang(chat_id)   # v38 · el motivo del aviso sale en el idioma del grupo
     threat = await semantic_scan_content(text_content, custom_prompt=ai_cfg.get("custom_prompt", ""), lang=g_lang)
@@ -2558,7 +2798,8 @@ async def _run_guardian(client: Client, message, chat_id: int, user_id: int, fro
     try:
         import raid_shield as _raid_shield  # type: ignore[import-not-found]  # bajo escudo anti-raid el aviso público no se publica
         notice_ok = _raid_shield.notice_allowed(chat_id)
-    except Exception:
+    except (ImportError, AttributeError, TypeError, ValueError) as rs_err:
+        logger.debug(f"[Guardián IA] raid_shield no disponible ({rs_err}); el aviso se publica.")
         notice_ok = True
     if notice_ok:
         _spawn(_dispatch_radar_notice(chat_id, alert_text, auto_delete_after=await _group_service_ttl(chat_id),
@@ -3089,12 +3330,11 @@ async def _audio_user_is_exempt(chat_id: int, user_id: int) -> bool:
     try:
         if await is_whitelisted(user_id):
             return True
-    except Exception:
-        pass
-    try:
-        return bool(await _vip_role_priority(chat_id, user_id))
-    except Exception:
-        return False
+    except _CFG_READ_ERRORS as wl_err:
+        # v46 · Fallo cerrado: sin poder confirmar la Whitelist, el miembro se trata como exento (no se le modera).
+        logger.warning(f"⚠️ [Audio IA] Whitelist ilegible para {user_id} en {chat_id} ({wl_err}); se considera exento.")
+        return True
+    return bool(await _vip_role_priority(chat_id, user_id))
 
 
 def _escalate_audio_action(chat_id: int, user_id: int, proposed: str) -> str:
@@ -3155,11 +3395,15 @@ async def process_voice_segment(segment: VoiceSegment) -> AudioVerdict:
     chat_id, user_id = int(segment.chat_id), int(segment.user_id)
     if not _is_group_chat_id(chat_id) or user_id <= 0:
         return SAFE_AUDIO_VERDICT
-    if not await _chat_has_ultra_license(chat_id):
+    if not await _audio_guardian_enabled(chat_id):
+        # v46 · Guardián apagado (o licencia vencida) durante la llamada: se descarta el segmento y se detiene la
+        # captura una sola vez por minuto (el monitor vuelve a unirse en silencio con su JoinGroupCall normal).
+        now_stop = time.monotonic()
+        if now_stop - _audio_off_stop_requested.get(chat_id, 0.0) > 60:
+            _audio_off_stop_requested[chat_id] = now_stop
+            _spawn(stop_audio_capture(chat_id), name=f"audio_stop_off:{chat_id}")
         return SAFE_AUDIO_VERDICT
     ai_cfg = await _get_ai_cfg_cached(chat_id)
-    if ai_cfg.get("guardian_status") != 1:
-        return SAFE_AUDIO_VERDICT
     if await _audio_user_is_exempt(chat_id, user_id):
         return SAFE_AUDIO_VERDICT
     now = time.monotonic()
@@ -3224,14 +3468,40 @@ def submit_voice_segment(segment: VoiceSegment) -> bool:
     return True
 
 
+async def _audio_guardian_enabled(chat_id: int) -> bool:
+    """v46 · ¿El Guardián de voz está ENCENDIDO para este grupo? (ULTRA PRO + guardian_status). Fallo cerrado."""
+    try:
+        if not await _chat_has_ultra_license(chat_id):
+            return False
+        ai_cfg = await _get_ai_cfg_cached(chat_id)
+    except _CFG_READ_ERRORS as ex:
+        logger.warning(f"⚠️ [Audio IA] Configuración del Guardián de voz ilegible en {chat_id}: {ex}")
+        return False
+    return _flag_on((ai_cfg or {}).get("guardian_status"), False)
+
+
+_audio_off_stop_requested: dict[int, float] = {}
+
+
 async def start_audio_capture(chat_id: int) -> bool:
-    """Pide al backend que escuche la llamada de la comunidad (lo invoca el monitor al detectar un videochat)."""
+    """
+    Pide al backend que escuche la llamada de la comunidad (lo invoca el monitor al detectar un videochat).
+    v46 · Comprueba que el Guardián de voz del grupo esté ENCENDIDO antes de llamar al backend (el adaptador pytgcalls
+    ya lo verificaba; ahora la regla vive en un único helper compartido y también la respeta cualquier otro backend
+    registrado con register_audio_capture_backend).
+    """
     if not AUDIO_AI_ENABLED or _audio_capture_backend is None:
+        return False
+    if not await _audio_guardian_enabled(int(chat_id)):
+        logger.debug(f"[Audio IA] Guardián de voz apagado en {chat_id}: no se inicia la captura.")
         return False
     try:
         return bool(await _audio_capture_backend(int(chat_id), True))
-    except Exception as exc:
-        logger.warning(f"⚠️ [Audio IA] El backend no pudo iniciar la captura en {chat_id}: {exc}")
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Backend externo (pytgcalls/ntgcalls): sus excepciones no forman una jerarquía estable entre versiones.
+        logger.exception(f"⚠️ [Audio IA] El backend no pudo iniciar la captura en {chat_id}")
         return False
 
 
@@ -3286,7 +3556,7 @@ def _tg_attr(module_paths: tuple[str, ...], name: str) -> Any:
     for path in module_paths:
         try:
             value = getattr(_import_module(path), name, None)
-        except Exception:
+        except (ImportError, AttributeError, OSError):   # ruta inexistente en esta versión o binario nativo ausente
             continue
         if value is not None:
             return value
@@ -3575,10 +3845,8 @@ async def bunker_audio_capture_backend(chat_id: int, start: bool) -> bool:
     if not AUDIO_AI_ENABLED or not TGCALLS_FLAVOR or chat_id in _audio_capture_active:
         return chat_id in _audio_capture_active
     # Las reglas de negocio se verifican ANTES de abrir el audio: sin ULTRA PRO + Guardián no se escucha nada.
-    try:
-        if not await _chat_has_ultra_license(chat_id) or (await _get_ai_cfg_cached(chat_id)).get("guardian_status") != 1:
-            return False
-    except Exception:
+    # v46 · Mismo criterio que start_audio_capture y process_voice_segment (_audio_guardian_enabled, fallo cerrado).
+    if not await _audio_guardian_enabled(chat_id):
         return False
     client = _capture_client_for(chat_id)
     if client is None or not getattr(client, "is_connected", False):
@@ -3697,8 +3965,8 @@ async def _alert_operator_session_revoked(user_id: int, chat_id: int, reason: st
     try:
         chat = await asyncio.wait_for(_global_bot.get_chat(chat_id), timeout=MTPROTO_RPC_TIMEOUT)
         title = chat.title or title
-    except Exception:
-        pass
+    except (*_BOT_SEND_ERRORS, AttributeError) as title_err:
+        logger.debug(f"[Sesión] Título de {chat_id} no disponible para el aviso de revocación: {title_err}")
     code = html.escape(_short_reason(reason))
     tx = SESSION_REVOKED_TEXTS[await _user_dm_lang(int(user_id))]   # v38 · idioma del operador (users.lang) o inglés
     text = tx["dm"].format(title=html.escape(title), chat_id=int(chat_id), code=code)
@@ -3708,7 +3976,8 @@ async def _alert_operator_session_revoked(user_id: int, chat_id: int, reason: st
         if username:
             markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
                 text=tx["btn"], url=f"https://t.me/{username}?start=gclone_{int(chat_id)}")]])
-    except Exception:
+    except (*_BOT_SEND_ERRORS, TypeError, ValueError) as btn_err:
+        logger.debug(f"[Sesión] Botón de reconexión no disponible para {chat_id}: {btn_err}")
         markup = None
     try:
         await asyncio.wait_for(_global_bot.send_message(chat_id=int(user_id), text=text, parse_mode="HTML",
@@ -3841,6 +4110,26 @@ def _is_call_gone_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _CALL_GONE_MARKERS)
 
 
+RADAR_ERROR_LOG_INTERVAL = 60.0
+_radar_error_last_log: dict[tuple, float] = {}
+
+
+def _log_radar_loop_error(chat_id: int, exc: BaseException) -> None:
+    """Registro con limitador para el catch-all del monitor (el bucle 24/7 nunca se interrumpe por un aviso)."""
+    key = (int(chat_id), type(exc).__name__)
+    now = time.monotonic()
+    if now - _radar_error_last_log.get(key, 0.0) < RADAR_ERROR_LOG_INTERVAL:
+        return
+    if len(_radar_error_last_log) > 5000:
+        _radar_error_last_log.clear()
+    _radar_error_last_log[key] = now
+    if isinstance(exc, RPCError):
+        logger.warning(f"⚠️ [Radar] RPC rechazada en el ciclo del grupo {chat_id}: {type(exc).__name__}: {exc}")
+    else:
+        logger.error(f"❌ [Radar] Error inesperado en el ciclo del grupo {chat_id}: {type(exc).__name__}: {exc}",
+                     exc_info=exc)
+
+
 def _call_gone_delay(strikes: int) -> float:
     """5 s → 10 s → 20 s → 40 s → 60 s (tope) + jitter: evita el spin-lock de CPU ante errores persistentes."""
     step = CALL_GONE_BACKOFF_STEPS[max(0, min(int(strikes), len(CALL_GONE_BACKOFF_STEPS) - 1))]
@@ -3963,10 +4252,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
             if current_call and call_start_time > 0:
                 if (time.monotonic() - call_start_time) >= 12600:
                     logger.info(f"🔄 [Optimización Audiovisual] Reinicio preventivo en grupo {chat_id} (Transmisión > 3.5h).")
-                    if _global_bot:
+                    if _has_notice_channel():
                         try:
-                            svc_cfg = await get_sentinel_service_messages_config(chat_id)
-                            if svc_cfg.get("reset_enabled", 1) == 1:
+                            svc_cfg = await get_sentinel_service_messages_config(chat_id) or {}
+                            if _flag_on(svc_cfg.get("reset_enabled"), True):
                                 text, media_id, media_type, btn_text, btn_url, autodel = await _resolve_reset_text(chat_id)
                                 reset_markup = None
                                 if btn_text or btn_url:
@@ -3990,25 +4279,39 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                     reply_markup=final_reset_markup,
                                     channel="vc_lifecycle"
                                 )
-                        except Exception as reset_notice_err:
-                            logger.warning(f"Aviso despachando aviso de reset en {chat_id}: {reset_notice_err}")
+                        except asyncio.CancelledError:
+                            raise
+                        except (*_CFG_READ_ERRORS, *_BOT_SEND_ERRORS) as reset_notice_err:
+                            logger.warning(f"⚠️ [Radar] Aviso de reinicio no publicado en {chat_id}: {reset_notice_err}")
+                        except Exception:
+                            logger.exception(f"❌ [Radar] Fallo inesperado en el aviso de reinicio de {chat_id}")
 
                         try:
                             await _dispatch_sentinel_payload(chat_id, origin="optimizacion_3.5h")
-                        except Exception as payload_err:
-                            logger.debug(f"Aviso despachando payload Ultra Pro en {chat_id}: {payload_err}")
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(f"❌ [Radar] Fallo despachando el Payload ULTRA PRO en {chat_id}")
 
                     try:
                         await _invoke(client, DiscardGroupCall(call=current_call))
-                    except Exception as disc_err:
-                        logger.warning(f"Aviso al cerrar llamada previa: {disc_err}")
+                    except (FloodWait, MTProtoRateLimited):
+                        raise
+                    except (RPCError, asyncio.TimeoutError, OSError) as disc_err:
+                        if is_fatal_session_error(disc_err):
+                            raise
+                        logger.warning(f"⚠️ [Radar] No se pudo cerrar la llamada previa en {chat_id}: {disc_err}")
 
                     await asyncio.sleep(3.0)
 
                     try:
                         await _invoke(client, CreateGroupCall(peer=peer, random_id=random.randint(100000, 2147483647)))
-                    except Exception as create_err:
-                        logger.warning(f"Aviso al reiniciar llamada: {create_err}")
+                    except (FloodWait, MTProtoRateLimited):
+                        raise
+                    except (RPCError, asyncio.TimeoutError, OSError) as create_err:
+                        if is_fatal_session_error(create_err):
+                            raise
+                        logger.warning(f"⚠️ [Radar] No se pudo reabrir la llamada en {chat_id}: {create_err}")
                     # La bienvenida fijada se envía una sola vez cuando el monitor detecta la
                     # llamada nueva (antes se enviaba aquí Y en la detección: mensaje duplicado).
                     last_channel_check = 0
@@ -4024,12 +4327,15 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 if ssrc_read is not None:
                     call_gone_strikes = 0
                 night_active, _ = await _is_night_active(chat_id)
-                autolower_enabled = await get_autolower_status(chat_id)
+                autolower_enabled = _flag_on(await get_autolower_status(chat_id), True)
                 # v8.3: Dinamizar porcentaje según la configuración del grupo (1 a 10%)
-                autolower_pct = await get_autolower_pct(chat_id)
+                try:
+                    autolower_pct = int(await get_autolower_pct(chat_id) or 2)
+                except (TypeError, ValueError):
+                    autolower_pct = 2
                 target_autolower_volume = max(100, min(1000, autolower_pct * 100))
 
-                if autolower_enabled != 1 and not night_active:
+                if not autolower_enabled and not night_active:
                     # Sin Auto-Lower el radar no lee participantes; solo se consulta si
                     # hay un Dashboard conectado escuchando esta sala.
                     if (
@@ -4090,7 +4396,18 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                 active_users = set()
                 _publish_voice_presence(chat_id, participants, users_map, voice_state)
 
-                podcast_cfg = await get_podcast_config(chat_id)
+                # v46 · Configuración normalizada: una clave ausente ya no lanza KeyError en cada ciclo (antes el
+                # monitor quedaba atascado en el catch-all, sin moderar y con un log en DEBUG invisible).
+                raw_podcast = await get_podcast_config(chat_id) or {}
+                try:
+                    duck_volume = max(1, min(20000, int(raw_podcast.get("duck_volume") or 500)))
+                except (TypeError, ValueError):
+                    duck_volume = 500
+                podcast_cfg = {
+                    "status": 1 if _flag_on(raw_podcast.get("status"), False) else 0,
+                    "duck_volume": duck_volume,
+                    "noise_shield": 1 if _flag_on(raw_podcast.get("noise_shield"), True) else 0,
+                }
                 host_is_speaking = False
                 if podcast_cfg["status"] == 1:
                     for p_scan in participants:
@@ -4104,7 +4421,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             host_is_speaking = True
                             break
 
-                screen_shield_on = await get_screen_shield_status(chat_id)
+                screen_shield_on = _flag_on(await get_screen_shield_status(chat_id), True)
 
                 for p in participants:
                     if getattr(p, "left", False):
@@ -4136,8 +4453,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             _sentinel_muted.add((chat_id, u_id))
                         except (FloodWait, MTProtoRateLimited):
                             raise
-                        except Exception:
-                            pass
+                        except (RPCError, asyncio.TimeoutError, OSError) as flag_err:
+                            if _is_call_gone_error(flag_err) or is_fatal_session_error(flag_err):
+                                raise
+                            logger.debug(f"[Radar] Silencio del userbot {u_id} no aplicado en {chat_id}: {flag_err}")
                         continue
 
                     is_admin_or_owner = (
@@ -4168,8 +4487,12 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                         text=SCREEN_SHIELD_ALERT_TEXTS.get(await _group_service_lang(chat_id), SCREEN_SHIELD_ALERT_TEXTS["en"]).format(user_name=user_name),
                                         auto_delete_after=await _group_service_ttl(chat_id)
                                     ))
-                            except Exception as e:
-                                logger.debug(f"Aviso en Escudo Antinota para {u_id} en {chat_id}: {e}")
+                            except (FloodWait, MTProtoRateLimited):
+                                raise
+                            except (RPCError, asyncio.TimeoutError, OSError) as e:
+                                if _is_call_gone_error(e) or is_fatal_session_error(e):
+                                    raise
+                                logger.warning(f"⚠️ [Escudo Antinota] No aplicado a {u_id} en {chat_id}: {e}")
                         continue
                     else:
                         _screen_shield_flagged.pop((chat_id, u_id), None)
@@ -4192,7 +4515,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                                 _micvip_evidence(chat_id, u_id, True)    # v22 · el Centinela aplicó el pase
                             except (FloodWait, MTProtoRateLimited):
                                 raise
-                            except Exception:
+                            except (RPCError, asyncio.TimeoutError, OSError) as vip_err:
+                                if _is_call_gone_error(vip_err) or is_fatal_session_error(vip_err):
+                                    raise
+                                logger.debug(f"[Radar] Volumen MicVIP no aplicado a {u_id} en {chat_id}: {vip_err}")
                                 _micvip_evidence(chat_id, u_id, False)   # v22 · intento fallido, queda auditado
                         else:
                             _micvip_evidence(chat_id, u_id, True)        # v22 · ya estaba al volumen del pase
@@ -4250,7 +4576,9 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             _forbidden_strikes[chat_id] = 0
                         except (FloodWait, MTProtoRateLimited):
                             raise
-                        except Exception as e:
+                        except (RPCError, asyncio.TimeoutError, OSError) as e:
+                            if is_fatal_session_error(e):
+                                raise
                             err_msg = str(e).upper()
                             if "GROUPCALL_FORBIDDEN" in err_msg:
                                 _invalidate_call_rights(chat_id)
@@ -4260,6 +4588,7 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                             elif _is_call_gone_error(e):
                                 call_gone_reason = e
                                 break
+                            logger.debug(f"[Radar] AutoLower no aplicado a {u_id} en {chat_id}: {e}")
                             continue
 
                     # v14 · El aviso de entrada se emite cuando el miembro QUEDA bajo AutoLower, tanto si el radar
@@ -4271,19 +4600,19 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
                         first_name = (html.escape(user_obj.first_name) if (user_obj and getattr(user_obj, "first_name", None))
                                       else f"{USER_FALLBACK_NAME[await _group_service_lang(chat_id)]} {u_id}")
                         user_mention = f'<a href="tg://user?id={u_id}">{first_name}</a>'
-                        if _global_bot:
-                            try:
-                                if noise_spike:
-                                    _spawn(_dispatch_radar_notice(
-                                        chat_id=chat_id,
-                                        text=NOISE_SHIELD_ALERT_TEXTS.get(await _group_service_lang(chat_id), NOISE_SHIELD_ALERT_TEXTS["en"]).format(user_name=user_mention),
-                                        auto_delete_after=await _group_service_ttl(chat_id)
-                                    ))
-                                else:
-                                    _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention,
-                                                                      lang=await _group_service_lang(chat_id)))
-                            except Exception:
-                                pass
+                        # v46 · Antes solo con el bot maestro: una comunidad atendida por su bot clon nunca recibía el
+                        # aviso. _spawn ya registra con traza cualquier fallo de la tarea (no bloquea este bucle).
+                        if _has_notice_channel():
+                            svc_lang = await _group_service_lang(chat_id)
+                            if noise_spike:
+                                _spawn(_dispatch_radar_notice(
+                                    chat_id=chat_id,
+                                    text=NOISE_SHIELD_ALERT_TEXTS.get(svc_lang, NOISE_SHIELD_ALERT_TEXTS["en"]).format(user_name=user_mention),
+                                    auto_delete_after=await _group_service_ttl(chat_id)
+                                ), name=f"noise_notice:{chat_id}")
+                            else:
+                                _spawn(_dispatch_member_vc_notice(chat_id=chat_id, user_name=user_mention, lang=svc_lang),
+                                       name=f"vc_join_notice:{chat_id}")
 
                 if call_gone_reason is not None:
                     await _handle_call_gone(call_gone_reason)
@@ -4334,7 +4663,10 @@ async def monitor_single_group(chat_id: int, peer, client: Client, bot_client_id
             if _is_call_gone_error(loop_err):
                 await _handle_call_gone(loop_err)
                 continue
-            logger.debug(f"Aviso en ciclo de radar del grupo {chat_id}: {loop_err}")
+            # v46 · Antes en DEBUG (invisible en Railway): un error repetido dejaba al Centinela sin moderar en silencio.
+            # Ahora: RPC de Telegram → WARNING; cualquier otro → ERROR con traza completa. Limitado a 1 por tipo de
+            # error y grupo cada RADAR_ERROR_LOG_INTERVAL segundos para no inundar los logs.
+            _log_radar_loop_error(chat_id, loop_err)
             await asyncio.sleep(3)
         await asyncio.sleep(3)
 
@@ -4370,7 +4702,8 @@ async def vc_scheduler_loop():
 
                 try:
                     peer = await asyncio.wait_for(client.resolve_peer(group_id), timeout=MTPROTO_RPC_TIMEOUT)
-                except Exception:
+                except (RPCError, asyncio.TimeoutError, OSError, KeyError, ValueError) as peer_err:
+                    logger.debug(f"[Programador VC] Peer de {group_id} no resoluble en este ciclo: {peer_err}")
                     continue
 
                 if current_day_str not in allowed_days_list:
@@ -4380,14 +4713,17 @@ async def vc_scheduler_loop():
                     try:
                         await _invoke(client, CreateGroupCall(peer=peer, random_id=random.randint(100000, 2147483647)))
                         await update_vc_call_status(group_id, 1)
-                        if _global_bot:
-                            svc_cfg = await get_sentinel_service_messages_config(group_id)
-                            if svc_cfg.get("sched_enabled", 1) == 1:
+                        if _has_notice_channel():
+                            svc_cfg = await get_sentinel_service_messages_config(group_id) or {}
+                            if _flag_on(svc_cfg.get("sched_enabled"), True):
                                 svc_lang = await _group_service_lang(group_id)
                                 sched_text = svc_cfg.get("sched_start_text") or VC_SCHED_MESSAGES_I18N.get(svc_lang, VC_SCHED_MESSAGES_I18N["en"])["start"]
                                 sched_media_id = svc_cfg.get("sched_start_media_id")
                                 sched_media_type = svc_cfg.get("sched_start_media_type")
-                                sched_autodel = int(svc_cfg.get("sched_start_autodel", 0) or 0)
+                                try:
+                                    sched_autodel = int(svc_cfg.get("sched_start_autodel", 0) or 0)
+                                except (TypeError, ValueError):
+                                    sched_autodel = 0
                                 cleaned_sched_text, sched_markup = _extract_urls_to_markup(
                                     sched_text, svc_cfg.get("sched_start_btn"), svc_cfg.get("sched_start_btn_url"),
                                     lang=svc_lang
@@ -4425,9 +4761,17 @@ async def vc_scheduler_loop():
                             await _invoke(client, DiscardGroupCall(call=raw_call_obj))
                         await update_vc_call_status(group_id, 0)
                         # Vía resiliente (maestro → clon); un fallo de Telegram no se confunde con un fallo de cierre.
-                        end_text = VC_SCHED_MESSAGES_I18N.get(await _group_service_lang(group_id), VC_SCHED_MESSAGES_I18N["en"])["end"]
-                        _spawn(_dispatch_radar_notice(chat_id=group_id, text=end_text, channel="vc_lifecycle"),
-                               name=f"vc_sched_end:{group_id}")
+                        # v46 · El aviso de cierre respeta el MISMO interruptor que el de apertura (antes salía siempre).
+                        try:
+                            end_cfg = await get_sentinel_service_messages_config(group_id) or {}
+                        except _CFG_READ_ERRORS as cfg_err:
+                            logger.warning(f"⚠️ [Cierre VC Programado] Configuración ilegible en {group_id} ({cfg_err}); "
+                                           "aviso de cierre omitido.")
+                            end_cfg = {"sched_enabled": 0}
+                        if _flag_on(end_cfg.get("sched_enabled"), True):
+                            end_text = VC_SCHED_MESSAGES_I18N.get(await _group_service_lang(group_id), VC_SCHED_MESSAGES_I18N["en"])["end"]
+                            _spawn(_dispatch_radar_notice(chat_id=group_id, text=end_text, channel="vc_lifecycle"),
+                                   name=f"vc_sched_end:{group_id}")
                         logger.info(f"📡 [Cierre VC Programado] Sala concluida ordenadamente en comunidad {group_id}.")
                     except Exception as e:
                         err_up = str(e).upper()
@@ -4450,7 +4794,8 @@ async def _get_all_night_groups() -> list[int]:
             return [row[0] for row in cursor.fetchall()]
     try:
         return await asyncio.to_thread(_sync)
-    except Exception:
+    except sqlite3.Error as db_err:
+        logger.warning(f"⚠️ [Modo Nocturno] Lista de grupos ilegible ({db_err}); se usan los grupos con Centinela activo.")
         return list(active_sentinels.keys())
 
 
@@ -4461,7 +4806,8 @@ async def _has_night_snapshot(group_id: int) -> bool:
             return row is not None
     try:
         return await asyncio.to_thread(_sync)
-    except Exception:
+    except sqlite3.Error as db_err:
+        logger.warning(f"⚠️ [Modo Nocturno] Instantánea ilegible para {group_id}: {db_err}")
         return False
 
 
@@ -4494,8 +4840,8 @@ async def night_mode_autonomous_loop():
                         logger.info(f"🌙 [Modo Nocturno Activado] Perímetro asegurado automáticamente en comunidad {group_id}.")
 
                     elif not in_night_time and night_engaged:
-                        night_cfg = await get_night_mode_config(group_id)
-                        if night_cfg.get("status") == 1 or current_media_lock == 1:
+                        night_cfg = await get_night_mode_config(group_id) or {}
+                        if _flag_on(night_cfg.get("status"), False) or _flag_on(current_media_lock, False):
                             await deactivate_universal_night_mode(group_id)
                             # deactivate_universal_night_mode pone night_mode_status=0, que también
                             # es el interruptor de la programación: se reactiva para la próxima noche.
@@ -4548,8 +4894,8 @@ async def radar_master_loop():
                     )
                     try:
                         await assistant_app.stop()
-                    except Exception:
-                        pass
+                    except (RPCError, ConnectionError, OSError, asyncio.TimeoutError, RuntimeError) as stop_err:
+                        logger.debug(f"[Centinela Maestro] stop() tras sesión inválida: {stop_err}")
                     assistant_app = None
                     break
                 except Exception as e:
@@ -4560,8 +4906,8 @@ async def radar_master_loop():
                         assistant_app = None
                         try:
                             await asyncio.wait_for(dead_client.stop(), timeout=MTPROTO_STOP_TIMEOUT)
-                        except Exception:
-                            pass
+                        except (RPCError, ConnectionError, OSError, asyncio.TimeoutError, RuntimeError) as stop_err:
+                            logger.debug(f"[Centinela Maestro] stop() tras sesión inválida: {stop_err}")
                         break
                     logger.warning(f"⚠️ [Centinela Maestro] Reconexión fallida: {e}")
 
@@ -4667,7 +5013,8 @@ async def launch_sentinel_instance(user_id: int, group_id: int, session_string: 
             peer = await asyncio.wait_for(session_client.resolve_peer(chat_obj.id), timeout=MTPROTO_RPC_TIMEOUT)
         except FATAL_SESSION_ERRORS:
             raise
-        except Exception:
+        except (RPCError, asyncio.TimeoutError, KeyError, ValueError) as chat_err:
+            logger.debug(f"[Centinela Propio] get_chat({group_id}) falló ({chat_err}); se resuelve el peer directamente.")
             peer = await asyncio.wait_for(session_client.resolve_peer(group_id), timeout=MTPROTO_RPC_TIMEOUT)
 
         task = asyncio.create_task(
@@ -4876,8 +5223,10 @@ def _sweep_global_state() -> int:
     try:
         import micvip_audit  # type: ignore[import-not-found]
         purged += micvip_audit.purge_sentinel_notes()
-    except Exception:
+    except ImportError:
         pass
+    except Exception:
+        logger.exception("[Janitor] micvip_audit.purge_sentinel_notes() falló")
 
     # 6c. v23 · Cachés acotadas de roles VIP, refuerzo perimetral (huellas / ráfagas) y cuotas de enlaces.
     for _mod_name, _fn_name in (("vip_roles", "purge_caches"), ("handlers.media_locks", "purge_v23_state"),
@@ -4886,8 +5235,10 @@ def _sweep_global_state() -> int:
             import importlib
             _mod = importlib.import_module(_mod_name)
             getattr(_mod, _fn_name)()
+        except (ImportError, AttributeError):
+            pass   # módulo opcional ausente en este despliegue
         except Exception:
-            pass
+            logger.exception(f"[Janitor] {_mod_name}.{_fn_name}() falló")
 
     # 7. Red de seguridad: topes duros de tamaño.
     for store in (
@@ -4955,8 +5306,8 @@ async def _disconnect_auth_client(client: Client) -> None:
     if client and client.is_connected:
         try:
             await asyncio.wait_for(client.disconnect(), timeout=AUTH_DISCONNECT_TIMEOUT)
-        except Exception:
-            pass
+        except (RPCError, ConnectionError, OSError, asyncio.TimeoutError, RuntimeError) as disc_err:
+            logger.debug(f"[Auth] disconnect() del cliente temporal: {disc_err}")
 
 
 async def cancel_phone_auth(uid: int):
@@ -5208,8 +5559,8 @@ async def init_assistant_master():
             logger.error(f"🔒 [MASTER_SESSION Inválida/Duplicada] {auth_err}. Desactivando Centinela Maestro para evitar bucles.")
             try:
                 await asyncio.wait_for(assistant_app.stop(), timeout=MTPROTO_STOP_TIMEOUT)
-            except Exception:
-                pass
+            except (RPCError, ConnectionError, OSError, asyncio.TimeoutError, RuntimeError) as stop_err:
+                logger.debug(f"[Centinela Maestro] stop(): {stop_err}")
             assistant_app = None
         except Exception as e:
             err_up = str(e).upper()
@@ -5217,8 +5568,8 @@ async def init_assistant_master():
                 logger.error(f"🔒 [MASTER_SESSION Duplicada/Inválida]: {e}. Desactivando Centinela Maestro permanentemente.")
                 try:
                     await asyncio.wait_for(assistant_app.stop(), timeout=MTPROTO_STOP_TIMEOUT)
-                except Exception:
-                    pass
+                except (RPCError, ConnectionError, OSError, asyncio.TimeoutError, RuntimeError) as stop_err:
+                    logger.debug(f"[Centinela Maestro] stop(): {stop_err}")
                 assistant_app = None
             else:
                 logger.warning(f"⚠️ [Centinela Maestro]: Error de conexión inicial ({e})")
@@ -5290,11 +5641,19 @@ async def close_all_sentinels():
     if assistant_app and (assistant_app.is_connected or getattr(assistant_app, "is_initialized", False)):
         try:
             await asyncio.wait_for(assistant_app.stop(), timeout=MTPROTO_STOP_TIMEOUT)
-        except Exception:
-            pass
+        except (RPCError, ConnectionError, OSError, asyncio.TimeoutError, RuntimeError) as stop_err:
+            logger.debug(f"[Apagado] stop() del Centinela Maestro: {stop_err}")
 
 
 async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: int = 10000) -> bool:
+    """
+    Ajusta el micrófono de un participante desde el Centinela del grupo (o el Maestro). Firma sin cambios.
+    v46 · Jerarquía: el Creador Absoluto (OWNER_ID) nunca puede ser silenciado ni atenuado por esta vía (la usan la
+    moderación, las advertencias y el Guardián de voz); restaurar su volumen sí se permite.
+    """
+    if is_owner(user_id) and (muted or int(volume or 0) < 10000):
+        logger.warning(f"👑 [Radar] Acción de micrófono sobre el Creador Absoluto bloqueada en {chat_id}.")
+        return False
     sentinel_data = active_sentinels.get(chat_id)
     client = sentinel_data["client"] if sentinel_data else assistant_app
 
@@ -5307,11 +5666,20 @@ async def set_participant_mic(chat_id: int, user_id: int, muted: bool, volume: i
             return False
 
         participant_peer = await asyncio.wait_for(client.resolve_peer(user_id), timeout=MTPROTO_RPC_TIMEOUT)
-        safe_volume = max(1, min(20000, int(volume)))
-        await _invoke_safe_rpc(client, EditGroupCallParticipant(call=raw_call, participant=participant_peer, muted=muted, volume=safe_volume))
+        if muted:
+            # Silencio sin volumen explícito (igual que el monitor): volume=1 junto a muted alteraba el volumen guardado
+            # del participante y algunos servidores responden VOLUME_INVALID.
+            rpc = EditGroupCallParticipant(call=raw_call, participant=participant_peer, muted=True)
+        else:
+            safe_volume = max(1, min(20000, int(volume)))
+            rpc = EditGroupCallParticipant(call=raw_call, participant=participant_peer, muted=False, volume=safe_volume)
+        await _invoke_safe_rpc(client, rpc)
         return True
-    except Exception as e:
-        logger.warning(f"Aviso en set_participant_mic para grupo {chat_id}: {e}")
+    except (FloodWait, MTProtoRateLimited) as fw:
+        logger.warning(f"⏳ [Radar] set_participant_mic en {chat_id} aplazado por FloodWait: {fw}")
+        return False
+    except (RPCError, asyncio.TimeoutError, OSError, TypeError, ValueError) as e:
+        logger.warning(f"⚠️ [Radar] set_participant_mic falló en {chat_id} para {user_id}: {type(e).__name__}: {e}")
         return False
 
 
@@ -5372,7 +5740,10 @@ async def _vip_role_priority(chat_id: int, user_id: int) -> bool:
         import vip_roles  # type: ignore[import-not-found]
         perks = await vip_roles.get_active_perks(chat_id, user_id)
         return bool(perks and perks.get("autolower_immune"))
-    except Exception:
+    except ImportError:
+        return False   # módulo de roles VIP no desplegado
+    except (*_CFG_READ_ERRORS, AttributeError) as vip_err:
+        logger.warning(f"⚠️ [Roles VIP] Prioridad acústica de {user_id} en {chat_id} ilegible: {vip_err}")
         return False
 
 
@@ -5531,7 +5902,8 @@ async def _collect_ghost_candidates(chat_id: int, client, criteria, flagged: set
             scanned += 1
             try:
                 chat_member = await asyncio.wait_for(_global_bot.get_chat_member(chat_id, uid), timeout=MTPROTO_RPC_TIMEOUT)
-            except Exception:
+            except _BOT_SEND_ERRORS as member_err:
+                logger.debug(f"[Ghost Purge] Miembro {uid} de {chat_id} no consultable: {member_err}")
                 continue
             status = str(getattr(chat_member.status, "value", chat_member.status) or "").lower()
             if status in ("creator", "administrator", "left", "kicked"):
@@ -5619,8 +5991,10 @@ async def _run_ghost_purge(chat_id: int, action, criteria, origin: str, lang: st
         try:
             if await is_whitelisted(uid):
                 continue
-        except Exception:
-            pass
+        except _CFG_READ_ERRORS as wl_err:
+            # v46 · Fallo cerrado: sin poder confirmar la Whitelist, el candidato NO se purga (antes se purgaba).
+            logger.warning(f"⚠️ [Ghost Purge] Whitelist ilegible para {uid} en {chat_id} ({wl_err}); candidato omitido.")
+            continue
         report["found"] += 1
         report["by_reason"][reason] = report["by_reason"].get(reason, 0) + 1
         if await _purge_one(chat_id, uid, action, client):
@@ -5639,8 +6013,8 @@ async def _run_ghost_purge(chat_id: int, action, criteria, origin: str, lang: st
 
     try:
         await update_ghost_purge_scan_time(chat_id)
-    except Exception:
-        pass
+    except _CFG_READ_ERRORS as ts_err:
+        logger.warning(f"⚠️ [Ghost Purge] No se pudo guardar la hora del escaneo de {chat_id}: {ts_err}")
     logger.info(f"💀 [Ghost Purge] {chat_id} ({origin}, {report['via']}): {report['scanned']} analizados, "
                 f"{report['found']} detectados, {report['purged']} purgados, {report['failed']} fallidos.")
     if notify and report["found"] > 0:

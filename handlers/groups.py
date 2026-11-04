@@ -166,13 +166,18 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
 
 
 def is_super_admin(user_id: int) -> bool:
-    return user_id in SUPER_ADMIN_IDS
+    # v47 · Delegado: Arquitecto (ADMIN_IDS) o Creador Absoluto (OWNER_ID); int o str numérico.
+    return _identity.is_super_admin(user_id)
 
 
 # ==========================================
@@ -902,7 +907,8 @@ async def is_sentinel_account(group_id: int, user_id: int, username: str) -> boo
     return False
 
 
-ARCHITECT_FALLBACK_ID = 8269470905
+# v47 · Custodio de chats sin creador verificable: OWNER_ID o, sin él, el Arquitecto de ID más bajo (antes, un ID fijo).
+ARCHITECT_FALLBACK_ID = _identity.custodian_id()
 
 
 async def _resolve_chat_creator_id(bot: Bot, chat_id: int) -> Optional[int]:
@@ -950,7 +956,11 @@ async def bot_added_as_admin(event: ChatMemberUpdated, bot: Bot):
         logger.info(f"👑 [Aduana] {user.id} añadió el bot a {group_id} pero no es el creador; se registra al creador {creator_id}.")
 
     await approve_group(group_id, tier="free")
-    await register_user_group(owner_to_register, group_id, group_name, chat_type=chat_type_str)
+    if owner_to_register is not None:
+        await register_user_group(owner_to_register, group_id, group_name, chat_type=chat_type_str)
+    else:
+        logger.warning(f"⚠️ [Aduana] {group_id} sin creador verificable ni custodio (OWNER_ID / ADMIN_IDS): no se "
+                       "vincula a ningún dueño hasta que Telegram confirme al creador.")
     # 🧾 v39 · Auditoría: The Bunker conectado (solo se publica si la comunidad ya tenía canal de registro).
     _audit(bot, group_id, "bunker_connected", actor=user, chat_title=chat.title,
            detail="channel" if is_channel else "group")
@@ -1326,6 +1336,8 @@ async def _apply_raid_penalty(bot: Bot, group_id: int, user, *, is_join_req: boo
     Devuelve True si la penalización sustituye al captcha (mute / kick / ban). Con 'captcha' se registra el
     caso y devuelve False para que siga el Captcha Pro estricto habitual.
     """
+    if is_super_admin(getattr(user, "id", 0)):   # 👑 v47 · defensa en profundidad: nunca se penaliza a un Arquitecto
+        return False
     cfg = await raid_cfg(group_id)
     penalty = str(cfg.get("penalty") or "captcha")
     minutes = int(cfg.get("penalty_minutes") or 60)
@@ -1522,6 +1534,13 @@ async def handle_chat_join_request(event: ChatJoinRequest, bot: Bot):
     group_id = event.chat.id
     user_id = event.from_user.id
     is_bot = bool(event.from_user.is_bot)
+    # 👑 v47 · Creador Absoluto y Arquitectos: su solicitud se aprueba al instante (nunca raid, CAS, userbot ni captcha).
+    if is_super_admin(user_id):
+        try:
+            await bot.approve_chat_join_request(chat_id=group_id, user_id=user_id)
+        except Exception as ex:
+            logger.warning(f"👑 [Aduana] No se pudo aprobar la solicitud del Arquitecto {user_id} en {group_id}: {ex}")
+        return
     # 🧾 v39 · Auditoría: solicitud recibida (la aprobación se registra como ingreso «por solicitud»).
     _audit(bot, group_id, "join_request", user=event.from_user, chat_title=event.chat.title,
            link_name=(event.invite_link.name if event.invite_link is not None else None),
@@ -1716,13 +1735,17 @@ async def handle_new_members(message: Message, bot: Bot):
     for new_user in message.new_chat_members or []:
         if new_user.id == bot_me.id:
             continue
-
         # 🧾 v39 · Respaldo del registro de entradas: si chat_member ya lo publicó (con el enlace exacto), se omite.
         if not new_user.is_bot:
             added_by_other = adder is not None and adder.id != new_user.id
             _audit(bot, group_id, "member_joined", user=new_user, chat_title=message.chat.title,
                    via="added" if added_by_other else "direct", inviter=adder if added_by_other else None,
                    dedupe_key=f"join:{new_user.id}", defer=4.0)
+
+        # 👑 v47 · Creador Absoluto y Arquitectos: inmunidad total en la entrada (sin raid, CAS, userbot ni captcha).
+        if is_super_admin(new_user.id):
+            await registry_track(group_id, new_user.id, force=True)
+            continue
 
         # 🚨 v9 · Detector de picos coordinados (cuentas nuevas, bots y nombres clonados).
         verdict = await _register_join_and_alert(bot, group_id, new_user.id, new_user.full_name or "", bool(new_user.is_bot))

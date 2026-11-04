@@ -59,9 +59,13 @@ METRICS_CARD_TTL = int(os.getenv("METRICS_CARD_TTL", "120") or 0)
 METRICS_COOLDOWN = float(os.getenv("METRICS_COOLDOWN", "15") or 0)
 METRICS_DM_WEBAPP = os.getenv("METRICS_DM_WEBAPP", "1").strip().lower() in ("1", "true", "yes", "on", "si", "sí")
 
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
 
 _BG_TASKS: set = set()
 _LAST_CARD: dict[int, float] = {}
@@ -269,7 +273,7 @@ def _status_value(member) -> str:
 
 
 async def _user_is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    if user_id in SUPER_ADMIN_IDS:
+    if _identity.is_super_admin(user_id):   # v47 · Arquitectos + Creador Absoluto
         return True
     try:
         member = await asyncio.wait_for(bot.get_chat_member(chat_id, user_id), timeout=5)

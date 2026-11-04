@@ -58,16 +58,18 @@ _thread_local = threading.local()
 # ==========================================
 # 👑 LISTA BLANCA DE ARQUITECTOS (INMUNIDAD TOTAL)
 # ==========================================
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
 
 
 def is_super_admin(user_id) -> bool:
-    try:
-        return int(user_id) in SUPER_ADMIN_IDS
-    except (TypeError, ValueError):
-        return False
+    # v47 · Delegado: Arquitecto (ADMIN_IDS) o Creador Absoluto (OWNER_ID); int o str numérico.
+    return _identity.is_super_admin(user_id)
 
 
 # ==========================================
@@ -679,6 +681,8 @@ def raid_blacklist_add(group_id: int, user_id: int, penalty: str, *, full_name: 
                        username: Optional[str] = None, penalty_until: Optional[int] = None,
                        source: str = "join") -> None:
     """Registra (o re-registra) a un usuario atrapado en un raid con estado 'penalized'."""
+    if _identity.is_owner(user_id):   # 👑 v47 · el Creador Absoluto nunca entra en la lista negra de raid
+        return None
     if penalty not in RAID_PENALTIES:
         penalty = "captcha"
     now = _now_ts()
@@ -1416,6 +1420,10 @@ def reset_warnings(user_id: int):
 
 @db_async
 def ban_user(user_id: int):
+    # 👑 v47 · Inmunidad total del Creador Absoluto: jamás recibe la marca global de baneo.
+    if _identity.is_owner(user_id):
+        logger.warning(f"👑 [DB] ban_user() ignorado: {user_id} es el Creador Absoluto.")
+        return
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (user_id,))
@@ -1590,6 +1598,9 @@ def set_warns_config(group_id: int, field: str, value):
 
 @db_async
 def add_user_strike(group_id: int, user_id: int, reason: str = "Rules violation") -> int:
+    # 👑 v47 · El Creador Absoluto no acumula advertencias: 0 strikes → ninguna escalera llega a sancionarlo.
+    if _identity.is_owner(user_id):
+        return 0
     with _write_transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3924,6 +3935,9 @@ def set_noise_shield_status(group_id: int, status: int):
 
 @db_async
 def flag_userbot(user_id: int, group_id: int, reason: str = "Suspicious userbot pattern"):
+    # 👑 v47 · El Creador Absoluto nunca se marca como userbot (el Centinela lo silenciaría en el videochat).
+    if _identity.is_owner(user_id):
+        return
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -3938,6 +3952,8 @@ def flag_userbot(user_id: int, group_id: int, reason: str = "Suspicious userbot 
 
 @db_async
 def is_userbot_flagged(user_id: int, group_id: int) -> bool:
+    if _identity.is_owner(user_id):   # 👑 v47 · aunque existiera una marca antigua, no se aplica
+        return False
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM flagged_userbots WHERE user_id = ? AND group_id = ?", (user_id, group_id))
@@ -7764,6 +7780,8 @@ def update_appeal_config(group_id: int, patch: dict) -> dict:
 
 @db_async
 def is_user_globally_banned(user_id: int) -> bool:
+    if _identity.is_owner(user_id):   # 👑 v47 · una marca previa nunca lo expulsa
+        return False
     with get_db_connection() as conn:
         row = conn.execute("SELECT is_banned FROM users WHERE user_id = ?", (int(user_id),)).fetchone()
     return bool(row and row[0])

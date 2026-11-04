@@ -416,7 +416,9 @@ try:
 except ValueError:
     ADMIN_GROUP_ID = -1004351489258
 
-CREATOR_FALLBACK_ID = 8269470905
+# v47 · Custodio de chats sin creador verificable: OWNER_ID (o el Arquitecto de ID más bajo). Antes era un ID fijo.
+#       Se resuelve tras importar bunker_identity (más abajo); None si no hay ninguno configurado.
+CREATOR_FALLBACK_ID: Optional[int] = None
 active_clone_tasks: dict[str, dict] = {}
 dp = Dispatcher()
 master_bot_instance: Optional[Bot] = None
@@ -427,16 +429,19 @@ _uvicorn_server = None
 # porque cualquiera podría operar la API con privilegios de super-admin.
 ALLOW_INSECURE_AUTH_FALLBACK = os.getenv("ALLOW_INSECURE_AUTH_FALLBACK", "0").strip().lower() in ("1", "true", "yes", "on")
 
-RAW_ADMINS = os.getenv("ADMIN_IDS", "")
-SUPER_ADMIN_IDS = {int(x.strip()) for x in RAW_ADMINS.split(",") if x.strip().isdigit()}
-SUPER_ADMIN_IDS.update([8269470905, 1738976493])
+# 👑 v47 · Identidades 100 % desde variables de entorno (bunker_identity): ningún ID escrito en el código.
+#    OWNER_ID = Creador Absoluto (jerarquía máxima, inmunidad total) · ADMIN_IDS = Arquitectos / Super Admins.
+import bunker_identity as _identity
+RAW_ADMINS = os.getenv("ADMIN_IDS", "")   # compatibilidad (valor crudo; las decisiones usan _identity)
+SUPER_ADMIN_IDS = _identity.SUPER_ADMIN_IDS   # Arquitectos + Creador Absoluto (conjunto compartido)
+OWNER_ID = _identity.OWNER_ID
+is_owner = _identity.is_owner
+CREATOR_FALLBACK_ID = _identity.custodian_id()
 
 
 def is_super_admin(user_id: int) -> bool:
-    try:
-        return int(user_id) in SUPER_ADMIN_IDS
-    except (TypeError, ValueError):
-        return False
+    # v47 · Delegado: Arquitecto (ADMIN_IDS) o Creador Absoluto (OWNER_ID); int o str numérico.
+    return _identity.is_super_admin(user_id)
 
 
 _BG_TASKS: Set[asyncio.Task] = set()
@@ -749,7 +754,7 @@ def resolve_user_id(x_telegram_init_data: Optional[str] = None, authorization: O
                     return raw_id
             except Exception:
                 pass
-        return CREATOR_FALLBACK_ID
+        return CREATOR_FALLBACK_ID or 0   # v47 · sin custodio configurado → anónimo (0 = sin acceso)
 
     return 0
 
@@ -3727,12 +3732,18 @@ async def on_bot_promoted_or_added(event: ChatMemberUpdated, bot: Optional[Bot] 
             creator_id = await _resolve_creator_id(bot, chat_id)
             owner_id = creator_id if creator_id is not None else CREATOR_FALLBACK_ID
 
-            await register_user_group(
-                user_id=owner_id,
-                group_id=chat_id,
-                group_name=chat_title,
-                chat_type=chat_type
-            )
+            if owner_id is not None:
+                await register_user_group(
+                    user_id=owner_id,
+                    group_id=chat_id,
+                    group_name=chat_title,
+                    chat_type=chat_type
+                )
+            else:
+                # v47 · Sin creador verificable y sin OWNER_ID / ADMIN_IDS: el chat no se vincula a nadie (nadie gana
+                # acceso a sus consolas). Se vinculará en cuanto Telegram confirme al creador (p. ej. con /reload).
+                logger.warning(f"⚠️ [Auto-Detección]: '{chat_title}' ({chat_id}) sin creador verificable ni custodio "
+                               "configurado (OWNER_ID / ADMIN_IDS); no se vincula a ningún dueño.")
             if creator_id is None:
                 logger.warning(f"⚠️ [Auto-Detección]: '{chat_title}' ({chat_id}) sin creador verificable; custodia del Arquitecto.")
             else:

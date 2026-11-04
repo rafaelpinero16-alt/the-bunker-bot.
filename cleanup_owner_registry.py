@@ -54,8 +54,13 @@ except Exception:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s", stream=sys.stdout)
 log = logging.getLogger("owner_cleanup")
 
-ARCHITECT_FALLBACK_ID = 8269470905
-DEFAULT_SUPER_ADMINS = {8269470905, 1738976493}
+# v47 · Sin IDs escritos en el código: custodio y Arquitectos salen de OWNER_ID / ADMIN_IDS (bunker_identity, que se
+#       importa DESPUÉS de load_dotenv para que un .env local también cuente).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bunker_identity as _identity  # noqa: E402
+
+ARCHITECT_FALLBACK_ID = _identity.custodian_id()
+DEFAULT_SUPER_ADMINS = set(_identity.SUPER_ADMIN_IDS)
 
 # Resultado de la consulta de rango
 CREATOR = "creator"
@@ -131,12 +136,8 @@ def stash_row(conn: sqlite3.Connection, table: str, row: sqlite3.Row, reason: st
 
 
 def load_super_admins() -> Set[int]:
-    ids = set(DEFAULT_SUPER_ADMINS)
-    for raw in os.getenv("ADMIN_IDS", "").split(","):
-        raw = raw.strip()
-        if raw.isdigit():
-            ids.add(int(raw))
-    return ids
+    """v47 · Arquitectos + Creador Absoluto desde OWNER_ID / ADMIN_IDS (bunker_identity). Sin valores por defecto fijos."""
+    return set(DEFAULT_SUPER_ADMINS)
 
 
 # ==========================================
@@ -265,6 +266,12 @@ async def clean_user_groups(conn, probe: TelegramProbe, supers: Set[int], report
             ops.append(("insert_owner", chat_rows[0], creator))
             keep_count += 1
         if keep_count == 0 and ops:
+            if ARCHITECT_FALLBACK_ID is None:
+                # v47 · Sin custodio configurado no se vacía el registro del chat (se perdería): se conserva intacto.
+                report.add(table, chat_id, 0, "", "conservar",
+                           "creador desconocido y sin OWNER_ID / ADMIN_IDS: no se retira a nadie")
+                log.warning(f"Chat {chat_id}: creador no verificable y sin custodio configurado; se conserva el registro.")
+                return []
             report.add(table, chat_id, ARCHITECT_FALLBACK_ID, "", "añadir",
                        "creador desconocido: custodia del Arquitecto para no perder el chat")
             ops.append(("insert_owner", chat_rows[0], ARCHITECT_FALLBACK_ID))
